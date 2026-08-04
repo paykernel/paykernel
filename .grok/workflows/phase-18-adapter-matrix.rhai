@@ -9,7 +9,7 @@ let meta = #{
         #{ title: "Gate", detail: "adversarial acceptance criteria check against roadmap Phase 18" },
         #{ title: "Remediate", detail: "fix blocking gate items if any" },
     ],
-    when_to_use: "Implement roadmap Phase 18 (Adapter Capability Matrix and Selection Guide) for payments-sdk monorepo",
+    when_to_use: "Implement roadmap Phase 18 (Adapter Capability Matrix and Selection Guide) for PayKernel monorepo",
 };
 
 let critic_schema = #{
@@ -90,7 +90,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };
@@ -100,7 +100,7 @@ phase("Critic");
 log("Critic: auditing Phase 18 gaps in " + root);
 
 let p_critic = "";
-p_critic += "You are the Phase 18 critic for the payments-sdk monorepo at " + root + ".\n";
+p_critic += "You are the Phase 18 critic for the PayKernel monorepo at " + root + ".\n";
 p_critic += "READ-ONLY audit: use read_file, list_dir, grep, and inspect-only shell commands.\n";
 p_critic += "Do NOT edit files. Do NOT commit. Do NOT push.\n\n";
 p_critic += "Read roadmap.md section \"# Phase 18 — Adapter Capability Matrix and Selection Guide\" completely\n";
@@ -285,7 +285,7 @@ p_a += "Bullet list matching roadmap Recommended Defaults exactly in spirit, wit
 p_a += "#### 5) Honesty / anti-marketing section\n";
 p_a += "Explicit bans:\n";
 p_a += "- Do not market local SQLite as multi-host or multi-region.\n";
-p_a += "- Do not market Redis as required for payments-sdk.\n";
+p_a += "- Do not market Redis as required for PayKernel.\n";
 p_a += "- Do not market D1 as interchangeable with local SQLite or Turso or Durable Objects.\n";
 p_a += "- Do not market DO as one global object or as shared multi-primary SQL.\n";
 p_a += "- Do not market multi-region unless the adapter's tested guarantees include it (most say multi-host only).\n";

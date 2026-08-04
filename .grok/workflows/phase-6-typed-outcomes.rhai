@@ -9,7 +9,7 @@ let meta = #{
         #{ title: "Gate", detail: "adversarial acceptance criteria check against roadmap Phase 6" },
         #{ title: "Remediate", detail: "fix blocking gate items if any" },
     ],
-    when_to_use: "Implement roadmap Phase 6 (Typed Provider Inputs and Operation Results) for payments-sdk monorepo",
+    when_to_use: "Implement roadmap Phase 6 (Typed Provider Inputs and Operation Results) for PayKernel monorepo",
 };
 
 let critic_schema = #{
@@ -91,7 +91,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };
@@ -101,7 +101,7 @@ phase("Critic");
 log("Critic: auditing Phase 6 gaps in " + root);
 
 let p_critic = "";
-p_critic += "You are the Phase 6 critic for the payments-sdk monorepo at " + root + ".\n";
+p_critic += "You are the Phase 6 critic for the PayKernel monorepo at " + root + ".\n";
 p_critic += "READ-ONLY audit: use read_file, list_dir, grep, and inspect-only shell commands.\n";
 p_critic += "Do NOT edit files. Do NOT commit. Do NOT push.\n\n";
 p_critic += "Read roadmap.md section \"# Phase 6 — Typed Provider Inputs and Operation Results\" completely\n";

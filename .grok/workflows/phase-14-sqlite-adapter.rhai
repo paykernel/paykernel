@@ -9,7 +9,7 @@ let meta = #{
         #{ title: "Gate", detail: "adversarial acceptance criteria check against roadmap Phase 14" },
         #{ title: "Remediate", detail: "fix blocking gate items if any" },
     ],
-    when_to_use: "Implement roadmap Phase 14 (Local SQLite Adapter Family) for payments-sdk monorepo",
+    when_to_use: "Implement roadmap Phase 14 (Local SQLite Adapter Family) for PayKernel monorepo",
 };
 
 let critic_schema = #{
@@ -96,7 +96,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };
@@ -106,7 +106,7 @@ phase("Critic");
 log("Critic: auditing Phase 14 gaps in " + root);
 
 let p_critic = "";
-p_critic += "You are the Phase 14 critic for the payments-sdk monorepo at " + root + ".\n";
+p_critic += "You are the Phase 14 critic for the PayKernel monorepo at " + root + ".\n";
 p_critic += "READ-ONLY audit: use read_file, list_dir, grep, and inspect-only shell commands.\n";
 p_critic += "Do NOT edit files. Do NOT commit. Do NOT push.\n\n";
 p_critic += "Read roadmap.md section \"# Phase 14 — Local SQLite Adapter Family\" completely\n";
@@ -317,7 +317,7 @@ p_a += "Do NOT break packages/store-postgres or packages/store-redis.\n\n";
 p_a += "### Create package packages/store-sqlite\n";
 p_a += "Name: @paykernel/store-sqlite\n";
 p_a += "version 0.1.0; type module; publishable (NOT private).\n";
-p_a += "description: Local/embedded SQLite stores for payments-sdk lease-aware idempotency, webhook inbox, and reconciliation (single-host).\n";
+p_a += "description: Local/embedded SQLite stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (single-host).\n";
 p_a += "dependencies:\n";
 p_a += "  @paykernel/testkit: workspace:*\n";
 p_a += "  @paykernel/internal-sql-store: workspace:*\n";

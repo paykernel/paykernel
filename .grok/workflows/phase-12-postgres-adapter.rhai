@@ -9,7 +9,7 @@ let meta = #{
         #{ title: "Gate", detail: "adversarial acceptance criteria check against roadmap Phase 12" },
         #{ title: "Remediate", detail: "fix blocking gate items if any" },
     ],
-    when_to_use: "Implement roadmap Phase 12 (PostgreSQL Adapter) for payments-sdk monorepo",
+    when_to_use: "Implement roadmap Phase 12 (PostgreSQL Adapter) for PayKernel monorepo",
 };
 
 let critic_schema = #{
@@ -94,7 +94,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };
@@ -104,7 +104,7 @@ phase("Critic");
 log("Critic: auditing Phase 12 gaps in " + root);
 
 let p_critic = "";
-p_critic += "You are the Phase 12 critic for the payments-sdk monorepo at " + root + ".\n";
+p_critic += "You are the Phase 12 critic for the PayKernel monorepo at " + root + ".\n";
 p_critic += "READ-ONLY audit: use read_file, list_dir, grep, and inspect-only shell commands.\n";
 p_critic += "Do NOT edit files. Do NOT commit. Do NOT push.\n\n";
 p_critic += "Read roadmap.md section \"# Phase 12 — PostgreSQL Adapter\" completely\n";
@@ -274,7 +274,7 @@ p_a += "Do NOT implement Redis/SQLite/Turso/D1/DO adapters.\n\n";
 p_a += "### Create package packages/store-postgres\n";
 p_a += "Name: @paykernel/store-postgres\n";
 p_a += "version 0.1.0; type module; publishable (NOT private).\n";
-p_a += "description: PostgreSQL durable stores for payments-sdk lease-aware idempotency, webhook inbox, reconciliation.\n";
+p_a += "description: PostgreSQL durable stores for PayKernel lease-aware idempotency, webhook inbox, reconciliation.\n";
 p_a += "dependencies:\n";
 p_a += "  @paykernel/testkit: workspace:*  (contracts, conformance, FakeClock types)\n";
 p_a += "  @paykernel/internal-sql-store: workspace:*  (schema, codecs, migrate, claim templates)\n";

@@ -65,7 +65,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };

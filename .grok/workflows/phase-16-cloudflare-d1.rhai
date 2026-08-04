@@ -9,7 +9,7 @@ let meta = #{
         #{ title: "Gate", detail: "adversarial acceptance criteria check against roadmap Phase 16" },
         #{ title: "Remediate", detail: "fix blocking gate items if any" },
     ],
-    when_to_use: "Implement roadmap Phase 16 (Cloudflare D1 Adapter) for payments-sdk monorepo",
+    when_to_use: "Implement roadmap Phase 16 (Cloudflare D1 Adapter) for PayKernel monorepo",
 };
 
 let critic_schema = #{
@@ -103,7 +103,7 @@ let fix_schema = #{
 };
 
 let root = if args == () || args.root == () {
-    "/home/shahin/Documents/projects/personal/packages/payments-sdk"
+    "/home/shahin/Documents/projects/personal/packages/paykernel"
 } else {
     args.root
 };
@@ -113,7 +113,7 @@ phase("Critic");
 log("Critic: auditing Phase 16 gaps in " + root);
 
 let p_critic = "";
-p_critic += "You are the Phase 16 critic for the payments-sdk monorepo at " + root + ".\n";
+p_critic += "You are the Phase 16 critic for the PayKernel monorepo at " + root + ".\n";
 p_critic += "READ-ONLY audit: use read_file, list_dir, grep, and inspect-only shell commands.\n";
 p_critic += "Do NOT edit files. Do NOT commit. Do NOT push.\n\n";
 p_critic += "Read roadmap.md section \"# Phase 16 — Cloudflare D1 Adapter\" completely\n";
@@ -351,7 +351,7 @@ p_a += "Do NOT break packages/store-postgres, adapter-redis, adapter-sqlite, or 
 p_a += "### Create package packages/store-d1\n";
 p_a += "Name: @paykernel/store-d1\n";
 p_a += "version 0.1.0; type module; publishable (NOT private).\n";
-p_a += "description: Cloudflare D1 stores for payments-sdk lease-aware idempotency, webhook inbox, and reconciliation (Workers-native shared SQLite via D1 binding).\n";
+p_a += "description: Cloudflare D1 stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (Workers-native shared SQLite via D1 binding).\n";
 p_a += "dependencies:\n";
 p_a += "  @paykernel/testkit: workspace:*\n";
 p_a += "  @paykernel/internal-sql-store: workspace:*\n";

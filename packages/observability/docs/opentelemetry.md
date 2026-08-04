@@ -87,7 +87,7 @@ import { trace, SpanStatusCode } from "@opentelemetry/api"; // app only
 const tracer = createOpenTelemetryBridge(
   { trace, SpanStatusCode },
   {
-    tracerName: "payments-sdk", // default
+    tracerName: "paykernel", // default
     // tracerVersion: "0.1.0",  // optional
   },
 );

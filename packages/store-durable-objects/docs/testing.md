@@ -86,8 +86,8 @@ binding** (SQLite-backed `new_sqlite_classes`) on the Manhali.official Cloudflar
 export CLOUDFLARE_ACCOUNT_ID=7829eb5cf7fce3400fe7aa222a942682
 cd packages/store-durable-objects/smoke
 bunx wrangler deploy
-curl -sS https://payments-sdk-do-smoke.<subdomain>.workers.dev/health
-curl -sS https://payments-sdk-do-smoke.<subdomain>.workers.dev/smoke
+curl -sS https://paykernel-do-smoke.<subdomain>.workers.dev/health
+curl -sS https://paykernel-do-smoke.<subdomain>.workers.dev/smoke
 ```
 
 Smoke covers: DO binding, hash/key sharding, atomic reserve/complete, fingerprint

@@ -78,12 +78,12 @@ path end-to-end (not REST):
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID=<account-id>
-# create once: bunx wrangler d1 create payments-sdk-adapter-smoke
+# create once: bunx wrangler d1 create paykernel-store-smoke
 cd packages/store-d1/smoke
 # set database_id in wrangler.toml, then:
 bunx wrangler deploy
-curl -sS https://payments-sdk-d1-smoke.<subdomain>.workers.dev/health
-curl -sS -X POST https://payments-sdk-d1-smoke.<subdomain>.workers.dev/smoke
+curl -sS https://paykernel-d1-smoke.<subdomain>.workers.dev/health
+curl -sS -X POST https://paykernel-d1-smoke.<subdomain>.workers.dev/smoke
 ```
 
 The `/smoke` endpoint runs migrate, idempotency/webhook/recon claims, batch
@@ -91,5 +91,5 @@ commit+rollback, Sessions (`first-primary`), FakeClock lease reclaim, and
 parallel reserve single-winner on the real D1 binding.
 
 **Verified live (2026-08-03):** 22/22 steps pass against D1
-`payments-sdk-adapter-smoke` on the manhali project Cloudflare account
+`paykernel-store-smoke` on the manhali project Cloudflare account
 (`createD1PaymentStores({ db: env.PAYMENTS_DB })`).

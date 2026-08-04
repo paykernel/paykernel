@@ -12,7 +12,7 @@ CI runs the same gate after install / before typecheck. Violations exit non-zero
 ## Expected layout
 
 ```text
-payments-sdk/
+paykernel/
 ├── packages/
 │   ├── core/                 # @paykernel/core (publishable; portable)
 │   ├── webhooks/             # @paykernel/webhooks (present; portable)

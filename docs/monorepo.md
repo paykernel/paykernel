@@ -5,7 +5,7 @@ This repository is a **Bun workspaces** monorepo. The publishable SDK lives unde
 ## Layout
 
 ```
-payments-sdk/                         # private workspace root (not published)
+paykernel/                         # private workspace root (not published)
 ├── packages/
 │   ├── core/                         # @paykernel/core (publishable)
 │   │   ├── src/

@@ -1,4 +1,4 @@
-// file: packages/payments-sdk/src/utils/currency.ts
+// file: packages/core/src/utils/currency.ts
 
 import { InvalidRequestError } from "../errors";
 

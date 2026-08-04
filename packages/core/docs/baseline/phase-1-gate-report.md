@@ -36,7 +36,7 @@ coverageThreshold = { lines = 0.90, functions = 0.85 }
 
 - **name:** `@paykernel/core`
 - **version:** `0.8.0`
-- **filename:** `abshahin-payments-sdk-0.8.0.tgz`
+- **filename:** `paykernel-core-0.1.0-next.0.tgz`
 - **total files:** 65
 - **paths:** `dist/**`, `docs/**`, `README.md`, `LICENSE`, `package.json` only
 - **junk scan** (`src/`, `scripts/`, `resources/`, `tsconfig`, `bunfig`, `*.test.ts`, `node_modules`, `monorepo`): **no matches**
@@ -150,7 +150,7 @@ _None._
 ## Structure cross-check
 
 ```
-payments-sdk/                         # private monorepo root
+paykernel/                         # private monorepo root
 ├── packages/core/                    # @paykernel/core
 │   ├── src/                          # not packed
 │   ├── dist/                         # packed

@@ -137,7 +137,7 @@ Answer in order; stop at the first clear fit.
    - Upstash → **`/upstash`**.
 
 8. **No Redis today and moderate load?**  
-   → Pick the **primary** relational / D1 / DO adapter from above. **Do not add Redis** only because payments-sdk exists.
+   → Pick the **primary** relational / D1 / DO adapter from above. **Do not add Redis** only because PayKernel exists.
 
 **Fail-closed default:** if **multi-host** coordination is required and the only option under consideration is **local SQLite** (`adapter-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts.
 
@@ -172,7 +172,7 @@ Explicit bans for humans and coding agents:
 | Do **not** market… | Because |
 | ------------------ | ------- |
 | Local SQLite (Bun / Node / better-sqlite3) as multi-host or multi-region | Manifest: `coordinationScope: "single-host"` only |
-| Redis as required for payments-sdk | Redis adapter is **optional**; many apps use SQL/D1/DO alone |
+| Redis as required for PayKernel | Redis adapter is **optional**; many apps use SQL/D1/DO alone |
 | D1 as interchangeable with local SQLite, Turso, or Durable Objects | Separate packages, APIs, and consistency models |
 | Durable Objects as one global object or shared multi-primary SQL | Partitioned strong coordination only; sharding required |
 | Multi-region strong consistency for any adapter | No adapter manifest uses `multi-region`; most are `multi-host` at most |

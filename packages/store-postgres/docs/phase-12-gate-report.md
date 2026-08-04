@@ -52,7 +52,7 @@ Phase 12 PostgreSQL production adapter is **complete and green**. Independent re
 | Injectable clock for conformance | **PASS** | `StoreClock` / `createSystemClock` / `clockNowIso`; FakeClock in conformance + multi-connection tests; `now` bound into claim SQL |
 | Prepared statements; validated identifiers | **PASS** | `$n` params throughout; table names via `resolveTableName` + identifier validation; public-api rejects bad `tablePrefix` / `sqlSchema` |
 | Phase 0–11 safety net green | **PASS** | 1300 pass across core/testkit/webhooks/sql-store/adapter-postgres |
-| Boundaries; no core/webhooks → adapter-postgres | **PASS** | `check:boundaries` OK; package.json deps: core=zod only; webhooks=payments-sdk only |
+| Boundaries; no core/webhooks → adapter-postgres | **PASS** | `check:boundaries` OK; package.json deps: core=zod only; webhooks=PayKernel only |
 | No Phase 13 packages | **PASS** | Only `adapter-postgres` under `packages/`; no adapter-redis/sqlite/turso |
 | Docs complete | **PASS** | overview, guarantees, crash-boundaries, drivers, migrations, testing + README |
 

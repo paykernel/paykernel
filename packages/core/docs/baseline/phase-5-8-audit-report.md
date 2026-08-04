@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | **Date (UTC)** | 2026-08-03 |
-| **Monorepo** | `paykernel` (`/home/shahin/Documents/projects/personal/packages/payments-sdk`) |
+| **Monorepo** | `paykernel` (`/home/shahin/Documents/projects/personal/packages/paykernel`) |
 | **Packages in scope** | `@paykernel/core` (core), `@paykernel/testkit` (testkit) |
 | **Reviewer stance** | **Fail-closed** (missing evidence = blocking; intentional 0.x design is not a defect) |
 | **Audits synthesized** | 3 independent audit passes (Phases 5–7 deep) + Phase 8 gate/live re-check + **Phase 8 independent re-audit (dedicated pass)** + cross-cut consolidation |

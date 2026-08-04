@@ -1,4 +1,4 @@
-// file: packages/payments-sdk/src/utils/money.ts
+// file: packages/core/src/utils/money.ts
 
 /**
  * Shared safe money primitives for major-unit decimal strings and bigint minor units.

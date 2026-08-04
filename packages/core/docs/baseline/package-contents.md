@@ -184,7 +184,7 @@ Walk of paths listed in `package.json#files`, plus always-included `package.json
 | --- | --- |
 | name | `@paykernel/core` |
 | version | `0.8.0` |
-| filename | `abshahin-payments-sdk-0.8.0.tgz` |
+| filename | `paykernel-core-0.1.0-next.0.tgz` |
 | package size | `261.3 kB` |
 | unpacked size | `1.2 MB` |
 | shasum | `1de8a6cb4d9c1daca4b1faf3162a58e20aa607ad` |
