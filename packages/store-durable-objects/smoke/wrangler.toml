@@ -1,0 +1,23 @@
+# Live smoke Worker for @paykernel/store-durable-objects
+# Account: Manhali.official@gmail.com (7829eb5c…)
+#
+# Deploy:
+#   CLOUDFLARE_ACCOUNT_ID=7829eb5cf7fce3400fe7aa222a942682 bunx wrangler deploy
+# Run smoke:
+#   curl -sS https://paykernel-do-smoke.<subdomain>.workers.dev/smoke | jq .
+#
+# CRITICAL: new_sqlite_classes — SQLite-backed DO only (not legacy KV-only).
+
+name = "paykernel-do-smoke"
+main = "worker.ts"
+compatibility_date = "2024-09-23"
+workers_dev = true
+account_id = "7829eb5cf7fce3400fe7aa222a942682"
+
+[[durable_objects.bindings]]
+name = "PAYMENTS_DO"
+class_name = "PaymentsStoreDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PaymentsStoreDurableObject"]

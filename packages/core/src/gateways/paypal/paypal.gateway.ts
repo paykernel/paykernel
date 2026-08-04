@@ -1,0 +1,2258 @@
+// file: packages/payments/src/gateways/paypal.gateway.ts
+
+import { BaseGateway } from "../base.gateway";
+import type {
+  AmountInput,
+  CaptureParams,
+  CreatePaymentParams,
+  GetPaymentParams,
+  GatewayPaymentResult,
+  GatewayRefundResult,
+  PaymentStatus,
+  RefundParams,
+  VoidParams,
+} from "../../types/payment.types";
+import {
+  applyOutcomeToGatewayResult,
+  applyOutcomeToGatewayRefundResult,
+  type PaymentOperationOutcome,
+  type RefundOperationOutcome,
+} from "../../types/operation-result";
+import type { PayPalWebhookPayload, WebhookEvent, } from "../../types/webhook.types";
+import { attachPaymentEvent } from "../../types/payment-event";
+import type { PayPalConfig } from "../../types/config.types";
+import type { HooksManager } from "../../hooks/hooks.manager";
+import {
+  PayPalCreatePaymentParamsSchema,
+  CaptureParamsSchema,
+  GetPaymentParamsSchema,
+  RefundParamsSchema,
+  VoidParamsSchema,
+} from "../../types/validation";
+import {
+  GatewayApiError,
+  CardDeclinedError,
+  InsufficientFundsError,
+  AuthenticationError,
+  RateLimitError,
+  InvalidRequestError,
+  NetworkError,
+  ResourceNotFoundError,
+} from "../../errors";
+import { withRetry as withRetryShared } from "../../utils/retry";
+import type { Logger } from "../../utils/logger";
+import {
+  fromMinorUnits as sharedFromMinorUnits,
+  MoneyAmountError,
+  money,
+  moneyToMajorNumber,
+  normalizeAmountInput,
+  toMinorUnits as sharedToMinorUnits,
+} from "../../utils/money";
+import { PAYPAL_CAPABILITIES } from "../builtin-capabilities";
+import type { GatewayRuntimeDeps } from "../../runtime/payment-runtime";
+import {
+  combineAbortSignals,
+  createTimeoutSignal,
+  extractAbortSignal,
+  mapHttpAbortError,
+} from "../../runtime/abort";
+
+type PayPalRefundStatus = "pending" | "completed" | "failed";
+
+class PayPalApiError extends GatewayApiError {
+  constructor(
+    message: string,
+    rawError: unknown,
+    public readonly paypalStatusCode: number,
+    public readonly retryAfterSeconds?: number,
+  ) {
+    super(message, "paypal", rawError);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PayPal API Response Types
+// ═══════════════════════════════════════════════════════════════════════════════
+
+interface PayPalOrderResponse {
+  id: string;
+  status: string;
+  intent?: "CAPTURE" | "AUTHORIZE";
+  amount?: {
+    currency_code: string;
+    value: string;
+  };
+  message?: string;
+  name?: string;
+  details?: Array<{
+    issue?: string;
+    description?: string;
+    field?: string;
+    value?: string;
+  }>;
+  links?: Array<{ rel: string; href: string }>;
+  purchase_units?: Array<{
+    reference_id?: string;
+    custom_id?: string;
+    amount?: {
+      currency_code: string;
+      value: string;
+    };
+    payments?: {
+      captures?: Array<{
+        id: string;
+        status: string;
+        amount: {
+          currency_code: string;
+          value: string;
+        };
+        create_time?: string;
+        update_time?: string;
+      }>;
+      authorizations?: Array<{
+        id: string;
+        status: string;
+        amount: {
+          currency_code: string;
+          value: string;
+        };
+        create_time?: string;
+        update_time?: string;
+      }>;
+    };
+  }>;
+}
+
+interface PayPalRefundResponse {
+  id: string;
+  status: string;
+  message?: string;
+  name?: string;
+  details?: Array<{
+    issue?: string;
+    description?: string;
+  }>;
+}
+
+type PayPalMoney = {
+  currency_code: string;
+  value: string;
+};
+
+type PayPalPaymentResource = {
+  id: string;
+  status: string;
+  amount: PayPalMoney;
+  supplementary_data?: {
+    related_ids?: {
+      order_id?: string;
+      authorization_id?: string;
+      capture_id?: string;
+    };
+  };
+  links?: Array<{ rel: string; href: string }>;
+};
+
+interface PayPalTokenResponse {
+  access_token: string;
+  expires_in: number;
+  message?: string;
+}
+
+interface PayPalWebhookVerifyRequest {
+  auth_algo: string;
+  cert_url: string;
+  transmission_id: string;
+  transmission_sig: string;
+  transmission_time: string;
+  webhook_id: string;
+  webhook_event: unknown;
+}
+
+interface PayPalWebhookVerifyResponse {
+  verification_status: "SUCCESS" | "FAILURE";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Retry Configuration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const PAYPAL_ZERO_DECIMAL_CURRENCIES = new Set(["HUF", "JPY", "TWD"]);
+const PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH = 108;
+const PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH = 10_000;
+const PAYPAL_CUSTOM_ID_MAX_LENGTH = 127;
+/** PayPal purchase_unit.description max length. */
+const PAYPAL_DESCRIPTION_MAX_LENGTH = 127;
+/** PayPal purchase_unit.reference_id (SDK orderId) max length. */
+const PAYPAL_ORDER_ID_MAX_LENGTH = 256;
+/** PayPal refund note_to_payer max length (SDK reason). */
+const PAYPAL_REFUND_NOTE_MAX_LENGTH = 255;
+const PAYPAL_WEBHOOK_ID_MAX_LENGTH = 50;
+/**
+ * Maximum age of `paypal-transmission-time` accepted for webhook verification.
+ * Older transmissions are rejected to limit replay risk.
+ */
+const PAYPAL_WEBHOOK_MAX_AGE_MS = 15 * 60 * 1000;
+/** Heuristic for unknown resource statuses that appear terminal (fail-closed). */
+const PAYPAL_TERMINAL_RESOURCE_STATUS_PATTERN =
+  /FAIL|DENIED|DECLIN|CANCEL|VOID|EXPIR|REJECT|ERROR|ABORT|BLOCK/i;
+const PAYPAL_WEBHOOK_HEADER_LIMITS = {
+  authAlgo: 100,
+  certUrl: 500,
+  transmissionId: 50,
+  transmissionSig: 500,
+  transmissionTime: 100,
+} as const;
+const PAYPAL_WEBHOOK_ID_PATTERN = /^[A-Za-z0-9]+$/;
+const PAYPAL_WEBHOOK_EVENTS_WITHOUT_AMOUNT = new Set([
+  "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
+]);
+const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_ID = new Set([
+  "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
+]);
+const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_STATUS = new Set([
+  "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
+]);
+
+/**
+ * Retry with exponential backoff.
+ *
+ * Thin adapter over the shared {@link withRetryShared} helper, preserving
+ * PayPal's original call signature. The shared helper's default backoff already
+ * honors `retryAfterSeconds` on the error (PayPalApiError exposes it), so 429
+ * Retry-After values are respected.
+ */
+function withRetry<T>(
+  operation: () => Promise<T>,
+  isRetryable: (error: unknown) => boolean = () => false,
+): Promise<T> {
+  return withRetryShared(operation, { isRetryable });
+}
+
+/**
+ * Check if error is retryable (5xx or network errors)
+ */
+function isRetryableError(error: unknown): boolean {
+  if (error instanceof PayPalApiError) {
+    const status = error.paypalStatusCode;
+    if (status >= 500 || status === 429) {
+      return true;
+    }
+
+    const raw = error.rawError as {
+      name?: string;
+      details?: Array<{ issue?: string }>;
+    };
+    return status === 409 &&
+      raw?.name === "RESOURCE_CONFLICT" &&
+      raw.details?.some((detail) => detail.issue === "PREVIOUS_REQUEST_IN_PROGRESS") === true;
+  }
+  // Network errors (timeout maps to NetworkError). Caller aborts map to
+  // PaymentAbortedError and must not be retried.
+  return error instanceof NetworkError || error instanceof TypeError;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PayPal Gateway Implementation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * PayPal payment gateway implementation
+ * Uses PayPal REST API v2
+ * @see https://developer.paypal.com/docs/api/orders/v2/
+ */
+export class PayPalGateway extends BaseGateway {
+  readonly name = "paypal" as const;
+
+  private readonly paypalConfig: PayPalConfig;
+  private accessToken: string | null = null;
+  private tokenExpiry: Date | null = null;
+
+  /** Promise for in-flight token fetch (prevents race conditions) */
+  private tokenFetchPromise: Promise<string> | null = null;
+
+  private get baseUrl(): string {
+    return this.paypalConfig.sandbox
+      ? "https://api-m.sandbox.paypal.com"
+      : "https://api-m.paypal.com";
+  }
+
+  constructor(
+    config: PayPalConfig,
+    hooks: HooksManager,
+    logger?: Logger,
+    runtime?: GatewayRuntimeDeps,
+  ) {
+    super(config, hooks, logger, PAYPAL_CAPABILITIES, runtime);
+    if (
+      config.webhookId !== undefined &&
+      !PayPalGateway.isValidWebhookId(config.webhookId)
+    ) {
+      throw new InvalidRequestError(
+        `PayPal webhookId must be ${PAYPAL_WEBHOOK_ID_MAX_LENGTH} or fewer alphanumeric characters`,
+      );
+    }
+    this.paypalConfig = config;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Public Methods
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Retrieve order details by ID
+   */
+  async getPayment(params: GetPaymentParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("getPayment", params, async (p) => {
+      const { gatewayPaymentId } = p;
+
+      const callerSignal = extractAbortSignal(p);
+      return withRetry(async () => {
+        const response = await this.fetchWithAccessToken(
+          `${this.baseUrl}/v2/checkout/orders/${gatewayPaymentId}`,
+          (token) => ({
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+          }),
+          callerSignal,
+        );
+
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+
+        if (!response.ok) {
+          if (response.status === 404) {
+            return this.getPaymentResource(gatewayPaymentId, callerSignal);
+          }
+
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertOrderResponse(data, "get payment");
+
+        // Prefer the last capture when multiple exist (most recent partial/full capture).
+        const capture = this.preferLastCapture(
+          data.purchase_units?.[0]?.payments?.captures,
+        );
+        const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
+        const purchaseUnitAmount = data.purchase_units?.[0]?.amount;
+        const amount = capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
+        const status = this.mapPaymentResultStatus(data, capture, authorization);
+        const amountMajor = amount
+          ? this.parseAmount(amount, "get payment")
+          : undefined;
+        return this.mapPayPalPaymentResult({
+          gatewayId: data.id,
+          orderId: data.id,
+          status,
+          rawResponse: data,
+          providerNativeStatus:
+            capture?.status ?? authorization?.status ?? data.status,
+          ...(capture?.id !== undefined ? { captureId: capture.id } : {}),
+          ...(authorization?.id !== undefined
+            ? { authorizationId: authorization.id }
+            : {}),
+          ...(amountMajor !== undefined ? { amount: amountMajor } : {}),
+        });
+      }, isRetryableError);
+    }, GetPaymentParamsSchema);
+  }
+
+  /**
+   * Get payment status
+   */
+  async getPaymentStatus(gatewayId: string): Promise<PaymentStatus> {
+    const result = await this.getPayment({ gatewayPaymentId: gatewayId });
+    return result.status;
+  }
+
+  /**
+   * Create a PayPal order
+   */
+  async createPayment(
+    params: CreatePaymentParams,
+  ): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("createPayment", params, async (p) => {
+      // PayPal experience_context needs return + cancel URLs.
+      // Success return: returnUrl | callbackUrl. Cancel: cancelUrl | callbackUrl | returnUrl.
+      // returnUrl-only is legal (both return_url and cancel_url use returnUrl).
+      if (!p.returnUrl && !p.callbackUrl) {
+        throw new InvalidRequestError(
+          "PayPal createPayment requires returnUrl or callbackUrl",
+        );
+      }
+      if (!p.cancelUrl && !p.callbackUrl && !p.returnUrl) {
+        throw new InvalidRequestError(
+          "PayPal createPayment requires cancelUrl, callbackUrl, or returnUrl for cancel fallback",
+        );
+      }
+      // Shipping address payload is not yet supported on createPayment.
+      if (p.paypalShippingPreference === "SET_PROVIDED_ADDRESS") {
+        throw new InvalidRequestError(
+          "PayPal shipping_preference SET_PROVIDED_ADDRESS is not supported: shipping address payload is not yet available. Use NO_SHIPPING (default) or GET_FROM_FILE.",
+        );
+      }
+
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH);
+      this.assertMaxLength(
+        p.orderId,
+        PAYPAL_ORDER_ID_MAX_LENGTH,
+        "PayPal orderId (reference_id)",
+      );
+      this.assertMaxLength(
+        p.description,
+        PAYPAL_DESCRIPTION_MAX_LENGTH,
+        "PayPal description",
+      );
+      return withRetry(async () => {
+        const customId = this.getCustomId(p.metadata);
+        const body = JSON.stringify({
+          intent: p.capture === false ? "AUTHORIZE" : "CAPTURE",
+          purchase_units: [
+            {
+              reference_id: p.orderId,
+              description: p.description,
+              custom_id: customId,
+              amount: {
+                currency_code: this.normalizeCurrencyCode(p.currency),
+                value: this.formatAmount(p.amount, p.currency),
+              },
+            },
+          ],
+          payment_source: {
+            paypal: {
+              experience_context: {
+                payment_method_preference: "IMMEDIATE_PAYMENT_REQUIRED",
+                return_url: p.returnUrl ?? p.callbackUrl,
+                cancel_url: p.cancelUrl ?? p.callbackUrl ?? p.returnUrl,
+                shipping_preference: p.paypalShippingPreference ?? "NO_SHIPPING",
+                user_action: "PAY_NOW",
+              },
+            },
+          },
+        });
+
+        const response = await this.fetchWithAccessToken(
+          `${this.baseUrl}/v2/checkout/orders`,
+          (token) => ({
+            method: "POST",
+            headers: this.createJsonHeaders(token, requestId),
+            body,
+          }),
+          extractAbortSignal(p),
+        );
+
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+
+        if (!response.ok) {
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertOrderResponse(data, "create payment");
+
+        // Find approval URL
+        const approvalLink = data.links?.find(
+          (link) => link.rel === "payer-action" || link.rel === "approve",
+        );
+        if (!approvalLink?.href) {
+          throw this.createMalformedResponseError(
+            "Invalid PayPal create payment response: missing approval link",
+            data,
+          );
+        }
+
+        const status = this.mapStatus(data.status);
+        const redirectUrl = approvalLink.href;
+        // Create always returns an approval redirect → requires_action (never paid).
+        const outcome: PaymentOperationOutcome =
+          status === "failed" ? "declined" : "requires_action";
+        return applyOutcomeToGatewayResult(
+          {
+            gatewayId: data.id,
+            orderId: data.id,
+            status,
+            redirectUrl,
+            rawResponse: data,
+            providerNativeStatus: data.status,
+            gateway: "paypal",
+          },
+          outcome,
+          outcome === "declined"
+            ? {
+                decline: {
+                  code: data.status ?? "DECLINED",
+                  message: `PayPal order status ${data.status}`,
+                  providerCode: data.status,
+                },
+              }
+            : undefined,
+        );
+      }, isRetryableError);
+    }, PayPalCreatePaymentParamsSchema);
+  }
+
+  /**
+   * Capture a PayPal order after customer approval
+   * @returns Result including capture ID in rawResponse for use in refunds
+   */
+  async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("capturePayment", params, async (p) => {
+      const isAuthorizationCapture = p.paypalCaptureType === "authorization";
+      const requestId = this.getRequestId(
+        p.idempotencyKey,
+        isAuthorizationCapture
+          ? PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH
+          : PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH,
+      );
+      return withRetry(async () => {
+        if (!isAuthorizationCapture && p.amount !== undefined) {
+          throw new InvalidRequestError(
+            "PayPal order captures do not support amount. Create an AUTHORIZE-intent order and capture the authorization for partial captures.",
+          );
+        }
+
+        const url = isAuthorizationCapture
+          ? `${this.baseUrl}/v2/payments/authorizations/${p.gatewayPaymentId}/capture`
+          : `${this.baseUrl}/v2/checkout/orders/${p.gatewayPaymentId}/capture`;
+
+        const body: Record<string, unknown> = {};
+        if (isAuthorizationCapture && p.amount !== undefined) {
+          if (!p.currency) {
+            throw new InvalidRequestError(
+              "Currency is required for partial PayPal authorization captures",
+            );
+          }
+          body.amount = {
+            value: this.formatAmount(p.amount, p.currency),
+            currency_code: this.normalizeCurrencyCode(p.currency),
+          };
+        }
+
+        // PayPal API defaults final_capture to false. SDK product defaults:
+        // - full capture (no amount): true (capture remaining balance and close auth)
+        // - partial (amount set): false unless paypalFinalCapture === true
+        if (isAuthorizationCapture) {
+          if (p.amount !== undefined) {
+            body.final_capture = p.paypalFinalCapture === true;
+          } else {
+            body.final_capture = p.paypalFinalCapture ?? true;
+          }
+        }
+
+        const response = await this.fetchWithAccessToken(
+          url,
+          (token) => ({
+            method: "POST",
+            headers: this.createJsonHeaders(token, requestId, "return=representation"),
+            body: JSON.stringify(body),
+          }),
+          extractAbortSignal(p),
+        );
+
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+
+        if (!response.ok) {
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertOrderResponse(data, "capture payment");
+
+        // Extract capture details (prefer last capture on multi-capture order responses)
+        const capture = isAuthorizationCapture
+          ? {
+            id: data.id,
+            status: data.status,
+            amount: data.amount,
+          }
+          : this.preferLastCapture(
+            data.purchase_units?.[0]?.payments?.captures,
+          );
+
+        this.assertPaymentResource(capture, "capture payment");
+
+        const status = capture
+          ? this.mapResourceStatus(capture.status)
+          : this.mapStatus(data.status);
+
+        // PayPal can return HTTP 200 with capture status PENDING (echeck, review).
+        // success remains true for pending API outcomes via requires_action dual-write;
+        // callers must require outcome succeeded + status paid before fulfill.
+        // Terminal failed statuses set success:false (outcome declined).
+        if (status === "pending") {
+          this.logger.warn(
+            "[PayPal] Capture returned pending status; do not fulfill until status is paid (webhook or poll)",
+          );
+        }
+
+        return this.mapPayPalPaymentResult({
+          gatewayId: capture.id,
+          captureId: capture.id,
+          status,
+          amount: this.parseAmount(capture.amount, "capture payment"),
+          // Include capture ID for downstream refund use
+          rawResponse: {
+            ...data,
+            captureId: capture?.id,
+            orderId: isAuthorizationCapture ? undefined : data.id,
+            authorizationId: isAuthorizationCapture
+              ? p.gatewayPaymentId
+              : undefined,
+          },
+          providerNativeStatus: capture.status ?? data.status,
+          ...(!isAuthorizationCapture ? { orderId: data.id } : {}),
+          ...(isAuthorizationCapture
+            ? { authorizationId: p.gatewayPaymentId }
+            : {}),
+        });
+      }, isRetryableError);
+    }, CaptureParamsSchema);
+  }
+
+  /**
+   * Refund a captured PayPal payment
+   * Note: gatewayPaymentId should be the CAPTURE ID, not order ID
+   */
+  async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
+    return this.executeWithHooks("refundPayment", params, async (p) => {
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH);
+      this.assertMaxLength(
+        p.reason,
+        PAYPAL_REFUND_NOTE_MAX_LENGTH,
+        "PayPal refund reason (note_to_payer)",
+      );
+      return withRetry(async () => {
+        // Build refund body
+        const body: Record<string, unknown> = {};
+
+        if (p.amount !== undefined) {
+          if (!p.currency) {
+            throw new InvalidRequestError(
+              "Currency is required for partial PayPal refunds",
+            );
+          }
+          body.amount = {
+            value: this.formatAmount(p.amount, p.currency),
+            currency_code: this.normalizeCurrencyCode(p.currency),
+          };
+        }
+
+        if (p.reason) {
+          body.note_to_payer = p.reason;
+        }
+
+        const response = await this.fetchWithAccessToken(
+          `${this.baseUrl}/v2/payments/captures/${p.gatewayPaymentId}/refund`,
+          (token) => ({
+            method: "POST",
+            headers: this.createJsonHeaders(token, requestId, "return=representation"),
+            body: JSON.stringify(body),
+          }),
+          extractAbortSignal(p),
+        );
+
+        const data = await this.parseJsonResponse<PayPalRefundResponse>(response);
+
+        if (!response.ok) {
+          // Refunds hit /v2/payments/captures/{id}/refund — order/auth IDs 404 here.
+          if (
+            response.status === 404 ||
+            (data as { name?: string }).name === "RESOURCE_NOT_FOUND"
+          ) {
+            throw new PayPalApiError(
+              "PayPal refund requires capture ID from capturePayment, not order/authorization ID",
+              data,
+              response.status,
+              this.parseRetryAfterSeconds(response.headers),
+            );
+          }
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertRefundResponse(data);
+
+        const status = this.mapRefundStatus(data.status);
+        const outcome: RefundOperationOutcome =
+          status === "completed"
+            ? "succeeded"
+            : status === "failed"
+              ? "failed"
+              : "pending";
+        // Terminal failed/cancelled refunds → outcome failed → success false.
+        return applyOutcomeToGatewayRefundResult(
+          {
+            gatewayRefundId: data.id,
+            status,
+            rawResponse: data,
+          },
+          outcome,
+        );
+      }, isRetryableError);
+    }, RefundParamsSchema);
+  }
+
+  /**
+   * Void an authorized PayPal payment
+   * Note: This only works for orders created with intent: AUTHORIZE
+   * gatewayPaymentId should be the AUTHORIZATION ID, not order ID
+   * @see https://developer.paypal.com/docs/api/payments/v2/#authorizations_void
+   */
+  async voidPayment(params: VoidParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("voidPayment", params, async (p) => {
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH);
+      return withRetry(async () => {
+        const response = await this.fetchWithAccessToken(
+          `${this.baseUrl}/v2/payments/authorizations/${p.gatewayPaymentId}/void`,
+          (token) => ({
+            method: "POST",
+            headers: this.createJsonHeaders(token, requestId),
+          }),
+          extractAbortSignal(p),
+        );
+
+        // PayPal returns 204 No Content on successful void
+        if (response.status === 204) {
+          return this.mapPayPalPaymentResult({
+            gatewayId: p.gatewayPaymentId,
+            authorizationId: p.gatewayPaymentId,
+            status: "cancelled",
+            rawResponse: null,
+            providerNativeStatus: "VOIDED",
+            forceOutcome: "succeeded",
+          });
+        }
+
+        // If not 204, try to parse the response for error details
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+
+        if (!response.ok) {
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertOrderResponse(data, "void payment");
+
+        return this.mapPayPalPaymentResult({
+          gatewayId: data.id ?? p.gatewayPaymentId,
+          authorizationId: data.id ?? p.gatewayPaymentId,
+          status: this.mapStatus(data.status ?? "VOIDED"),
+          rawResponse: data,
+          providerNativeStatus: data.status ?? "VOIDED",
+          forceOutcome: "succeeded",
+        });
+      }, isRetryableError);
+    }, VoidParamsSchema);
+  }
+
+  /**
+   * Authorize an approved PayPal AUTHORIZE-intent order.
+   * Use the returned authorizationId to capture or void the hold later.
+   */
+  async authorizePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("authorizePayment", params, async (p) => {
+      this.assertAuthorizeParams(p);
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH);
+      return withRetry(async () => {
+        const response = await this.fetchWithAccessToken(
+          `${this.baseUrl}/v2/checkout/orders/${p.gatewayPaymentId}/authorize`,
+          (token) => ({
+            method: "POST",
+            headers: this.createJsonHeaders(token, requestId, "return=representation"),
+            body: "{}",
+          }),
+          extractAbortSignal(p),
+        );
+
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+
+        if (!response.ok) {
+          throw this.createApiError(data, response.status, response.headers);
+        }
+
+        this.assertOrderResponse(data, "authorize payment");
+        const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
+        this.assertPaymentResource(authorization, "authorize payment");
+
+        const status = this.mapResourceStatus(authorization.status);
+        return this.mapPayPalPaymentResult({
+          // Match capturePayment: terminal failed statuses are not successful outcomes.
+          gatewayId: authorization.id,
+          orderId: data.id,
+          authorizationId: authorization.id,
+          status,
+          amount: this.parseAmount(authorization.amount, "authorize payment"),
+          providerNativeStatus: authorization.status,
+          rawResponse: {
+            ...data,
+            authorizationId: authorization.id,
+          },
+        });
+      }, isRetryableError);
+    }, CaptureParamsSchema);
+  }
+
+  /**
+   * Map PayPal errors to standardized SDK errors
+   */
+  protected mapError(error: unknown): Error {
+    if (error instanceof PayPalApiError) {
+      const raw = error.rawError as {
+        name?: string;
+        details?: Array<{ issue?: string }>;
+      };
+      const name = raw?.name;
+      const issues = raw?.details
+        ?.map((detail) => detail.issue)
+        .filter((issue): issue is string => Boolean(issue)) ?? [];
+      const hasIssue = (patterns: string[]): boolean =>
+        issues.some((issue) => patterns.some((pattern) => issue.includes(pattern)));
+
+      if (error.paypalStatusCode === 401 || name === "AUTHENTICATION_FAILURE") {
+        return new AuthenticationError(error.message, raw);
+      }
+      if (error.paypalStatusCode === 404 || name === "RESOURCE_NOT_FOUND") {
+        return new ResourceNotFoundError(error.message, raw);
+      }
+      if (error.paypalStatusCode === 429 || name === "RATE_LIMIT_REACHED") {
+        return new RateLimitError("paypal", error.retryAfterSeconds);
+      }
+      if (hasIssue(["INSUFFICIENT_FUNDS"])) {
+        return new InsufficientFundsError(error.message, raw);
+      }
+      if (hasIssue([
+        "INSTRUMENT_DECLINED",
+        "CARD_EXPIRED",
+        "CARD_BRAND_NOT_SUPPORTED",
+        "CARD_COUNTRY_NOT_SUPPORTED",
+        "CARD_TYPE_NOT_SUPPORTED",
+        "COMPLIANCE_VIOLATION",
+        "DECLINED_DUE_TO_RELATED_TXN",
+        "PAYEE_BLOCKED_TRANSACTION",
+      ])) {
+        return new CardDeclinedError(error.message, raw);
+      }
+      if (
+        error.paypalStatusCode === 400 ||
+        error.paypalStatusCode === 422 ||
+        name === "INVALID_REQUEST" ||
+        name === "MALFORMED_REQUEST" ||
+        name === "VALIDATION_ERROR" ||
+        name === "UNPROCESSABLE_ENTITY"
+      ) {
+        return new InvalidRequestError(error.message, [raw]);
+      }
+    }
+    return super.mapError(error);
+  }
+
+
+  /**
+   * Verify PayPal webhook signature (synchronous).
+   *
+   * PayPal signature verification requires an API round-trip. This method
+   * always throws — use {@link verifyWebhookAsync} or `client.handleWebhook`.
+   *
+   * Prefer the **raw** request body (string / Buffer / Uint8Array). Parsed
+   * objects are accepted by the async path but may fail verification because
+   * re-serialization can change key order and whitespace.
+   *
+   * @throws {InvalidRequestError} Always — sync verification is not supported.
+   * @see https://developer.paypal.com/docs/api/webhooks/v1/#verify-webhook-signature
+   */
+  verifyWebhook(
+    _payload?: unknown,
+    _signatureOrHeaders?: string | Record<string, string>,
+    _headers?: Record<string, string>,
+  ): boolean {
+    throw new InvalidRequestError(
+      "PayPal does not support synchronous webhook verification. Use verifyWebhookAsync or client.handleWebhook",
+    );
+  }
+
+  /**
+   * Verify PayPal webhook signature asynchronously.
+   * This is the recommended method for webhook verification.
+   *
+   * **Raw body required for reliable verification**: pass the exact bytes
+   * PayPal signed (string, Buffer, or Uint8Array). The SDK embeds that JSON
+   * text as `webhook_event` without parse→stringify reordering. Already-parsed
+   * objects are still accepted but log a warning — verification may fail.
+   *
+   * Also rejects `paypal-transmission-time` values that are unparseable or
+   * older than 15 minutes (replay protection).
+   *
+   * Certificate URLs are allowlisted to HTTPS hosts under `*.paypal.com` before
+   * any verify API call.
+   */
+  async verifyWebhookAsync(
+    payload: unknown,
+    signatureOrHeaders?: string | Record<string, string>,
+    headers?: Record<string, string>,
+  ): Promise<boolean> {
+    if (!this.paypalConfig.webhookId) {
+      throw new InvalidRequestError(
+        "paypal.webhookId is required for webhook verification",
+      );
+    }
+
+    const normalizedHeaders = this.normalizeHeaders(
+      typeof signatureOrHeaders === "string" ? headers : signatureOrHeaders,
+    );
+    const transmissionId = normalizedHeaders["paypal-transmission-id"];
+    const transmissionTime = normalizedHeaders["paypal-transmission-time"];
+    const transmissionSig =
+      typeof signatureOrHeaders === "string"
+        ? signatureOrHeaders
+        : normalizedHeaders["paypal-transmission-sig"];
+    const certUrl = normalizedHeaders["paypal-cert-url"];
+    const authAlgo = normalizedHeaders["paypal-auth-algo"];
+
+    if (
+      !transmissionId ||
+      !transmissionTime ||
+      !transmissionSig ||
+      !certUrl ||
+      !authAlgo
+    ) {
+      this.logger.warn("[PayPal] Missing required webhook headers");
+      return false;
+    }
+
+    if (!this.isValidWebhookHeaders({
+      authAlgo,
+      certUrl,
+      transmissionId,
+      transmissionSig,
+      transmissionTime,
+    })) {
+      // Reason already logged inside isValidWebhookHeaders when specific.
+      this.logger.warn("[PayPal] Invalid webhook header values");
+      return false;
+    }
+
+    const verifyBody = this.buildWebhookVerifyBody({
+      authAlgo,
+      certUrl,
+      transmissionId,
+      transmissionSig,
+      transmissionTime,
+      webhookId: this.paypalConfig.webhookId,
+      payload,
+    });
+    if (verifyBody === undefined) {
+      this.logger.warn(
+        "[PayPal] Webhook verification failed: payload is not a valid JSON object",
+      );
+      return false;
+    }
+
+    const response = await withRetry(async () => {
+      const verificationResponse = await this.fetchWithAccessToken(
+        `${this.baseUrl}/v1/notifications/verify-webhook-signature`,
+        (token) => ({
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: verifyBody,
+        }),
+      );
+
+      if (!verificationResponse.ok) {
+        const errorData = await this.parseJsonResponse<PayPalOrderResponse>(verificationResponse);
+        throw this.createApiError(errorData, verificationResponse.status, verificationResponse.headers);
+      }
+
+      return verificationResponse;
+    }, isRetryableError);
+
+    const data = await this.parseJsonResponse<PayPalWebhookVerifyResponse>(response);
+    if (
+      data.verification_status !== "SUCCESS" &&
+      data.verification_status !== "FAILURE"
+    ) {
+      throw this.createMalformedResponseError(
+        "Invalid PayPal webhook verification response: missing verification_status",
+        data,
+      );
+    }
+
+    return data.verification_status === "SUCCESS";
+  }
+
+  /**
+   * Parse PayPal webhook payload into normalized WebhookEvent.
+   * Accepts a parsed object, or a raw JSON string/Buffer (same shapes as verify).
+   *
+   * Dual-writes Phase 7 PaymentEvent. Note: `PAYMENT.CAPTURE.COMPLETED` maps to
+   * stable `capture.completed` (not `payment.succeeded`) — see webhook-events.md.
+   */
+  parseWebhookEvent(payload: unknown): WebhookEvent {
+    const raw = this.validateWebhookPayload(this.coerceWebhookPayload(payload));
+
+    // Extract capture ID if available. Refund webhooks identify the refund as
+    // resource.id and link back to the affected capture with rel="up".
+    // Resolved before status mapping so CHECKOUT.ORDER.COMPLETED is only
+    // treated as paid when a capture is present (not auth-only completed orders).
+    const captureId = this.extractWebhookCaptureId(raw);
+    const status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
+      hasCapture: Boolean(captureId),
+    });
+    if (!status) {
+      throw new InvalidRequestError(
+        `Unsupported PayPal webhook event: ${raw.event_type}`,
+      );
+    }
+
+    const webhookAmount = this.extractWebhookAmount(raw);
+    if (!webhookAmount && this.webhookEventRequiresAmount(raw.event_type)) {
+      throw new InvalidRequestError(
+        `PayPal webhook event ${raw.event_type} is missing amount information`,
+      );
+    }
+    const amount = webhookAmount
+      ? this.parseAmount(webhookAmount, "webhook")
+      : undefined;
+    const eventTimestamp = new Date(raw.create_time);
+    if (!Number.isFinite(eventTimestamp.getTime())) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: invalid create_time",
+        "paypal",
+        raw,
+      );
+    }
+
+    const paymentId = this.extractWebhookPaymentId(raw);
+
+    const gatewayPaymentId = captureId ?? raw.resource.id ?? raw.resource.order_id;
+    if (!gatewayPaymentId) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing gateway payment identifier",
+        "paypal",
+        raw,
+      );
+    }
+    const gatewayObjectId = raw.resource.id && captureId && captureId !== raw.resource.id
+      ? raw.resource.id
+      : undefined;
+
+    const event: WebhookEvent = {
+      id: raw.id,
+      type: raw.event_type,
+      gateway: "paypal",
+      paymentId,
+      gatewayPaymentId,
+      gatewayObjectId,
+      status,
+      timestamp: eventTimestamp,
+      rawPayload: raw,
+    };
+
+    if (webhookAmount) {
+      event.amount = amount;
+      // Normalize to uppercase ISO 4217 for cross-gateway consistency.
+      event.currency = webhookAmount.currency_code.toUpperCase();
+    }
+
+    return attachPaymentEvent(event, { computePayloadHash: true });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Private Methods
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Validate webhook payload structure
+   */
+  private validateWebhookPayload(payload: unknown): PayPalWebhookPayload {
+    if (!payload || typeof payload !== "object") {
+      throw new GatewayApiError(
+        "Invalid webhook payload: not an object",
+        "paypal",
+        payload,
+      );
+    }
+
+    const p = payload as Record<string, unknown>;
+
+    if (typeof p.id !== "string") {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing id",
+        "paypal",
+        payload,
+      );
+    }
+
+    if (typeof p.event_type !== "string") {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing event_type",
+        "paypal",
+        payload,
+      );
+    }
+
+    if (typeof p.create_time !== "string") {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing create_time",
+        "paypal",
+        payload,
+      );
+    }
+
+    if (!p.resource || typeof p.resource !== "object") {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing resource",
+        "paypal",
+        payload,
+      );
+    }
+
+    const resource = p.resource as Record<string, unknown>;
+
+    if (
+      typeof resource.id !== "string" &&
+      !PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_ID.has(p.event_type)
+    ) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing resource.id",
+        "paypal",
+        payload,
+      );
+    }
+
+    if (
+      typeof resource.status !== "string" &&
+      !PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_STATUS.has(p.event_type)
+    ) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing resource.status",
+        "paypal",
+        payload,
+      );
+    }
+
+    return payload as PayPalWebhookPayload;
+  }
+
+  private async getPaymentResource(
+    gatewayPaymentId: string,
+    callerSignal?: AbortSignal,
+  ): Promise<GatewayPaymentResult> {
+    const captureResult = await this.tryGetPaymentResource(
+      gatewayPaymentId,
+      "capture",
+      callerSignal,
+    );
+
+    if (captureResult) {
+      return captureResult;
+    }
+
+    return this.getAuthorizationResource(gatewayPaymentId, callerSignal);
+  }
+
+  private async tryGetPaymentResource(
+    gatewayPaymentId: string,
+    resourceType: "capture",
+    callerSignal?: AbortSignal,
+  ): Promise<GatewayPaymentResult | undefined> {
+    const response = await this.fetchWithAccessToken(
+      `${this.baseUrl}/v2/payments/captures/${gatewayPaymentId}`,
+      (token) => ({
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      callerSignal,
+    );
+
+    const data = await this.parseJsonResponse<PayPalPaymentResource>(response);
+
+    if (response.status === 404) {
+      return undefined;
+    }
+
+    if (!response.ok) {
+      throw this.createApiError(data, response.status, response.headers);
+    }
+
+    this.assertPaymentResource(data, `get ${resourceType}`);
+
+    const relatedIds = data.supplementary_data?.related_ids;
+    return this.mapPayPalPaymentResult({
+      gatewayId: data.id,
+      captureId: data.id,
+      status: this.mapResourceStatus(data.status),
+      amount: this.parseAmount(data.amount, `get ${resourceType}`),
+      rawResponse: data,
+      providerNativeStatus: data.status,
+      ...(relatedIds?.order_id !== undefined
+        ? { orderId: relatedIds.order_id }
+        : {}),
+      ...(relatedIds?.authorization_id !== undefined
+        ? { authorizationId: relatedIds.authorization_id }
+        : {}),
+    });
+  }
+
+  private async getAuthorizationResource(
+    gatewayPaymentId: string,
+    callerSignal?: AbortSignal,
+  ): Promise<GatewayPaymentResult> {
+    const response = await this.fetchWithAccessToken(
+      `${this.baseUrl}/v2/payments/authorizations/${gatewayPaymentId}`,
+      (token) => ({
+        method: "GET",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+      }),
+      callerSignal,
+    );
+
+    const data = await this.parseJsonResponse<PayPalPaymentResource>(response);
+
+    if (!response.ok) {
+      throw this.createApiError(data, response.status, response.headers);
+    }
+
+    this.assertPaymentResource(data, "get authorization");
+    const relatedIds = data.supplementary_data?.related_ids;
+
+    return this.mapPayPalPaymentResult({
+      gatewayId: data.id,
+      authorizationId: data.id,
+      status: this.mapResourceStatus(data.status),
+      amount: this.parseAmount(data.amount, "get authorization"),
+      rawResponse: data,
+      providerNativeStatus: data.status,
+      ...(relatedIds?.order_id !== undefined
+        ? { orderId: relatedIds.order_id }
+        : {}),
+      ...(relatedIds?.capture_id !== undefined
+        ? { captureId: relatedIds.capture_id }
+        : {}),
+    });
+  }
+
+  /**
+   * Build GatewayPaymentResult with Phase 6 outcome + ProviderReferences.
+   * Dual-writes legacy orderId/captureId/authorizationId for 0.x callers.
+   */
+  private mapPayPalPaymentResult(input: {
+    gatewayId: string;
+    status: PaymentStatus;
+    rawResponse: unknown;
+    orderId?: string | undefined;
+    captureId?: string | undefined;
+    authorizationId?: string | undefined;
+    amount?: number | undefined;
+    redirectUrl?: string | undefined;
+    providerNativeStatus?: string | undefined;
+    forceOutcome?: PaymentOperationOutcome | undefined;
+  }): GatewayPaymentResult {
+    const outcome =
+      input.forceOutcome ?? this.mapPayPalOutcome(input.status, input.redirectUrl);
+
+    return applyOutcomeToGatewayResult(
+      {
+        gatewayId: input.gatewayId,
+        status: input.status,
+        rawResponse: input.rawResponse,
+        ...(input.redirectUrl !== undefined
+          ? { redirectUrl: input.redirectUrl }
+          : {}),
+        ...(input.orderId !== undefined ? { orderId: input.orderId } : {}),
+        ...(input.captureId !== undefined ? { captureId: input.captureId } : {}),
+        ...(input.authorizationId !== undefined
+          ? { authorizationId: input.authorizationId }
+          : {}),
+        ...(input.amount !== undefined ? { amount: input.amount } : {}),
+        ...(input.providerNativeStatus !== undefined
+          ? { providerNativeStatus: input.providerNativeStatus }
+          : {}),
+        gateway: "paypal",
+      },
+      outcome,
+      outcome === "declined"
+        ? {
+            decline: {
+              code: input.providerNativeStatus ?? input.status,
+              message: `PayPal payment status ${input.status}`,
+              ...(input.providerNativeStatus !== undefined
+                ? { providerCode: input.providerNativeStatus }
+                : {}),
+            },
+          }
+        : undefined,
+    );
+  }
+
+  /**
+   * Map normalized PayPal payment status to operation outcome.
+   * Approval redirects / pending captures are never `succeeded`.
+   */
+  private mapPayPalOutcome(
+    status: PaymentStatus,
+    redirectUrl?: string,
+  ): PaymentOperationOutcome {
+    if (status === "failed") {
+      return "declined";
+    }
+    if (
+      (typeof redirectUrl === "string" && redirectUrl.length > 0) ||
+      status === "pending" ||
+      status === "processing"
+    ) {
+      return "requires_action";
+    }
+    if (status === "cancelled") {
+      // voidPayment forces succeeded; other VOIDED reads are not charge success.
+      return "failed";
+    }
+    // paid | authorized | partially_captured | refunded
+    return "succeeded";
+  }
+
+  private assertAuthorizeParams(params: CaptureParams): void {
+    if (
+      params.amount !== undefined ||
+      params.currency !== undefined ||
+      params.paypalCaptureType !== undefined ||
+      params.paypalFinalCapture !== undefined
+    ) {
+      throw new InvalidRequestError(
+        "PayPal authorizePayment only accepts gatewayPaymentId and idempotencyKey",
+      );
+    }
+  }
+
+  /**
+   * Get OAuth access token for PayPal API
+   * Uses promise-based singleton to prevent race conditions
+   */
+  private async getAccessToken(): Promise<string> {
+    // Return cached token if still valid
+    if (this.accessToken && this.tokenExpiry && this.tokenExpiry > new Date()) {
+      return this.accessToken;
+    }
+
+    // If there's already a token fetch in progress, wait for it
+    if (this.tokenFetchPromise) {
+      return this.tokenFetchPromise;
+    }
+
+    // Start new token fetch
+    this.tokenFetchPromise = this.fetchAccessToken();
+
+    try {
+      return await this.tokenFetchPromise;
+    } finally {
+      this.tokenFetchPromise = null;
+    }
+  }
+
+  private invalidateAccessToken(): void {
+    this.accessToken = null;
+    this.tokenExpiry = null;
+  }
+
+  private async fetchWithAccessToken(
+    url: string,
+    initFactory: (token: string) => RequestInit,
+    callerSignal?: AbortSignal,
+  ): Promise<Response> {
+    const withSignal = (init: RequestInit): RequestInit => {
+      if (!callerSignal) {
+        return init;
+      }
+      return { ...init, signal: callerSignal };
+    };
+
+    let token = await this.getAccessToken();
+    let response = await this.performFetch(url, withSignal(initFactory(token)));
+
+    if (response.status !== 401) {
+      return response;
+    }
+
+    this.invalidateAccessToken();
+    token = await this.getAccessToken();
+    response = await this.performFetch(url, withSignal(initFactory(token)));
+    return response;
+  }
+
+  /**
+   * Fetch new access token from PayPal
+   */
+  private async fetchAccessToken(): Promise<string> {
+    const credentials = btoa(
+      `${this.paypalConfig.clientId}:${this.paypalConfig.clientSecret}`,
+    );
+
+    // Token acquisition uses timeout only (shared across concurrent ops).
+    const response = await this.performFetch(`${this.baseUrl}/v1/oauth2/token`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Authorization: `Basic ${credentials}`,
+      },
+      body: "grant_type=client_credentials",
+    });
+
+    const data = await this.parseJsonResponse<PayPalTokenResponse>(response);
+
+    if (!response.ok) {
+      throw new PayPalApiError(
+        "Failed to get PayPal access token",
+        data,
+        response.status,
+        this.parseRetryAfterSeconds(response.headers),
+      );
+    }
+
+    if (typeof data.access_token !== "string" || data.access_token.length === 0) {
+      throw this.createMalformedResponseError(
+        "Invalid PayPal token response: missing access_token",
+        data,
+      );
+    }
+
+    if (
+      typeof data.expires_in !== "number" ||
+      !Number.isFinite(data.expires_in) ||
+      data.expires_in <= 0
+    ) {
+      throw this.createMalformedResponseError(
+        "Invalid PayPal token response: missing expires_in",
+        data,
+      );
+    }
+
+    this.accessToken = data.access_token;
+    // Refresh early to avoid using a token that expires mid-request: up to 5
+    // minutes early, or half the lifetime for short-lived tokens.
+    const refreshSkewSeconds = Math.min(300, Math.floor(data.expires_in / 2));
+    this.tokenExpiry = new Date(
+      this.clock.nowMs() + (data.expires_in - refreshSkewSeconds) * 1000,
+    );
+
+    return this.accessToken;
+  }
+
+  /**
+   * Create a structured API error from PayPal response
+   */
+  private createApiError(
+    data: PayPalOrderResponse | PayPalRefundResponse,
+    statusCode: number,
+    headers?: Headers,
+  ): GatewayApiError {
+    // Build detailed error message from details array
+    let message = data.message ?? data.name ?? "PayPal API error";
+
+    if (data.details && data.details.length > 0) {
+      const detailMessages = data.details
+        .map((d) => d.description ?? d.issue ?? "Unknown issue")
+        .join("; ");
+      message = `${message}: ${detailMessages}`;
+    }
+
+    return new PayPalApiError(
+      message,
+      data,
+      statusCode,
+      headers ? this.parseRetryAfterSeconds(headers) : undefined,
+    );
+  }
+
+  private createMalformedResponseError(
+    message: string,
+    rawResponse: unknown,
+  ): PayPalApiError {
+    return new PayPalApiError(message, rawResponse, 0);
+  }
+
+  private async performFetch(url: string, init: RequestInit): Promise<Response> {
+    const timeoutMs = this.paypalConfig.timeoutMs ?? 30_000;
+    const { signal: timeoutSignal, clear } = createTimeoutSignal(timeoutMs);
+    const callerSignal = init.signal ?? undefined;
+    const signal = combineAbortSignals(callerSignal, timeoutSignal);
+
+    try {
+      return await this.fetch(url, {
+        ...init,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch (error) {
+      throw mapHttpAbortError(error, {
+        callerSignal,
+        timeoutSignal,
+        timeoutMessage: `PayPal API request timed out after ${timeoutMs}ms`,
+        networkMessage: "PayPal network request failed",
+        callerAbortMessage: "PayPal API request aborted by caller signal",
+      });
+    } finally {
+      clear();
+    }
+  }
+
+  private parseRetryAfterSeconds(headers: Headers): number | undefined {
+    const retryAfter = headers.get("retry-after");
+    if (!retryAfter) {
+      return undefined;
+    }
+
+    const numericRetryAfter = Number(retryAfter);
+    if (Number.isFinite(numericRetryAfter) && numericRetryAfter >= 0) {
+      return numericRetryAfter;
+    }
+
+    const retryDate = new Date(retryAfter);
+    const retryAfterSeconds = Math.ceil(
+      (retryDate.getTime() - this.clock.nowMs()) / 1000,
+    );
+    return Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+      ? retryAfterSeconds
+      : undefined;
+  }
+
+  private async parseJsonResponse<T>(response: Response): Promise<T> {
+    const text = await response.text();
+
+    if (!text.trim()) {
+      return {} as T;
+    }
+
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return {
+        name: response.statusText || "PayPal API error",
+        message: text,
+      } as T;
+    }
+  }
+
+  private createJsonHeaders(
+    token: string,
+    requestId?: string,
+    prefer?: "return=minimal" | "return=representation",
+  ): Record<string, string> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    };
+
+    if (requestId) {
+      headers["PayPal-Request-Id"] = requestId;
+    }
+
+    if (prefer) {
+      headers.Prefer = prefer;
+    }
+
+    return headers;
+  }
+
+  private getRequestId(
+    idempotencyKey: string | undefined,
+    maxLength: number,
+  ): string {
+    const requestId = idempotencyKey ?? this.runtime.randomUUID();
+
+    if (requestId.length > maxLength) {
+      throw new InvalidRequestError(
+        `PayPal idempotencyKey must be ${maxLength} characters or fewer for this operation`,
+      );
+    }
+
+    return requestId;
+  }
+
+  private static isValidWebhookId(webhookId: string): boolean {
+    return webhookId.length > 0 &&
+      webhookId.length <= PAYPAL_WEBHOOK_ID_MAX_LENGTH &&
+      PAYPAL_WEBHOOK_ID_PATTERN.test(webhookId);
+  }
+
+  private isValidWebhookHeaders(fields: {
+    authAlgo: string;
+    certUrl: string;
+    transmissionId: string;
+    transmissionSig: string;
+    transmissionTime: string;
+  }): boolean {
+    if (
+      fields.authAlgo.length > PAYPAL_WEBHOOK_HEADER_LIMITS.authAlgo ||
+      fields.certUrl.length > PAYPAL_WEBHOOK_HEADER_LIMITS.certUrl ||
+      fields.transmissionId.length > PAYPAL_WEBHOOK_HEADER_LIMITS.transmissionId ||
+      fields.transmissionSig.length > PAYPAL_WEBHOOK_HEADER_LIMITS.transmissionSig ||
+      fields.transmissionTime.length > PAYPAL_WEBHOOK_HEADER_LIMITS.transmissionTime
+    ) {
+      this.logger.warn(
+        "[PayPal] Webhook header rejected: value exceeds length limits",
+      );
+      return false;
+    }
+
+    if (!/^[A-Za-z0-9]+$/.test(fields.authAlgo)) {
+      this.logger.warn(
+        "[PayPal] Webhook header rejected: invalid auth_algo format",
+      );
+      return false;
+    }
+
+    if (!this.isAllowedPayPalCertUrl(fields.certUrl)) {
+      this.logger.warn(
+        "[PayPal] Webhook header rejected: cert_url is not an allowed PayPal HTTPS host",
+      );
+      return false;
+    }
+
+    const transmissionMs = new Date(fields.transmissionTime).getTime();
+    if (!Number.isFinite(transmissionMs)) {
+      this.logger.warn(
+        "[PayPal] Webhook header rejected: transmission_time is unparseable",
+      );
+      return false;
+    }
+
+    const ageMs = this.clock.nowMs() - transmissionMs;
+    if (ageMs > PAYPAL_WEBHOOK_MAX_AGE_MS) {
+      this.logger.warn(
+        `[PayPal] Webhook header rejected: transmission_time is older than ${PAYPAL_WEBHOOK_MAX_AGE_MS / 60_000} minutes (ageMs=${ageMs})`,
+      );
+      return false;
+    }
+
+    // Reject far-future timestamps (clock skew / malformed clocks). Allow a small skew.
+    if (ageMs < -PAYPAL_WEBHOOK_MAX_AGE_MS) {
+      this.logger.warn(
+        "[PayPal] Webhook header rejected: transmission_time is too far in the future",
+      );
+      return false;
+    }
+
+    return true;
+  }
+
+  /**
+   * Allow only HTTPS certificate URLs hosted on PayPal domains
+   * (e.g. api.paypal.com, api-m.paypal.com, *.sandbox.paypal.com).
+   */
+  private isAllowedPayPalCertUrl(certUrl: string): boolean {
+    try {
+      const url = new URL(certUrl);
+      if (url.protocol !== "https:") {
+        return false;
+      }
+
+      const host = url.hostname.toLowerCase();
+      return (
+        host === "api.paypal.com" ||
+        host === "api-m.paypal.com" ||
+        host === "api.sandbox.paypal.com" ||
+        host === "api-m.sandbox.paypal.com" ||
+        host.endsWith(".paypal.com")
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Build the verify-webhook-signature POST body.
+   *
+   * For raw string/Buffer/Uint8Array payloads, embeds the original JSON text as
+   * `webhook_event` without parse→stringify (which can break signatures).
+   * For already-parsed objects, falls back to JSON.stringify and warns.
+   *
+   * Returns undefined when the payload cannot be used as a JSON object event.
+   */
+  private buildWebhookVerifyBody(fields: {
+    authAlgo: string;
+    certUrl: string;
+    transmissionId: string;
+    transmissionSig: string;
+    transmissionTime: string;
+    webhookId: string;
+    payload: unknown;
+  }): string | undefined {
+    const rawJsonText = this.extractRawWebhookJsonText(fields.payload);
+    if (rawJsonText !== undefined) {
+      // Trim a copy only for empty/JSON-object validation; embed original text
+      // (including trailing whitespace/newlines) so signature bytes match.
+      const trimmedForValidation = rawJsonText.trim();
+      if (!this.isValidRawWebhookEventJson(trimmedForValidation)) {
+        return undefined;
+      }
+      // Embed original JSON bytes for webhook_event — do not re-serialize or trim.
+      return (
+        '{"auth_algo":' + JSON.stringify(fields.authAlgo) +
+        ',"cert_url":' + JSON.stringify(fields.certUrl) +
+        ',"transmission_id":' + JSON.stringify(fields.transmissionId) +
+        ',"transmission_sig":' + JSON.stringify(fields.transmissionSig) +
+        ',"transmission_time":' + JSON.stringify(fields.transmissionTime) +
+        ',"webhook_id":' + JSON.stringify(fields.webhookId) +
+        ',"webhook_event":' + rawJsonText +
+        "}"
+      );
+    }
+
+    if (
+      !fields.payload ||
+      typeof fields.payload !== "object" ||
+      Array.isArray(fields.payload)
+    ) {
+      return undefined;
+    }
+
+    this.logger.warn(
+      "[PayPal] Webhook verification with a parsed object re-serializes webhook_event; " +
+        "signature verification may fail due to key reordering/whitespace. " +
+        "Prefer the raw request body (string/Buffer/Uint8Array).",
+    );
+
+    const verifyRequest: PayPalWebhookVerifyRequest = {
+      auth_algo: fields.authAlgo,
+      cert_url: fields.certUrl,
+      transmission_id: fields.transmissionId,
+      transmission_sig: fields.transmissionSig,
+      transmission_time: fields.transmissionTime,
+      webhook_id: fields.webhookId,
+      webhook_event: fields.payload,
+    };
+    return JSON.stringify(verifyRequest);
+  }
+
+  /**
+   * Extract UTF-8 JSON text from raw webhook body shapes.
+   * Returns undefined for already-parsed objects / unsupported types.
+   */
+  private extractRawWebhookJsonText(payload: unknown): string | undefined {
+    if (typeof payload === "string") {
+      return payload;
+    }
+
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(payload)) {
+      return payload.toString("utf8");
+    }
+
+    if (payload instanceof Uint8Array) {
+      return new TextDecoder().decode(payload);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * True when text is a JSON object (starts with `{`) and JSON.parse succeeds.
+   */
+  private isValidRawWebhookEventJson(text: string): boolean {
+    if (!text.startsWith("{")) {
+      return false;
+    }
+
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Accept object, JSON string, Buffer, or Uint8Array payloads for parse paths.
+   */
+  private coerceWebhookPayload(payload: unknown): unknown {
+    if (typeof payload === "string") {
+      try {
+        return JSON.parse(payload) as unknown;
+      } catch {
+        throw new GatewayApiError(
+          "Invalid webhook payload: not valid JSON",
+          "paypal",
+          payload,
+        );
+      }
+    }
+
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(payload)) {
+      try {
+        return JSON.parse(payload.toString("utf8")) as unknown;
+      } catch {
+        throw new GatewayApiError(
+          "Invalid webhook payload: not valid JSON",
+          "paypal",
+          payload,
+        );
+      }
+    }
+
+    if (payload instanceof Uint8Array) {
+      try {
+        return JSON.parse(new TextDecoder().decode(payload)) as unknown;
+      } catch {
+        throw new GatewayApiError(
+          "Invalid webhook payload: not valid JSON",
+          "paypal",
+          payload,
+        );
+      }
+    }
+
+    return payload;
+  }
+
+  /**
+   * Prefer the most recent capture when PayPal returns multiple on an order.
+   * Uses `update_time` / `create_time` when present; otherwise the last array element.
+   */
+  private preferLastCapture<T>(
+    captures:
+      | Array<T & { create_time?: string; update_time?: string }>
+      | undefined,
+  ): (T & { create_time?: string; update_time?: string }) | undefined {
+    if (!captures || captures.length === 0) {
+      return undefined;
+    }
+
+    // noUncheckedIndexedAccess: index access is T | undefined; length check
+    // guarantees at least one element, so fall back only for the type system.
+    let latest = captures[captures.length - 1];
+    if (latest === undefined) {
+      return undefined;
+    }
+    let latestTime = this.captureTimestampMs(latest);
+
+    for (let i = captures.length - 2; i >= 0; i--) {
+      const candidate = captures[i];
+      if (candidate === undefined) {
+        continue;
+      }
+      const candidateTime = this.captureTimestampMs(candidate);
+      // Strict greater-than keeps later array index on ties / missing timestamps.
+      if (
+        Number.isFinite(candidateTime) &&
+        (!Number.isFinite(latestTime) || candidateTime > latestTime)
+      ) {
+        latest = candidate;
+        latestTime = candidateTime;
+      }
+    }
+
+    return latest;
+  }
+
+  private captureTimestampMs(
+    capture: { create_time?: string; update_time?: string },
+  ): number {
+    const raw = capture.update_time ?? capture.create_time;
+    if (!raw) {
+      return Number.NaN;
+    }
+    return new Date(raw).getTime();
+  }
+
+  private normalizeHeaders(
+    headers?: Record<string, string>,
+  ): Record<string, string> {
+    const normalized: Record<string, string> = {};
+
+    if (!headers) {
+      return normalized;
+    }
+
+    for (const [key, value] of Object.entries(headers)) {
+      normalized[key.toLowerCase()] = value;
+    }
+
+    return normalized;
+  }
+
+  private assertOrderResponse(
+    data: PayPalOrderResponse,
+    operation: string,
+  ): asserts data is PayPalOrderResponse {
+    if (typeof data.id !== "string" || data.id.length === 0) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing id`,
+        data,
+      );
+    }
+
+    if (typeof data.status !== "string" || data.status.length === 0) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing status`,
+        data,
+      );
+    }
+  }
+
+  private assertRefundResponse(
+    data: PayPalRefundResponse,
+  ): asserts data is PayPalRefundResponse {
+    if (typeof data.id !== "string" || data.id.length === 0) {
+      throw this.createMalformedResponseError(
+        "Invalid PayPal refund response: missing id",
+        data,
+      );
+    }
+
+    if (typeof data.status !== "string" || data.status.length === 0) {
+      throw this.createMalformedResponseError(
+        "Invalid PayPal refund response: missing status",
+        data,
+      );
+    }
+  }
+
+  private assertPaymentResource(
+    resource: unknown,
+    operation: string,
+  ): asserts resource is PayPalPaymentResource {
+    if (!resource || typeof resource !== "object") {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing payment resource`,
+        resource,
+      );
+    }
+
+    const paymentResource = resource as Partial<PayPalPaymentResource>;
+    if (typeof paymentResource.id !== "string" || paymentResource.id.length === 0) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing payment resource id`,
+        resource,
+      );
+    }
+
+    if (typeof paymentResource.status !== "string" || paymentResource.status.length === 0) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing payment resource status`,
+        resource,
+      );
+    }
+
+    this.parseAmount(paymentResource.amount, operation);
+  }
+
+  private normalizeCurrencyCode(currency: string): string {
+    return currency.toUpperCase();
+  }
+
+  private getCustomId(metadata?: Record<string, unknown>): string | undefined {
+    const customId = metadata?.paymentId;
+
+    if (customId === undefined) {
+      return undefined;
+    }
+
+    if (typeof customId !== "string" || customId.length === 0) {
+      throw new InvalidRequestError("PayPal metadata.paymentId must be a non-empty string");
+    }
+
+    if (customId.length > PAYPAL_CUSTOM_ID_MAX_LENGTH) {
+      throw new InvalidRequestError(
+        `PayPal metadata.paymentId must be ${PAYPAL_CUSTOM_ID_MAX_LENGTH} characters or fewer`,
+      );
+    }
+
+    return customId;
+  }
+
+  /**
+   * Enforce PayPal field max lengths client-side before the API call.
+   */
+  private assertMaxLength(
+    value: string | undefined,
+    maxLength: number,
+    label: string,
+  ): void {
+    if (value === undefined) {
+      return;
+    }
+
+    if (value.length > maxLength) {
+      throw new InvalidRequestError(
+        `${label} must be ${maxLength} characters or fewer (got ${value.length})`,
+      );
+    }
+  }
+
+  private getCurrencyScale(currency: string): number {
+    return PAYPAL_ZERO_DECIMAL_CURRENCIES.has(this.normalizeCurrencyCode(currency))
+      ? 0
+      : 2;
+  }
+
+  private formatAmount(amount: AmountInput, currency: string): string {
+    const normalizedCurrency = this.normalizeCurrencyCode(currency);
+    // PayPal zero-decimal set (HUF/JPY/TWD) is the exponent source — not ISO.
+    const scale = this.getCurrencyScale(normalizedCurrency);
+    const parseOpts = {
+      rounding: "reject" as const,
+      exponent: scale,
+      allowZero: false,
+      allowNegative: false,
+    };
+
+    try {
+      const normalized = normalizeAmountInput(amount, currency, parseOpts);
+      // Convert through bigint minor units, then format canonical major string
+      // (exactly `scale` fractional digits, or none when scale is 0).
+      const minor = sharedToMinorUnits(normalized, parseOpts);
+      return sharedFromMinorUnits(minor, normalizedCurrency, {
+        ...parseOpts,
+        allowZero: true,
+      }).amount;
+    } catch (error) {
+      if (error instanceof MoneyAmountError && error.kind === "excess_precision") {
+        throw new InvalidRequestError(
+          `PayPal ${normalizedCurrency} amounts support at most ${scale} decimal place${scale === 1 ? "" : "s"}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private parseAmount(amount: unknown, operation: string): number {
+    if (!amount || typeof amount !== "object") {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing amount`,
+        amount,
+      );
+    }
+
+    const payload = amount as Partial<PayPalMoney>;
+    if (typeof payload.currency_code !== "string" || payload.currency_code.length !== 3) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing amount currency`,
+        amount,
+      );
+    }
+
+    if (typeof payload.value !== "string" || payload.value.length === 0) {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: missing amount value`,
+        amount,
+      );
+    }
+
+    // Parse provider decimal strings via shared money helpers — no Number()/parseFloat.
+    try {
+      const code = this.normalizeCurrencyCode(payload.currency_code);
+      const scale = this.getCurrencyScale(code);
+      const parsed = money(payload.value, code, {
+        rounding: "reject",
+        exponent: scale,
+        allowZero: true,
+        allowNegative: true,
+      });
+      return moneyToMajorNumber(parsed, {
+        exponent: scale,
+        allowZero: true,
+        allowNegative: true,
+      });
+    } catch {
+      throw this.createMalformedResponseError(
+        `Invalid PayPal ${operation} response: invalid amount value`,
+        amount,
+      );
+    }
+  }
+
+  private extractWebhookAmount(raw: PayPalWebhookPayload): {
+    currency_code: string;
+    value: string;
+  } | undefined {
+    const lastCapture = this.preferLastCapture(
+      raw.resource.purchase_units?.[0]?.payments?.captures,
+    );
+    return raw.resource.amount ??
+      lastCapture?.amount ??
+      raw.resource.purchase_units?.[0]?.amount;
+  }
+
+  private extractWebhookPaymentId(raw: PayPalWebhookPayload): string | undefined {
+    if (raw.resource_type === "refund" || raw.event_type.startsWith("PAYMENT.REFUND.")) {
+      return raw.resource.purchase_units?.[0]?.custom_id ??
+        raw.resource.purchase_units?.[0]?.reference_id;
+    }
+
+    return raw.resource.custom_id ??
+      raw.resource.purchase_units?.[0]?.custom_id ??
+      raw.resource.purchase_units?.[0]?.reference_id;
+  }
+
+  private webhookEventRequiresAmount(eventType: string): boolean {
+    return !PAYPAL_WEBHOOK_EVENTS_WITHOUT_AMOUNT.has(eventType);
+  }
+
+  /**
+   * Resolve a capture ID from a webhook resource when present.
+   * Prefers the last capture when multiple are listed.
+   *
+   * For AUTHORIZATION.* events without a linked capture id, returns undefined —
+   * callers fall back to resource.id (authorization id). That id is **not**
+   * refundable; refunds require a capture ID.
+   */
+  private extractWebhookCaptureId(raw: PayPalWebhookPayload): string | undefined {
+    const lastCapture = this.preferLastCapture(
+      raw.resource.purchase_units?.[0]?.payments?.captures,
+    );
+    return raw.resource.supplementary_data?.related_ids?.capture_id ??
+      lastCapture?.id ??
+      this.extractLinkedCaptureId(raw.resource.links);
+  }
+
+  private extractLinkedCaptureId(
+    links?: Array<{ href: string; rel: string }>,
+  ): string | undefined {
+    const upLink = links?.find((link) => link.rel === "up");
+    if (!upLink) {
+      return undefined;
+    }
+
+    try {
+      const url = new URL(upLink.href);
+      const match = url.pathname.match(/\/v2\/payments\/captures\/([^/]+)$/);
+      return match?.[1];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Map PayPal order status to unified PaymentStatus
+   */
+  private mapStatus(paypalStatus: string): PaymentStatus {
+    const statusMap: Record<string, PaymentStatus> = {
+      CREATED: "pending",
+      SAVED: "pending",
+      APPROVED: "approved",
+      VOIDED: "cancelled",
+      COMPLETED: "paid",
+      PAYER_ACTION_REQUIRED: "pending",
+    };
+
+    const mapped = statusMap[paypalStatus];
+    if (!mapped) {
+      this.logger.warn(`[PayPal] Unmapped order status: ${paypalStatus}`);
+      return "pending";
+    }
+    return mapped;
+  }
+
+  /**
+   * Map PayPal resource status to unified PaymentStatus.
+   * Unknown statuses that look terminal map to `failed` (fail-closed); otherwise `pending`.
+   */
+  private mapResourceStatus(status: string): PaymentStatus {
+    const statusMap: Record<string, PaymentStatus> = {
+      CREATED: "authorized",
+      APPROVED: "authorized",
+      COMPLETED: "paid",
+      CAPTURED: "paid",
+      PARTIALLY_CAPTURED: "partially_captured",
+      DENIED: "failed",
+      DECLINED: "failed",
+      PARTIALLY_REFUNDED: "partially_refunded",
+      PENDING: "pending",
+      REFUNDED: "refunded",
+      REVERSED: "reversed",
+      FAILED: "failed",
+      VOIDED: "cancelled",
+      EXPIRED: "cancelled",
+    };
+
+    const mapped = statusMap[status];
+    if (!mapped) {
+      const looksTerminal = PAYPAL_TERMINAL_RESOURCE_STATUS_PATTERN.test(status);
+      const fallback: PaymentStatus = looksTerminal ? "failed" : "pending";
+      this.logger.warn(
+        `[PayPal] Unmapped resource status: ${status} (mapped to ${fallback})`,
+      );
+      return fallback;
+    }
+    return mapped;
+  }
+
+  private mapRefundStatus(status: string): PayPalRefundStatus {
+    const statusMap: Record<string, PayPalRefundStatus> = {
+      COMPLETED: "completed",
+      PENDING: "pending",
+      FAILED: "failed",
+      CANCELLED: "failed",
+    };
+
+    const mapped = statusMap[status];
+    if (!mapped) {
+      this.logger.warn(`[PayPal] Unmapped refund status: ${status}`);
+      return "pending";
+    }
+    return mapped;
+  }
+
+  private mapWebhookStatus(
+    eventType: string,
+    resourceStatus?: string,
+    options?: { hasCapture?: boolean },
+  ): PaymentStatus | undefined {
+    if (eventType === "PAYMENT.CAPTURE.REFUNDED") {
+      const resourceMappedStatus = resourceStatus
+        ? this.mapResourceStatus(resourceStatus)
+        : undefined;
+
+      return resourceMappedStatus === "partially_refunded" ||
+        resourceMappedStatus === "refunded"
+        ? resourceMappedStatus
+        : "refunded";
+    }
+
+    // Order completed without a capture (e.g. AUTHORIZE-intent) must not look paid.
+    // Prefer PAYMENT.CAPTURE.COMPLETED as the fulfillment signal.
+    if (eventType === "CHECKOUT.ORDER.COMPLETED") {
+      return options?.hasCapture ? "paid" : "approved";
+    }
+
+    const eventStatusMap: Record<string, PaymentStatus> = {
+      "CHECKOUT.ORDER.APPROVED": "approved",
+      "CHECKOUT.PAYMENT-APPROVAL.REVERSED": "cancelled",
+      "PAYMENT.AUTHORIZATION.CREATED": "authorized",
+      "PAYMENT.AUTHORIZATION.CAPTURED": "paid",
+      "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED": "partially_captured",
+      "PAYMENT.AUTHORIZATION.VOIDED": "cancelled",
+      "PAYMENT.CAPTURE.COMPLETED": "paid",
+      "PAYMENT.CAPTURE.DENIED": "failed",
+      "PAYMENT.CAPTURE.DECLINED": "failed",
+      "PAYMENT.CAPTURE.PENDING": "pending",
+      "PAYMENT.CAPTURE.REVERSED": "reversed",
+      "PAYMENT.REFUND.PENDING": "refund_pending",
+      "PAYMENT.REFUND.FAILED": "refund_failed",
+    };
+
+    return eventStatusMap[eventType] ?? undefined;
+  }
+
+  private mapPaymentResultStatus(
+    order: PayPalOrderResponse,
+    capture?: { status: string },
+    authorization?: { status: string },
+  ): PaymentStatus {
+    if (capture) {
+      return this.mapResourceStatus(capture.status);
+    }
+
+    if (authorization) {
+      return this.mapResourceStatus(authorization.status);
+    }
+
+    return this.mapStatus(order.status);
+  }
+}

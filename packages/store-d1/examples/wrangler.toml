@@ -1,0 +1,51 @@
+# Example Wrangler config for paykernel Cloudflare D1 adapter.
+# Copy into your Worker project and adjust database_name / binding / database_id.
+#
+# Docs: https://developers.cloudflare.com/d1/get-started/
+# Adapter: @paykernel/store-d1
+# Package docs: packages/store-d1/docs/wrangler.md
+#
+# Schema: apply explicitly via migrateD1Adapter in a one-shot Worker/script
+# or CI step — never on package import or default createD1PaymentStores.
+#
+# If using wrangler d1 migrations apply, migration SQL must OMIT BEGIN/COMMIT
+# wrappers (see migrations/0001_foundation.sql and docs/migrations.md).
+
+name = "payments-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[[d1_databases]]
+binding = "PAYMENTS_DB"          # env.PAYMENTS_DB in Worker
+database_name = "payments"
+database_id = "<your-d1-id>"
+# Optional: migrations_dir for wrangler d1 migrations (DDL must not use BEGIN/COMMIT)
+# migrations_dir = "migrations"
+
+# Usage in Worker (TypeScript):
+#
+# import {
+#   createD1PaymentStores,
+#   migrateD1Adapter,
+# } from "@paykernel/store-d1";
+#
+# export default {
+#   async fetch(request: Request, env: { PAYMENTS_DB: D1Database }) {
+#     // Explicit migrate (ops/CI), not on every request in production:
+#     // await migrateD1Adapter(env.PAYMENTS_DB);
+#
+#     const stores = createD1PaymentStores({
+#       db: env.PAYMENTS_DB,
+#       // Optional: session for read-after-write under D1 read replication
+#       // session: "first-primary",
+#     });
+#
+#     const r = await stores.idempotency.reserve({
+#       key: "pay_123",
+#       fingerprint: "fp",
+#       owner: "worker-1",
+#       leaseMs: 30_000,
+#     });
+#     return Response.json(r);
+#   },
+# };

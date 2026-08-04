@@ -1,0 +1,121 @@
+{
+  "info": {
+    "name": "Moyasar Payments API Reference Fixtures",
+    "description": "Small maintained request/response fixtures used as local reference material. Amounts are in minor currency units and authentication is HTTP Basic Auth with the secret key as the username."
+  },
+  "item": [
+    {
+      "name": "Create Payment",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/payments",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 10000,\n  \"currency\": \"SAR\",\n  \"description\": \"Order order_123\",\n  \"callback_url\": \"https://example.com/callback\",\n  \"given_id\": \"a1168bd1-47a4-4b97-8a50-dd5caaccacf2\",\n  \"source\": {\n    \"type\": \"token\",\n    \"token\": \"token_test_123\"\n  },\n  \"metadata\": {\n    \"orderId\": \"order_123\",\n    \"paymentId\": \"order_123\"\n  }\n}"
+        }
+      },
+      "response": [
+        {
+          "name": "Created - Paid",
+          "status": "Created",
+          "code": 201,
+          "body": "{\n  \"id\": \"a1168bd1-47a4-4b97-8a50-dd5caaccacf2\",\n  \"status\": \"paid\",\n  \"amount\": 10000,\n  \"fee\": 230,\n  \"currency\": \"SAR\",\n  \"refunded\": 0,\n  \"captured\": 10000,\n  \"amount_format\": \"100.00 SAR\",\n  \"fee_format\": \"2.30 SAR\",\n  \"refunded_format\": \"0.00 SAR\",\n  \"captured_format\": \"100.00 SAR\",\n  \"ip\": \"203.0.113.10\",\n  \"created_at\": \"2026-05-21T10:00:00.000Z\",\n  \"updated_at\": \"2026-05-21T10:00:00.000Z\",\n  \"refunded_at\": null,\n  \"captured_at\": \"2026-05-21T10:00:00.000Z\",\n  \"voided_at\": null,\n  \"description\": \"Order order_123\",\n  \"invoice_id\": null,\n  \"callback_url\": \"https://example.com/callback\",\n  \"metadata\": {\n    \"orderId\": \"order_123\",\n    \"paymentId\": \"order_123\"\n  },\n  \"source\": {\n    \"type\": \"token\",\n    \"transaction_url\": null,\n    \"message\": null\n  }\n}"
+        },
+        {
+          "name": "Created - Failed Attempt",
+          "status": "Created",
+          "code": 201,
+          "body": "{\n  \"id\": \"b2168bd1-47a4-4b97-8a50-dd5caaccacf2\",\n  \"status\": \"failed\",\n  \"amount\": 10000,\n  \"fee\": 0,\n  \"currency\": \"SAR\",\n  \"refunded\": 0,\n  \"captured\": 0,\n  \"amount_format\": \"100.00 SAR\",\n  \"fee_format\": \"0.00 SAR\",\n  \"refunded_format\": \"0.00 SAR\",\n  \"captured_format\": \"0.00 SAR\",\n  \"ip\": \"203.0.113.10\",\n  \"created_at\": \"2026-05-21T10:00:00.000Z\",\n  \"updated_at\": \"2026-05-21T10:00:00.000Z\",\n  \"refunded_at\": null,\n  \"captured_at\": null,\n  \"voided_at\": null,\n  \"description\": \"Order order_123\",\n  \"invoice_id\": null,\n  \"callback_url\": \"https://example.com/callback\",\n  \"metadata\": {\n    \"orderId\": \"order_123\",\n    \"paymentId\": \"order_123\"\n  },\n  \"source\": {\n    \"type\": \"token\",\n    \"transaction_url\": null,\n    \"message\": \"Declined\"\n  }\n}"
+        }
+      ]
+    },
+    {
+      "name": "Fetch Payment",
+      "request": {
+        "method": "GET",
+        "url": "{{baseUrl}}/payments/{{paymentId}}",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Capture Payment",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/payments/{{paymentId}}/capture",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 5000\n}"
+        }
+      }
+    },
+    {
+      "name": "Refund Payment",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/payments/{{paymentId}}/refund",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 5000\n}"
+        }
+      }
+    },
+    {
+      "name": "Void Payment",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/payments/{{paymentId}}/void",
+        "header": [
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Error - Not Found",
+      "response": [
+        {
+          "status": "Not Found",
+          "code": 404,
+          "body": "{\n  \"type\": \"record_not_found\",\n  \"message\": \"Payment was not found\"\n}"
+        }
+      ]
+    }
+  ]
+}

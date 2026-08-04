@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  build:
+    name: Typecheck, Test & Package
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.18"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check workspace boundaries
+        run: bun run check:boundaries
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Typecheck public API type tests
+        run: bun run typecheck:types
+
+      - name: Test
+        # Match monorepo `bun run test` intent: core + testkit + webhooks (offline-safe).
+        run: bun test packages/core packages/testkit packages/webhooks
+
+      - name: Test with coverage
+        run: bun run test:coverage
+
+      - name: Build
+        run: bun run build
+
+      - name: Verify dist output
+        run: test -f packages/core/dist/index.js && test -f packages/core/dist/index.d.ts
+
+      - name: Runtime portability (src + dist node: scan)
+        run: bun run check:runtime-portability
+
+      - name: Pack dry-run
+        run: bun run pack:check
+
+      - name: Publint
+        run: bun run publint
+
+      - name: Are the types wrong
+        run: bun run attw
+
+      - name: Consumer smoke (packed tarball)
+        run: |
+          PACK_DIR="$(mktemp -d)"
+          TGZ_NAME="$(cd packages/core && npm pack --pack-destination "${PACK_DIR}" | tail -n 1)"
+          bun run scripts/consumer-smoke.mjs "${PACK_DIR}/${TGZ_NAME}"
+          rm -rf "${PACK_DIR}"

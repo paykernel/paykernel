@@ -1,0 +1,54 @@
+{
+  "name": "@paykernel/internal-sql-store",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private shared relational schemas, codecs, migrations, and claim algorithms for PayKernel durable adapters. Not a public npm product.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "payments",
+    "sql-store",
+    "internal",
+    "private"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "internal/sql-store"
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/internal/sql-store#readme",
+  "paymentsSdk": {
+    "portable": true,
+    "privateInternal": true
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

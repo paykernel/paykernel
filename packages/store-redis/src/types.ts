@@ -1,0 +1,42 @@
+/**
+ * Shared option types for the Redis adapter.
+ */
+
+import type { RedisCommandPort } from "./port";
+import type { StoreClock } from "./clock";
+import type { KeyOptions, ResolvedKeyDesign } from "./keys";
+
+export type { RedisCommandPort } from "./port";
+export type { StoreClock } from "./clock";
+export type { KeyOptions, ResolvedKeyDesign } from "./keys";
+
+/**
+ * Options shared by all createRedis*Store factories.
+ *
+ * - `port` is required (narrow command port; no driver import at root).
+ * - `clock` is optional; default wall clock. Prefer FakeClock in tests.
+ * - `keys` configures prefix / tenant / cluster hash tags.
+ * - Factories do **not** require Redis at install time (optional adapter).
+ */
+export type RedisStoreOptions = {
+  port: RedisCommandPort;
+  /** Injectable clock for lease expiry / ISO timestamps (FakeClock-compatible). */
+  clock?: StoreClock;
+  /** Key namespace / hash-tag options. */
+  keys?: KeyOptions;
+  /**
+   * When set, terminal records get EXPIRE with this TTL (ms) after complete/fail.
+   * Retention cleanup via deleteExpired remains supported independently.
+   */
+  retentionTtlMs?: number;
+};
+
+export type RedisStoresBundle = {
+  idempotency: import("@paykernel/testkit").IdempotencyStore;
+  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
+  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  port: RedisCommandPort;
+  keys: ResolvedKeyDesign;
+  clock: StoreClock;
+  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+};

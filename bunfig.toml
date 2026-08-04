@@ -1,0 +1,15 @@
+# Test + coverage configuration for @paykernel/core
+# Thresholds apply only when `bun test --coverage` is used (coverage is not always-on).
+# See packages/core/docs/baseline/coverage-policy.md for focus areas and rationale.
+
+[test]
+# Exclude *.test.ts from the coverage denominator so thresholds reflect production sources.
+coverageSkipTestFiles = true
+
+# Console summary by default. CI may override with --coverage-reporter=lcov.
+coverageReporter = ["text"]
+
+# Floor set below current baseline (~95% lines / ~94% funcs) with intentional headroom
+# so real regressions fail CI without forcing 100% or branch-hunting refactors.
+# Do not raise these without re-measuring after intentional coverage work.
+coverageThreshold = { lines = 0.90, functions = 0.85 }

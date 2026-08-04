@@ -1,0 +1,1236 @@
+/**
+ * Capability-gated gateway conformance suite (Phase 4.1).
+ *
+ * Offline-first: does **not** call live provider APIs. Gateways under test
+ * must be mocks / fixture-driven doubles, or run in `structural` /
+ * `applicable` mode (capabilities + method presence only for real HTTP
+ * gateways without injectable fetch).
+ *
+ * Named cases (skip when not applicable by capabilities, mode, or fixtures):
+ * 1 amount_conversion  2 status_normalization  3 decline_mapping
+ * 4 provider_error_mapping  5 network_failure  6 timeout_behavior
+ * 7 safe_retry  8 idempotency_behavior  9 webhook_verification
+ * 10 malformed_webhook_rejection  11 event_normalization
+ * 12 partial_capture  13 partial_refund  14 logging_redaction
+ * 15 request_cancellation  16 indeterminate_outcomes
+ * 17 capabilities_parity  18 claim_method_presence
+ */
+
+import {
+  CAPABILITY_OPERATION_MAP,
+  CardDeclinedError,
+  createRedactingLogger,
+  GATEWAY_CAPABILITY_KEYS,
+  GatewayApiError,
+  InsufficientFundsError,
+  isMoney,
+  money,
+  moneyToMajorNumber,
+  NetworkError,
+  OperationNotSupportedError,
+  PaymentAbortedError,
+  type AmountInput,
+  type GatewayCapabilities,
+  type GatewayCapabilityKey,
+  type Logger,
+  type PaymentGateway,
+  type PaymentStatus,
+} from "@paykernel/core";
+import { majorToMinor } from "../mock/mock-gateway";
+import type {
+  GatewayConformanceCaseResult,
+  GatewayConformanceFixtures,
+  GatewayConformanceMode,
+  GatewayConformanceOptions,
+  GatewayConformanceReport,
+} from "./types";
+
+/** Resolve expected major-unit number from AmountInput for assertions. */
+function amountInputToExpectedMajor(
+  amount: AmountInput,
+  currency: string,
+): number {
+  if (typeof amount === "number") return amount;
+  if (isMoney(amount)) {
+    return moneyToMajorNumber(amount, { allowZero: true, allowNegative: true });
+  }
+  // Defensive — AmountInput is number | Money
+  return moneyToMajorNumber(money(String(amount), currency), {
+    allowZero: true,
+    allowNegative: true,
+  });
+}
+
+/** Canonical case ids for include/exclude and report entries. */
+export const GATEWAY_CONFORMANCE_CASES = [
+  "amount_conversion",
+  "status_normalization",
+  "decline_mapping",
+  "provider_error_mapping",
+  "network_failure",
+  "timeout_behavior",
+  "safe_retry",
+  "idempotency_behavior",
+  "webhook_verification",
+  "malformed_webhook_rejection",
+  "event_normalization",
+  "partial_capture",
+  "partial_refund",
+  "logging_redaction",
+  "request_cancellation",
+  "indeterminate_outcomes",
+  "capabilities_parity",
+  "claim_method_presence",
+] as const;
+
+export type GatewayConformanceCaseName =
+  (typeof GATEWAY_CONFORMANCE_CASES)[number];
+
+const STRUCTURAL_CASES: ReadonlySet<string> = new Set([
+  "capabilities_parity",
+  "claim_method_presence",
+]);
+
+const ALLOWED_PAYMENT_STATUSES: ReadonlySet<PaymentStatus> = new Set([
+  "pending",
+  "processing",
+  "authorized",
+  "approved",
+  "paid",
+  "partially_captured",
+  "failed",
+  "cancelled",
+  "reversed",
+  "refunded",
+  "partially_refunded",
+  "refund_completed",
+  "refund_pending",
+  "refund_failed",
+  "setup_completed",
+]);
+
+type Mockish = PaymentGateway & {
+  enqueue?: (
+    op: string,
+    outcome: { outcome: string; latencyMs?: number; message?: string },
+  ) => void;
+  history?: ReadonlyArray<{ operation: string; params: unknown }>;
+  buildWebhook?: (overrides?: Record<string, unknown>) => unknown;
+  getLastProviderSideSuccess?: () => { success?: boolean } | undefined;
+  getPaymentState?: (id: string) => { amount: number; capturedAmount: number } | undefined;
+  /** Optional testkit logger injection surface */
+  setLogger?: (logger: Logger) => void;
+};
+
+function assert(cond: unknown, msg: string): asserts cond {
+  if (!cond) throw new Error(msg);
+}
+
+function isScriptableMock(g: PaymentGateway): boolean {
+  const m = g as Mockish;
+  return typeof m.enqueue === "function";
+}
+
+function defaultCreatePayment(caps: GatewayCapabilities) {
+  return {
+    amount: 10.5,
+    currency: "SAR",
+    callbackUrl: "https://merchant.example/callback",
+    capture: caps.immediateCapture !== false,
+  };
+}
+
+function mergeFixtures(
+  caps: GatewayCapabilities,
+  fixtures?: GatewayConformanceFixtures,
+): GatewayConformanceFixtures & {
+  createPayment: NonNullable<GatewayConformanceFixtures["createPayment"]>;
+} {
+  const base = defaultCreatePayment(caps);
+  return {
+    ...fixtures,
+    createPayment: {
+      ...base,
+      ...fixtures?.createPayment,
+    },
+  };
+}
+
+function isAbortLike(err: unknown): boolean {
+  if (err instanceof PaymentAbortedError) return true;
+  if (err instanceof NetworkError) {
+    // mockGateway surfaces abort as NetworkError("Request aborted", …)
+    return /abort/i.test(err.message);
+  }
+  if (err instanceof Error) {
+    if (err.name === "AbortError") return true;
+    if (/abort/i.test(err.message)) return true;
+  }
+  // DOMException AbortError in some runtimes
+  if (
+    typeof DOMException !== "undefined" &&
+    err instanceof DOMException &&
+    err.name === "AbortError"
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isPaidSuccess(result: {
+  success?: boolean;
+  status?: string;
+}): boolean {
+  return result.success === true && result.status === "paid";
+}
+
+function buildReport(
+  name: string,
+  results: GatewayConformanceCaseResult[],
+): GatewayConformanceReport {
+  const passed: string[] = [];
+  const failed: Array<{ case: string; error: string }> = [];
+  const skipped: Array<{ case: string; reason: string }> = [];
+  for (const r of results) {
+    if (r.status === "passed") passed.push(r.name);
+    else if (r.status === "failed")
+      failed.push({ case: r.name, error: r.error });
+    else skipped.push({ case: r.name, reason: r.reason });
+  }
+  return {
+    name,
+    passed,
+    failed,
+    skipped,
+    ok: failed.length === 0,
+  };
+}
+
+type CaseFn = () => Promise<void>;
+
+type CaseDef = {
+  name: GatewayConformanceCaseName;
+  /**
+   * Return a skip reason, or undefined to run.
+   * Called after mode/include/exclude filtering.
+   */
+  skipReason?: () => string | undefined;
+  run: CaseFn;
+};
+
+/**
+ * Run the shared gateway conformance suite.
+ */
+export async function runGatewayConformanceSuite(
+  options: GatewayConformanceOptions,
+): Promise<GatewayConformanceReport> {
+  const mode: GatewayConformanceMode = options.mode ?? "full";
+  const include = options.include
+    ? new Set(options.include)
+    : null;
+  const exclude = options.exclude
+    ? new Set(options.exclude)
+    : null;
+
+  // Resolve capabilities (optional on options — default from first gateway).
+  const probe = await options.createGateway();
+  const caps: GatewayCapabilities =
+    options.capabilities ?? probe.capabilities;
+  const fixtures = mergeFixtures(caps, options.fixtures);
+
+  const fresh = async (): Promise<PaymentGateway> => options.createGateway();
+
+  /**
+   * Network-mutating payment ops are only safe for scriptable mocks in
+   * applicable mode, or always in full mode. Structural never runs them.
+   */
+  const allowNetworkOps = (g: PaymentGateway): boolean => {
+    if (mode === "structural") return false;
+    if (mode === "full") return true;
+    // applicable: mock only (offline scripted)
+    return isScriptableMock(g);
+  };
+
+  const networkSkipReason = (g: PaymentGateway): string | undefined => {
+    if (mode === "structural") {
+      return "structural mode: capabilities/method presence only";
+    }
+    if (mode === "applicable" && !isScriptableMock(g)) {
+      return "applicable mode: skipping provider HTTP (no mock/scriptable enqueue; offline-only)";
+    }
+    return undefined;
+  };
+
+  const cases: CaseDef[] = [
+    // ── 17 capabilities_parity ─────────────────────────────────────────────
+    {
+      name: "capabilities_parity",
+      run: async () => {
+        const g = await fresh();
+        for (const key of GATEWAY_CAPABILITY_KEYS) {
+          assert(
+            typeof g.capabilities[key] === "boolean",
+            `missing capability ${key}`,
+          );
+          assert(
+            g.supports(key) === g.capabilities[key],
+            `supports(${key}) !== capabilities[${key}]`,
+          );
+          // Expected claims when caller supplied capabilities option
+          if (options.capabilities) {
+            assert(
+              g.capabilities[key] === caps[key],
+              `gateway.capabilities.${key}=${String(g.capabilities[key])} !== expected ${String(caps[key])}`,
+            );
+          }
+        }
+      },
+    },
+
+    // ── 18 claim_method_presence ───────────────────────────────────────────
+    {
+      name: "claim_method_presence",
+      run: async () => {
+        const g = await fresh();
+        for (const key of GATEWAY_CAPABILITY_KEYS) {
+          if (!g.supports(key)) continue;
+          const operation = CAPABILITY_OPERATION_MAP[key as GatewayCapabilityKey];
+          if (operation === undefined) continue;
+          const method = (g as PaymentGateway & Record<string, unknown>)[
+            operation
+          ];
+          assert(
+            typeof method === "function",
+            `capability ${key} claimed but ${operation} is not a function`,
+          );
+        }
+        // Explicit voids boundary (Phase 3 claim logic)
+        if (g.supports("voids")) {
+          assert(
+            typeof g.voidPayment === "function",
+            "voids=true requires voidPayment function",
+          );
+        }
+      },
+    },
+
+    // ── 1 amount_conversion ────────────────────────────────────────────────
+    {
+      name: "amount_conversion",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        const amountCases =
+          fixtures.amountCases ??
+          (isScriptableMock(g)
+            ? [
+                { amount: 10.5, currency: "USD", expectedMinor: 1050 },
+                { amount: 100, currency: "JPY", expectedMinor: 100 },
+                { amount: 1.234, currency: "KWD", expectedMinor: 1234 },
+                // Money decimal-string path (Phase 5 shared conversion)
+                {
+                  amount: money("10.50", "SAR"),
+                  currency: "SAR",
+                  expectedMajor: 10.5,
+                  expectedMinor: 1050,
+                },
+              ]
+            : [
+                {
+                  amount: fixtures.createPayment.amount,
+                  currency: fixtures.createPayment.currency,
+                },
+              ]);
+
+        for (const ac of amountCases) {
+          const createParams: Parameters<PaymentGateway["createPayment"]>[0] = {
+            amount: ac.amount,
+            currency: ac.currency,
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          };
+          if (fixtures.createPayment.capture !== undefined) {
+            createParams.capture = fixtures.createPayment.capture;
+          }
+          const result = await g.createPayment(createParams);
+          const expectedMajor =
+            ac.expectedMajor ??
+            amountInputToExpectedMajor(ac.amount, ac.currency);
+          if (result.amount !== undefined) {
+            assert(
+              Math.abs(result.amount - expectedMajor) < 1e-9,
+              `amount major units: expected ${expectedMajor}, got ${result.amount} (${ac.currency})`,
+            );
+          }
+          const expectedMinor =
+            ac.expectedMinor ??
+            fixtures.expectedAmountMinor ??
+            majorToMinor(ac.amount, ac.currency);
+          const raw = result.rawResponse as { amountMinor?: number } | null;
+          if (raw && typeof raw === "object" && typeof raw.amountMinor === "number") {
+            assert(
+              raw.amountMinor === expectedMinor,
+              `amountMinor ${raw.amountMinor} !== ${expectedMinor} (${ac.currency})`,
+            );
+          }
+          assert(
+            typeof result.gatewayId === "string" && result.gatewayId.length > 0,
+            "gatewayId required",
+          );
+          // Never claim paid with wrong major→minor silent scale (e.g. 10.5 → 10)
+          if (isPaidSuccess(result) && result.amount !== undefined) {
+            assert(
+              Math.abs(result.amount - expectedMajor) < 1e-9,
+              "paid result amount must match major units",
+            );
+          }
+        }
+      },
+    },
+
+    // ── 2 status_normalization ─────────────────────────────────────────────
+    {
+      name: "status_normalization",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue === "function") {
+          // Script known statuses and assert SDK PaymentStatus union
+          const scripts: Array<{ outcome: string; expect: PaymentStatus }> = [
+            { outcome: "succeeded", expect: "paid" },
+            { outcome: "authorized", expect: "authorized" },
+            { outcome: "pending", expect: "pending" },
+            { outcome: "processing", expect: "processing" },
+          ];
+          for (const s of scripts) {
+            mockish.enqueue!("createPayment", { outcome: s.outcome });
+            const result = await g.createPayment({
+              amount: 1,
+              currency: "USD",
+              callbackUrl: fixtures.createPayment.callbackUrl,
+              capture: s.outcome === "authorized" ? false : true,
+            });
+            assert(
+              ALLOWED_PAYMENT_STATUSES.has(result.status),
+              `unknown status ${result.status}`,
+            );
+            assert(
+              result.status === s.expect,
+              `expected ${s.expect}, got ${result.status}`,
+            );
+          }
+          if (fixtures.statusMap) {
+            for (const [, mapped] of Object.entries(fixtures.statusMap)) {
+              assert(
+                ALLOWED_PAYMENT_STATUSES.has(mapped),
+                `statusMap value ${mapped} not in PaymentStatus union`,
+              );
+            }
+          }
+          return;
+        }
+
+        // Non-mock: single create, assert status is in union
+        const result = await g.createPayment({
+          amount: fixtures.createPayment.amount,
+          currency: fixtures.createPayment.currency,
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          capture: true,
+        });
+        assert(
+          ALLOWED_PAYMENT_STATUSES.has(result.status),
+          `unknown status ${result.status}`,
+        );
+      },
+    },
+
+    // ── 3 decline_mapping ──────────────────────────────────────────────────
+    {
+      name: "decline_mapping",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal(
+            "decline scripting not available (provide mock enqueue or decline fixtures)",
+          );
+        }
+        mockish.enqueue("createPayment", { outcome: "declined" });
+        let declinedOk = false;
+        try {
+          const result = await g.createPayment({
+            amount: 1,
+            currency: "USD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+          // Some designs return success:false instead of throwing
+          declinedOk =
+            result.success === false &&
+            (result.status === "failed" || result.status === "cancelled");
+          assert(
+            !isPaidSuccess(result),
+            "decline must not surface as paid success",
+          );
+        } catch (e) {
+          // Documented design: CardDeclinedError throw is acceptable
+          declinedOk =
+            e instanceof CardDeclinedError ||
+            e instanceof InsufficientFundsError;
+        }
+        assert(
+          declinedOk,
+          "decline must yield success:false or CardDeclinedError (gateway design may throw)",
+        );
+      },
+    },
+
+    // ── 4 provider_error_mapping ───────────────────────────────────────────
+    {
+      name: "provider_error_mapping",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal(
+            "provider error scripting not available (mock enqueue required)",
+          );
+        }
+        mockish.enqueue("createPayment", { outcome: "gateway_api_error" });
+        let mapped = false;
+        try {
+          const result = await g.createPayment({
+            amount: 1,
+            currency: "USD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+          mapped =
+            result.success === false &&
+            !isPaidSuccess(result);
+        } catch (e) {
+          mapped = e instanceof GatewayApiError;
+        }
+        assert(
+          mapped,
+          "provider error must map to GatewayApiError or controlled failure result",
+        );
+      },
+    },
+
+    // ── 5 network_failure ──────────────────────────────────────────────────
+    {
+      name: "network_failure",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal("network_error scripting requires mock enqueue");
+        }
+        mockish.enqueue("createPayment", { outcome: "network_error" });
+        let err: unknown;
+        let resultSuccess: boolean | undefined;
+        try {
+          const result = await g.createPayment({
+            amount: 1,
+            currency: "USD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+          resultSuccess = isPaidSuccess(result);
+        } catch (e) {
+          err = e;
+        }
+        assert(resultSuccess !== true, "network_error must not claim paid");
+        assert(
+          err instanceof NetworkError || resultSuccess === false,
+          "network_error should surface NetworkError (or non-paid result)",
+        );
+      },
+    },
+
+    // ── 6 timeout_behavior ─────────────────────────────────────────────────
+    {
+      name: "timeout_behavior",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal("timeout scripting requires mock enqueue");
+        }
+        mockish.enqueue("createPayment", { outcome: "timeout" });
+        let err: unknown;
+        let paid = false;
+        try {
+          const result = await g.createPayment({
+            amount: 1,
+            currency: "USD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+          paid = isPaidSuccess(result);
+        } catch (e) {
+          err = e;
+        }
+        assert(!paid, "timeout must not become silent success/paid");
+        // Prefer indeterminate path (NetworkError → reconcile), not false "failed paid"
+        assert(
+          err instanceof NetworkError,
+          "timeout should surface NetworkError (indeterminate; requires reconciliation)",
+        );
+      },
+    },
+
+    // ── 7 safe_retry ───────────────────────────────────────────────────────
+    {
+      name: "safe_retry",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        const key = "conformance-safe-retry-key-001";
+        const r1 = await g.createPayment({
+          amount: fixtures.createPayment.amount,
+          currency: fixtures.createPayment.currency,
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          idempotencyKey: key,
+        });
+        assert(r1.gatewayId, "first create gatewayId");
+
+        const r2 = await g.createPayment({
+          amount: fixtures.createPayment.amount,
+          currency: fixtures.createPayment.currency,
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          idempotencyKey: key,
+        });
+        assert(r2.gatewayId, "retry create gatewayId");
+
+        if (isScriptableMock(g)) {
+          // Mock records one payment id for same key (no double-charge)
+          assert(
+            r1.gatewayId === r2.gatewayId,
+            `safe_retry: expected same gatewayId on idempotent retry, got ${r1.gatewayId} vs ${r2.gatewayId}`,
+          );
+          const mockish = g as Mockish;
+          if (mockish.history) {
+            const creates = mockish.history.filter(
+              (h) => h.operation === "createPayment",
+            );
+            // Two client attempts, one logical payment
+            assert(
+              creates.length >= 2,
+              "expected two create attempts recorded",
+            );
+          }
+        }
+        // Non-mock: only require both calls accepted without throw
+      },
+    },
+
+    // ── 8 idempotency_behavior ─────────────────────────────────────────────
+    {
+      name: "idempotency_behavior",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        if (!isScriptableMock(g)) {
+          throw new SkipSignal(
+            "idempotency_behavior same-id assertion requires scriptable mock (or store-backed gateway)",
+          );
+        }
+
+        const key = "conformance-idem-key-002";
+        const r1 = await g.createPayment({
+          amount: 25,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          idempotencyKey: key,
+        });
+        const r2 = await g.createPayment({
+          amount: 25,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          idempotencyKey: key,
+        });
+        assert(
+          r1.gatewayId === r2.gatewayId,
+          `same idempotencyKey must return same gatewayId (${r1.gatewayId} vs ${r2.gatewayId})`,
+        );
+      },
+    },
+
+    // ── 9 webhook_verification ─────────────────────────────────────────────
+    {
+      name: "webhook_verification",
+      run: async () => {
+        const g = await fresh();
+        const mockish = g as Mockish;
+        const wh = fixtures.webhook;
+
+        if (typeof mockish.buildWebhook === "function") {
+          const payload = mockish.buildWebhook({
+            id: "evt_verify_ok",
+            gatewayPaymentId: "pay_verify",
+            status: "paid",
+            type: "payment_paid",
+          });
+          const body = payload as { signature?: string };
+          assert(
+            g.verifyWebhook(payload) === true,
+            "valid mock signed webhook must verify",
+          );
+          assert(
+            g.verifyWebhook(payload, "definitely-wrong-sig") === false,
+            "invalid signature must reject",
+          );
+          // Tampered embedded signature must not self-verify
+          if (body.signature) {
+            const tampered = {
+              ...(payload as object),
+              signature: "definitely-wrong-sig",
+            };
+            assert(
+              g.verifyWebhook(tampered) === false,
+              "tampered body.signature must reject (HMAC, not self-match)",
+            );
+            assert(
+              g.verifyWebhook(
+                { ...body, signature: undefined },
+                body.signature,
+              ) === true,
+              "correct explicit signature arg must verify",
+            );
+          }
+          return;
+        }
+
+        if (wh?.validPayload !== undefined) {
+          const ok = g.verifyWebhook(
+            wh.validPayload,
+            wh.validSignature,
+            wh.headers,
+          );
+          assert(ok === true, "fixture valid webhook must verify");
+          const bad = g.verifyWebhook(
+            wh.validPayload,
+            wh.invalidSignature ?? "definitely-wrong-sig",
+            wh.headers,
+          );
+          assert(bad === false, "invalid signature must reject");
+          return;
+        }
+
+        // Built-ins without fixtures: only assert invalid is rejected offline
+        if (mode === "structural") {
+          throw new SkipSignal("structural mode");
+        }
+        if (!isScriptableMock(g) && !wh) {
+          // Offline invalid-path check (never calls live APIs)
+          let rejected = false;
+          try {
+            if (g.verifyWebhook(null) === false) rejected = true;
+            if (g.verifyWebhook(undefined) === false) rejected = true;
+            if (g.verifyWebhook({}) === false) rejected = true;
+          } catch {
+            // PayPal sync verifyWebhook throws (provider difference) — safe reject
+            rejected = true;
+          }
+          assert(
+            rejected,
+            "without fixtures, null/empty payload must not verify (or must throw)",
+          );
+          throw new SkipSignal(
+            "webhook_verification valid-path skipped: no fixtures.webhook (invalid rejection checked)",
+          );
+        }
+        throw new SkipSignal(
+          "webhook_verification: no fixtures.webhook and not a mock (provide validPayload+signature)",
+        );
+      },
+    },
+
+    // ── 10 malformed_webhook_rejection ─────────────────────────────────────
+    {
+      name: "malformed_webhook_rejection",
+      run: async () => {
+        const g = await fresh();
+        if (mode === "structural") {
+          throw new SkipSignal("structural mode");
+        }
+
+        const garbage = fixtures.webhook?.malformedPayload ?? "not-json-{{{";
+        let rejected = false;
+        try {
+          const v = g.verifyWebhook(garbage);
+          if (v === false) rejected = true;
+        } catch {
+          // throw on garbage is safe fail
+          rejected = true;
+        }
+        try {
+          const v2 = g.verifyWebhook(null);
+          if (v2 === false) rejected = true;
+        } catch {
+          rejected = true;
+        }
+        // parse must not claim a paid event from garbage
+        try {
+          const evt = g.parseWebhookEvent(
+            fixtures.webhook?.malformedPayload ?? { nonsense: true },
+          );
+          assert(
+            !evt || evt.status !== "paid" || !evt.gatewayPaymentId,
+            "malformed parse must not invent paid events",
+          );
+          // If parse succeeds on garbage without required fields, fail
+          if (evt && (!evt.id || !evt.gatewayPaymentId)) {
+            rejected = true;
+          }
+        } catch {
+          rejected = true;
+        }
+        assert(rejected, "malformed webhook must verify false / parse throw / safe fail");
+      },
+    },
+
+    // ── 11 event_normalization ─────────────────────────────────────────────
+    {
+      name: "event_normalization",
+      run: async () => {
+        const g = await fresh();
+        if (mode === "structural") {
+          throw new SkipSignal("structural mode");
+        }
+        const mockish = g as Mockish;
+
+        if (typeof mockish.buildWebhook === "function") {
+          const payload = mockish.buildWebhook({
+            id: "evt_norm_1",
+            gatewayPaymentId: "pay_norm",
+            status: "paid",
+            type: "payment_paid",
+          });
+          assert(g.verifyWebhook(payload) === true, "signed webhook verifies");
+          const evt = g.parseWebhookEvent(payload);
+          assert(evt.id === "evt_norm_1", "normalized id");
+          assert(evt.gatewayPaymentId === "pay_norm", "gatewayPaymentId");
+          assert(evt.status === "paid", "status");
+          assert(evt.gateway === g.name, "gateway name");
+          assert(typeof evt.type === "string", "type");
+          assert(evt.timestamp instanceof Date || evt.timestamp, "timestamp");
+          return;
+        }
+
+        if (fixtures.webhook?.validPayload !== undefined) {
+          const evt = g.parseWebhookEvent(fixtures.webhook.validPayload);
+          assert(typeof evt.id === "string" && evt.id.length > 0, "id");
+          assert(
+            typeof evt.gatewayPaymentId === "string" &&
+              evt.gatewayPaymentId.length > 0,
+            "gatewayPaymentId",
+          );
+          assert(typeof evt.type === "string", "type");
+          assert(ALLOWED_PAYMENT_STATUSES.has(evt.status), "status in union");
+          assert(evt.gateway === g.name || typeof evt.gateway === "string", "gateway");
+          assert(evt.timestamp != null, "timestamp required");
+          return;
+        }
+
+        // Try minimal synthetic payload accepted by some gateways
+        try {
+          const evt = g.parseWebhookEvent({
+            id: "evt_1",
+            type: "payment_paid",
+            gatewayPaymentId: "pay_1",
+            status: "paid",
+          });
+          assert(evt.id === "evt_1", "id");
+          assert(evt.gatewayPaymentId === "pay_1", "gatewayPaymentId");
+          assert(evt.status === "paid", "status");
+        } catch {
+          throw new SkipSignal(
+            "event_normalization: no fixtures.webhook and gateway rejects synthetic mock payload",
+          );
+        }
+      },
+    },
+
+    // ── 12 partial_capture ─────────────────────────────────────────────────
+    {
+      name: "partial_capture",
+      skipReason: () => {
+        if (!caps.partialCapture) return "capability partialCapture not claimed";
+        if (!caps.payments && !caps.authorization) {
+          return "payments/authorization required for partial capture";
+        }
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        const created = await g.createPayment({
+          amount: 100,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          capture: false,
+        });
+        const cap = await g.capturePayment({
+          gatewayPaymentId: created.gatewayId,
+          amount: 40,
+          currency: "USD",
+        });
+        assert(
+          cap.status === "partially_captured" ||
+            cap.capturedAmount === 40 ||
+            (cap.success === true &&
+              (cap.capturedAmount === undefined ||
+                cap.capturedAmount === 40 ||
+                cap.capturedAmount < 100)),
+          "partial capture must update remaining / partially_captured",
+        );
+        const mockish = g as Mockish;
+        if (typeof mockish.getPaymentState === "function") {
+          const state = mockish.getPaymentState(created.gatewayId);
+          if (state) {
+            assert(
+              state.capturedAmount === 40 ||
+                state.capturedAmount < state.amount,
+              "mock ledger remaining capture amount",
+            );
+          }
+        }
+      },
+    },
+
+    // ── 13 partial_refund ──────────────────────────────────────────────────
+    {
+      name: "partial_refund",
+      skipReason: () => {
+        if (!caps.partialRefunds) return "capability partialRefunds not claimed";
+        if (!caps.refunds) return "capability refunds not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+
+        const created = await g.createPayment({
+          amount: 100,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          capture: true,
+        });
+        const refund = await g.refundPayment({
+          gatewayPaymentId: created.gatewayId,
+          amount: 25,
+          currency: "USD",
+        });
+        assert(
+          refund.success === true ||
+            refund.status === "completed" ||
+            refund.status === "pending",
+          "partial refund accepted",
+        );
+      },
+    },
+
+    // ── 14 logging_redaction ───────────────────────────────────────────────
+    {
+      name: "logging_redaction",
+      run: async () => {
+        if (mode === "structural") {
+          throw new SkipSignal("structural mode");
+        }
+
+        const captured: Array<Record<string, unknown> | undefined> = [];
+        const sink: Logger = {
+          debug(_m, ctx) {
+            captured.push(ctx);
+          },
+          info(_m, ctx) {
+            captured.push(ctx);
+          },
+          warn(_m, ctx) {
+            captured.push(ctx);
+          },
+          error(_m, ctx) {
+            captured.push(ctx);
+          },
+        };
+        const redacting = createRedactingLogger(sink);
+
+        // Prove redaction contract used by gateways (createRedactingLogger)
+        redacting.info("createPayment", {
+          amount: 1,
+          currency: "USD",
+          cardNumber: "4111111111111111",
+          apiKey: "sk_test_conformance_not_live",
+          authorization: "Bearer secret-token-value",
+          customerEmail: "buyer@example.com",
+          note: "ok",
+        });
+
+        const blob = JSON.stringify(captured);
+        assert(
+          !blob.includes("4111111111111111"),
+          "cardNumber must be redacted in logs",
+        );
+        assert(
+          !blob.includes("Bearer secret-token-value"),
+          "authorization must be redacted",
+        );
+        assert(
+          !blob.includes("buyer@example.com"),
+          "customerEmail must be redacted",
+        );
+        assert(
+          blob.includes("[REDACTED]") || blob.includes("REDACTED"),
+          "expected [REDACTED] markers",
+        );
+
+        // Gateway path: create with secret-like metadata; history / logs must
+        // not embed live key patterns. Mock may record params for assertions —
+        // ensure no sk_live_ / whsec_ leaks in serialized history.
+        const g = await fresh();
+        if (allowNetworkOps(g) || isScriptableMock(g)) {
+          const mockish = g as Mockish;
+          if (typeof mockish.setLogger === "function") {
+            mockish.setLogger(redacting);
+          }
+          await g
+            .createPayment({
+              amount: 1,
+              currency: "USD",
+              callbackUrl: fixtures.createPayment.callbackUrl,
+              metadata: {
+                note: "ok",
+                // intentional sensitive keys — must not appear unredacted in logs
+                cardNumber: "4111111111111111",
+                apiSecret: "super-secret-value",
+              },
+            })
+            .catch(() => {
+              /* network/scripted failures ok */
+            });
+
+          if (mockish.history) {
+            const hist = JSON.stringify(mockish.history);
+            assert(!/sk_live_/.test(hist), "history must not contain sk_live_");
+            assert(!/whsec_/.test(hist), "history must not contain whsec_");
+            // Live card dump in history is for test params; redacting logger path above is source of truth
+          }
+        } else if (mode === "applicable") {
+          // Offline structural redaction check already done via createRedactingLogger
+          return;
+        }
+      },
+    },
+
+    // ── 15 request_cancellation ────────────────────────────────────────────
+    {
+      name: "request_cancellation",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal(
+            "request_cancellation requires mock latency + AbortSignal support",
+          );
+        }
+        mockish.enqueue("createPayment", {
+          outcome: "succeeded",
+          latencyMs: 500,
+        });
+        const controller = new AbortController();
+        const p = g.createPayment({
+          amount: 1,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+          ...({ signal: controller.signal } as object),
+        } as Parameters<PaymentGateway["createPayment"]>[0]);
+        controller.abort();
+        let aborted = false;
+        let paid = false;
+        try {
+          const result = await p;
+          paid = isPaidSuccess(result);
+        } catch (e) {
+          aborted = isAbortLike(e);
+        }
+        assert(!paid, "aborted request must not yield paid result");
+        assert(
+          aborted,
+          "abort must surface PaymentAbortedError, AbortError, or abort NetworkError",
+        );
+      },
+    },
+
+    // ── 16 indeterminate_outcomes ──────────────────────────────────────────
+    {
+      name: "indeterminate_outcomes",
+      skipReason: () => {
+        if (!caps.payments) return "capability payments not claimed";
+        return undefined;
+      },
+      run: async () => {
+        const g = await fresh();
+        const netSkip = networkSkipReason(g);
+        if (netSkip) throw new SkipSignal(netSkip);
+        const mockish = g as Mockish;
+        if (typeof mockish.enqueue !== "function") {
+          throw new SkipSignal(
+            "indeterminate_outcomes requires mock provider_ok_client_timeout script",
+          );
+        }
+        mockish.enqueue("createPayment", {
+          outcome: "provider_ok_client_timeout",
+        });
+        let err: unknown;
+        let paid = false;
+        try {
+          const result = await g.createPayment({
+            amount: 5,
+            currency: "USD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+          paid = isPaidSuccess(result);
+        } catch (e) {
+          err = e;
+        }
+        assert(!paid, "indeterminate must never surface success:true paid");
+        assert(
+          err instanceof NetworkError,
+          "provider_ok_client_timeout must be NetworkError for reconciliation",
+        );
+        if (typeof mockish.getLastProviderSideSuccess === "function") {
+          const side = mockish.getLastProviderSideSuccess();
+          assert(
+            side?.success === true,
+            "provider-side success retained for reconcile",
+          );
+        }
+      },
+    },
+  ];
+
+  const results: GatewayConformanceCaseResult[] = [];
+
+  for (const def of cases) {
+    if (include && !include.has(def.name)) continue;
+    if (exclude && exclude.has(def.name)) {
+      results.push({
+        name: def.name,
+        status: "skipped",
+        reason: "excluded via options.exclude",
+      });
+      continue;
+    }
+
+    // Mode filter: structural only structural cases
+    if (mode === "structural" && !STRUCTURAL_CASES.has(def.name)) {
+      results.push({
+        name: def.name,
+        status: "skipped",
+        reason: "structural mode: capabilities/method presence only",
+      });
+      continue;
+    }
+
+    const staticSkip = def.skipReason?.();
+    if (staticSkip) {
+      results.push({ name: def.name, status: "skipped", reason: staticSkip });
+      continue;
+    }
+
+    try {
+      await def.run();
+      results.push({ name: def.name, status: "passed" });
+    } catch (err) {
+      if (err instanceof SkipSignal) {
+        results.push({ name: def.name, status: "skipped", reason: err.reason });
+      } else {
+        results.push({
+          name: def.name,
+          status: "failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // When include filters out structural cases entirely, still ok
+  const report = buildReport(options.name, results);
+
+  if (!report.ok && options.throwOnFailure) {
+    const lines = report.failed
+      .map((f) => `  - ${f.case}: ${f.error}`)
+      .join("\n");
+    throw new Error(
+      `Gateway conformance failed for "${options.name}":\n${lines}`,
+    );
+  }
+
+  return report;
+}
+
+/** Internal control flow for mid-case skips (mode / missing fixtures). */
+class SkipSignal extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(reason);
+    this.name = "SkipSignal";
+    this.reason = reason;
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "name": "@paykernel/core",
+  "version": "0.1.0-next.0",
+  "description": "PayKernel core \u2014 type-safe payment orchestration contracts, client, gateway registry, money types, results, and runtime abstractions for TypeScript.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "typecheck": "tsc --noEmit",
+    "typecheck:types": "tsc -p tsconfig.type-tests.json --noEmit",
+    "typecheck:all": "bun run typecheck && bun run typecheck:types",
+    "docs:capabilities": "bun run scripts/generate-capability-docs.ts",
+    "pack:check": "npm pack --dry-run",
+    "publint": "publint",
+    "attw": "attw --pack . --profile esm-only --ignore-rules internal-resolution-error",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/bun": "latest",
+    "publint": "^0.3.22",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {},
+  "keywords": [
+    "payment",
+    "gateway",
+    "moyasar",
+    "paypal",
+    "paymob",
+    "stripe",
+    "multi-gateway",
+    "typescript",
+    "paykernel",
+    "payments",
+    "orchestration"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/core#readme",
+  "dependencies": {
+    "zod": "3.25.76"
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

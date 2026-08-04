@@ -1,0 +1,91 @@
+{
+  "name": "@paykernel/store-turso",
+  "version": "0.1.0-next.0",
+  "description": "Turso serverless and libSQL stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (shared remote SQLite-compatible).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./serverless": {
+      "types": "./dist/serverless.d.ts",
+      "import": "./dist/serverless.js"
+    },
+    "./libsql": {
+      "types": "./dist/libsql.d.ts",
+      "import": "./dist/libsql.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts ./src/serverless.ts ./src/libsql.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/testkit": "workspace:*"
+  },
+  "peerDependencies": {
+    "@libsql/client": ">=0.14.0",
+    "@tursodatabase/serverless": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@libsql/client": {
+      "optional": true
+    },
+    "@tursodatabase/serverless": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@libsql/client": "^0.17.4",
+    "@tursodatabase/serverless": "^1.4.0",
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "payments",
+    "turso",
+    "libsql",
+    "sqlite",
+    "idempotency",
+    "webhooks",
+    "reconciliation",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/store-turso"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/store-turso#readme",
+  "paymentsSdk": {
+    "portable": false,
+    "runtime": "node-or-bun"
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

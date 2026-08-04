@@ -1,0 +1,80 @@
+{
+  "name": "@paykernel/store-d1",
+  "version": "0.1.0-next.0",
+  "description": "Cloudflare D1 stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (Workers-native shared SQLite via D1 binding).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "migrations",
+    "examples",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/testkit": "workspace:*"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/workers-types": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "payments",
+    "cloudflare",
+    "d1",
+    "workers",
+    "sqlite",
+    "idempotency",
+    "webhooks",
+    "reconciliation",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/store-d1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/store-d1#readme",
+  "paymentsSdk": {
+    "portable": false,
+    "runtime": "cloudflare-only"
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

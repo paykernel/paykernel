@@ -1,0 +1,81 @@
+# Example Wrangler config for paykernel Cloudflare Durable Objects adapter.
+# Copy into your Worker project and adjust binding / class names.
+#
+# Docs: https://developers.cloudflare.com/durable-objects/get-started/
+# SQLite storage: https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
+# Adapter: @paykernel/store-durable-objects
+#
+# CRITICAL: use new_sqlite_classes (SQLite-backed DO). Do NOT use legacy
+# new_classes alone for KV-only storage — this adapter requires storage.sql.
+#
+# Schema: call ensureDoSchema / migrateDoAdapter inside the DO constructor
+# (e.g. blockConcurrencyWhile) or via ops — never on package import or
+# default createDoPaymentStores.
+
+name = "payments-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+[[durable_objects.bindings]]
+name = "PAYMENTS_DO"
+class_name = "PaymentsStoreDurableObject"
+
+[[migrations]]
+tag = "v1"
+# SQLite-backed Durable Objects (required for storage.sql / transactionSync)
+new_sqlite_classes = ["PaymentsStoreDurableObject"]
+
+# Usage sketch (Worker + DO):
+#
+# // worker.ts
+# import {
+#   createDoPaymentStores,
+# } from "@paykernel/store-durable-objects";
+#
+# export { PaymentsStoreDurableObject } from "./payments-do";
+#
+# export default {
+#   async fetch(request: Request, env: { PAYMENTS_DO: DurableObjectNamespace }) {
+#     const stores = createDoPaymentStores({
+#       namespace: env.PAYMENTS_DO,
+#       // NEVER omit sharding / never use a silent global DO
+#       sharding: { kind: "hash", partitions: 32 },
+#       // or: sharding: { kind: "key" } for per-key objects
+#     });
+#
+#     const r = await stores.idempotency.reserve({
+#       key: "pay_123",
+#       fingerprint: "fp",
+#       owner: "worker-1",
+#       leaseMs: 30_000,
+#     });
+#     // claim done → leave DO storage txn → external provider work → complete
+#     return Response.json(r);
+#   },
+# };
+#
+# // payments-do.ts (Workers runtime; optional @cloudflare/workers-types)
+# import { DurableObject } from "cloudflare:workers";
+# import {
+#   PaymentsStoreObject,
+#   ensureDoSchema,
+# } from "@paykernel/store-durable-objects";
+#
+# export class PaymentsStoreDurableObject extends DurableObject {
+#   private stores: PaymentsStoreObject;
+#
+#   constructor(ctx: DurableObjectState, env: unknown) {
+#     super(ctx, env);
+#     this.stores = new PaymentsStoreObject({ storage: ctx.storage });
+#     // DO lifecycle schema ensure (not npm import auto-migrate):
+#     ctx.blockConcurrencyWhile(async () => {
+#       await this.stores.ensureSchema();
+#     });
+#   }
+#
+#   // Expose RPC methods matching PaymentsStoreObject (reserveIdempotency, …)
+#   reserveIdempotency(input: unknown) {
+#     return this.stores.reserveIdempotency(input as never);
+#   }
+#   // … wire other methods similarly; alarm() optional for 17.4
+# }

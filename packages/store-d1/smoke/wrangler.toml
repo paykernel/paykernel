@@ -1,0 +1,19 @@
+# Live smoke Worker for @paykernel/store-d1
+# Account: manhali project Cloudflare account (53fb41ed…)
+# Database: paykernel-adapter-smoke (isolated; not production app data)
+#
+# Deploy:
+#   CLOUDFLARE_ACCOUNT_ID=53fb41ede04e54b276ce3fd9bfd270b6 bunx wrangler deploy
+# Run smoke:
+#   curl -sS https://paykernel-d1-smoke.<subdomain>.workers.dev/smoke | jq .
+
+name = "paykernel-d1-smoke"
+main = "worker.ts"
+compatibility_date = "2024-09-23"
+workers_dev = true
+account_id = "53fb41ede04e54b276ce3fd9bfd270b6"
+
+[[d1_databases]]
+binding = "PAYMENTS_DB"
+database_name = "paykernel-adapter-smoke"
+database_id = "222a2d3a-ac08-48df-80ad-2bde60c56967"

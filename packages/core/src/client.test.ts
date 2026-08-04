@@ -1,0 +1,1698 @@
+import { describe, it, expect, beforeEach, afterEach, mock } from 'bun:test';
+import { PaymentClient } from './client';
+import {
+    GatewayNotConfiguredError,
+    InvalidRequestError,
+    InvalidWebhookError,
+    OperationNotSupportedError,
+    PaymentError,
+} from './errors';
+import {
+    CreatePaymentParamsSchema,
+    CaptureParamsSchema,
+    MoyasarCreatePaymentParamsSchema,
+    PayPalCreatePaymentParamsSchema,
+} from './types/validation';
+import { createPaymentClient } from './create-payment-client';
+import { BaseGateway } from './gateways/base.gateway';
+import type { GatewayAdapter } from './gateways/gateway-adapter';
+import type { GatewayContext } from './gateways/gateway-context';
+import type { GatewayCapabilities } from './gateways/gateway-capabilities';
+import { HooksManager } from './hooks/hooks.manager';
+import type {
+    CreatePaymentParams,
+    CaptureParams,
+    RefundParams,
+    GatewayPaymentResult,
+    GatewayRefundResult,
+} from './types/payment.types';
+import type { WebhookEvent } from './types/webhook.types';
+
+function createMockResponse(data: unknown): Response {
+    return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify(data),
+        json: async () => data,
+        headers: new Headers(),
+    } as unknown as Response;
+}
+
+describe('PaymentClient Stripe convenience methods', () => {
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    it('should route voidPayment to the selected gateway', async () => {
+        let requestedUrl = '';
+        globalThis.fetch = mock(async (url) => {
+            requestedUrl = String(url);
+            return createMockResponse({
+                id: 'pi_cancel',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: null,
+            });
+        }) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        const result = await client.voidPayment({ gatewayPaymentId: 'pi_cancel' });
+
+        expect(requestedUrl).toContain('/payment_intents/pi_cancel/cancel');
+        expect(result.status).toBe('cancelled');
+    });
+
+    it('should route getPaymentStatus to the selected gateway', async () => {
+        let requestedUrl = '';
+        globalThis.fetch = mock(async (url) => {
+            requestedUrl = String(url);
+            return createMockResponse({
+                id: 'pi_paid',
+                object: 'payment_intent',
+                status: 'succeeded',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: null,
+            });
+        }) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        const status = await client.getPaymentStatus('pi_paid');
+
+        expect(requestedUrl).toContain('/payment_intents/pi_paid');
+        expect(status).toBe('paid');
+    });
+
+    it('should route createPayment to the explicit gateway', async () => {
+        let requestedUrl = '';
+        globalThis.fetch = mock(async (url) => {
+            requestedUrl = String(url);
+            return createMockResponse({
+                id: 'pi_create',
+                object: 'payment_intent',
+                status: 'requires_payment_method',
+                amount: 2500,
+                currency: 'usd',
+                client_secret: 'pi_create_secret',
+            });
+        }) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test_123' },
+            moyasar: { secretKey: 'sk_test_moyasar' },
+            defaultGateway: 'moyasar',
+        });
+
+        const result = await client.createPayment(
+            {
+                amount: 25,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            },
+            'stripe',
+        );
+
+        expect(requestedUrl).toContain('api.stripe.com');
+        expect(result.gatewayId).toBe('pi_create');
+        expect(result.success).toBe(true);
+    });
+});
+
+describe('PaymentClient resolveGateway and error types', () => {
+    it('throws InvalidRequestError when no gateway and no default are set', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+        });
+
+        try {
+            await client.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            });
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+            expect(error).toBeInstanceOf(PaymentError);
+            expect((error as InvalidRequestError).code).toBe('INVALID_REQUEST');
+            expect((error as Error).message).toMatch(/no default gateway/i);
+        }
+    });
+
+    it('throws GatewayNotConfiguredError for an unconfigured gateway name', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        expect(() => client.gateway('moyasar')).toThrow(GatewayNotConfiguredError);
+    });
+
+    it('throws InvalidRequestError when defaultGateway is not among configured gateways', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    stripe: { secretKey: 'sk_test_123' },
+                    defaultGateway: 'moyasar',
+                }),
+        ).toThrow(InvalidRequestError);
+    });
+
+    it('throws OperationNotSupportedError (not GatewayNotConfiguredError) for unsupported ops', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        const gw = client.gateway('stripe');
+        // Shadow prototype methods with undefined so client treats them as unsupported.
+        Object.defineProperty(gw, 'voidPayment', { value: undefined, configurable: true });
+        Object.defineProperty(gw, 'getPayment', { value: undefined, configurable: true });
+        Object.defineProperty(gw, 'getPaymentStatus', {
+            value: undefined,
+            configurable: true,
+        });
+
+        try {
+            await client.voidPayment({ gatewayPaymentId: 'pi_x' });
+            expect.unreachable('voidPayment should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            expect(error).not.toBeInstanceOf(GatewayNotConfiguredError);
+            const opErr = error as OperationNotSupportedError;
+            expect(opErr.code).toBe('OPERATION_NOT_SUPPORTED');
+            expect(opErr.message).toContain('voidPayment');
+            // Stripe claims voids:true; method was shadowed — capability metadata present
+            expect(opErr.capability).toBe('voids');
+            expect(opErr.claimedSupport).toBe(true);
+        }
+
+        try {
+            await client.getPayment({ gatewayPaymentId: 'pi_x' });
+            expect.unreachable('getPayment should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const opErr = error as OperationNotSupportedError;
+            expect(opErr.code).toBe('OPERATION_NOT_SUPPORTED');
+            // getPayment is not a capability key — no capability metadata
+            expect(opErr.capability).toBeUndefined();
+        }
+
+        try {
+            await client.getPaymentStatus('pi_x');
+            expect.unreachable('getPaymentStatus should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const opErr = error as OperationNotSupportedError;
+            expect(opErr.code).toBe('OPERATION_NOT_SUPPORTED');
+            expect(opErr.capability).toBeUndefined();
+        }
+    });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Phase 3 Stream C — client capability enforcement
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function mockCapPaymentResult(
+    gatewayId: string,
+    overrides: Partial<GatewayPaymentResult> = {},
+): GatewayPaymentResult {
+    return {
+        success: true,
+        gatewayId,
+        status: 'paid',
+        rawResponse: {},
+        amount: 10,
+        ...overrides,
+    };
+}
+
+/**
+ * Configurable custom gateway for capability enforcement tests.
+ */
+class CapabilityTestGateway extends BaseGateway {
+    readonly name: string;
+
+    // Optional method assigned when implementVoid is true
+    declare voidPayment?: (params: {
+        gatewayPaymentId: string;
+    }) => Promise<GatewayPaymentResult>;
+
+    constructor(
+        name: string,
+        hooks: HooksManager,
+        capabilities?: Partial<GatewayCapabilities> | GatewayCapabilities,
+        opts: { implementVoid?: boolean } = {},
+    ) {
+        super({}, hooks, undefined, capabilities);
+        this.name = name;
+        if (opts.implementVoid) {
+            this.voidPayment = async () =>
+                mockCapPaymentResult(`${name}_void`, { status: 'cancelled' });
+        }
+    }
+
+    async createPayment(params: CreatePaymentParams): Promise<GatewayPaymentResult> {
+        return mockCapPaymentResult(`${this.name}_pay`, { amount: params.amount });
+    }
+
+    async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
+        return mockCapPaymentResult(`${this.name}_cap`, {
+            amount: params.amount,
+        });
+    }
+
+    async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
+        return {
+            success: true,
+            gatewayRefundId: `${this.name}_ref`,
+            status: 'completed',
+            rawResponse: {},
+            amount: params.amount,
+        };
+    }
+
+    verifyWebhook(): boolean {
+        return true;
+    }
+
+    parseWebhookEvent(payload: unknown): WebhookEvent {
+        return {
+            id: 'evt_cap',
+            type: 'payment_paid',
+            gateway: this.name,
+            paymentId: undefined,
+            gatewayPaymentId: 'pay_1',
+            status: 'paid',
+            timestamp: new Date(),
+            rawPayload: payload,
+        };
+    }
+}
+
+function capabilityAdapter(
+    name: string,
+    capabilities?: Partial<GatewayCapabilities> | GatewayCapabilities,
+    opts?: { implementVoid?: boolean },
+): GatewayAdapter<string, CapabilityTestGateway> {
+    return {
+        name,
+        manifest: {
+            name,
+            displayName: name,
+        },
+        create(ctx: GatewayContext) {
+            return new CapabilityTestGateway(
+                name,
+                ctx.hooks,
+                capabilities,
+                opts,
+            );
+        },
+    };
+}
+
+describe('PaymentClient capability enforcement (Phase 3)', () => {
+    it('exposes supports() and capabilities via client.gateway(name)', () => {
+        const client = createPaymentClient({
+            gateways: {
+                limited: capabilityAdapter('limited', {
+                    payments: true,
+                    refunds: true,
+                    partialRefunds: false,
+                    voids: false,
+                }),
+            },
+            defaultGateway: 'limited',
+        });
+
+        const gw = client.gateway('limited');
+        expect(gw.supports('payments')).toBe(true);
+        expect(gw.supports('refunds')).toBe(true);
+        expect(gw.supports('partialRefunds')).toBe(false);
+        expect(gw.supports('voids')).toBe(false);
+        expect(gw.capabilities.partialRefunds).toBe(false);
+        expect(gw.capabilities.voids).toBe(false);
+        expect(Object.isFrozen(gw.capabilities)).toBe(true);
+    });
+
+    it('voidPayment throws OperationNotSupportedError with capability voids when voids:false and no method', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                novoid: capabilityAdapter('novoid', {
+                    payments: true,
+                    voids: false,
+                }),
+            },
+            defaultGateway: 'novoid',
+        });
+
+        expect(client.gateway('novoid').supports('voids')).toBe(false);
+        expect(client.gateway('novoid').voidPayment).toBeUndefined();
+
+        try {
+            await client.voidPayment({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('voids');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('voidPayment');
+            expect(err.gatewayName).toBe('novoid');
+            expect(err.code).toBe('OPERATION_NOT_SUPPORTED');
+            expect(err.message).toContain('voids');
+        }
+    });
+
+    it('voidPayment throws with capability voids even when a method exists but voids:false (claim authoritative)', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                shadowvoid: capabilityAdapter(
+                    'shadowvoid',
+                    { payments: true, voids: false },
+                    { implementVoid: true },
+                ),
+            },
+            defaultGateway: 'shadowvoid',
+        });
+
+        // Method is present...
+        expect(typeof client.gateway('shadowvoid').voidPayment).toBe('function');
+        // ...but claim is false → client still rejects
+        try {
+            await client.voidPayment({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('voids');
+            expect(err.claimedSupport).toBe(false);
+        }
+    });
+
+    it('refunds: full refund ok when refunds:true partialRefunds:false; partial amount throws partialRefunds', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                fullonly: capabilityAdapter('fullonly', {
+                    payments: true,
+                    refunds: true,
+                    partialRefunds: false,
+                }),
+            },
+            defaultGateway: 'fullonly',
+        });
+
+        expect(client.gateway('fullonly').supports('refunds')).toBe(true);
+        expect(client.gateway('fullonly').supports('partialRefunds')).toBe(false);
+
+        // Full refund (no amount) allowed
+        const full = await client.refundPayment({ gatewayPaymentId: 'pay_1' });
+        expect(full.success).toBe(true);
+        expect(full.gatewayRefundId).toBe('fullonly_ref');
+
+        // Partial amount blocked
+        try {
+            await client.refundPayment({ gatewayPaymentId: 'pay_1', amount: 5 });
+            expect.unreachable('partial refund should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('partialRefunds');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('refundPayment');
+        }
+    });
+
+    it('refundPayment throws with capability refunds when refunds:false', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                norefund: capabilityAdapter('norefund', {
+                    payments: true,
+                    refunds: false,
+                    partialRefunds: false,
+                }),
+            },
+            defaultGateway: 'norefund',
+        });
+
+        try {
+            await client.refundPayment({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('refunds');
+            expect(err.claimedSupport).toBe(false);
+        }
+    });
+
+    it('createPayment throws with capability payments when payments:false', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                nopay: capabilityAdapter('nopay', {
+                    payments: false,
+                }),
+            },
+            defaultGateway: 'nopay',
+        });
+
+        try {
+            await client.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/cb',
+            });
+            expect.unreachable('should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('payments');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('createPayment');
+        }
+    });
+
+    it('capturePayment full capture ok when partialCapture:false; amount throws partialCapture', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                fullcap: capabilityAdapter('fullcap', {
+                    payments: true,
+                    authorization: true,
+                    partialCapture: false,
+                }),
+            },
+            defaultGateway: 'fullcap',
+        });
+
+        const full = await client.capturePayment({ gatewayPaymentId: 'pay_1' });
+        expect(full.gatewayId).toBe('fullcap_cap');
+
+        try {
+            await client.capturePayment({ gatewayPaymentId: 'pay_1', amount: 3 });
+            expect.unreachable('partial capture should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('partialCapture');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('capturePayment');
+        }
+    });
+
+    it('legacy plain gateway without capabilities falls back to method presence for void', async () => {
+        // Pre-Phase-3 style object: no capabilities / supports
+        const legacyGw = {
+            name: 'legacy',
+            async createPayment() {
+                return mockCapPaymentResult('legacy_pay');
+            },
+            async capturePayment() {
+                return mockCapPaymentResult('legacy_cap');
+            },
+            async refundPayment() {
+                return {
+                    success: true,
+                    gatewayRefundId: 'legacy_ref',
+                    status: 'completed' as const,
+                    rawResponse: {},
+                };
+            },
+            verifyWebhook() {
+                return true;
+            },
+            parseWebhookEvent(payload: unknown): WebhookEvent {
+                return {
+                    id: 'evt_l',
+                    type: 'payment_paid',
+                    gateway: 'legacy',
+                    paymentId: undefined,
+                    gatewayPaymentId: 'pay_l',
+                    status: 'paid',
+                    timestamp: new Date(),
+                    rawPayload: payload,
+                };
+            },
+        };
+
+        const adapter: GatewayAdapter<'legacy', typeof legacyGw> = {
+            name: 'legacy',
+            manifest: { name: 'legacy' },
+            create: () => legacyGw,
+        };
+
+        const client = createPaymentClient({
+            gateways: { legacy: adapter },
+            defaultGateway: 'legacy',
+        });
+
+        // createPayment works without payments claim (no capability surface)
+        const created = await client.createPayment({
+            amount: 10,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/cb',
+        });
+        expect(created.gatewayId).toBe('legacy_pay');
+
+        // void without method → OperationNotSupportedError without capability key
+        try {
+            await client.voidPayment({ gatewayPaymentId: 'pay_l' });
+            expect.unreachable('should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBeUndefined();
+            expect(err.operation).toBe('voidPayment');
+        }
+    });
+});
+
+describe('PaymentClient after-hook post-success isolation', () => {
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    it('returns success when after-hook returns proceed:false (side-effect already committed)', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_abort',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        let onErrorCalled = false;
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async () => ({ proceed: false }),
+                onError: async () => {
+                    onErrorCalled = true;
+                },
+            },
+        });
+
+        const result = await client.voidPayment({ gatewayPaymentId: 'pi_abort' });
+        expect(result.gatewayId).toBe('pi_abort');
+        expect(result.status).toBe('cancelled');
+        expect(onErrorCalled).toBe(false);
+    });
+
+    it('returns success when after-hook throws (does not convert analytics failure into payment failure)', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_after_throw',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        let onErrorCalled = false;
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async () => {
+                    throw new Error('analytics down');
+                },
+                onError: async () => {
+                    onErrorCalled = true;
+                },
+            },
+        });
+
+        const result = await client.voidPayment({ gatewayPaymentId: 'pi_after_throw' });
+        expect(result.gatewayId).toBe('pi_after_throw');
+        expect(result.status).toBe('cancelled');
+        expect(onErrorCalled).toBe(false);
+    });
+
+    it('composed after-hooks continue after proceed:false (no short-circuit)', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_compose_proceed',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const order: string[] = [];
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => {
+                    order.push('first');
+                    return {
+                        proceed: false,
+                        modifiedResult: {
+                            ...result,
+                            rawResponse: { ...(result.rawResponse as object), tagged: 'first' },
+                        },
+                    };
+                },
+            },
+        });
+
+        client.addHook('afterVoid', async (_ctx, result) => {
+            order.push('second');
+            return {
+                proceed: true,
+                modifiedResult: {
+                    ...result,
+                    rawResponse: {
+                        ...(result.rawResponse as object),
+                        tagged: 'second',
+                    },
+                },
+            };
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_compose_proceed',
+        });
+        expect(order).toEqual(['first', 'second']);
+        expect(result.gatewayId).toBe('pi_compose_proceed');
+        expect((result.rawResponse as { tagged?: string }).tagged).toBe('second');
+    });
+
+    it('after-hook throw keeps earlier modifiedResult and continues chain', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_after_keep',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const order: string[] = [];
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => {
+                    order.push('specific');
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            rawResponse: {
+                                ...(result.rawResponse as object),
+                                fromSpecific: true,
+                            },
+                        },
+                    };
+                },
+                onAfter: async () => {
+                    order.push('global-throw');
+                    throw new Error('global after boom');
+                },
+            },
+        });
+
+        const result = await client.voidPayment({ gatewayPaymentId: 'pi_after_keep' });
+        expect(order).toEqual(['specific', 'global-throw']);
+        expect(result.gatewayId).toBe('pi_after_keep');
+        expect((result.rawResponse as { fromSpecific?: boolean }).fromSpecific).toBe(
+            true,
+        );
+    });
+
+    it('restores money identity fields if after-hook tries to change them', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_money_guard',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 2500,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        success: false,
+                        status: 'paid' as const,
+                        amount: 0.01,
+                        gatewayId: 'forged_id',
+                        // Phase 6: cannot forge paid outcome / references via modifiedResult
+                        outcome: 'succeeded' as const,
+                        references: {
+                            providerObjectId: 'forged_ref',
+                            normalizedStatus: 'paid',
+                            gateway: 'stripe',
+                        },
+                        reconciliationRequired: false,
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_money_guard',
+        });
+        // Money identity restored from original gateway result
+        expect(result.success).toBe(true);
+        expect(result.status).toBe('cancelled');
+        expect(result.amount).toBe(25);
+        expect(result.gatewayId).toBe('pi_money_guard');
+        // Void dual-writes outcome succeeded + cancelled status (not paid)
+        expect(result.outcome).toBe('succeeded');
+        expect(result.references?.providerObjectId).toBe('pi_money_guard');
+        expect(result.references?.normalizedStatus).toBe('cancelled');
+        expect(result.reconciliationRequired).toBeUndefined();
+        // Additive non-money field allowed
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot forge paid outcome from requires_action via after-hook modifiedResult', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_3ds_guard',
+                object: 'payment_intent',
+                status: 'requires_action',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: 'pi_3ds_guard_secret',
+                next_action: {
+                    type: 'redirect_to_url',
+                    redirect_to_url: {
+                        url: 'https://hooks.stripe.com/3ds',
+                        return_url: 'https://example.com/return',
+                    },
+                },
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        success: true,
+                        status: 'paid' as const,
+                        outcome: 'succeeded' as const,
+                        gatewayId: 'forged_paid',
+                        amount: 0.01,
+                        references: {
+                            providerObjectId: 'forged_paid',
+                            normalizedStatus: 'paid',
+                            gateway: 'stripe',
+                        },
+                        reconciliationRequired: false,
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 50,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/return',
+        });
+
+        // Gateway 3DS shape preserved — hooks cannot flip to fake paid
+        expect(result.outcome).toBe('requires_action');
+        expect(result.outcome).not.toBe('succeeded');
+        expect(result.status).toBe('pending');
+        expect(result.gatewayId).toBe('pi_3ds_guard');
+        expect(result.references?.providerObjectId).toBe('pi_3ds_guard');
+        expect(result.references?.normalizedStatus).toBe('pending');
+        expect(result.success).toBe(true); // API ok dual-write, not "paid"
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot replace nextAction with forged redirect via after-hook on requires_action create', async () => {
+        const gatewayNextAction = {
+            type: 'redirect_to_url',
+            redirect_to_url: {
+                url: 'https://hooks.stripe.com/3ds/real',
+                return_url: 'https://example.com/return',
+            },
+        };
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_next_action_guard',
+                object: 'payment_intent',
+                status: 'requires_action',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: 'pi_next_action_guard_secret',
+                next_action: gatewayNextAction,
+            }),
+        ) as unknown as typeof fetch;
+
+        const forgedNextAction = {
+            type: 'redirect',
+            url: 'https://evil.example/phish',
+        };
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        nextAction: forgedNextAction,
+                        // rawResponse remains additive (not identity-frozen)
+                        rawResponse: { annotated: true, nextActionTampered: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 50,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/return',
+        });
+
+        expect(result.outcome).toBe('requires_action');
+        expect(result.nextAction).toEqual(gatewayNextAction);
+        expect(result.nextAction).not.toEqual(forgedNextAction);
+        // Additive non-identity field allowed
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+        expect(
+            (result.rawResponse as { nextActionTampered?: boolean }).nextActionTampered,
+        ).toBe(true);
+    });
+
+    it('cannot invent nextAction via after-hook when gateway omitted it', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_no_next_action',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 2000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        nextAction: {
+                            type: 'redirect',
+                            url: 'https://evil.example/forged',
+                        },
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_no_next_action',
+        });
+
+        expect(result.gatewayId).toBe('pi_no_next_action');
+        expect(result.nextAction).toBeUndefined();
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('restores money identity fields when after-hook mutates result in place', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_inplace_guard',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1500,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => {
+                    // In-place mutation of the hook argument must not poison freeze
+                    (result as { success: boolean }).success = false;
+                    (result as { status: string }).status = 'paid';
+                    (result as { gatewayId: string }).gatewayId = 'forged_inplace';
+                    (result as { amount?: number }).amount = 0.01;
+                    // Phase 6: outcome / references / reconciliation must not forge paid
+                    (result as { outcome?: string }).outcome = 'succeeded';
+                    (result as { reconciliationRequired?: boolean }).reconciliationRequired =
+                        false;
+                    (result as { references?: { providerObjectId: string } }).references = {
+                        providerObjectId: 'forged_ref',
+                    };
+                    return { proceed: true, modifiedResult: result };
+                },
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_inplace_guard',
+        });
+        expect(result.success).toBe(true);
+        expect(result.status).toBe('cancelled');
+        expect(result.gatewayId).toBe('pi_inplace_guard');
+        expect(result.amount).toBe(15);
+        // Outcome dual-written by gateway (void → succeeded op, cancelled status)
+        expect(result.outcome).toBe('succeeded');
+        expect(result.references?.providerObjectId).toBe('pi_inplace_guard');
+        expect(result.reconciliationRequired).toBeUndefined();
+    });
+
+    it('ignores null modifiedResult from after-hook and returns original gateway result', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_null_mod',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 2000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async () => ({
+                    proceed: true,
+                    // Force a non-object modifiedResult
+                    modifiedResult: null as unknown as never,
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_null_mod',
+        });
+        expect(result.success).toBe(true);
+        expect(result.status).toBe('cancelled');
+        expect(result.gatewayId).toBe('pi_null_mod');
+        expect(result.amount).toBe(20);
+    });
+});
+
+describe('PaymentClient webhook error isolation', () => {
+    it('rethrows InvalidWebhookError even when onWebhookFailed throws', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                onWebhookFailed: async () => {
+                    throw new Error('hook secondary failure');
+                },
+            },
+        });
+
+        // Stripe verifyWebhook will fail without a valid signature
+        try {
+            await client.handleWebhook(
+                'stripe',
+                { id: 'evt_1', type: 'payment_intent.succeeded', data: { object: {} } },
+                'invalid_sig',
+            );
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidWebhookError);
+            expect((error as Error).message).not.toMatch(/hook secondary/);
+        }
+    });
+
+    it('continues verification when onWebhookReceived throws', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                onWebhookReceived: async () => {
+                    throw new Error('received-hook boom');
+                },
+            },
+        });
+
+        // Still fails closed on invalid signature — proves we reached verify after the hook threw
+        try {
+            await client.handleWebhook(
+                'stripe',
+                { id: 'evt_1', type: 'payment_intent.succeeded', data: { object: {} } },
+                'invalid_sig',
+            );
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidWebhookError);
+            expect((error as Error).message).not.toMatch(/received-hook/);
+        }
+    });
+
+    it('does not call onWebhookFailed for parse failures after successful verify', async () => {
+        let onWebhookFailedCalled = false;
+        const client = new PaymentClient({
+            moyasar: {
+                secretKey: 'sk_test_moyasar',
+                webhookSecret: 'whsec_moyasar_test',
+            },
+            defaultGateway: 'moyasar',
+            hooks: {
+                onWebhookFailed: async () => {
+                    onWebhookFailedCalled = true;
+                },
+            },
+        });
+
+        // secret_token matches → verify succeeds; card_auth_* → parse throws
+        try {
+            await client.handleWebhook('moyasar', {
+                id: 'evt_card_auth',
+                type: 'card_auth_succeeded',
+                created_at: '2024-01-01T00:00:00Z',
+                secret_token: 'whsec_moyasar_test',
+                data: {
+                    id: 'card_auth_1',
+                    status: 'authenticated',
+                    amount: 100,
+                    currency: 'SAR',
+                },
+            });
+            expect.unreachable('should have thrown on parse');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidWebhookError);
+            expect((error as Error).message).toMatch(/card authentication|card_auth/i);
+        }
+        expect(onWebhookFailedCalled).toBe(false);
+    });
+
+    it('calls onWebhookFailed when verification fails', async () => {
+        let onWebhookFailedCalled = false;
+        const client = new PaymentClient({
+            moyasar: {
+                secretKey: 'sk_test_moyasar',
+                webhookSecret: 'whsec_moyasar_test',
+            },
+            defaultGateway: 'moyasar',
+            hooks: {
+                onWebhookFailed: async () => {
+                    onWebhookFailedCalled = true;
+                },
+            },
+        });
+
+        try {
+            await client.handleWebhook('moyasar', {
+                id: 'evt_bad',
+                type: 'payment_paid',
+                secret_token: 'wrong_token',
+                data: { id: 'pay_1', status: 'paid', amount: 100, currency: 'SAR' },
+            });
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidWebhookError);
+        }
+        expect(onWebhookFailedCalled).toBe(true);
+    });
+
+    it('composed onWebhookVerified is fail-fast: second handler not run if first throws', async () => {
+        let firstCalled = false;
+        let secondCalled = false;
+        const client = new PaymentClient({
+            moyasar: {
+                secretKey: 'sk_test_moyasar',
+                webhookSecret: 'whsec_moyasar_test',
+            },
+            defaultGateway: 'moyasar',
+            hooks: {
+                onWebhookVerified: async () => {
+                    firstCalled = true;
+                    throw new Error('primary fulfillment failed');
+                },
+            },
+        });
+
+        client.addHook('onWebhookVerified', async () => {
+            secondCalled = true;
+        });
+
+        try {
+            await client.handleWebhook('moyasar', {
+                id: 'evt_paid',
+                type: 'payment_paid',
+                created_at: '2024-01-01T00:00:00Z',
+                secret_token: 'whsec_moyasar_test',
+                data: {
+                    id: 'pay_compose_1',
+                    status: 'paid',
+                    amount: 100,
+                    currency: 'SAR',
+                },
+            });
+            expect.unreachable('should have rethrown first handler error');
+        } catch (error) {
+            expect(error).toBeInstanceOf(Error);
+            expect((error as Error).message).toBe('primary fulfillment failed');
+        }
+        expect(firstCalled).toBe(true);
+        expect(secondCalled).toBe(false);
+    });
+});
+
+describe('PaymentClient construct-time credential validation', () => {
+    it('throws InvalidRequestError when stripe.secretKey is empty', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    stripe: { secretKey: '' },
+                }),
+        ).toThrow(InvalidRequestError);
+
+        try {
+            new PaymentClient({ stripe: { secretKey: '   ' } });
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+            expect((error as Error).message).toMatch(/stripe\.secretKey/i);
+        }
+    });
+
+    it('throws InvalidRequestError when moyasar.secretKey is empty', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    moyasar: { secretKey: '' },
+                }),
+        ).toThrow(InvalidRequestError);
+    });
+
+    it('throws InvalidRequestError when paypal credentials are empty', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    paypal: { clientId: '', clientSecret: 'secret' },
+                }),
+        ).toThrow(InvalidRequestError);
+
+        expect(
+            () =>
+                new PaymentClient({
+                    paypal: { clientId: 'id', clientSecret: '  ' },
+                }),
+        ).toThrow(InvalidRequestError);
+    });
+
+    it('throws InvalidRequestError when paymob has neither secretKey nor apiKey', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    paymob: { publicKey: 'pk_test' },
+                }),
+        ).toThrow(InvalidRequestError);
+
+        try {
+            new PaymentClient({ paymob: { secretKey: '  ', apiKey: '' } });
+            expect.unreachable('should have thrown');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+            expect((error as Error).message).toMatch(/paymob/i);
+        }
+    });
+
+    it('allows paymob with only apiKey (legacy) or only secretKey', () => {
+        expect(
+            () =>
+                new PaymentClient({
+                    paymob: { apiKey: 'legacy_api_key' },
+                }),
+        ).not.toThrow();
+
+        expect(
+            () =>
+                new PaymentClient({
+                    paymob: { secretKey: 'sk_test_paymob' },
+                }),
+        ).not.toThrow();
+    });
+});
+
+describe('PayPalCreatePaymentParamsSchema', () => {
+    it('accepts returnUrl + cancelUrl without callbackUrl', () => {
+        const parsed = PayPalCreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'USD',
+            returnUrl: 'https://example.com/return',
+            cancelUrl: 'https://example.com/cancel',
+        });
+        expect(parsed.success).toBe(true);
+    });
+
+    it('accepts callbackUrl alone (covers success + cancel fallback)', () => {
+        const parsed = PayPalCreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/callback',
+        });
+        expect(parsed.success).toBe(true);
+    });
+
+    it('rejects when neither callbackUrl nor returnUrl is set', () => {
+        const parsed = PayPalCreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'USD',
+            cancelUrl: 'https://example.com/cancel',
+        });
+        expect(parsed.success).toBe(false);
+    });
+});
+
+describe('idempotencyKey and Moyasar source schema guards', () => {
+    it('rejects empty-string idempotencyKey on create/capture schemas', () => {
+        const create = CreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/callback',
+            idempotencyKey: '',
+        });
+        expect(create.success).toBe(false);
+
+        const capture = CaptureParamsSchema.safeParse({
+            gatewayPaymentId: 'pay_1',
+            idempotencyKey: '',
+        });
+        expect(capture.success).toBe(false);
+    });
+
+    it('accepts omitted idempotencyKey', () => {
+        const create = CreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/callback',
+        });
+        expect(create.success).toBe(true);
+    });
+
+    it('MoyasarCreatePaymentParamsSchema rejects raw creditcard source', () => {
+        const parsed = MoyasarCreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'SAR',
+            callbackUrl: 'https://example.com/callback',
+            moyasarSource: {
+                type: 'creditcard',
+                name: 'John Doe',
+                number: '4111111111111111',
+                month: 12,
+                year: 2030,
+                cvc: '123',
+            },
+        });
+        expect(parsed.success).toBe(false);
+    });
+
+    it('MoyasarCreatePaymentParamsSchema accepts token source', () => {
+        const parsed = MoyasarCreatePaymentParamsSchema.safeParse({
+            amount: 10,
+            currency: 'SAR',
+            callbackUrl: 'https://example.com/callback',
+            moyasarSource: {
+                type: 'token',
+                token: 'token_abc',
+            },
+        });
+        expect(parsed.success).toBe(true);
+    });
+});
+
+describe('PaymentClient amount validation (finite)', () => {
+    it('rejects Infinity/NaN amounts via createPayment validation path', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        for (const amount of [Infinity, -Infinity, NaN]) {
+            try {
+                await client.createPayment({
+                    amount,
+                    currency: 'USD',
+                    callbackUrl: 'https://example.com/callback',
+                });
+                expect.unreachable(`should reject amount=${amount}`);
+            } catch (error) {
+                expect(error).toBeInstanceOf(InvalidRequestError);
+                expect((error as InvalidRequestError).code).toBe('INVALID_REQUEST');
+            }
+        }
+    });
+
+    it('rejects Infinity/NaN checkout session amounts', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+            defaultGateway: 'stripe',
+        });
+        const gw = client.gateway('stripe') as {
+            createCheckoutSession: (params: {
+                amount?: number;
+                currency?: string;
+                successUrl: string;
+            }) => Promise<unknown>;
+        };
+
+        for (const amount of [Infinity, -Infinity, NaN]) {
+            try {
+                await gw.createCheckoutSession({
+                    amount,
+                    currency: 'USD',
+                    successUrl: 'https://example.com/success',
+                });
+                expect.unreachable(`should reject checkout amount=${amount}`);
+            } catch (error) {
+                expect(error).toBeInstanceOf(InvalidRequestError);
+            }
+        }
+    });
+
+    it('rejects Infinity/NaN Moyasar split amounts', async () => {
+        const client = new PaymentClient({
+            moyasar: { secretKey: 'sk_test_moyasar' },
+            defaultGateway: 'moyasar',
+        });
+
+        for (const amount of [Infinity, -Infinity, NaN]) {
+            try {
+                await client.createPayment({
+                    amount: 10,
+                    currency: 'SAR',
+                    callbackUrl: 'https://example.com/callback',
+                    moyasarSource: {
+                        type: 'token',
+                        token: 'token_test_abc',
+                    },
+                    // gateway-specific field accepted via passthrough / Moyasar schema
+                    splits: [
+                        {
+                            amount,
+                            recipient_id: '11111111-1111-1111-1111-111111111111',
+                        },
+                    ],
+                } as never);
+                expect.unreachable(`should reject split amount=${amount}`);
+            } catch (error) {
+                expect(error).toBeInstanceOf(InvalidRequestError);
+            }
+        }
+    });
+
+    it('rejects non-http(s) callback and checkout URLs (javascript:, data:, file:)', async () => {
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123' },
+            defaultGateway: 'stripe',
+        });
+
+        for (const url of [
+            'javascript:alert(1)',
+            'data:text/html,hi',
+            'file:///etc/passwd',
+        ]) {
+            try {
+                await client.createPayment({
+                    amount: 10,
+                    currency: 'USD',
+                    callbackUrl: url,
+                });
+                expect.unreachable(`should reject callbackUrl=${url}`);
+            } catch (error) {
+                expect(error).toBeInstanceOf(InvalidRequestError);
+            }
+        }
+
+        const gw = client.gateway('stripe') as {
+            createCheckoutSession: (params: {
+                amount: number;
+                currency: string;
+                successUrl: string;
+                cancelUrl?: string;
+            }) => Promise<unknown>;
+        };
+
+        try {
+            await gw.createCheckoutSession({
+                amount: 10,
+                currency: 'USD',
+                successUrl: 'javascript:alert(1)',
+            });
+            expect.unreachable('should reject javascript: successUrl');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+        }
+
+        try {
+            await gw.createCheckoutSession({
+                amount: 10,
+                currency: 'USD',
+                successUrl: 'https://example.com/ok',
+                cancelUrl: 'javascript:void(0)',
+            });
+            expect.unreachable('should reject javascript: cancelUrl');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+        }
+    });
+});
+
+describe('PaymentClient PayPal webhooks', () => {
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    afterEach(() => {
+        globalThis.fetch = originalFetch;
+    });
+
+    it('should verify PayPal webhooks asynchronously when headers are passed', async () => {
+        let verifyCalled = false;
+        globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+            const url = typeof input === 'string' ? input : (input as Request).url;
+
+            if (url.includes('oauth2/token')) {
+                return createMockResponse({
+                    access_token: 'test_token',
+                    expires_in: 3600,
+                });
+            }
+
+            if (url.includes('verify-webhook-signature')) {
+                verifyCalled = true;
+                return createMockResponse({ verification_status: 'SUCCESS' });
+            }
+
+            throw new Error(`Unexpected URL: ${url}`);
+        }) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            paypal: {
+                clientId: 'paypal_client',
+                clientSecret: 'paypal_secret',
+                webhookId: 'WH123',
+                sandbox: true,
+            },
+            defaultGateway: 'paypal',
+        });
+
+        const payload = {
+            id: 'WH-event-123',
+            event_type: 'PAYMENT.CAPTURE.COMPLETED',
+            create_time: '2024-06-15T14:30:00Z',
+            resource_type: 'capture',
+            resource: {
+                id: 'CAPTURE-123',
+                status: 'COMPLETED',
+                amount: {
+                    currency_code: 'USD',
+                    value: '10.00',
+                },
+            },
+        };
+
+        // Fresh transmission_time — gateway rejects headers older than 15 minutes.
+        const event = await client.handleWebhook('paypal', payload, {
+            'PAYPAL-TRANSMISSION-ID': 'trans-123',
+            'PAYPAL-TRANSMISSION-TIME': new Date().toISOString(),
+            'PAYPAL-TRANSMISSION-SIG': 'signature',
+            'PAYPAL-CERT-URL': 'https://api.paypal.com/cert',
+            'PAYPAL-AUTH-ALGO': 'SHA256withRSA',
+        });
+
+        expect(verifyCalled).toBe(true);
+        expect(event.gateway).toBe('paypal');
+        expect(event.gatewayPaymentId).toBe('CAPTURE-123');
+        // Built-in gateway dual-write
+        expect(event.event?.type).toBe('capture.completed');
+        expect(event.stableType).toBe('capture.completed');
+        expect(event.provider?.eventType).toBe('PAYMENT.CAPTURE.COMPLETED');
+    });
+
+    it('Phase 7: safety-net attaches PaymentEvent when custom gateway omits dual-write', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                custom: {
+                    name: 'custom',
+                    manifest: {
+                        name: 'custom',
+                        displayName: 'Custom',
+                        version: '0.0.1',
+                    },
+                    create(ctx) {
+                        return {
+                            name: 'custom',
+                            capabilities: {
+                                createPayment: true,
+                                capturePayment: false,
+                                refundPayment: false,
+                                voidPayment: false,
+                                getPayment: false,
+                                getPaymentStatus: false,
+                                webhooks: true,
+                                createCheckoutSession: false,
+                            },
+                            supports(cap: string) {
+                                return cap === 'webhooks' || cap === 'createPayment';
+                            },
+                            async createPayment() {
+                                throw new Error('unused');
+                            },
+                            async capturePayment() {
+                                throw new Error('unused');
+                            },
+                            async refundPayment() {
+                                throw new Error('unused');
+                            },
+                            verifyWebhook() {
+                                return true;
+                            },
+                            parseWebhookEvent(payload: unknown) {
+                                return {
+                                    id: 'evt_custom_safety',
+                                    type: 'payment_paid',
+                                    gateway: 'custom',
+                                    paymentId: 'pay_internal',
+                                    gatewayPaymentId: 'gw_1',
+                                    status: 'paid' as const,
+                                    timestamp: new Date('2024-01-01T00:00:00.000Z'),
+                                    rawPayload: payload,
+                                };
+                            },
+                        };
+                    },
+                },
+            },
+            defaultGateway: 'custom',
+        });
+
+        let verifiedType: string | undefined;
+        client.addHook('onWebhookVerified', async (event) => {
+            verifiedType = event.event?.type;
+        });
+
+        const event = await client.handleWebhook('custom', {
+            hello: true,
+            signature: 'valid',
+        });
+
+        // Custom parse did not attach — client safety-net dual-writes
+        expect(event.type).toBe('payment_paid'); // legacy preserved
+        expect(event.event).toBeDefined();
+        expect(event.event?.schemaVersion).toBe('1');
+        // custom gateway → provider.unmapped (no native map) unless type already stable
+        expect(event.event?.type).toBe('provider.unmapped');
+        expect(event.provider?.eventType).toBe('payment_paid');
+        expect(event.payloadHash).toBeDefined();
+        // Hook sees dual-written event
+        expect(verifiedType).toBe('provider.unmapped');
+    });
+
+    it('Phase 7: Moyasar handleWebhook dual-write preserves redaction + stable type', async () => {
+        const client = new PaymentClient({
+            moyasar: {
+                secretKey: 'sk_test_moyasar',
+                webhookSecret: 'whsec_moyasar_test',
+            },
+            defaultGateway: 'moyasar',
+        });
+
+        const event = await client.handleWebhook('moyasar', {
+            id: 'wh_client_p7',
+            type: 'payment_paid',
+            created_at: '2024-01-01T00:00:00Z',
+            secret_token: 'whsec_moyasar_test',
+            live: false,
+            data: {
+                id: 'pay_moyasar_1',
+                status: 'paid',
+                amount: 10000,
+                currency: 'SAR',
+                metadata: { paymentId: 'internal_1' },
+            },
+        });
+
+        expect(event.type).toBe('payment_paid');
+        expect(event.stableType).toBe('payment.succeeded');
+        expect(event.event?.type).toBe('payment.succeeded');
+        expect(event.provider?.eventType).toBe('payment_paid');
+        expect(
+            (event.rawPayload as Record<string, unknown>).secret_token,
+        ).toBeUndefined();
+        expect(event.payloadHash).toBeDefined();
+    });
+});

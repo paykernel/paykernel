@@ -1,0 +1,89 @@
+/**
+ * Structural D1 types + store options.
+ *
+ * Consumers pass Workers `env.DB` (or a mock) without this package importing
+ * `cloudflare:workers`. Optional peer `@cloudflare/workers-types` improves DX.
+ */
+
+import type {
+  ResolvedSchemaNamespace,
+  SchemaNamespaceConfig,
+} from "@paykernel/internal-sql-store";
+import type { D1Executor } from "./executor";
+import type { StoreClock } from "./clock";
+
+export type { D1Executor } from "./executor";
+export type { StoreClock } from "./clock";
+export type { SchemaNamespaceConfig, ResolvedSchemaNamespace };
+
+/**
+ * Minimal structural surface — duck-types real D1Database from Workers.
+ * Verified against Cloudflare D1 Workers Binding API docs (2026-08-03).
+ */
+export type D1PreparedStatementLike = {
+  bind(...values: unknown[]): D1PreparedStatementLike;
+  first<T = Record<string, unknown>>(colName?: string): Promise<T | null>;
+  all<T = Record<string, unknown>>(): Promise<{
+    results: T[];
+    success: boolean;
+    meta?: unknown;
+  }>;
+  run(): Promise<{
+    success: boolean;
+    meta?: { changes?: number; [key: string]: unknown };
+    results?: unknown[];
+  }>;
+};
+
+/**
+ * Structural D1Database / D1DatabaseSession surface.
+ * `withSession` is optional for older bindings / mocks without Sessions API.
+ */
+export type D1DatabaseLike = {
+  prepare(query: string): D1PreparedStatementLike;
+  batch<T = unknown>(statements: D1PreparedStatementLike[]): Promise<T[]>;
+  exec?(query: string): Promise<unknown>;
+  /** Sessions API — returns a session-scoped DB (or self-like object). */
+  withSession?(constraintOrBookmark?: string): D1DatabaseLike;
+};
+
+/**
+ * Options shared by createD1*Store factories that take an executor.
+ *
+ * - `executor` is required when not using binding factories.
+ * - `clock` is optional; default wall clock. Prefer FakeClock in tests.
+ * - `namespace` is validated via createSchemaNamespace — never raw SQL names.
+ * - Factories do **not** migrate by default.
+ */
+export type D1StoreOptions = {
+  executor: D1Executor;
+  /** Injectable clock for lease expiry / ISO timestamps (FakeClock-compatible). */
+  clock?: StoreClock;
+  /** Schema/table namespace; validated identifiers only. */
+  namespace?: SchemaNamespaceConfig;
+};
+
+/**
+ * Ergonomic binding options for `createD1PaymentStores({ db })`.
+ */
+export type D1BindingStoreOptions = {
+  /** Workers D1 binding (`env.PAYMENTS_DB` / `env.DB`) or mock. */
+  db: D1DatabaseLike;
+  clock?: StoreClock;
+  namespace?: SchemaNamespaceConfig;
+  /**
+   * When set, wraps the binding with `db.withSession(session)` if available
+   * (e.g. `"first-primary"` for read-after-write under read replication).
+   */
+  session?: string;
+};
+
+export type D1StoresBundle = {
+  idempotency: import("@paykernel/testkit").IdempotencyStore;
+  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
+  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  executor: D1Executor;
+  namespace: ResolvedSchemaNamespace;
+  clock: StoreClock;
+  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+};

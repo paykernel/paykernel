@@ -1,0 +1,416 @@
+/**
+ * Restricted post-attempt fallback eligibility (Phase 21.3).
+ *
+ * SEPARATE from select-time `createPaymentRouter({ fallback })`.
+ *
+ * Default-deny: only `not_submitted` and `pre_submission_failure` are safe.
+ * Never auto-route after timeout, connection_reset, indeterminate,
+ * provider_5xx_uncertain, or submitted (duplicate-charge risk).
+ *
+ * Expert override is opt-in and loud: branded object only, never defaulted.
+ */
+
+import type { PaymentOperationOutcome } from "@paykernel/core";
+import { isIndeterminateOutcome } from "@paykernel/core";
+import { NoRouteMatchError, UnsafeFallbackDeniedError } from "./errors";
+import type { PaymentRouter } from "./types";
+import type {
+  ExpertUnsafeFallbackOverride,
+  FallbackEligibility,
+  RoutingDecision,
+  RoutingInput,
+  SubmissionState,
+} from "./types";
+
+const SAFE_STATES: ReadonlySet<SubmissionState> = new Set([
+  "not_submitted",
+  "pre_submission_failure",
+]);
+
+const ALL_STATES: ReadonlySet<SubmissionState> = new Set([
+  "not_submitted",
+  "pre_submission_failure",
+  "submitted",
+  "indeterminate",
+  "timeout",
+  "connection_reset",
+  "provider_5xx_uncertain",
+]);
+
+/**
+ * True ONLY for states where the request was never accepted by a provider:
+ * `not_submitted` | `pre_submission_failure`.
+ *
+ * False for timeout, connection_reset, indeterminate, provider_5xx_uncertain,
+ * submitted (A2).
+ */
+export function isSafeFallbackEligible(state: SubmissionState): boolean {
+  return SAFE_STATES.has(state);
+}
+
+/**
+ * Evaluate post-attempt fallback eligibility.
+ *
+ * - Safe states → allowed:true
+ * - Unsafe states → allowed:false UNLESS expertOverride with
+ *   `confirmUnsafeFallback: true` AND non-empty reason string
+ */
+export function evaluateFallback(input: {
+  submissionState: SubmissionState;
+  expertOverride?: ExpertUnsafeFallbackOverride;
+}): FallbackEligibility {
+  const { submissionState } = input;
+
+  if (isSafeFallbackEligible(submissionState)) {
+    return {
+      allowed: true,
+      reason: "safe_submission_state",
+      submissionState,
+    };
+  }
+
+  if (isExpertUnsafeFallbackOverride(input.expertOverride)) {
+    return {
+      allowed: true,
+      reason: `expert_override:${input.expertOverride.reason.trim()}`,
+      submissionState,
+      expertOverride: true,
+    };
+  }
+
+  return {
+    allowed: false,
+    reason: unsafeDenyReason(submissionState),
+    submissionState,
+  };
+}
+
+function unsafeDenyReason(state: SubmissionState): string {
+  switch (state) {
+    case "timeout":
+      return "denied_timeout";
+    case "connection_reset":
+      return "denied_connection_reset";
+    case "indeterminate":
+      return "denied_indeterminate";
+    case "provider_5xx_uncertain":
+      return "denied_provider_5xx_uncertain";
+    case "submitted":
+      return "denied_submitted";
+    default:
+      return "denied_unsafe_state";
+  }
+}
+
+/**
+ * Map a core {@link PaymentOperationOutcome} to a {@link SubmissionState}.
+ *
+ * **Never** maps `indeterminate` → `pre_submission_failure`.
+ * Conservative: unknown / succeeded / requires_action / declined map to
+ * states that do not enable automatic multi-gateway retry.
+ */
+export function classifyFromOperationOutcome(
+  outcome: PaymentOperationOutcome,
+): SubmissionState {
+  switch (outcome) {
+    case "indeterminate":
+      return "indeterminate";
+    case "failed":
+      // Generic failed without submission evidence — treat as pre-submission
+      // only when the app has classified transport-level failure separately.
+      // Default: pre_submission_failure is NOT assumed for bare "failed".
+      // Use classifySubmissionState with explicit hints for transport failures.
+      return "submitted";
+    case "succeeded":
+    case "requires_action":
+    case "declined":
+      return "submitted";
+    default: {
+      const _exhaustive: never = outcome;
+      void _exhaustive;
+      return "indeterminate";
+    }
+  }
+}
+
+/**
+ * Classify submission state from outcome / error / explicit hints.
+ *
+ * Priority:
+ * 1. Explicit `submissionState` if provided
+ * 2. Known error kinds (timeout, connection_reset, etc.)
+ * 3. PaymentOperationOutcome / indeterminate detection
+ * 4. Default: `indeterminate` (fail-closed for fallback)
+ *
+ * **Never** maps indeterminate → pre_submission_failure.
+ */
+export function classifySubmissionState(input: {
+  submissionState?: SubmissionState;
+  outcome?: PaymentOperationOutcome;
+  /**
+   * Optional error kind / code string (e.g. "timeout", "ECONNRESET",
+   * "network_error", "validation_error", "not_submitted").
+   */
+  errorKind?: string;
+  /**
+   * Optional raw error for shape-based classification.
+   * Secrets must not be required — only name/code/message patterns.
+   */
+  error?: unknown;
+  /**
+   * Result object that may carry `outcome` (GatewayPaymentResult or
+   * PaymentOperationResult). Indeterminate detection uses core helper.
+   */
+  result?: unknown;
+}): SubmissionState {
+  if (
+    input.submissionState !== undefined &&
+    ALL_STATES.has(input.submissionState)
+  ) {
+    return input.submissionState;
+  }
+
+  const fromErrorKind = classifyErrorKind(input.errorKind);
+  if (fromErrorKind !== null) {
+    return fromErrorKind;
+  }
+
+  const fromError = classifyErrorObject(input.error);
+  if (fromError !== null) {
+    return fromError;
+  }
+
+  if (input.outcome !== undefined) {
+    return classifyFromOperationOutcome(input.outcome);
+  }
+
+  if (input.result !== undefined) {
+    const fromResult = classifyResultShape(input.result);
+    if (fromResult !== null) {
+      return fromResult;
+    }
+  }
+
+  // Fail-closed: unknown → indeterminate (blocks automatic fallback).
+  return "indeterminate";
+}
+
+/**
+ * Classify only known payment-result shapes. Returns null for unrecognized
+ * values so callers can fail-closed without catch-all swallowing.
+ */
+function classifyResultShape(result: unknown): SubmissionState | null {
+  if (result === null || typeof result !== "object") {
+    return null;
+  }
+
+  // Prefer dual-write / operation outcome when present (covers PaymentOperationResult
+  // and GatewayPaymentResult with outcome attached).
+  if ("outcome" in result) {
+    const outcome = (result as { outcome?: unknown }).outcome;
+    if (outcome === "indeterminate") return "indeterminate";
+    if (
+      outcome === "succeeded" ||
+      outcome === "requires_action" ||
+      outcome === "declined" ||
+      outcome === "failed"
+    ) {
+      return classifyFromOperationOutcome(outcome);
+    }
+  }
+
+  // GatewayPaymentResult without outcome: use core helper only on the
+  // structural shape it accepts (success + gatewayId + status).
+  if (
+    "success" in result &&
+    "gatewayId" in result &&
+    "status" in result &&
+    isIndeterminateOutcome(
+      result as Parameters<typeof isIndeterminateOutcome>[0],
+    )
+  ) {
+    return "indeterminate";
+  }
+
+  return null;
+}
+
+function classifyErrorKind(kind: string | undefined): SubmissionState | null {
+  if (kind === undefined) return null;
+  const k = kind.trim().toLowerCase();
+  if (!k) return null;
+
+  if (
+    k === "not_submitted" ||
+    k === "aborted_before_submit" ||
+    k === "cancelled_before_submit"
+  ) {
+    return "not_submitted";
+  }
+  if (
+    k === "pre_submission_failure" ||
+    k === "validation_error" ||
+    k === "invalid_request" ||
+    k === "configuration_error" ||
+    k === "auth_config_error"
+  ) {
+    return "pre_submission_failure";
+  }
+  if (k === "timeout" || k === "etimedout" || k === "network_timeout") {
+    return "timeout";
+  }
+  if (
+    k === "connection_reset" ||
+    k === "econnreset" ||
+    k === "econnrefused" ||
+    k === "socket_hang_up"
+  ) {
+    return "connection_reset";
+  }
+  if (
+    k === "provider_5xx_uncertain" ||
+    k === "uncertain_5xx" ||
+    k === "http_5xx_uncertain"
+  ) {
+    return "provider_5xx_uncertain";
+  }
+  if (k === "indeterminate" || k === "ambiguous" || k === "unknown") {
+    return "indeterminate";
+  }
+  if (k === "submitted" || k === "network_error") {
+    // Generic network without classification → indeterminate (safer than pre-submit).
+    return k === "submitted" ? "submitted" : "indeterminate";
+  }
+  return null;
+}
+
+function classifyErrorObject(error: unknown): SubmissionState | null {
+  if (error === null || error === undefined) return null;
+  if (typeof error !== "object") return null;
+
+  const e = error as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    statusCode?: unknown;
+  };
+
+  const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
+  const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+
+  if (name === "aborterror" || code === "abort_error") {
+    return "not_submitted";
+  }
+  if (
+    name === "invalidrequesterror" ||
+    name === "validationerror" ||
+    code === "invalid_request" ||
+    code === "validation_error"
+  ) {
+    return "pre_submission_failure";
+  }
+  if (
+    code === "etimedout" ||
+    code === "timeout" ||
+    message.includes("timed out") ||
+    message.includes("timeout")
+  ) {
+    return "timeout";
+  }
+  if (
+    code === "econnreset" ||
+    code === "econnrefused" ||
+    message.includes("connection reset") ||
+    message.includes("socket hang up")
+  ) {
+    return "connection_reset";
+  }
+  if (
+    typeof e.statusCode === "number" &&
+    e.statusCode >= 500 &&
+    e.statusCode < 600
+  ) {
+    return "provider_5xx_uncertain";
+  }
+
+  return null;
+}
+
+/**
+ * Select an alternate gateway only when eligibility.allowed.
+ * Excludes already-attempted gateways from candidates.
+ *
+ * Throws {@link UnsafeFallbackDeniedError} when not allowed or no alternate.
+ */
+export function trySelectFallbackGateway(
+  router: PaymentRouter,
+  input: RoutingInput,
+  eligibility: FallbackEligibility,
+  options?: {
+    /** Gateways already attempted (always excluded). */
+    attemptedGateways?: readonly string[];
+  },
+): RoutingDecision {
+  if (!eligibility.allowed) {
+    throw new UnsafeFallbackDeniedError(
+      `Post-attempt fallback denied: ${eligibility.reason}`,
+      {
+        submissionState: eligibility.submissionState,
+        reason: eligibility.reason,
+      },
+    );
+  }
+
+  const attempted = new Set<string>([
+    ...(options?.attemptedGateways ?? []),
+    ...(input.excludeGateways ?? []),
+  ]);
+
+  const selectInput: RoutingInput = { ...input };
+  if (attempted.size > 0) {
+    selectInput.excludeGateways = Object.freeze([...attempted]);
+  }
+
+  // router.select honors excludeGateways for both rules and select-time fallback.
+  let decision: RoutingDecision;
+  try {
+    decision = router.select(selectInput);
+  } catch (err) {
+    if (err instanceof NoRouteMatchError) {
+      throw new UnsafeFallbackDeniedError(
+        "Post-attempt fallback denied: no alternate gateway available",
+        {
+          submissionState: eligibility.submissionState,
+          reason: "no_alternate_gateway",
+        },
+      );
+    }
+    throw err;
+  }
+
+  if (attempted.has(decision.gateway)) {
+    throw new UnsafeFallbackDeniedError(
+      "Post-attempt fallback denied: no alternate gateway available",
+      {
+        submissionState: eligibility.submissionState,
+        reason: "no_alternate_gateway",
+      },
+    );
+  }
+
+  return decision;
+}
+
+/** Type guard for expert override shape (runtime). */
+export function isExpertUnsafeFallbackOverride(
+  value: unknown,
+): value is ExpertUnsafeFallbackOverride {
+  if (value === null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    v.confirmUnsafeFallback === true &&
+    typeof v.reason === "string" &&
+    v.reason.trim().length > 0
+  );
+}

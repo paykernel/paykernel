@@ -1,0 +1,44 @@
+# Build & deps
+dist
+**/dist/**
+node_modules
+**/node_modules/**
+coverage
+**/coverage/**
+
+# Lockfiles & package manager
+bun.lock
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Generated / packed artifacts
+*.tgz
+**/*.tgz
+
+# Changesets release notes (when present)
+.changeset/**/*.md
+
+# Large reference material (not product source)
+resources/**
+roadmap.md
+tasks.md
+
+# Pre-Phase-1 sources keep existing style until an intentional format pass.
+# Shared Prettier still formats monorepo root tooling and new docs.
+packages/core/src/**
+packages/core/docs/**
+packages/core/dist/**
+packages/core/CHANGELOG.md
+
+# Phase 0 baseline generators predate Prettier; leave until deliberate reformat.
+scripts/generate-api-baseline.ts
+scripts/record-package-baseline.ts
+scripts/consumer-smoke.mjs
+scripts/validate-package.sh
+
+# GitHub / IDE
+.github/**
+.idea/**
+.grok/**
+*.toml

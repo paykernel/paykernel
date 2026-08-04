@@ -1,0 +1,64 @@
+# Crash boundaries (D1)
+
+**Package:** `@paykernel/store-d1`  
+**Engine (inbox):** [webhooks crash-boundaries](../../webhooks/docs/crash-boundaries.md) (domain)  
+**Contracts:** Phase 9 lease reclaim + fencing in testkit
+
+How isolate restarts, mid-request crashes, and lease reclaim interact with durable D1 rows.
+
+---
+
+## Claim acquisition
+
+- Single-statement UPSERT/RETURNING is engine-atomic: either the lease is issued (RETURNING row) or the write did not take the claim path.
+- After a crash mid-request, a reserved/claimed row with an active lease blocks other workers until lease expiry (or reclaim via FakeClock-compatible `now` predicates).
+- Completing with a stale lease token fails with `StoreLeaseLostError` (fencing).
+
+| Timing | Outcome |
+| ------ | ------- |
+| Crash **before** claim write commits | No lease; safe for another worker to acquire |
+| Crash **after** claim write, before side effect | Active lease blocks peers until expiry / reclaim |
+| Crash **after** side effect, before `complete` | Holder or reclaim path; do **not** invent terminal failure if outcome is uncertain → `markIndeterminate` |
+| Stale `complete` after peer reclaim | `StoreLeaseLostError` |
+
+---
+
+## Multi-statement batch
+
+- `db.batch([...])` is a SQL transaction on D1: failure aborts/rolls back the **entire** sequence.
+- Prefer single-statement claims; use batch only when multi-statement is unavoidable.
+- Partial application of a claim sequence across unprotected round-trips is **forbidden**.
+
+---
+
+## Indeterminate outcomes
+
+- Do **not** convert uncertain provider outcomes into terminal failure.
+- `markIndeterminate` preserves the row; retention cleanup does **not** delete indeterminate by default.
+- Aligns with Phase 9 A4 and core indeterminate contracts.
+
+---
+
+## Worker isolate restarts
+
+- D1 is **durable** across Worker isolate restarts when using the **shared** D1 database.
+- In-memory only state is lost; lease rows are not (shared DB).
+- Local mock file reopen tests (`restart.d1.test.ts`) prove lease rows survive handle reopen.
+- Multi-host safety assumes **one shared D1** bound into all instances — not separate D1 DBs per isolate without consensus.
+
+---
+
+## Secrets
+
+- Never persist raw provider payloads/signatures by default.
+- Map driver errors through `mapDriverError` (token/account redaction).
+- Never echo Cloudflare API tokens or account IDs in `StoreError` messages.
+
+---
+
+## Related
+
+- [claims.md](./claims.md)  
+- [sessions-and-replication.md](./sessions-and-replication.md)  
+- [guarantees.md](./guarantees.md)  
+- [limits.md](./limits.md)  

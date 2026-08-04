@@ -1,0 +1,103 @@
+{
+  "name": "@paykernel/store-redis",
+  "version": "0.1.0-next.0",
+  "description": "Redis/Valkey/Upstash stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation coordination.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./bun": {
+      "types": "./dist/bun.d.ts",
+      "import": "./dist/bun.js"
+    },
+    "./upstash": {
+      "types": "./dist/upstash.d.ts",
+      "import": "./dist/upstash.js"
+    },
+    "./ioredis": {
+      "types": "./dist/ioredis.d.ts",
+      "import": "./dist/ioredis.js"
+    },
+    "./node-redis": {
+      "types": "./dist/node-redis.d.ts",
+      "import": "./dist/node-redis.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts ./src/bun.ts ./src/upstash.ts ./src/ioredis.ts ./src/node-redis.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/testkit": "workspace:*"
+  },
+  "peerDependencies": {
+    "ioredis": ">=5.0.0",
+    "redis": ">=4.0.0",
+    "@upstash/redis": ">=1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ioredis": {
+      "optional": true
+    },
+    "redis": {
+      "optional": true
+    },
+    "@upstash/redis": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@upstash/redis": "^1.35.3",
+    "ioredis": "^5.7.0",
+    "redis": "^5.8.2",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "payments",
+    "redis",
+    "valkey",
+    "upstash",
+    "idempotency",
+    "webhooks",
+    "reconciliation",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/store-redis"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/store-redis#readme",
+  "paymentsSdk": {
+    "portable": false,
+    "runtime": "node-or-bun"
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

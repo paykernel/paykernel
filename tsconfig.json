@@ -1,0 +1,24 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "include": [],
+  "references": [
+    {
+      "path": "./packages/core"
+    },
+    {
+      "path": "./packages/webhooks"
+    },
+    {
+      "path": "./packages/reconciliation"
+    },
+    {
+      "path": "./packages/testkit"
+    },
+    {
+      "path": "./internal/sql-store"
+    }
+  ]
+}

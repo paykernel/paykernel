@@ -1,0 +1,90 @@
+{
+  "name": "@paykernel/store-sqlite",
+  "version": "0.1.0-next.0",
+  "description": "Local/embedded SQLite stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (single-host).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./bun": {
+      "types": "./dist/bun.d.ts",
+      "import": "./dist/bun.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
+    },
+    "./better-sqlite3": {
+      "types": "./dist/better-sqlite3.d.ts",
+      "import": "./dist/better-sqlite3.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts ./src/bun.ts ./src/node.ts ./src/better-sqlite3.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/testkit": "workspace:*"
+  },
+  "peerDependencies": {
+    "better-sqlite3": ">=9.0.0"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/bun": "latest",
+    "better-sqlite3": "^11.10.0",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "payments",
+    "sqlite",
+    "bun",
+    "idempotency",
+    "webhooks",
+    "reconciliation",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/store-sqlite"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/store-sqlite#readme",
+  "paymentsSdk": {
+    "portable": false,
+    "runtime": "node-or-bun"
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

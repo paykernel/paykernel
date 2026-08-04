@@ -1,0 +1,72 @@
+<!-- auto-generated; do not hand-edit -->
+
+# Gateway capabilities
+
+This matrix is **generated from code** (built-in capability claims on
+gateway manifests). Do not edit by hand — regenerate with:
+
+```bash
+bun run docs:capabilities
+```
+
+## Providers
+
+- **Stripe** (`stripe`) `0.8.0`
+- **Moyasar** (`moyasar`) `0.8.0`
+- **PayPal** (`paypal`) `0.8.0`
+- **Paymob** (`paymob`) `0.8.0`
+
+## Capability matrix
+
+Cells are `✓` when the adapter **claims** the capability on its
+`GatewayManifest.capabilities` / instance snapshot, otherwise `✗`.
+Claims are conservative: method presence alone does not imply `true`.
+
+| Capability | Stripe | Moyasar | PayPal | Paymob |
+| --- | --- | --- | --- | --- |
+| payments | ✓ | ✓ | ✓ | ✓ |
+| immediateCapture | ✓ | ✓ | ✓ | ✓ |
+| authorization | ✓ | ✓ | ✓ | ✓ |
+| partialCapture | ✓ | ✓ | ✓ | ✓ |
+| refunds | ✓ | ✓ | ✓ | ✓ |
+| partialRefunds | ✓ | ✓ | ✓ | ✓ |
+| voids | ✓ | ✓ | ✓ | ✓ |
+| hostedCheckout | ✓ | ✗ | ✗ | ✗ |
+| tokenization | ✗ | ✗ | ✗ | ✗ |
+| customers | ✗ | ✗ | ✗ | ✗ |
+| paymentMethods | ✗ | ✗ | ✗ | ✗ |
+| marketplaceSplits | ✗ | ✓ | ✗ | ✗ |
+| disputes | ✗ | ✗ | ✗ | ✗ |
+| paymentLinks | ✗ | ✗ | ✗ | ✗ |
+| providerRecurring | ✗ | ✗ | ✗ | ✗ |
+
+## Key notes
+
+- **partialCapture** / **partialRefunds**: optional `amount` on
+  `capturePayment` / `refundPayment`. Omitting `amount` is a full
+  capture/refund and does not require the partial flag.
+- **hostedCheckout**: first-class `createCheckoutSession` (Stripe Checkout
+  Session product), not every provider redirect URL.
+- **marketplaceSplits**: create-time split / transfer surface (e.g. Moyasar
+  `splits`).
+- **providerRecurring**: extension-only; default `false`. Checkout
+  subscription mode alone does not force `true`.
+- **disputes** / **paymentLinks** / **customers** / **tokenization** /
+  **paymentMethods**: claimed only when the adapter exposes first-class
+  APIs for those products.
+
+## Inspecting support at runtime
+
+```ts
+import { createPaymentClient, stripeGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: { stripe: stripeGateway({ /* closed-over credentials */ }) },
+  defaultGateway: "stripe",
+});
+
+const gateway = client.gateway("stripe");
+if (gateway.supports("partialRefunds")) {
+  // partial amount is a viable path on this adapter
+}
+```

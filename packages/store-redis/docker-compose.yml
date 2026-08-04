@@ -1,0 +1,21 @@
+# Optional local Redis 7.2 for adapter-redis integration / conformance tests.
+#
+#   docker compose -f packages/store-redis/docker-compose.yml up -d
+#   export PAYMENTS_SDK_REDIS_URL=redis://127.0.0.1:33027
+#   bun test packages/store-redis
+#
+# Prefer PAYMENTS_SDK_REDIS_URL; REDIS_URL / VALKEY_URL also accepted by tests.
+# Host port 33027 avoids clashing with a local 6379.
+# Redis is optional infrastructure — CI without this service stays green via skip.
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "33027:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
