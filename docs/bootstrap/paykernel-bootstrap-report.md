@@ -61,7 +61,7 @@ Independent personal packages intentionally left as historical references only:
 
 ## Git
 
-Initialized as a new repository with default branch `main` and a single bootstrap commit. No remotes at init time.
+Initialized as a new repository with default branch `main` and a single bootstrap commit `df66280752504f18494f28f1eef8c5dacfa67c03`. No remotes at init time.
 
 ## External gates (not executed)
 
