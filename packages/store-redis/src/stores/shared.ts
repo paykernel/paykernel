@@ -6,7 +6,7 @@ import type { RedisCommandPort } from "../port";
 import { createEvalHelper, type EvalHelper } from "../port";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
-import type { KeyOptions, ResolvedKeyDesign, StoreSegment } from "../keys";
+import type { ResolvedKeyDesign, StoreSegment } from "../keys";
 import { resolveKeyDesign } from "../keys";
 import type { RedisStoreOptions } from "../types";
 import { MAX_RESULT_JSON_BYTES } from "../limits";
@@ -94,5 +94,4 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
   return { cursor, keys };
 }
 
-/** Re-export for callers that resolve keys options. */
-export type { KeyOptions };
+

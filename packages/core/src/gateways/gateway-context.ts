@@ -5,10 +5,8 @@ import { noopLogger, redact, type Logger } from "../utils/logger";
 import type { PaymentRuntime } from "../runtime/payment-runtime";
 import { createPaymentRuntime } from "../runtime/payment-runtime";
 
-// Re-export so existing `from "./gateway-context"` imports keep working.
+// Re-export CryptoProvider for the gateways barrel / public API surface.
 export type { CryptoProvider } from "../runtime/crypto-provider";
-export type { Clock } from "../runtime/clock";
-export type { PaymentRuntime } from "../runtime/payment-runtime";
 
 /**
  * Optional telemetry sink. Keep payloads free of secrets/PII.

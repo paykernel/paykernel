@@ -26,7 +26,7 @@ import {
   type ScheduleResult,
 } from "./store";
 
-export type MemoryClock = {
+type MemoryClock = {
   nowMs(): number;
 };
 

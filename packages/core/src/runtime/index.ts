@@ -9,7 +9,6 @@
 export type { Clock } from "./clock";
 export { systemClock } from "./clock";
 
-export type { CryptoProvider } from "./crypto-provider";
 export {
   resolveDefaultCrypto,
   uuidV4FromGetRandomValues,

@@ -10,7 +10,7 @@
  * backed by Redis/SQL, across processes.
  */
 
-export type MaybePromise<T> = T | Promise<T>;
+type MaybePromise<T> = T | Promise<T>;
 
 export type IdempotencyStatus = "in_progress" | "completed" | "unknown";
 

@@ -54,17 +54,17 @@ loadEnvFile(join(import.meta.dir, "../../.env"));
 loadEnvFile(join(process.cwd(), "packages/store-d1/.env"));
 loadEnvFile(join(process.cwd(), ".env"));
 
-export const D1_DATABASE_ID =
+const D1_DATABASE_ID =
   process.env.PAYMENTS_SDK_D1_DATABASE_ID ??
   process.env.D1_DATABASE_ID ??
   undefined;
 
-export const CF_ACCOUNT_ID =
+const CF_ACCOUNT_ID =
   process.env.CLOUDFLARE_ACCOUNT_ID ??
   process.env.CF_ACCOUNT_ID ??
   undefined;
 
-export const CF_API_TOKEN =
+const CF_API_TOKEN =
   process.env.CLOUDFLARE_API_TOKEN ??
   process.env.CF_API_TOKEN ??
   undefined;

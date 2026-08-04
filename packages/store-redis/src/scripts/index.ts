@@ -98,5 +98,3 @@ export const REDIS_SCRIPT_REGISTRY = {
     deleteIfExpired: RECON_DELETE_IF_EXPIRED_LUA,
   },
 } as const;
-
-export type RedisScriptRegistry = typeof REDIS_SCRIPT_REGISTRY;

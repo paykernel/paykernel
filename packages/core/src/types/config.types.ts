@@ -65,7 +65,7 @@ export interface PayPalConfig {
  */
 export type PaymobRegion = 'ksa' | 'eg' | 'pk' | 'om' | 'ae';
 
-export type MaybePromise<T> = T | Promise<T>;
+type MaybePromise<T> = T | Promise<T>;
 
 export interface PaymobIdempotencyRecord {
     fingerprint: string;

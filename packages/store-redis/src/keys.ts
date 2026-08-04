@@ -108,7 +108,7 @@ function joinKey(parts: string[]): string {
   return key;
 }
 
-export function assertLogicalKey(logicalKey: string): void {
+function assertLogicalKey(logicalKey: string): void {
   if (logicalKey.length === 0) {
     throw new RedisKeyDesignError("logical key must be non-empty");
   }

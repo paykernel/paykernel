@@ -72,7 +72,7 @@ export type GenerateWebhookEventOptions = {
 /**
  * Canonical body for signing: payload without the `signature` field.
  */
-export function webhookSigningBody(payload: unknown): string {
+function webhookSigningBody(payload: unknown): string {
   if (typeof payload === "string") return payload;
   if (payload === null || typeof payload !== "object") {
     return JSON.stringify(payload) ?? "null";

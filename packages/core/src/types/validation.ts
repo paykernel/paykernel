@@ -23,36 +23,10 @@ const HttpOrHttpsUrlSchema = (message = 'URL must be a valid http or https URL')
     );
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Enums & Literals
+// Moyasar Source Schemas (module-private composition helpers)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export const GatewayNameSchema = z.enum(["moyasar", "paypal", "paymob", "stripe"]);
-
-export const PaymentStatusSchema = z.enum([
-    "pending",
-    "processing",
-    "authorized",
-    "approved",
-    "paid",
-    "partially_captured",
-    "failed",
-    "cancelled",
-    "reversed",
-    "refunded",
-    "partially_refunded",
-    "refund_completed",
-    "refund_pending",
-    "refund_failed",
-    "setup_completed"
-]);
-
-export const RefundStatusSchema = z.enum(["pending", "completed", "failed"]);
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Moyasar Source Schemas
-// ═══════════════════════════════════════════════════════════════════════════════
-
-export const CreditCardSourceSchema = z.object({
+const CreditCardSourceSchema = z.object({
     type: z.literal("creditcard"),
     name: z.string().min(2),
     number: z.string().regex(/^\d{13,19}$/, "Invalid card number format"),
@@ -65,7 +39,7 @@ export const CreditCardSourceSchema = z.object({
     saveCard: z.boolean().optional(),
 });
 
-export const CardTokenSourceSchema = z.object({
+const CardTokenSourceSchema = z.object({
     type: z.literal("token"),
     token: z.string().startsWith("token_"),
     cvc: z.string().regex(/^\d{3,4}$/).optional(),
@@ -74,7 +48,7 @@ export const CardTokenSourceSchema = z.object({
     manualCapture: z.boolean().optional(),
 });
 
-export const ApplePaySourceSchema = z.object({
+const ApplePaySourceSchema = z.object({
     type: z.literal("applepay"),
     token: z.string(),
     manualCapture: z.boolean().optional(),
@@ -82,7 +56,7 @@ export const ApplePaySourceSchema = z.object({
     statementDescriptor: z.string().optional(),
 });
 
-export const ApplePayDecryptedSourceSchema = z.object({
+const ApplePayDecryptedSourceSchema = z.object({
     type: z.literal("applepay"),
     dpan: z.string().regex(/^\d{16,19}$/, "Invalid Apple Pay DPAN format"),
     month: z.number().int().min(1).max(12),
@@ -93,7 +67,7 @@ export const ApplePayDecryptedSourceSchema = z.object({
     eci: z.string().regex(/^\d{2}$/).optional(),
 });
 
-export const SamsungPaySourceSchema = z.object({
+const SamsungPaySourceSchema = z.object({
     type: z.literal("samsungpay"),
     token: z.string(),
     manualCapture: z.boolean().optional(),
@@ -101,14 +75,14 @@ export const SamsungPaySourceSchema = z.object({
     statementDescriptor: z.string().optional(),
 });
 
-export const StcPaySourceSchema = z.object({
+const StcPaySourceSchema = z.object({
     type: z.literal("stcpay"),
     mobile: z.string().regex(/^(?:05|\+9665|009665|9665)\d{8}$/, "Invalid KSA mobile number"),
     cashier: z.string().optional(),
     branch: z.string().optional(),
 });
 
-export const MoyasarPaymentSourceSchema = z.union([
+const MoyasarPaymentSourceSchema = z.union([
     CreditCardSourceSchema,
     CardTokenSourceSchema,
     ApplePaySourceSchema,
@@ -239,7 +213,7 @@ const MoyasarAftSenderSchema = z.object({
     phone_number: z.string().min(1).max(20),
 });
 
-export const MoyasarMetadataSchema = z.record(
+const MoyasarMetadataSchema = z.record(
     z.string()
 ).superRefine((metadata, ctx) => {
     const entries = Object.entries(metadata);
@@ -281,7 +255,7 @@ const OptionalIdempotencyKeySchema = z.string().min(1, "idempotencyKey must be n
  * Moyasar payment sources safe for merchant backend use.
  * Excludes raw `creditcard` (must be tokenized client-side via Moyasar.js).
  */
-export const MoyasarBackendPaymentSourceSchema = z.union([
+const MoyasarBackendPaymentSourceSchema = z.union([
     CardTokenSourceSchema,
     ApplePaySourceSchema,
     ApplePayDecryptedSourceSchema,
@@ -341,9 +315,6 @@ export const CreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.superRe
     },
 );
 
-/** Inferred type from CreatePaymentParamsSchema */
-export type ValidatedCreatePaymentParams = z.infer<typeof CreatePaymentParamsSchema>;
-
 export const MoyasarCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.extend({
     callbackUrl: HttpOrHttpsUrlSchema("Callback URL must be a valid URL").optional(),
     metadata: MoyasarMetadataSchema.optional(),
@@ -396,9 +367,6 @@ export const PayPalCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.e
     }
 });
 
-/** Inferred output type from PayPalCreatePaymentParamsSchema (defaults applied). */
-export type ValidatedPayPalCreatePaymentParams = z.infer<typeof PayPalCreatePaymentParamsSchema>;
-
 export const StripeCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.extend({
     callbackUrl: HttpOrHttpsUrlSchema("Callback URL must be a valid URL").optional(),
 }).superRefine((params, ctx) => {
@@ -423,9 +391,6 @@ export const CaptureParamsSchema = CaptureParamsObjectSchema.superRefine(
     },
 );
 
-/** Inferred type from CaptureParamsSchema */
-export type ValidatedCaptureParams = z.infer<typeof CaptureParamsSchema>;
-
 const RefundParamsObjectSchema = z.object({
     gatewayPaymentId: z.string().min(1),
     amount: OptionalPositiveAmountInputSchema,
@@ -441,23 +406,14 @@ export const RefundParamsSchema = RefundParamsObjectSchema.superRefine(
     },
 );
 
-/** Inferred type from RefundParamsSchema */
-export type ValidatedRefundParams = z.infer<typeof RefundParamsSchema>;
-
 export const VoidParamsSchema = z.object({
     gatewayPaymentId: z.string().min(1),
     idempotencyKey: OptionalIdempotencyKeySchema,
 }).passthrough();
 
-/** Inferred type from VoidParamsSchema */
-export type ValidatedVoidParams = z.infer<typeof VoidParamsSchema>;
-
 export const GetPaymentParamsSchema = z.object({
     gatewayPaymentId: z.string().min(1, "Gateway payment ID is required"),
 }).passthrough();
-
-/** Inferred type from GetPaymentParamsSchema */
-export type ValidatedGetPaymentParams = z.infer<typeof GetPaymentParamsSchema>;
 
 const MoyasarGatewayPaymentIdSchema = z.string().uuid(
     "Moyasar gatewayPaymentId must be a UUID",
@@ -672,8 +628,3 @@ export type CreateCheckoutSessionParams =
          */
         signal?: AbortSignal;
     };
-
-/** Inferred output type from CreateCheckoutSessionParamsSchema (defaults applied) */
-export type ValidatedCreateCheckoutSessionParams = z.infer<typeof CreateCheckoutSessionParamsSchema> & {
-    signal?: AbortSignal;
-};

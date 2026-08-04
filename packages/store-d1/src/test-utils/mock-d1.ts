@@ -31,7 +31,7 @@ export type MockD1Options = {
 };
 
 /** Observation of a prepare/bind/execute chain for assert-only tests. */
-export type MockD1StatementTrace = {
+type MockD1StatementTrace = {
   sql: string;
   /** Bound parameter values (via `.bind(...)`), never interpolated into SQL. */
   boundParams: readonly unknown[];

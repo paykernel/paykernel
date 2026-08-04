@@ -86,16 +86,4 @@ export function uniqueTablePrefix(label = "t"): string {
   return `${safeLabel}${Date.now().toString(36)}${rand}_`;
 }
 
-export const FOUNDATION_LOGICAL_TABLES = [
-  "payment_idempotency",
-  "payment_webhook_inbox",
-  "payment_reconciliation_jobs",
-  "payment_storage_migrations",
-] as const;
 
-export function dropFoundationTablesSql(tablePrefix: string): string {
-  // SQLite: drop one at a time (no multi-table DROP).
-  return FOUNDATION_LOGICAL_TABLES.map(
-    (t) => `DROP TABLE IF EXISTS "${tablePrefix}${t}"`,
-  ).join("; ");
-}
