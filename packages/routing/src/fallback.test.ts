@@ -145,15 +145,78 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
     expect(classifySubmissionState({})).toBe("indeterminate");
   });
 
-  it("maps AbortError shape to not_submitted (default-allow; multi-gateway caution)", () => {
-    // Documented residual: abort after provider accept can double-charge if auto-fallback.
-    // Prefer explicit submissionState / indeterminate for multi-gateway (safe-fallback.md).
+  it("maps AbortError shape to indeterminate (not fallback-eligible by default)", () => {
+    // Abort may race after provider accept — never default-allow multi-gateway.
     const err = new Error("The operation was aborted");
     err.name = "AbortError";
-    expect(classifySubmissionState({ error: err })).toBe("not_submitted");
+    expect(classifySubmissionState({ error: err })).toBe("indeterminate");
     expect(
       evaluateFallback({
         submissionState: classifySubmissionState({ error: err }),
+      }).allowed,
+    ).toBe(false);
+    expect(
+      isSafeFallbackEligible(classifySubmissionState({ error: err })),
+    ).toBe(false);
+  });
+
+  it("maps abort_error / ABORT_ERR codes and errorKinds to indeterminate", () => {
+    expect(
+      classifySubmissionState({ error: { name: "Error", code: "abort_error" } }),
+    ).toBe("indeterminate");
+    expect(
+      classifySubmissionState({ error: { name: "Error", code: "ABORT_ERR" } }),
+    ).toBe("indeterminate");
+    expect(classifySubmissionState({ errorKind: "abort_error" })).toBe(
+      "indeterminate",
+    );
+    expect(classifySubmissionState({ errorKind: "aborted" })).toBe(
+      "indeterminate",
+    );
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({ errorKind: "abort_error" }),
+      }).allowed,
+    ).toBe(false);
+  });
+
+  it("explicit pre-submit abort kinds remain not_submitted (safe)", () => {
+    expect(
+      classifySubmissionState({ errorKind: "aborted_before_submit" }),
+    ).toBe("not_submitted");
+    expect(
+      classifySubmissionState({ errorKind: "cancelled_before_submit" }),
+    ).toBe("not_submitted");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          errorKind: "aborted_before_submit",
+        }),
+      }).allowed,
+    ).toBe(true);
+  });
+
+  it("expertUnsafeAbortAsNotSubmitted restores old AbortError → not_submitted", () => {
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    expect(
+      classifySubmissionState({
+        error: err,
+        expertUnsafeAbortAsNotSubmitted: true,
+      }),
+    ).toBe("not_submitted");
+    expect(
+      classifySubmissionState({
+        errorKind: "abort_error",
+        expertUnsafeAbortAsNotSubmitted: true,
+      }),
+    ).toBe("not_submitted");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          error: err,
+          expertUnsafeAbortAsNotSubmitted: true,
+        }),
       }).allowed,
     ).toBe(true);
   });
@@ -170,6 +233,22 @@ describe("trySelectFallbackGateway", () => {
 
   it("throws when eligibility denied", () => {
     const eligibility = evaluateFallback({ submissionState: "timeout" });
+    expect(() =>
+      trySelectFallbackGateway(
+        router,
+        { currency: "USD" },
+        eligibility,
+        { attemptedGateways: ["stripe"] },
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+  });
+
+  it("denies alternate select when AbortError classified (default)", () => {
+    const err = new Error("aborted");
+    err.name = "AbortError";
+    const state = classifySubmissionState({ error: err });
+    const eligibility = evaluateFallback({ submissionState: state });
+    expect(eligibility.allowed).toBe(false);
     expect(() =>
       trySelectFallbackGateway(
         router,

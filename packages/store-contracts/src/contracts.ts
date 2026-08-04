@@ -30,7 +30,16 @@
  * - `leaseToken` is an unguessable opaque string. After reclaim or renew, the prior
  *   token MUST fail (`StoreLeaseLostError` or renew `{ ok: false, reason: "lease_lost" }`).
  * - Every mutator after `reserve`/`claim` (`complete`, `fail`, `renew`,
- *   `markIndeterminate`, `markManualReview`) **requires the active `leaseToken`**.
+ *   `markIndeterminate`, `markManualReview`) **requires the current `leaseToken`**.
+ * - Wrong/stale tokens (and tokens after reclaim/renew) → `StoreLeaseLostError`
+ *   (or renew `{ ok: false, reason: "lease_lost" }`).
+ * - `complete` / `fail` / `renew` typically also require an **unexpired** lease.
+ * - `markIndeterminate` is intentionally more permissive for A4 near-expiry parking:
+ *   production SQL/Redis accept `status === "reserved"` + matching token even when
+ *   the lease clock has passed, as long as the row has not been reclaimed. After
+ *   reclaim, the prior token is fenced. Memory testkit may soft-expire on the
+ *   read path first, so post-expiry park can fail there while still succeeding
+ *   in production if unreclaimed — not a silent race if token fencing holds.
  *
  * ## Indeterminate blocking (A4)
  *
@@ -309,9 +318,14 @@ export type CompleteIdempotencyInput = {
 
 export type MarkIndeterminateInput = {
   key: IdempotencyKey;
-  /** Required active lease token. Wrong/stale/expired → {@link StoreLeaseLostError}. */
+  /**
+   * Current reservation lease token.
+   * Wrong/stale token (or token after reclaim) → {@link StoreLeaseLostError}.
+   * Expired-but-unreclaimed (`status` still `reserved` + token match) may still
+   * park indeterminate (intentional A4 near-expiry parking in SQL/Redis).
+   */
   leaseToken: LeaseToken;
-  /** Optional non-secret diagnostic code (e.g. "network_timeout"). */
+  /** Optional non-secret diagnostic code (e.g. "network_timeout"); adapters should sanitize/cap. */
   reason?: string;
 };
 
@@ -327,13 +341,17 @@ export type MarkIndeterminateInput = {
  *
  * ### Lease-gated mutators
  * After a successful `reserve`, every of `renew` / `complete` / `markIndeterminate`
- * **requires the active `leaseToken`**. Wrong, stale, or expired tokens throw
+ * **requires the current `leaseToken`**. Wrong or stale tokens throw
  * {@link StoreLeaseLostError} (or renew returns `{ ok: false, reason: "lease_lost" }`).
+ * `renew` / `complete` also require an unexpired lease. `markIndeterminate` may
+ * still succeed for expired-but-unreclaimed `reserved` rows when the token matches
+ * (A4 near-expiry parking); post-reclaim the prior token is fenced.
  *
  * ### Indeterminate (A4)
  * `status === "indeterminate"` permanently blocks automatic replay: `reserve` returns
  * `kind: "indeterminate"` and does not issue a lease. Operator/reconciliation must
- * resolve. `deleteExpired` must not delete indeterminate rows by default.
+ * resolve. `deleteExpired` must not delete indeterminate rows by default, and must
+ * only remove terminal `completed` / `expired` rows (not reclaimable `reserved`).
  */
 export interface IdempotencyStore extends WithTransaction {
   /**
@@ -357,17 +375,22 @@ export interface IdempotencyStore extends WithTransaction {
   complete(input: CompleteIdempotencyInput): Promise<void>;
 
   /**
-   * Preserve uncertain outcome. **Requires active `leaseToken`.**
-   * After this, further `reserve` returns `kind: "indeterminate"` (A4 block).
-   * Stale/wrong token → {@link StoreLeaseLostError}.
+   * Preserve uncertain outcome. **Requires current `leaseToken`** with
+   * `status === "reserved"`. Stale/wrong token (or post-reclaim) →
+   * {@link StoreLeaseLostError}. Expired-but-unreclaimed may still park
+   * (intentional A4 near-expiry parking; SQL/Redis do not require an active
+   * lease clock here). After this, further `reserve` returns
+   * `kind: "indeterminate"` (A4 block).
    */
   markIndeterminate(input: MarkIndeterminateInput): Promise<void>;
 
   get(key: IdempotencyKey): Promise<IdempotencyRecord | undefined>;
 
   /**
-   * Retention cleanup for terminal/expired rows.
-   * MUST NOT remove `indeterminate` rows by default (operator must resolve A4).
+   * Retention cleanup for terminal rows (`completed` / `expired` with
+   * `updatedAt <= before`). MUST NOT remove `indeterminate` by default (A4).
+   * MUST NOT delete reclaimable `reserved` rows solely because the lease
+   * clock passed — soft-release / reclaim is a separate path.
    */
   deleteExpired(input: CleanupInput): Promise<CleanupResult>;
 }

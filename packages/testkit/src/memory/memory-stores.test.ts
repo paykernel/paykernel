@@ -153,6 +153,35 @@ describe("createMemoryIdempotencyStore", () => {
     expect((await store.get("tx_ok"))?.status).toBe("completed");
   });
 
+  it("deleteExpired keeps reclaimable reserved rows (SQL/Redis parity)", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryIdempotencyStore({ clock });
+    const r = await store.reserve({
+      key: "reserved_old_lease",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    // Advance past lease expiry; row is still reserved until soft-release/reclaim.
+    clock.advance(5_000);
+    const before = new Date(clock.nowMs() + 1).toISOString();
+    const cleaned = await store.deleteExpired({ before });
+    expect(cleaned.deleted).toBe(0);
+    // Key still present (not wiped); get soft-releases to expired.
+    const got = await store.get("reserved_old_lease");
+    expect(got).toBeDefined();
+    expect(got?.status).toBe("expired");
+    // Terminal expired may now be cleaned.
+    clock.advance(1);
+    const cleaned2 = await store.deleteExpired({
+      before: new Date(clock.nowMs() + 1).toISOString(),
+    });
+    expect(cleaned2.deleted).toBe(1);
+    expect(await store.get("reserved_old_lease")).toBeUndefined();
+  });
+
   it("indeterminate blocks reserve and is not deleted by deleteExpired (A4)", async () => {
     const clock = createFakeClock();
     const store = createMemoryIdempotencyStore({ clock });

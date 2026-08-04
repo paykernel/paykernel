@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
   resolveDoShardName,
+  resolveDoDiscoveryPartitions,
+  enumerateDoPartitionShardNames,
   assertDoShardingStrategy,
   hashStringToUint32,
   RECOMMENDED_HASH_PARTITIONS,
@@ -78,5 +80,73 @@ describe("resolveDoShardName", () => {
   it("hashStringToUint32 is stable", () => {
     expect(hashStringToUint32("hello")).toBe(hashStringToUint32("hello"));
     expect(RECOMMENDED_HASH_PARTITIONS).toBe(16);
+  });
+});
+
+describe("resolveDoDiscoveryPartitions", () => {
+  it("hash: enumerates all N partitions in stable order", () => {
+    const r = resolveDoDiscoveryPartitions({ kind: "hash", partitions: 4 });
+    expect(r.kind).toBe("partitions");
+    if (r.kind !== "partitions") return;
+    expect([...r.shardNames]).toEqual([
+      "hash:4:0",
+      "hash:4:1",
+      "hash:4:2",
+      "hash:4:3",
+    ]);
+    expect(enumerateDoPartitionShardNames({ kind: "hash", partitions: 4 })).toEqual(
+      r.shardNames,
+    );
+  });
+
+  it("hash partitions=1: single partition (fast path size)", () => {
+    const r = resolveDoDiscoveryPartitions({ kind: "hash", partitions: 1 });
+    expect(r.kind).toBe("partitions");
+    if (r.kind !== "partitions") return;
+    expect([...r.shardNames]).toEqual(["hash:1:0"]);
+  });
+
+  it("hash: prefix is applied to every partition name", () => {
+    const r = resolveDoDiscoveryPartitions(
+      { kind: "hash", partitions: 2 },
+      { prefix: "payments-v1" },
+    );
+    expect(r.kind).toBe("partitions");
+    if (r.kind !== "partitions") return;
+    expect([...r.shardNames]).toEqual([
+      "payments-v1:hash:2:0",
+      "payments-v1:hash:2:1",
+    ]);
+  });
+
+  it("static tenant: single partition", () => {
+    const r = resolveDoDiscoveryPartitions({
+      kind: "tenant",
+      tenantId: "acme",
+    });
+    expect(r.kind).toBe("partitions");
+    if (r.kind !== "partitions") return;
+    expect([...r.shardNames]).toEqual(["tenant:acme"]);
+  });
+
+  it("key strategy: unsupported (no silent sentinel)", () => {
+    const r = resolveDoDiscoveryPartitions({ kind: "key" });
+    expect(r.kind).toBe("unsupported");
+    if (r.kind !== "unsupported") return;
+    expect(r.reason).toMatch(/kind "key"/);
+    expect(r.reason).toMatch(/hash/);
+    expect(() => enumerateDoPartitionShardNames({ kind: "key" })).toThrow(
+      /kind "key"/,
+    );
+  });
+
+  it("dynamic tenant function: unsupported", () => {
+    const r = resolveDoDiscoveryPartitions({
+      kind: "tenant",
+      tenantId: (i) => i.tenantId ?? "default",
+    });
+    expect(r.kind).toBe("unsupported");
+    if (r.kind !== "unsupported") return;
+    expect(r.reason).toMatch(/dynamic tenantId/);
   });
 });

@@ -507,7 +507,8 @@ export type MoyasarNextAction = MoyasarStcPayOtpNextAction | { type: "redirect";
  * - `declined` | `failed` | `indeterminate` → `success: false`
  *
  * **Never fulfill on `success` alone.** Use `outcome === 'succeeded'` with a
- * paid-like `status` (`paid` / `approved`), or `isPaidOutcome(result)`.
+ * paid-like `status` (`paid` only — not `approved` / `authorized`), or
+ * `isPaidOutcome(result)`.
  *
  * **Indeterminate:** when present, always treat as non-terminal for money —
  * `outcome: 'indeterminate'` + `reconciliationRequired: true`. Do not treat as

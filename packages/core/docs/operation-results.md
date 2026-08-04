@@ -28,7 +28,7 @@ import {
 const result = await client.createPayment(params);
 
 if (isPaidOutcome(result)) {
-  // status paid/approved + outcome succeeded
+  // status paid + outcome succeeded (approved/authorized are never paid)
   await fulfillOrder(result.gatewayId);
 } else if (isRequiresActionOutcome(result)) {
   // redirect / OTP / Stripe confirm — do not fulfill
@@ -114,7 +114,7 @@ When gateways (or the testkit mock) use `applyOutcomeToGatewayResult`:
 
 | Helper | Role |
 | --- | --- |
-| `isPaidOutcome(result)` | `outcome === 'succeeded'` **and** paid-like status (`paid` / `approved`) |
+| `isPaidOutcome(result)` | `outcome === 'succeeded'` **and** paid-like status (`paid` only; not `approved` / `authorized`) |
 | `isRequiresActionOutcome(result)` | Customer action required |
 | `isIndeterminateOutcome(result)` | Explicit indeterminate / must reconcile |
 | `mapGatewayResultToOperationResult(result)` | Gateway shape → preferred union |

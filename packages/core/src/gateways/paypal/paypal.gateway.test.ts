@@ -23,6 +23,7 @@ import {
 import type { HookContext } from '../../hooks/hooks.types';
 import type { Logger } from '../../utils/logger';
 import { money } from '../../utils/money';
+import { isPaidOutcome } from '../../types/operation-result';
 
 /** Logger that records warn/error messages for assertions. */
 function captureLogger(sink: string[]): Logger {
@@ -3146,6 +3147,63 @@ describe('PayPalGateway', () => {
             expect(result.captureId).toBe('CAP-001');
             expect(result.status).toBe('paid');
             expect(result.amount).toBe(200);
+            expect(result.outcome).toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(true);
+        });
+
+        it('APPROVED order (pre-capture) is not isPaidOutcome / not succeeded', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-APPROVED-ONLY',
+                status: 'APPROVED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '50.00',
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-APPROVED-ONLY',
+            });
+
+            expect(result.status).toBe('approved');
+            expect(result.outcome).toBe('requires_action');
+            expect(result.outcome).not.toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('COMPLETED capture order is isPaidOutcome true', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-PAID-OUTCOME',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-PAID-OUTCOME',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '75.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-PAID-OUTCOME',
+            });
+
+            expect(result.status).toBe('paid');
+            expect(result.outcome).toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(true);
         });
 
         it('should retry transient getPayment failures', async () => {

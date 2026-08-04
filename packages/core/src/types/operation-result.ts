@@ -250,7 +250,9 @@ export function paymentFromGatewayResult(
  * - Customer action signals (`nextAction`, pending redirect, client secret) →
  *   `requires_action` (never `succeeded`).
  * - Auth holds (`authorized` + API ok) → operation `succeeded`, but
- *   {@link isPaidOutcome} stays false until status is paid-like.
+ *   {@link isPaidOutcome} stays false until status is paid-like (`paid` only).
+ * - Buyer approval (`approved`, e.g. PayPal pre-capture) → `requires_action`
+ *   (never `succeeded`; not paid-like).
  * - Card/hard declines → `declined`; cancelled/voided without force → `failed`.
  * - Bare pending/processing without action still → `requires_action` so callers
  *   never fulfill on non-terminal state.
@@ -297,7 +299,6 @@ export function inferOperationOutcome(
     // success: true (API call completed — not necessarily paid)
     if (
         result.status === "paid" ||
-        result.status === "approved" ||
         result.status === "authorized" ||
         result.status === "partially_captured" ||
         result.status === "refunded" ||
@@ -306,9 +307,14 @@ export function inferOperationOutcome(
         return "succeeded";
     }
 
-    if (result.status === "pending" || result.status === "processing") {
-        // Non-terminal: never succeeded. Prefer requires_action so fulfillment
-        // gates stay closed (clientSecret, bare pending intention, etc.).
+    if (
+        result.status === "pending" ||
+        result.status === "processing" ||
+        result.status === "approved"
+    ) {
+        // Non-terminal / pre-capture approval: never succeeded. Prefer
+        // requires_action so fulfillment gates stay closed (clientSecret, bare
+        // pending intention, PayPal buyer APPROVED before capture, etc.).
         return "requires_action";
     }
 
@@ -554,10 +560,10 @@ export function successFromOutcome(outcome: PaymentOperationOutcome): boolean {
 
 /**
  * True only when the result means money settled for fulfillment:
- * `outcome === 'succeeded'` (or inferred) **and** paid-like status (`paid` / `approved`).
+ * `outcome === 'succeeded'` (or inferred) **and** paid-like status (`paid` only).
  *
- * Auth holds (`authorized`), pending, requires_action, declined, failed, and
- * indeterminate all return **false**.
+ * Auth holds (`authorized`), buyer approval (`approved`), pending, requires_action,
+ * declined, failed, and indeterminate all return **false**.
  */
 export function isPaidOutcome(
     result: GatewayPaymentResult | PaymentOperationResult,

@@ -181,9 +181,11 @@ export function paymentStatusToOperationOutcome(
       return "failed";
     case "pending":
     case "processing":
+    case "approved":
+      // Buyer approval (PayPal pre-capture) is not settled — aligns with core
+      // inferOperationOutcome / mapPayPalOutcome (requires_action, not succeeded).
       return "requires_action";
     case "paid":
-    case "approved":
     case "authorized":
     case "partially_captured":
     case "refunded":
@@ -196,7 +198,7 @@ export function paymentStatusToOperationOutcome(
     case "setup_completed":
     default:
       // Void/cancel/refund terminal ops are still "operation succeeded" at API level;
-      // isPaidOutcome stays false unless status is paid/approved.
+      // isPaidOutcome stays false unless status is paid (not approved/authorized).
       return "succeeded";
   }
 }

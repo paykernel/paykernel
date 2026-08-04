@@ -66,7 +66,7 @@ if (result.redirectUrl) {
 
 For one-time payments, PayPal uses a two-step flow: create order → capture after approval.
 
-> **Important — fulfillment**: Never fulfill on `captureResult.success` alone. Prefer **`isPaidOutcome(captureResult)`** (Phase 6: `outcome === 'succeeded'` **and** paid-like status `paid` \| `approved`). Checking `status === 'paid'` is also fine for capture settlement. PayPal can return HTTP 200 with `status: 'pending'` (echeck / review) — pending keeps `success: true` (API-ok, not paid); wait for **`PAYMENT.CAPTURE.COMPLETED`** (or poll) before fulfilling. Terminal failures (`status: 'failed'`) return **`success: false`** — use success/status only to detect API/terminal failure, not to ship goods.
+> **Important — fulfillment**: Never fulfill on `captureResult.success` alone. Prefer **`isPaidOutcome(captureResult)`** (Phase 6: `outcome === 'succeeded'` **and** paid-like status `paid` only). Checking `status === 'paid'` is also fine for capture settlement. **Never ship on buyer approval alone** (`status: 'approved'` / order `APPROVED` / `CHECKOUT.ORDER.APPROVED` → processing, not paid). PayPal can return HTTP 200 with `status: 'pending'` (echeck / review) — pending keeps `success: true` (API-ok, not paid); wait for **`PAYMENT.CAPTURE.COMPLETED`** (or poll until paid) before fulfilling. Terminal failures (`status: 'failed'`) return **`success: false`** — use success/status only to detect API/terminal failure, not to ship goods.
 >
 > **Important — refunds**: Persist **`captureResult.captureId`** (also exposed as `gatewayId` after capture). Refunds require the **capture ID**, not the order ID or authorization ID. Passing an order/auth ID yields a clear not-found error.
 
@@ -101,8 +101,8 @@ if (captureResult.status === 'pending') {
   return;
 }
 
-// Fulfillment gate: paid settlement only via isPaidOutcome (succeeded + paid|approved).
-// success:true alone is never enough (pending keeps success:true).
+// Fulfillment gate: paid settlement only via isPaidOutcome (succeeded + paid).
+// success:true alone is never enough (pending / approved keep fulfillment closed).
 if (!isPaidOutcome(captureResult)) {
   throw new Error(`Unexpected PayPal capture status: ${captureResult.status}`);
 }
@@ -304,7 +304,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Capture ID for refunds** | Store **`captureId`** from `capturePayment()` — refunds **must** use the capture ID, never the order ID or authorization ID. |
 | **Capture result ID** | After capture, `result.gatewayId` is the PayPal capture ID. The original PayPal order is available as `result.orderId`. |
 | **Multiple captures** | When an order has multiple captures, `getPayment` / order capture / webhooks prefer the **latest** capture by `update_time`/`create_time` when present; otherwise the last array element. |
-| **Capture fulfillment** | Never fulfill on `success: true` alone. Prefer **`isPaidOutcome(result)`** (`outcome === 'succeeded'` + paid-like `paid` \| `approved`) or require **`status === 'paid'`**. Pending captures return `success: true` + `status: 'pending'`; **failed** captures return `success: false` (use success only for terminal API failure, not fulfillment). Prefer **`PAYMENT.CAPTURE.COMPLETED`** as the fulfillment webhook signal (or poll until paid). |
+| **Capture fulfillment** | Never fulfill on `success: true` alone. Prefer **`isPaidOutcome(result)`** (`outcome === 'succeeded'` + paid-like `paid` only) or require **`status === 'paid'`**. Buyer `approved` is **not** paid (pre-capture; outcome `requires_action`). Pending captures return `success: true` + `status: 'pending'`; **failed** captures return `success: false` (use success only for terminal API failure, not fulfillment). Prefer **`PAYMENT.CAPTURE.COMPLETED`** as the fulfillment webhook signal (or poll until paid). |
 | **Shipping preference** | Default `shipping_preference` is **`NO_SHIPPING`**. Optional `paypalShippingPreference`: `NO_SHIPPING` \| `GET_FROM_FILE`. **`SET_PROVIDED_ADDRESS` is rejected** until shipping-address params exist on create. |
 | **Field length limits** | Client-enforced: `description` ≤ 127, `orderId` (reference_id) ≤ 256, `metadata.paymentId` (custom_id) ≤ 127, refund `reason` (note_to_payer) ≤ 255. |
 | **Return / cancel URLs** | Create requires `returnUrl` or `callbackUrl`. Cancel is `cancelUrl ?? callbackUrl ?? returnUrl` — **returnUrl-only is OK** (both URLs use returnUrl). |
@@ -345,8 +345,8 @@ app.post('/webhooks/paypal', async (req) => {
 | `PAYMENT.CAPTURE.PENDING` | `pending` |
 | `PAYMENT.CAPTURE.REFUNDED` | `refunded` or `partially_refunded` based on PayPal capture status |
 | `PAYMENT.CAPTURE.REVERSED` | `reversed` |
-| `CHECKOUT.ORDER.APPROVED` | `approved` |
-| `CHECKOUT.ORDER.COMPLETED` | `paid` only when a capture is present on the resource; otherwise `approved` (do not auto-fulfill auth-only completed orders) |
+| `CHECKOUT.ORDER.APPROVED` | `approved` (stable type `payment.processing` — **not** paid; do not fulfill) |
+| `CHECKOUT.ORDER.COMPLETED` | `paid` only when a capture is present on the resource; otherwise `approved` (do not auto-fulfill uncaptured completed orders) |
 | `CHECKOUT.PAYMENT-APPROVAL.REVERSED` | `cancelled` |
 | `PAYMENT.AUTHORIZATION.CREATED` | `authorized` |
 | `PAYMENT.AUTHORIZATION.CAPTURED` | `paid` (see note: capture id may be missing; auth id is not refundable) |

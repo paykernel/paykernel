@@ -69,29 +69,39 @@ The following are **always** denied for automatic multi-gateway retry unless a v
 
 Generic network errors without a safe classification fail closed to **`indeterminate`** (not `pre_submission_failure`).
 
-### AbortError / AbortSignal caution (multi-gateway)
+### AbortError / AbortSignal (multi-gateway — default fail-closed)
 
-Default `classifySubmissionState` maps `AbortError` / `code: "abort_error"` to **`not_submitted`**, which is **default-allow** for post-attempt fallback (`evaluateFallback` → `allowed: true`).
+Default `classifySubmissionState` maps `AbortError` / `code: "abort_error"` / `ABORT_ERR` / errorKind `"abort"` / `"aborted"` / `"abort_error"` to **`indeterminate`**, which is **not** fallback-eligible (`evaluateFallback` → `allowed: false`).
 
-That is only safe when the abort is known to fire **before** the provider accepted the request (e.g. cancelled before the outbound HTTP call). If the abort can race **after** accept (client timeout, `AbortSignal` deadline while the provider already committed), treating it as `not_submitted` and auto-routing to another gateway risks **double charge**.
+Abort may race **after** provider accept (client timeout, `AbortSignal` deadline while the provider already committed). Treating abort as `not_submitted` and auto-routing to another gateway risks **double charge** — so the library **never** auto-falls back on raw abort shapes.
 
-**Recommendations for multi-gateway integrators:**
+**When abort is known pre-submit** (cancelled before the outbound HTTP call):
 
-- Prefer classifying aborts as **`indeterminate`** (or recon / manual_review) unless you control the abort boundary pre-submit.
-- Pass explicit `submissionState` / `errorKind` rather than relying on raw `AbortError` shape when the request may have left your process.
-- Or supply a custom classification wrapper around `classifySubmissionState` that maps abort → `indeterminate` for multi-gateway paths.
-- Never widen `SAFE_STATES` to include `timeout` / `connection_reset` / bare network errors.
+- Pass `errorKind: "aborted_before_submit"` or `"cancelled_before_submit"` → `not_submitted` (safe)
+- Or pass explicit `submissionState: "not_submitted"`
+- Or (legacy / expert) `expertUnsafeAbortAsNotSubmitted: true` to restore the old AbortError → `not_submitted` mapping — **only** if you control the abort boundary pre-submit
 
 ```typescript
-// Conservative multi-gateway pattern
-const raw = classifySubmissionState({ error: err });
-const state =
-  err instanceof Error && err.name === "AbortError"
-    ? "indeterminate"
-    : raw;
+// Default: AbortError is not multi-gateway fallback-eligible
+const state = classifySubmissionState({ error: err }); // AbortError → indeterminate
 const eligibility = evaluateFallback({ submissionState: state });
+// eligibility.allowed === false
+
+// Known pre-submit cancel
+const preSubmit = classifySubmissionState({
+  errorKind: "aborted_before_submit",
+});
+// preSubmit === "not_submitted" → evaluateFallback allowed
+
+// Expert legacy mapping (unsafe if abort can be post-accept)
+const legacy = classifySubmissionState({
+  error: err,
+  expertUnsafeAbortAsNotSubmitted: true,
+});
+// legacy === "not_submitted" — app owns double-charge risk
 ```
 
+Never widen `SAFE_STATES` to include `timeout` / `connection_reset` / bare network errors / bare abort.
 
 ### Classification helpers
 
@@ -112,7 +122,7 @@ Maps core `PaymentOperationOutcome` conservatively:
 Priority:
 
 1. Explicit `submissionState` if provided
-2. Known `errorKind` strings (`timeout`, `ECONNRESET`, `validation_error`, `not_submitted`, …)
+2. Known `errorKind` strings (`timeout`, `ECONNRESET`, `validation_error`, `not_submitted`, `aborted_before_submit`, …)
 3. Error object shape (name/code/message/statusCode patterns — no secrets required)
 4. `outcome` / result `outcome` field / core `isIndeterminateOutcome`
 5. Default: **`indeterminate`** (fail-closed for fallback)
@@ -124,11 +134,12 @@ classifySubmissionState({ errorKind: "timeout" }); // → "timeout"
 classifySubmissionState({ errorKind: "ECONNRESET" }); // → "connection_reset"
 classifySubmissionState({ errorKind: "validation_error" }); // → "pre_submission_failure"
 classifySubmissionState({ errorKind: "not_submitted" }); // → "not_submitted"
+classifySubmissionState({ errorKind: "aborted_before_submit" }); // → "not_submitted"
 classifySubmissionState({ errorKind: "provider_5xx_uncertain" }); // → "provider_5xx_uncertain"
 classifySubmissionState({ outcome: "indeterminate" }); // → "indeterminate"
 classifySubmissionState({}); // → "indeterminate" (fail-closed)
-// AbortError shape → "not_submitted" (default-allow). Unsafe if abort can be post-accept;
-// see AbortError caution above for multi-gateway.
+// AbortError / abort_error → "indeterminate" (NOT fallback-eligible)
+// expertUnsafeAbortAsNotSubmitted: true → "not_submitted" (legacy; app owns risk)
 ```
 
 ### Expert override API (opt-in, loud, never defaulted)
@@ -157,6 +168,8 @@ Rules:
 - Empty / whitespace reason is **not** accepted
 - Override is **never** defaulted by the library
 - Runtime guard: `isExpertUnsafeFallbackOverride(value)`
+
+Note: `expertUnsafeAbortAsNotSubmitted` on `classifySubmissionState` only changes **classification** of abort shapes; it does not bypass `evaluateFallback` for other unsafe states. For abort → `not_submitted`, fallback becomes allowed because `not_submitted` is a safe state — use only when pre-submit is guaranteed.
 
 ### Alternate gateway helper
 
@@ -203,7 +216,7 @@ Reconciliation’s `do_not_create_replacement` / `shouldForbidReplacementCharge`
 
 **Never** automatically retry or route an **indeterminate** payment to another gateway.
 
-Timeouts, connection resets, and uncertain provider 5xx are treated the same way for automatic multi-gateway fallback: **denied**. Only definitive pre-submission failures and true not-submitted states are safe without an expert override.
+Timeouts, connection resets, uncertain provider 5xx, and raw **AbortError** / abort codes are treated the same way for automatic multi-gateway fallback: **denied**. Only definitive pre-submission failures and true not-submitted states (including explicit `aborted_before_submit`) are safe without an expert override.
 
 ## Related
 

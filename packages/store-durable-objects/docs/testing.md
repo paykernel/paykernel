@@ -56,7 +56,7 @@ Also covered in-package (17.5 matrix):
 | ---- | -------- |
 | `conformance.do.test.ts` | All three Phase 9 suites + live skip-clean |
 | `concurrency.do.test.ts` | Same-key winner, multi-instance, stale lease, FakeClock reclaim, recon claim |
-| `partitions.do.test.ts` | Hash partition isolation, key serialization, tenant isolation |
+| `partitions.do.test.ts` | Hash partition isolation, key serialization, tenant isolation, multi-partition listDue/listRetryable/deleteExpired fan-out |
 | `transaction.do.test.ts` | Rollback, no BEGIN/COMMIT via exec, sync-only, external-work-outside-txn static |
 | `restart.do.test.ts` | File reopen durability + FakeClock reclaim after eviction |
 | `alarms.do.test.ts` | One alarm/queue, backoff, maxRetries, at-least-once, default-off |

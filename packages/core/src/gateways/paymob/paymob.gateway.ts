@@ -1081,7 +1081,9 @@ export class PaymobGateway extends BaseGateway {
    * Parse Paymob webhook payload into normalized WebhookEvent.
    *
    * Dual-writes Phase 7 PaymentEvent using transaction flags + status
-   * (`success` → payment.succeeded, TOKEN → setup_completed, void/refund flags, …).
+   * (`TRANSACTION` success → payment.succeeded, partial capture →
+   * payment.processing, `TRANSACTION_RESPONSE` success → payment.processing,
+   * TOKEN → setup_completed, void/refund flags, …).
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
     if (this.isCardTokenWebhook(payload)) {
@@ -1168,7 +1170,8 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(statusData, "is_capture", payload.is_capture);
 
     // type defaults to TRANSACTION_RESPONSE so callers can distinguish redirect/response
-    // callbacks from processed TRANSACTION webhooks. Never fulfill on redirect-only events.
+    // callbacks from processed TRANSACTION webhooks. Dual-write demotes settlement arms
+    // to payment.processing — never fulfill on redirect-only events.
     const legacy: WebhookEvent = {
       id: String(payload.id),
       type: this.stringOrUndefined(payload.type) ?? "TRANSACTION_RESPONSE",

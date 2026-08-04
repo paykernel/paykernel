@@ -354,6 +354,19 @@ describe("mapProviderEventTypeToStable tables", () => {
         expect(mapProviderEventTypeToStable("moyasar", native)).toBe(stable);
       });
     }
+
+    it("free-form status approved → payment.processing (not succeeded)", () => {
+      expect(
+        mapProviderEventTypeToStable("moyasar", "unknown_event", {
+          status: "approved",
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("moyasar", "unknown_event", {
+          status: "paid",
+        }),
+      ).toBe("payment.succeeded");
+    });
   });
 
   describe("paypal", () => {
@@ -462,12 +475,39 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("provider.unmapped");
     });
 
-    it("TRANSACTION_RESPONSE with paid status → payment.succeeded", () => {
+    it("TRANSACTION_RESPONSE with paid/success → payment.processing (not succeeded)", () => {
+      // Redirect/query callbacks must not dual-write fulfillment-ready settlement.
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", {
           status: "paid",
         }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", {
+          flags: { success: true },
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", {
+          flags: { success: true, isCapture: true },
+        }),
+      ).toBe("payment.processing");
+    });
+
+    it("TRANSACTION with paid status still → payment.succeeded", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "paid",
+        }),
       ).toBe("payment.succeeded");
+    });
+
+    it("TRANSACTION status approved → payment.processing (not succeeded)", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "approved",
+        }),
+      ).toBe("payment.processing");
     });
 
     it("TRANSACTION amount-only refund status beats success → refund.completed", () => {
@@ -495,12 +535,13 @@ describe("mapProviderEventTypeToStable tables", () => {
     });
 
     it("TRANSACTION is_auth + paid/partially_captured status is not payment.authorized", () => {
+      // Partial capture is open money story → processing (not payment.succeeded).
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
           status: "partially_captured",
           flags: { success: true, isAuth: true },
         }),
-      ).toBe("payment.succeeded");
+      ).toBe("payment.processing");
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
           status: "paid",
@@ -509,13 +550,45 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.succeeded");
     });
 
-    it("TRANSACTION is_auth + captured amount without status → payment.succeeded", () => {
+    it("TRANSACTION partially_captured status alone → payment.processing not succeeded", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "partially_captured",
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "partially_captured",
+          flags: { success: true },
+        }),
+      ).toBe("payment.processing");
+    });
+
+    it("TRANSACTION is_auth + partial captured amount without status → payment.processing", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
           flags: { success: true, isAuth: true },
           amounts: { amountCents: 10000, capturedAmountCents: 5000 },
         }),
+      ).toBe("payment.processing");
+    });
+
+    it("TRANSACTION is_auth + full captured amount without status → payment.succeeded", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          flags: { success: true, isAuth: true },
+          amounts: { amountCents: 10000, capturedAmountCents: 10000 },
+        }),
       ).toBe("payment.succeeded");
+    });
+
+    it("TRANSACTION is_capture + partially_captured → capture.completed (not payment.succeeded)", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "partially_captured",
+          flags: { success: true, isCapture: true },
+        }),
+      ).toBe("capture.completed");
     });
   });
 

@@ -7,6 +7,7 @@
 
 import {
   StoreCorruptedRecordError,
+  StoreUnsupportedFeatureError,
   StoreError,
   StoreInvalidSchemaError,
   StoreLeaseLostError,
@@ -222,4 +223,5 @@ export {
   StoreSerializationFailureError,
   StoreInvalidSchemaError,
   StoreCorruptedRecordError,
+  StoreUnsupportedFeatureError,
 };

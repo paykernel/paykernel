@@ -2171,6 +2171,10 @@ describe("PaymobGateway", () => {
       expect(event.gatewayPaymentId).toBe("123456789");
       expect(event.status).toBe("paid");
       expect(event.amount).toBe(100);
+      // Dual-write must not look fulfillment-ready on redirect success alone.
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
     });
 
     it("rejects Paymob callbacks with invalid timestamps instead of using the current time", () => {
@@ -2287,6 +2291,7 @@ describe("PaymobGateway", () => {
 
     it("Phase 7 dual-write: is_auth + partial captured_amount does not emit payment.authorized", () => {
       // Sticky is_auth must not under-map capture when captured_amount is set.
+      // Partial capture is not full settlement → payment.processing (not payment.succeeded).
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_auth: true,
@@ -2298,8 +2303,9 @@ describe("PaymobGateway", () => {
 
       expect(event.status).toBe("partially_captured");
       expect(event.stableType).not.toBe("payment.authorized");
-      expect(event.stableType).toBe("payment.succeeded");
-      expect(event.event?.type).toBe("payment.succeeded");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
     });
 
     it("Phase 7 dual-write: is_auth + full captured_amount → payment.succeeded not authorized", () => {

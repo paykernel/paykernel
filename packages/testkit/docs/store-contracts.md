@@ -153,7 +153,18 @@ Store-specific fields (fingerprint, `payloadHash`, `subjectId`, `dueAt`, …) si
 | Webhook inbox  | `renew`, `complete`, `fail`                     |
 | Reconciliation | `renew`, `complete`, `fail`, `markManualReview` |
 
-Wrong, stale, or expired tokens → `StoreLeaseLostError` (or renew `{ ok: false, reason: "lease_lost" }`). A stale worker **must not** complete work after a newer worker reclaims or renews the lease.
+Wrong or stale tokens → `StoreLeaseLostError` (or renew `{ ok: false, reason: "lease_lost" }`). A stale worker **must not** complete work after a newer worker reclaims or renews the lease.
+
+**`markIndeterminate` vs complete/renew (A4 near-expiry parking):**
+
+| Mutator | Token check | Active lease clock |
+| --- | --- | --- |
+| `complete` / `renew` | Current token | Required (expired → `lease_lost`) |
+| `markIndeterminate` | Current token + `status === "reserved"` | **Not required** in production SQL/Redis: expired-but-unreclaimed may still park so a worker can preserve uncertainty near/at expiry. After reclaim, prior token is fenced. |
+
+Memory testkit soft-expires reserved rows on the read path (`expireIfNeeded`) before `markIndeterminate`, so post-expiry park can fail in tests while still succeeding on SQL/Redis if the row remains unreclaimed. That is a documented NON-PRODUCTION parity note — not a production fence hole (token fencing after reclaim still holds).
+
+**`deleteExpired`:** terminal-only for idempotency (`completed` / `expired`). Must **not** wipe reclaimable `reserved` rows when `leaseExpiresAt <= before` (soft-release/reclaim is separate). Must not remove `indeterminate` by default.
 
 ---
 

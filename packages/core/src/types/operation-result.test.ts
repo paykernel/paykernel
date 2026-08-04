@@ -312,6 +312,28 @@ describe("operation-result helpers", () => {
     expect(isPaidLikePaymentStatus("paid")).toBe(true);
   });
 
+  it("buyer pre-capture approved is not paid-like and not isPaidOutcome", () => {
+    expect(isPaidLikePaymentStatus("approved")).toBe(false);
+    expect(isPaidLikePaymentStatus("authorized")).toBe(false);
+
+    const approved = baseResult({ success: true, status: "approved" });
+    // Uncaptured approval must not look settled to poll / fulfillment helpers
+    expect(inferOperationOutcome(approved)).toBe("requires_action");
+    expect(isPaidOutcome(approved)).toBe(false);
+
+    const op = mapGatewayResultToOperationResult(approved);
+    expect(op.outcome).toBe("requires_action");
+    expect(isPaidOutcome(op)).toBe(false);
+
+    // Forced dual-write of outcome=succeeded still fails paid-like gate.
+    const forced = baseResult({
+      success: true,
+      status: "approved",
+      outcome: "succeeded",
+    });
+    expect(isPaidOutcome(forced)).toBe(false);
+  });
+
   it("buildProviderReferences dual-writes related ids", () => {
     const refs: ProviderReferences = buildProviderReferences({
       gateway: "paypal",

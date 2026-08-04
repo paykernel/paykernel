@@ -1,5 +1,11 @@
 # @paykernel/store-redis
 
+## Unreleased
+
+### Patch Changes
+
+- **N6 / markIndeterminate reason:** sanitize and cap `reason` via `enforceMaxSanitizedError` before JSON serialize (SQL adapter parity; length + secret-pattern hygiene).
+
 ## 0.1.0-next.0
 
 ### Patch Changes

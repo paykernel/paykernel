@@ -187,15 +187,31 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource; capture id via `rel: up` / related_ids |
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
 | Paymob | `TOKEN` | `payment_method.setup_completed` | |
-| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context |
+| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context; **processed** server webhook only |
 | Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without refund flags) | **`refund.completed`** | Status `refunded`/`partially_refunded` + dual-write agree; **not** `payment.succeeded` |
-| Paymob | `TRANSACTION` `is_auth` + `captured_amount` | `payment.succeeded` | Not `payment.authorized` when status is `paid`/`partially_captured` |
+| Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled |
+| Paymob | `TRANSACTION` `partially_captured` (status or partial `captured_amount`) | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like); amount-aware capture logic required |
+| Paymob | `TRANSACTION` `is_capture` + success | `capture.completed` | Capture domain; still amount-aware for partials |
 | Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
+| Paymob | `TRANSACTION_RESPONSE` + success / paid / capture signals | **`payment.processing`** | **Never** `payment.succeeded` / `capture.completed` on redirect; wait for processed `TRANSACTION` |
 
 **PayPal capture choice:** `PAYMENT.CAPTURE.COMPLETED` maps to
 `capture.completed` (capture domain), not `payment.succeeded`. Apps that
 fulfill when money is captured should handle `capture.completed` (and may still
 inspect normalized `WebhookEvent.status === 'paid'` during migration).
+
+**Paymob redirect vs processed:** Native type is the distinguisher. Browser/query
+redirect callbacks parse as `TRANSACTION_RESPONSE` and dual-write
+`payment.processing` even when status is `paid` or flags say success — so
+fulfill-on-`payment.succeeded` handlers never ship from redirect alone. Use the
+processed backend notification (`type: 'TRANSACTION'`) or transaction inquiry
+as the sole fulfillment source of truth.
+
+**Paymob partial capture:** Domain status `partially_captured` dual-writes
+`payment.processing`, not `payment.succeeded`. That matches
+`isPaidOutcome` / paid-like helpers (partial capture is excluded). Type-only
+handlers that fulfill solely on `payment.succeeded` will not over-fulfill
+partials; amount-aware logic still needed for partial inventory/settlement.
 
 **Paymob amount-only refunds:** Prefer `status` / amount-derived signals over bare
 `success` flags. When Paymob sends `refunded_amount_cents > 0` without `is_refund`

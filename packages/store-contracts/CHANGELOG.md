@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **N4 / markIndeterminate fencing wording:** document intentional A4 near-expiry parking (`status=reserved` + matching token may park even if lease clock passed; post-reclaim token is fenced). Clarify `deleteExpired` is terminal-only (not reclaimable reserved).
 - Webhook inbox: additive claim kind `not_available` (pending + future `availableAt`); additive `FailWebhookInput.restoreAttempt` for parking-claim attempt restore; `availableAt` is a key-addressed claim gate.
 
 ## 0.1.0-next.0

@@ -12,6 +12,16 @@
  * (Stripe invoice/subscription schedules, Paymob redirect-only without status
  * context, unknown custom gateway events) return `'provider.unmapped'`.
  *
+ * Paymob honesty:
+ * - `TRANSACTION_RESPONSE` (browser/redirect) never dual-writes fulfillment-ready
+ *   `payment.succeeded` / `capture.completed` — use `payment.processing` and wait
+ *   for the processed `TRANSACTION` webhook (or inquiry).
+ * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
+ *   `payment.processing`, not `payment.succeeded`.
+ *
+ * Cross-gateway: domain status `approved` (PayPal buyer pre-capture) is never
+ * mapped to `payment.succeeded` on status-only fallbacks — use `payment.processing`.
+ *
  * @see docs/webhook-events.md
  */
 
@@ -217,7 +227,9 @@ function mapMoyasarEventType(
 
   // Fallback from normalized PaymentStatus when type is free-form
   const status = (context?.status ?? "").toLowerCase();
-  if (status === "paid" || status === "approved") return "payment.succeeded";
+  // paid-like settlement only — buyer `approved` is pre-capture (not fulfillment-ready)
+  if (status === "paid") return "payment.succeeded";
+  if (status === "approved") return "payment.processing";
   if (status === "failed") return "payment.failed";
   if (status === "authorized") return "payment.authorized";
   if (status === "cancelled" || status === "voided") return "payment.cancelled";
@@ -298,11 +310,54 @@ function mapPayPalEventType(
 export const PAYMOB_TOKEN_EVENT_TYPES: readonly string[] = ["TOKEN", "token"];
 
 /**
+ * Stable types that mean "money settled / capture complete" for fulfillment
+ * switch arms. Redirect callbacks must never dual-write these.
+ */
+const PAYMOB_FULFILLMENT_READY_STABLE: ReadonlySet<MappedStableEventType> =
+  new Set(["payment.succeeded", "capture.completed"]);
+
+/**
+ * True when amount fields show a partial capture (captured > 0 and < auth amount).
+ * Missing either side → not proven partial (caller may still use status).
+ */
+function isPartialCaptureAmounts(
+  amounts?: ProviderEventMapContext["amounts"],
+): boolean {
+  const captured = amounts?.capturedAmountCents;
+  const amount = amounts?.amountCents;
+  return (
+    captured !== undefined &&
+    amount !== undefined &&
+    captured > 0 &&
+    captured < amount
+  );
+}
+
+/**
+ * Map amount-/flag-derived capture (without status) to a stable type.
+ * Explicit `is_capture` keeps the capture domain; amount-only partial capture
+ * is `payment.processing` (aligns with `isPaidOutcome` excluding partial).
+ */
+function mapPaymobCaptureSettle(
+  flags: NonNullable<ProviderEventMapContext["flags"]>,
+  amounts?: ProviderEventMapContext["amounts"],
+): MappedStableEventType {
+  if (flags.isCapture === true) {
+    return "capture.completed";
+  }
+  if (isPartialCaptureAmounts(amounts)) {
+    return "payment.processing";
+  }
+  return "payment.succeeded";
+}
+
+/**
  * Map Paymob TRANSACTION flags/amounts to a stable type.
  *
  * Order aligns with `PaymobGateway.mapTransactionStatus`: normalized status
  * first, then amount-derived refunds, then flags. Never invent
- * `payment.succeeded` from uncertain outcomes.
+ * `payment.succeeded` from uncertain outcomes. Partial capture is never
+ * `payment.succeeded` (full paid only).
  */
 function mapPaymobFromFlags(
   flags: NonNullable<ProviderEventMapContext["flags"]>,
@@ -315,7 +370,9 @@ function mapPaymobFromFlags(
   const hasAmountCapture =
     amounts?.capturedAmountCents !== undefined && amounts.capturedAmountCents > 0;
 
-  // Explicit capture action on paid-like status keeps capture domain (before generic status map).
+  // Explicit capture action on paid-like / partial status keeps capture domain
+  // (before generic status map). Capture-domain arms still require amount-aware
+  // fulfillment for partials; they are not `payment.succeeded`.
   if (
     (s === "paid" || s === "approved" || s === "partially_captured") &&
     flags.isCapture === true &&
@@ -349,7 +406,7 @@ function mapPaymobFromFlags(
   // Capture amounts / is_capture beat sticky is_auth.
   if (flags.isAuth === true && flags.success === true) {
     if (flags.isCapture === true || hasAmountCapture) {
-      return flags.isCapture === true ? "capture.completed" : "payment.succeeded";
+      return mapPaymobCaptureSettle(flags, amounts);
     }
     return "payment.authorized";
   }
@@ -357,7 +414,7 @@ function mapPaymobFromFlags(
     return "capture.completed";
   }
   if (hasAmountCapture && flags.success === true) {
-    return "payment.succeeded";
+    return mapPaymobCaptureSettle(flags, amounts);
   }
   if (flags.success === true) {
     return "payment.succeeded";
@@ -372,10 +429,18 @@ function mapPaymobFromFlags(
   return undefined;
 }
 
+/**
+ * Status-only Paymob map. `payment.succeeded` only for full paid-like settlement
+ * (`paid`). Buyer `approved` and `partially_captured` are open money stories →
+ * `payment.processing` (matches `isPaidOutcome` / paid-like = paid only).
+ */
 function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined {
   const s = (status ?? "").toLowerCase();
-  if (s === "paid" || s === "approved" || s === "partially_captured") {
+  if (s === "paid") {
     return "payment.succeeded";
+  }
+  if (s === "approved" || s === "partially_captured") {
+    return "payment.processing";
   }
   if (s === "failed") return "payment.failed";
   if (s === "authorized") return "payment.authorized";
@@ -388,6 +453,31 @@ function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined
   return undefined;
 }
 
+/**
+ * Resolve TRANSACTION / TRANSACTION_RESPONSE using flags, amounts, status.
+ * Does not apply redirect demotion — caller handles TRANSACTION_RESPONSE.
+ */
+function mapPaymobTransactionSignals(
+  context?: ProviderEventMapContext,
+): MappedStableEventType | undefined {
+  if (context?.flags) {
+    const fromFlags = mapPaymobFromFlags(
+      context.flags,
+      context.status,
+      context.amounts,
+    );
+    if (fromFlags !== undefined) return fromFlags;
+  }
+  // Amount-only without decisive flags (pure mapper / incomplete context)
+  if (
+    context?.amounts?.refundedAmountCents !== undefined &&
+    context.amounts.refundedAmountCents > 0
+  ) {
+    return "refund.completed";
+  }
+  return mapPaymobStatusOnly(context?.status);
+}
+
 function mapPaymobEventType(
   providerEventType: string,
   context?: ProviderEventMapContext,
@@ -397,45 +487,35 @@ function mapPaymobEventType(
     return "payment_method.setup_completed";
   }
 
-  // TRANSACTION / TRANSACTION_RESPONSE — require status, amounts, or flags
-  if (
-    upper === "TRANSACTION" ||
+  const isRedirectResponse =
     upper === "TRANSACTION_RESPONSE" ||
-    providerEventType === "TRANSACTION" ||
-    providerEventType === "TRANSACTION_RESPONSE"
-  ) {
-    if (context?.flags) {
-      const fromFlags = mapPaymobFromFlags(
-        context.flags,
-        context.status,
-        context.amounts,
-      );
-      if (fromFlags !== undefined) return fromFlags;
+    providerEventType === "TRANSACTION_RESPONSE";
+  const isTransaction =
+    upper === "TRANSACTION" || providerEventType === "TRANSACTION";
+
+  // TRANSACTION / TRANSACTION_RESPONSE — require status, amounts, or flags
+  if (isTransaction || isRedirectResponse) {
+    const mapped = mapPaymobTransactionSignals(context);
+    if (mapped === undefined) {
+      // Redirect-only / bare type without usable signals — do not invent
+      return "provider.unmapped";
     }
-    // Amount-only without decisive flags (pure mapper / incomplete context)
+
+    // Browser/redirect callbacks must never look fulfillment-ready. Native type
+    // distinguishes them from processed TRANSACTION server webhooks — demote
+    // settlement arms so fulfill-on-succeeded handlers ignore redirects.
     if (
-      context?.amounts?.refundedAmountCents !== undefined &&
-      context.amounts.refundedAmountCents > 0
+      isRedirectResponse &&
+      PAYMOB_FULFILLMENT_READY_STABLE.has(mapped)
     ) {
-      return "refund.completed";
+      return "payment.processing";
     }
-    const fromStatus = mapPaymobStatusOnly(context?.status);
-    if (fromStatus !== undefined) return fromStatus;
-    // Redirect-only without usable status — do not invent
-    return "provider.unmapped";
+    return mapped;
   }
 
   // Unknown Paymob type: try flags/status still
-  if (context?.flags) {
-    const fromFlags = mapPaymobFromFlags(
-      context.flags,
-      context.status,
-      context.amounts,
-    );
-    if (fromFlags !== undefined) return fromFlags;
-  }
-  const fromStatus = mapPaymobStatusOnly(context?.status);
-  if (fromStatus !== undefined) return fromStatus;
+  const fromUnknown = mapPaymobTransactionSignals(context);
+  if (fromUnknown !== undefined) return fromUnknown;
 
   return "provider.unmapped";
 }

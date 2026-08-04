@@ -40,6 +40,7 @@ import {
   splitRecordAndToken,
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
+import { enforceMaxSanitizedError } from "../limits";
 import {
   newLeaseToken,
   normalizeScan,
@@ -192,9 +193,13 @@ export function createRedisIdempotencyStore(
 
     async markIndeterminate(input: MarkIndeterminateInput): Promise<void> {
       return withMappedErrors(async () => {
-        const resultJson =
+        const reason =
           input.reason !== undefined
-            ? serializeResultJson({ reason: input.reason })
+            ? enforceMaxSanitizedError(input.reason)
+            : undefined;
+        const resultJson =
+          reason !== undefined
+            ? serializeResultJson({ reason })
             : "";
         const raw = await ctx.eval.eval(
           IDEMPOTENCY_MARK_INDETERMINATE_LUA,

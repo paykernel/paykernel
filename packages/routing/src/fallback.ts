@@ -144,17 +144,21 @@ export function classifyFromOperationOutcome(
  *
  * **Never** maps indeterminate → pre_submission_failure.
  *
- * **AbortError caution:** raw `AbortError` / `abort_error` classify as
- * `not_submitted` (default-allow fallback). That is unsafe if the abort can
- * occur after provider accept — multi-gateway apps should pass an explicit
- * `submissionState` / treat abort as `indeterminate` (see safe-fallback.md).
+ * **AbortError (money-safe default):** raw `AbortError` / `abort_error` /
+ * `ABORT_ERR` classify as **`indeterminate`**, which is **not**
+ * fallback-eligible. Abort may race after provider accept; auto multi-gateway
+ * retry would risk double charge. For known pre-submit aborts use
+ * `errorKind: "aborted_before_submit"` / `"cancelled_before_submit"`, explicit
+ * `submissionState: "not_submitted"`, or
+ * `expertUnsafeAbortAsNotSubmitted: true` (old unsafe default).
  */
 export function classifySubmissionState(input: {
   submissionState?: SubmissionState;
   outcome?: PaymentOperationOutcome;
   /**
    * Optional error kind / code string (e.g. "timeout", "ECONNRESET",
-   * "network_error", "validation_error", "not_submitted").
+   * "network_error", "validation_error", "not_submitted",
+   * "aborted_before_submit").
    */
   errorKind?: string;
   /**
@@ -167,7 +171,16 @@ export function classifySubmissionState(input: {
    * PaymentOperationResult). Indeterminate detection uses core helper.
    */
   result?: unknown;
+  /**
+   * Expert opt-in: restore pre-fix `AbortError` → `not_submitted` mapping
+   * (fallback-eligible). **Unsafe** if abort can fire after provider accept.
+   * Prefer explicit `submissionState` / `aborted_before_submit` instead.
+   * Only the literal `true` is accepted (`exactOptionalPropertyTypes`).
+   */
+  expertUnsafeAbortAsNotSubmitted?: true;
 }): SubmissionState {
+  const abortAsNotSubmitted = input.expertUnsafeAbortAsNotSubmitted === true;
+
   if (
     input.submissionState !== undefined &&
     ALL_STATES.has(input.submissionState)
@@ -175,12 +188,12 @@ export function classifySubmissionState(input: {
     return input.submissionState;
   }
 
-  const fromErrorKind = classifyErrorKind(input.errorKind);
+  const fromErrorKind = classifyErrorKind(input.errorKind, abortAsNotSubmitted);
   if (fromErrorKind !== null) {
     return fromErrorKind;
   }
 
-  const fromError = classifyErrorObject(input.error);
+  const fromError = classifyErrorObject(input.error, abortAsNotSubmitted);
   if (fromError !== null) {
     return fromError;
   }
@@ -240,7 +253,10 @@ function classifyResultShape(result: unknown): SubmissionState | null {
   return null;
 }
 
-function classifyErrorKind(kind: string | undefined): SubmissionState | null {
+function classifyErrorKind(
+  kind: string | undefined,
+  abortAsNotSubmitted: boolean,
+): SubmissionState | null {
   if (kind === undefined) return null;
   const k = kind.trim().toLowerCase();
   if (!k) return null;
@@ -251,6 +267,16 @@ function classifyErrorKind(kind: string | undefined): SubmissionState | null {
     k === "cancelled_before_submit"
   ) {
     return "not_submitted";
+  }
+  // Generic abort without pre-submit guarantee → indeterminate (not fallback-eligible).
+  if (
+    k === "abort_error" ||
+    k === "aborterror" ||
+    k === "abort_err" ||
+    k === "aborted" ||
+    k === "abort"
+  ) {
+    return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
   if (
     k === "pre_submission_failure" ||
@@ -289,7 +315,10 @@ function classifyErrorKind(kind: string | undefined): SubmissionState | null {
   return null;
 }
 
-function classifyErrorObject(error: unknown): SubmissionState | null {
+function classifyErrorObject(
+  error: unknown,
+  abortAsNotSubmitted: boolean,
+): SubmissionState | null {
   if (error === null || error === undefined) return null;
   if (typeof error !== "object") return null;
 
@@ -304,12 +333,16 @@ function classifyErrorObject(error: unknown): SubmissionState | null {
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
   const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
 
-  // AbortError → not_submitted enables default-allow fallback. Unsafe if the
-  // abort can fire after the provider accepted the request (client timeout race).
-  // Multi-gateway apps should treat AbortError as indeterminate / manual_review,
-  // pass submissionState explicitly, or supply a custom classification path.
-  if (name === "aborterror" || code === "abort_error") {
-    return "not_submitted";
+  // Abort may fire after provider accept (client deadline race); treating as
+  // not_submitted would enable multi-gateway fallback and risk double charge.
+  // Opt in to old mapping only via expertUnsafeAbortAsNotSubmitted.
+  if (
+    name === "aborterror" ||
+    code === "abort_error" ||
+    code === "abort_err" ||
+    code === "aborted"
+  ) {
+    return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
   if (
     name === "invalidrequesterror" ||

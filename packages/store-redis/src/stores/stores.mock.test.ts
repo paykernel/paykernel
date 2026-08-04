@@ -9,6 +9,10 @@ import { createRedisIdempotencyStore } from "./idempotency-store";
 import { createRedisWebhookInboxStore } from "./webhook-inbox-store";
 import { createRedisReconciliationStore } from "./reconciliation-store";
 import type { RedisCommandPort } from "../port";
+import {
+  enforceMaxSanitizedError,
+  MAX_SANITIZED_ERROR_LENGTH,
+} from "../limits";
 
 type SendCall = { command: string; args: readonly string[] };
 
@@ -141,6 +145,51 @@ describe("idempotency store mock port", () => {
     const args = evalCall!.args;
     const nowMs = String(clock.nowMs());
     expect(args.some((a) => a === nowMs)).toBe(true);
+  });
+
+  it("markIndeterminate sanitizes and caps reason before serialize (SQL parity)", async () => {
+    const { port, calls } = createMockPort(() => ["ok"]);
+    const store = createRedisIdempotencyStore({ port });
+    const longSecret =
+      "token=super-secret-value-that-must-not-persist " + "x".repeat(600);
+    await store.markIndeterminate({
+      key: "k1",
+      leaseToken: "lt_1",
+      reason: longSecret,
+    });
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    const expected = enforceMaxSanitizedError(longSecret);
+    expect(expected).toBeDefined();
+    expect(expected!.length).toBeLessThanOrEqual(MAX_SANITIZED_ERROR_LENGTH);
+    expect(expected).toContain("token=***");
+    expect(expected).not.toContain("super-secret-value-that-must-not-persist");
+    // resultJson ARGV must use sanitized reason (not raw)
+    const resultJsonArg = evalCall!.args.find((a) => a.startsWith("{") && a.includes("reason"));
+    expect(resultJsonArg).toBeDefined();
+    const parsed = JSON.parse(resultJsonArg!) as { reason: string };
+    expect(parsed.reason).toBe(expected);
+    expect(parsed.reason.length).toBeLessThanOrEqual(MAX_SANITIZED_ERROR_LENGTH);
+  });
+
+  it("markIndeterminate omits resultJson when reason sanitizes empty", async () => {
+    const { port, calls } = createMockPort(() => ["ok"]);
+    const store = createRedisIdempotencyStore({ port });
+    await store.markIndeterminate({
+      key: "k1",
+      leaseToken: "lt_1",
+      reason: "   ",
+    });
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    // Empty sanitized reason → empty resultJson ARGV (last arg after lease token)
+    const args = evalCall!.args;
+    // EVAL[SHA] script/sha numkeys key nowMs nowIso leaseToken resultJson
+    expect(args[args.length - 1]).toBe("");
   });
 });
 

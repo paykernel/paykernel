@@ -14,6 +14,12 @@
  * Hot-key: many ops for the same key/tenant hit the same object → latency/cost
  * concentration. Prefer hash partitions when a single key would become a hotspot
  * (rare for pure idempotency keys; more relevant for tenant strategy).
+ *
+ * Discovery / cleanup (`listDue`, `listRetryable`, `deleteExpired`):
+ * - `hash` (and static `tenant`): Worker client fans out to every enumerable
+ *   partition (see {@link resolveDoDiscoveryPartitions}).
+ * - `key` / dynamic `tenant`: unbounded object set — global list is unsupported
+ *   without an external index (hard-fail, not silent sentinel miss).
  */
 
 export type DoShardingStrategy =
@@ -39,6 +45,16 @@ export type ResolveDoShardNameOptions = {
    */
   prefix?: string;
 };
+
+/**
+ * Result of resolving which partitions discovery/cleanup must visit.
+ *
+ * - `partitions`: fan-out to every listed shard name (stable order).
+ * - `unsupported`: strategy has no finite partition set (hard-fail on list/cleanup).
+ */
+export type DoDiscoveryPartitions =
+  | { kind: "partitions"; shardNames: readonly string[] }
+  | { kind: "unsupported"; reason: string };
 
 /**
  * FNV-1a 32-bit hash for stable partition assignment (portable, no crypto dep).
@@ -91,6 +107,12 @@ function validateStrategy(strategy: DoShardingStrategy): void {
   }
 }
 
+function namePrefix(options: ResolveDoShardNameOptions = {}): string {
+  return options.prefix !== undefined && options.prefix.length > 0
+    ? `${options.prefix}:`
+    : "";
+}
+
 /**
  * Resolve the Durable Object name for a given key/tenant under the strategy.
  *
@@ -103,10 +125,7 @@ export function resolveDoShardName(
 ): string {
   validateStrategy(strategy);
   const key = assertNonBlank(input.key, "key");
-  const prefix =
-    options.prefix !== undefined && options.prefix.length > 0
-      ? `${options.prefix}:`
-      : "";
+  const prefix = namePrefix(options);
 
   if (strategy.kind === "key") {
     // One object per key — strongest per-key serialization.
@@ -129,6 +148,69 @@ export function resolveDoShardName(
     tenant = assertNonBlank(strategy.tenantId, "tenantId");
   }
   return `${prefix}tenant:${tenant}`;
+}
+
+/**
+ * Enumerate every partition shard name for discovery/cleanup fan-out.
+ *
+ * - `hash`: `hash:<N>:0` … `hash:<N>:(N-1)` (bounded; N=1 is a single partition).
+ * - `tenant` with a static string `tenantId`: one `tenant:<id>` partition.
+ * - `key` or dynamic `tenantId` function: `{ kind: "unsupported" }` — no silent
+ *   sentinel (`__list__` / `__cleanup__`) partial success.
+ *
+ * Order is stable (ascending partition index / single tenant name).
+ */
+export function resolveDoDiscoveryPartitions(
+  strategy: DoShardingStrategy,
+  options: ResolveDoShardNameOptions = {},
+): DoDiscoveryPartitions {
+  validateStrategy(strategy);
+  const prefix = namePrefix(options);
+
+  if (strategy.kind === "hash") {
+    const names: string[] = [];
+    for (let i = 0; i < strategy.partitions; i++) {
+      names.push(`${prefix}hash:${strategy.partitions}:${i}`);
+    }
+    return { kind: "partitions", shardNames: names };
+  }
+
+  if (strategy.kind === "tenant") {
+    if (typeof strategy.tenantId === "function") {
+      return {
+        kind: "unsupported",
+        reason:
+          'listDue/listRetryable/deleteExpired cannot fan out under sharding kind "tenant" with a dynamic tenantId function (unbounded tenants). Use a static tenantId string, kind "hash", or address work by known key.',
+      };
+    }
+    const tenant = assertNonBlank(strategy.tenantId, "tenantId");
+    return {
+      kind: "partitions",
+      shardNames: [`${prefix}tenant:${tenant}`],
+    };
+  }
+
+  // kind === "key"
+  return {
+    kind: "unsupported",
+    reason:
+      'listDue/listRetryable/deleteExpired cannot fan out under sharding kind "key" (unbounded key:<id> objects; no global index). Prefer kind "hash" for recovery schedulers, or claim/list by known key. Sentinel shards (__list__/__cleanup__) are not used.',
+  };
+}
+
+/**
+ * Convenience: shard names for discovery, or throw TypeError when unsupported.
+ * Prefer {@link resolveDoDiscoveryPartitions} when you need a soft result.
+ */
+export function enumerateDoPartitionShardNames(
+  strategy: DoShardingStrategy,
+  options: ResolveDoShardNameOptions = {},
+): readonly string[] {
+  const resolved = resolveDoDiscoveryPartitions(strategy, options);
+  if (resolved.kind === "unsupported") {
+    throw new TypeError(resolved.reason);
+  }
+  return resolved.shardNames;
 }
 
 /**

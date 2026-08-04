@@ -4,6 +4,11 @@
  * createDoPaymentStores({ namespace, sharding }) routes each op to the correct
  * partition via resolveDoShardName → idFromName/getByName → stub method.
  *
+ * Discovery / cleanup (`listDue`, `listRetryable`, `deleteExpired`):
+ * - hash (and static tenant): fan-out to every enumerable partition, merge/sum.
+ * - key / dynamic tenant: hard-fail with StoreUnsupportedFeatureError (no
+ *   silent sentinel `__list__` / `__cleanup__` partial success).
+ *
  * Does **not** migrate. Does **not** default to a global Durable Object.
  * Does **not** require Cloudflare REST / account credentials.
  */
@@ -44,6 +49,7 @@ import type {
   WebhookInboxRecord,
   WebhookInboxStore,
 } from "@paykernel/store-contracts";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import { createSchemaNamespace } from "@paykernel/sql-foundation";
 import type {
   DoClientStoreOptions,
@@ -58,9 +64,11 @@ import type { StoreClock } from "./clock";
 import {
   assertDoShardingStrategy,
   getDoStub,
+  resolveDoDiscoveryPartitions,
   resolveDoShardName,
   type DoShardingStrategy,
   type DoShardInput,
+  type ResolveDoShardNameOptions,
 } from "./sharding";
 import { createDoExecutor } from "./sql-executor";
 import { createDoIdempotencyStore } from "./stores/idempotency-store";
@@ -69,6 +77,8 @@ import { createDoReconciliationStore } from "./stores/reconciliation-store";
 import { DO_STORAGE_ADAPTER_MANIFEST } from "./manifest";
 import { PaymentsStoreObject } from "./object/payments-store-object";
 import { withMappedErrors } from "./errors";
+
+const DEFAULT_LIST_LIMIT = 100;
 
 function resolveStub(
   namespace: DoNamespaceLike,
@@ -79,6 +89,21 @@ function resolveStub(
   const nameOpts =
     objectNamePrefix !== undefined ? { prefix: objectNamePrefix } : {};
   const shardName = resolveDoShardName(sharding, input, nameOpts);
+  return getDoStub(namespace, shardName) as DoStubLike;
+}
+
+function nameOptsForPrefix(
+  objectNamePrefix: string | undefined,
+): ResolveDoShardNameOptions {
+  return objectNamePrefix !== undefined && objectNamePrefix.length > 0
+    ? { prefix: objectNamePrefix }
+    : {};
+}
+
+function stubForShardName(
+  namespace: DoNamespaceLike,
+  shardName: string,
+): DoStubLike {
   return getDoStub(namespace, shardName) as DoStubLike;
 }
 
@@ -94,6 +119,118 @@ async function callStub<T>(
     throw new TypeError(`DO stub missing RPC method: ${method}`);
   }
   return (await fn(...args)) as T;
+}
+
+type FanOutStoreContext = {
+  namespace: DoNamespaceLike;
+  sharding: DoShardingStrategy;
+  objectNamePrefix: string | undefined;
+};
+
+/**
+ * Resolve enumerable partitions for listDue/listRetryable/deleteExpired, or hard-fail.
+ * Never falls back to sentinel keys (`__list__` / `__cleanup__`).
+ */
+function requireDiscoveryShardNames(ctx: FanOutStoreContext): readonly string[] {
+  const resolved = resolveDoDiscoveryPartitions(
+    ctx.sharding,
+    nameOptsForPrefix(ctx.objectNamePrefix),
+  );
+  if (resolved.kind === "unsupported") {
+    throw new StoreUnsupportedFeatureError(resolved.reason);
+  }
+  return resolved.shardNames;
+}
+
+type FanOutListOptions<T extends { key: string }> = FanOutStoreContext & {
+  method: string;
+  input: { limit?: number };
+  sortKey: (row: T) => string;
+};
+
+/**
+ * Fan-out listDue/listRetryable across all enumerable partitions; merge, dedupe by key,
+ * stable sort, then truncate to limit.
+ */
+async function fanOutListByKey<T extends { key: string }>(
+  options: FanOutListOptions<T>,
+): Promise<T[]> {
+  const { namespace, method, input, sortKey } = options;
+  const shardNames = requireDiscoveryShardNames(options);
+  const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+  const perPartitionInput = { ...input, limit };
+
+  const batches = await Promise.all(
+    shardNames.map((name) =>
+      callStub<T[]>(stubForShardName(namespace, name), method, perPartitionInput),
+    ),
+  );
+
+  const seen = new Set<string>();
+  const merged: T[] = [];
+  for (const batch of batches) {
+    for (const row of batch) {
+      if (seen.has(row.key)) continue;
+      seen.add(row.key);
+      merged.push(row);
+    }
+  }
+
+  merged.sort((a, b) => {
+    const sa = sortKey(a);
+    const sb = sortKey(b);
+    if (sa < sb) return -1;
+    if (sa > sb) return 1;
+    if (a.key < b.key) return -1;
+    if (a.key > b.key) return 1;
+    return 0;
+  });
+
+  return merged.slice(0, limit);
+}
+
+type FanOutDeleteOptions = FanOutStoreContext & {
+  method: string;
+  input: CleanupInput;
+};
+
+/**
+ * Fan-out deleteExpired across partitions; sum deleted counts.
+ * With limit: walk partitions in stable order, applying remaining budget.
+ */
+async function fanOutDeleteExpired(
+  options: FanOutDeleteOptions,
+): Promise<CleanupResult> {
+  const { namespace, method, input } = options;
+  const shardNames = requireDiscoveryShardNames(options);
+  const limit = input.limit;
+
+  if (limit === undefined) {
+    const results = await Promise.all(
+      shardNames.map((name) =>
+        callStub<CleanupResult>(stubForShardName(namespace, name), method, input),
+      ),
+    );
+    let deleted = 0;
+    for (const r of results) deleted += r.deleted;
+    return { deleted };
+  }
+
+  // Bounded cleanup: sequential stable partition order so limit is global.
+  let remaining = limit;
+  let deleted = 0;
+  for (const name of shardNames) {
+    if (remaining <= 0) break;
+    const partInput: CleanupInput = { before: input.before, limit: remaining };
+    const r = await callStub<CleanupResult>(
+      stubForShardName(namespace, name),
+      method,
+      partInput,
+    );
+    deleted += r.deleted;
+    remaining -= r.deleted;
+  }
+  return { deleted };
 }
 
 function createIdempotencyClient(
@@ -136,14 +273,14 @@ function createIdempotencyClient(
       return withMappedErrors(() => callStub(shard(key), "getIdempotency", key));
     },
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
-      // Partition-local only (sentinel shard). Under hash/tenant, iterate partitions
-      // for full cleanup — see docs/sharding.md.
       return withMappedErrors(() =>
-        callStub(
-          shard("__cleanup__"),
-          "deleteExpiredIdempotency",
+        fanOutDeleteExpired({
+          namespace,
+          sharding,
+          objectNamePrefix,
+          method: "deleteExpiredIdempotency",
           input,
-        ),
+        }),
       );
     },
     async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -186,12 +323,25 @@ function createWebhookClient(
     },
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(() =>
-        callStub(shard("__list__"), "listRetryableWebhooks", input),
+        fanOutListByKey<WebhookInboxRecord>({
+          namespace,
+          sharding,
+          objectNamePrefix,
+          method: "listRetryableWebhooks",
+          input,
+          sortKey: (row) => row.availableAt,
+        }),
       );
     },
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() =>
-        callStub(shard("__cleanup__"), "deleteExpiredWebhooks", input),
+        fanOutDeleteExpired({
+          namespace,
+          sharding,
+          objectNamePrefix,
+          method: "deleteExpiredWebhooks",
+          input,
+        }),
       );
     },
     async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -253,12 +403,25 @@ function createReconciliationClient(
     },
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(() =>
-        callStub(shard("__list__"), "listDueReconciliation", input),
+        fanOutListByKey<ReconciliationRecord>({
+          namespace,
+          sharding,
+          objectNamePrefix,
+          method: "listDueReconciliation",
+          input,
+          sortKey: (row) => row.dueAt,
+        }),
       );
     },
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() =>
-        callStub(shard("__cleanup__"), "deleteExpiredReconciliation", input),
+        fanOutDeleteExpired({
+          namespace,
+          sharding,
+          objectNamePrefix,
+          method: "deleteExpiredReconciliation",
+          input,
+        }),
       );
     },
     async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
@@ -278,6 +441,10 @@ function createReconciliationClient(
  * ```
  *
  * Does **not** migrate schema. Does **not** default to one global DO.
+ *
+ * Under `kind: "hash"`, `listDue` / `listRetryable` / `deleteExpired` fan out
+ * across all partitions. Under `kind: "key"`, those methods throw
+ * {@link StoreUnsupportedFeatureError}.
  */
 export function createDoPaymentStores(
   options: DoClientStoreOptions,

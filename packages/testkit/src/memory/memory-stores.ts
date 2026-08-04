@@ -372,19 +372,14 @@ export function createMemoryIdempotencyStore(
       const limit = input.limit ?? Number.POSITIVE_INFINITY;
       for (const [key, rec] of entries) {
         if (deleted >= limit) break;
-        // A4: never delete indeterminate — operator/reconciliation must resolve.
-        if (rec.status === "indeterminate") continue;
-        const recTime = Date.parse(rec.updatedAt);
-        if (recTime > before) continue;
-        const expiredOrTerminal =
-          rec.status === "completed" ||
-          rec.status === "expired" ||
-          (rec.leaseExpiresAt !== undefined &&
-            Date.parse(rec.leaseExpiresAt) <= before);
-        if (expiredOrTerminal) {
-          entries.delete(key);
-          deleted++;
-        }
+        // Terminal-only retention (SQL/Redis parity). Soft-release / reclaim of
+        // reserved rows is separate from deleteExpired — never wipe reclaimable
+        // reserved keys just because leaseExpiresAt <= before (A4 hygiene).
+        // Also never delete indeterminate by default.
+        if (rec.status !== "completed" && rec.status !== "expired") continue;
+        if (Date.parse(rec.updatedAt) > before) continue;
+        entries.delete(key);
+        deleted++;
       }
       return { deleted };
     },

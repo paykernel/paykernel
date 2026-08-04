@@ -51,7 +51,7 @@ Columns align with the roadmap Phase 18 **Initial Matrix**, expanded with **pack
 | **Bun SQLite** | [`@paykernel/store-sqlite/bun`](../packages/store-sqlite) | **No — single host** (`single-host`) | **Yes** with durable disk file (`durable`; `:memory:` is process-local) | **Yes** (`BEGIN IMMEDIATE` + conditional SQL) | Bun local / single-server apps | **Not** cross-host; no network FS sharing of the file |
 | **Node SQLite** | [`@paykernel/store-sqlite/node`](../packages/store-sqlite) | **No — single host** | **Yes** (file-backed) | **Yes** | Node local / single server | `node:sqlite` stability varies by Node line (experimental); optional subpath only |
 | **better-sqlite3** | [`@paykernel/store-sqlite/better-sqlite3`](../packages/store-sqlite) | **No — single host** | **Yes** (file-backed) | **Yes** | Mature Node SQLite deployments | Native dependency; synchronous API |
-| **Turso serverless** | [`@paykernel/store-turso/serverless`](../packages/store-turso) | **Yes** (`multi-host` remote) | **Yes** (`durable`) | **Yes** after conformance (strong claims) | Shared remote SQLite-compatible store | Remote/async txn semantics; **not** local `adapter-sqlite`; **no** `/sync` export |
+| **Turso serverless** | [`@paykernel/store-turso/serverless`](../packages/store-turso) | **Yes** (`multi-host` remote) | **Yes** (`durable`) | **Yes** after conformance (strong claims) | Shared remote SQLite-compatible store | Remote/async txn semantics; **not** local `store-sqlite`; **no** `/sync` export |
 | **libSQL** | [`@paykernel/store-turso/libsql`](../packages/store-turso) | **Yes** remote multi-host; local `file:` is single-host testing only | **Yes** remote; local file follows SQLite file rules | **Yes** after conformance | Existing Turso / `@libsql/client` projects | Embedded-replica / offline multi-writer **not** advertised; no `/sync`; clients **not** interchangeable with `/serverless` |
 | **Cloudflare D1** | [`@paykernel/store-d1`](../packages/store-d1) | **Yes** (`multi-host`, shared D1) | **Yes** (`durable`) | **Yes** (`strong` claims) | Worker-native shared relational store | **Not** local SQLite, Turso, or DO; `readAfterWrite: "session"`; `staleReadsPossible: true` without Sessions under read replication |
 | **Cloudflare Durable Objects** | [`@paykernel/store-durable-objects`](../packages/store-durable-objects) | **Yes, partitioned** (`multi-host` + per-DO strong coordination) | **Yes** (SQLite-backed DO) | **Yes** within a partition | Strong **per-key / per-partition** coordination and retries | Requires sharding; **never** one global DO; no global total order across partitions; **not** D1/shared multi-primary SQL |
@@ -86,17 +86,17 @@ flowchart TD
   Q2 -->|No| Q3{Cloudflare Workers + need<br/>strong per-key serialization?}
   Q3 -->|Yes| DO["@paykernel/store-durable-objects<br/>sharded DO — never global singleton"]
   Q3 -->|No| Q4{Bun + single host /<br/>local file OK?}
-  Q4 -->|Yes| SQLITE_BUN["adapter-sqlite /bun<br/>single-host only"]
+  Q4 -->|Yes| SQLITE_BUN["@paykernel/store-sqlite /bun<br/>single-host only"]
   Q4 -->|No| Q4b{Node single host /<br/>local file OK?}
-  Q4b -->|Yes Node SQLite| SQLITE_NODE["adapter-sqlite /node or /better-sqlite3"]
+  Q4b -->|Yes Node SQLite| SQLITE_NODE["@paykernel/store-sqlite /node or /better-sqlite3"]
   Q4b -->|No| Q5{Need global remote<br/>SQLite-compatible multi-host?}
-  Q5 -->|Yes| TURSO["adapter-turso /serverless or /libsql<br/>remote primary; no /sync"]
+  Q5 -->|Yes| TURSO["@paykernel/store-turso /serverless or /libsql<br/>remote primary; no /sync"]
   Q5 -->|No| Q6{Already have<br/>Redis / Valkey / Upstash?}
   Q6 -->|Yes| Q7{Binding?}
   Q7 -->|Bun native Redis| REDIS_BUN{"Cluster or Sentinel?"}
-  REDIS_BUN -->|No| REDIS_B["adapter-redis /bun"]
-  REDIS_BUN -->|Yes| REDIS_IO["adapter-redis /ioredis or /node-redis<br/>with clusterKeys as needed"]
-  Q7 -->|Upstash| REDIS_UP["adapter-redis /upstash"]
+  REDIS_BUN -->|No| REDIS_B["@paykernel/store-redis /bun"]
+  REDIS_BUN -->|Yes| REDIS_IO["@paykernel/store-redis /ioredis or /node-redis<br/>with clusterKeys as needed"]
+  Q7 -->|Upstash| REDIS_UP["@paykernel/store-redis /upstash"]
   Q7 -->|ioredis / node-redis| REDIS_NODE["matching /ioredis or /node-redis"]
   Q6 -->|No| Q8{Moderate load;<br/>no Redis today?}
   Q8 -->|Yes| SQL_PRIMARY["Pick primary SQL / D1 / DO<br/>Do not add Redis only for PayKernel"]
@@ -139,7 +139,7 @@ Answer in order; stop at the first clear fit.
 8. **No Redis today and moderate load?**  
    → Pick the **primary** relational / D1 / DO adapter from above. **Do not add Redis** only because PayKernel exists.
 
-**Fail-closed default:** if **multi-host** coordination is required and the only option under consideration is **local SQLite** (`adapter-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts.
+**Fail-closed default:** if **multi-host** coordination is required and the only option under consideration is **local SQLite** (`store-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts.
 
 **Tests / examples only:** `createMemoryStores()` from `@paykernel/testkit` — **NON-PRODUCTION**.
 

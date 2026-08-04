@@ -28,6 +28,7 @@ import {
   signWebhook,
   computeMockWebhookSignature,
   createFakeClock,
+  paymentStatusToOperationOutcome,
 } from "../index";
 
 const baseCreate = {
@@ -35,6 +36,15 @@ const baseCreate = {
   currency: "USD" as const,
   callbackUrl: "https://ex.test/cb",
 };
+
+describe("paymentStatusToOperationOutcome", () => {
+  it("maps paid → succeeded and approved → requires_action (not paid-like)", () => {
+    expect(paymentStatusToOperationOutcome("paid")).toBe("succeeded");
+    expect(paymentStatusToOperationOutcome("approved")).toBe("requires_action");
+    expect(paymentStatusToOperationOutcome("pending")).toBe("requires_action");
+    expect(paymentStatusToOperationOutcome("authorized")).toBe("succeeded");
+  });
+});
 
 describe("mockGateway", () => {
   it("scripts outcomes FIFO", async () => {

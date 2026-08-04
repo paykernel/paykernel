@@ -96,6 +96,7 @@ async function createRoutedPayment(params: {
 **Do not** treat transport failures as safe multi-gateway retries:
 
 - **Timeout** / **connection reset** / **uncertain 5xx** may have already submitted a charge.
+- **AbortError** / abort codes classify as **`indeterminate`** by default (not fallback-eligible). Use `aborted_before_submit` only when cancel is known pre-submit.
 - **Indeterminate** outcomes must **not** be auto-routed to another gateway (duplicate-charge risk; package non-goal).
 - **`createPaymentRouter({ fallback })` is not recovery** after a failed attempt — it only fills in a gateway when **no rule matches** at select time.
 - Automatic post-attempt switching is **default-deny**. Use `classifySubmissionState` + `evaluateFallback` before any alternate `select` / `createPayment`.

@@ -1295,7 +1295,8 @@ export class PayPalGateway extends BaseGateway {
 
   /**
    * Map normalized PayPal payment status to operation outcome.
-   * Approval redirects / pending captures are never `succeeded`.
+   * Approval redirects, buyer `approved` (pre-capture), and pending captures
+   * are never `succeeded` — align with webhook `payment.processing` for APPROVED.
    */
   private mapPayPalOutcome(
     status: PaymentStatus,
@@ -1307,8 +1308,11 @@ export class PayPalGateway extends BaseGateway {
     if (
       (typeof redirectUrl === "string" && redirectUrl.length > 0) ||
       status === "pending" ||
-      status === "processing"
+      status === "processing" ||
+      status === "approved"
     ) {
+      // Buyer APPROVED = pre-capture; funds not settled. Keep requires_action
+      // so isPaidOutcome / poll helpers cannot treat approval as fulfillment.
       return "requires_action";
     }
     if (status === "cancelled") {

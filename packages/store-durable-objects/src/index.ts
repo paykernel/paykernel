@@ -53,6 +53,8 @@ export {
 
 export {
   resolveDoShardName,
+  resolveDoDiscoveryPartitions,
+  enumerateDoPartitionShardNames,
   hashStringToUint32,
   getDoStub,
   assertDoShardingStrategy,
@@ -62,6 +64,7 @@ export type {
   DoShardingStrategy,
   DoShardInput,
   ResolveDoShardNameOptions,
+  DoDiscoveryPartitions,
 } from "./sharding";
 
 export type {
@@ -104,6 +107,7 @@ export {
   StoreSerializationFailureError,
   StoreInvalidSchemaError,
   StoreCorruptedRecordError,
+  StoreUnsupportedFeatureError,
 } from "./errors";
 export type { StoreErrorCode } from "./errors";
 

@@ -55,3 +55,5 @@ Lease reclaim / complete / fail predicates bind an injectable client `now` (ISO 
 **Webhook abandoned claims:** `listRetryable` / `get` soft-release `status=claimed` rows whose `lease_expires_at <= now` back to `pending` (lease fields cleared, attempts preserved) so `processRetryable` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases.
 
 **Reconciliation abandoned claims:** `listDue` soft-releases `status=claimed` rows whose `lease_expires_at <= now` back to `scheduled` (lease fields cleared, attempts preserved) so `claimDue` / `processDue` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases. `markManualReview` requires an active (unexpired) lease, matching complete/fail.
+
+**Multi-partition Worker client:** under `kind: "hash"`, `listDue` / `listRetryable` / `deleteExpired` **fan out** to every partition so soft-release + rediscovery reach non-sentinel shards. Under `kind: "key"`, global list/cleanup hard-fails (`StoreUnsupportedFeatureError`); claim/complete by real key remain correct. Details: [sharding.md](./sharding.md).

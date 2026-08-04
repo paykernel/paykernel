@@ -56,7 +56,9 @@ On every successful acquire / reclaim / renew that issues a new lease:
 | `generation`  | Monotonic integer; prior + 1 (or `1` on insert)             |
 | `lease_token` | New unguessable opaque string; old token must fail mutators |
 
-Token-gated methods (complete / fail / renew / markIndeterminate / markManualReview) must check the **current** token (and typically active lease + expected status). Stale token → lease lost — **not** a definitive business failure of the payment.
+Token-gated methods (complete / fail / renew / markIndeterminate / markManualReview) must check the **current** token (and typically expected status). Stale/wrong token → lease lost — **not** a definitive business failure of the payment.
+
+**Lease clock nuance:** `complete` / `fail` / `renew` also require an **unexpired** lease in production templates. `markIndeterminate` (idempotency A4) intentionally parks on `status = reserved` + matching `lease_token` **without** requiring `lease_expires_at > now`, so a worker can still preserve an uncertain outcome near/at expiry before reclaim. After another worker reclaims, the prior token fails. This is intentional near-expiry parking — not a post-reclaim fence hole.
 
 ---
 

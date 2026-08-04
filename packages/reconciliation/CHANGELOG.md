@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Behavior (0.x)
+
+- **Inherited paid-like fix:** Provider status `approved` no longer drives `update_local_to_paid` (core `isPaidLikePaymentStatus` excludes buyer pre-capture approval). Only true settled `paid` upgrades local to paid.
+
 ### Patch Changes
 
 - Docs: SQL adapter `listDue` poll recovery and active-lease `markManualReview` fencing documented for crash recovery after lease expiry.

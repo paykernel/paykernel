@@ -135,7 +135,7 @@ Note: Root `validate:package` targets **core** (typecheck + core tests + monorep
 
 ## Non-blocking observations
 
-1. **Partition-local list/cleanup on Worker client:** `deleteExpired` / `listRetryable` / `listDue` route via sentinel keys (`__cleanup__` / `__list__`), so under hash sharding they hit **one** partition only. Documented in `client.ts` comments and `supportsRetentionCleanup` honesty (partition-local). Operators must iterate partitions for full cleanup — not an A1–A3 blocker.
+1. **Multi-partition discovery fan-out (fixed B5):** Worker client `listDue` / `listRetryable` / `deleteExpired` fan out across all hash partitions (merge/limit); `kind: "key"` hard-fails with `StoreUnsupportedFeatureError`. See `docs/sharding.md` and `partitions.do.test.ts`.
 2. **`runInTransaction` async BEGIN path:** Exists for store `withTransaction` / conformance under mock SQLite. Public `run`/`query` still forbid BEGIN/COMMIT; claims use sync single-statement UPSERT outside external I/O. Documented in `sql-executor.ts`.
 3. **Single-invocation full monorepo test:** Long-running postgres live integrations can exceed short wall-clock budgets; batched runs of the **same package set** prove the aggregate green counts above.
 

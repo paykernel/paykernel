@@ -208,7 +208,7 @@ There is **no** single exported `isTerminalStatus()` helper in v0.8.0. Classific
 | `pending` | Awaiting customer action, provider processing, or async settlement (3DS, PayPal echeck/review, etc.) |
 | `processing` | In-flight processing (provider-dependent) |
 | `authorized` | Auth hold only — funds reserved, **not** captured/paid unless your product intentionally treats holds as reserved inventory |
-| `approved` | Buyer approved (e.g. PayPal order approved before capture). **Paid-like** for `isPaidOutcome` / `PAID_LIKE_PAYMENT_STATUSES`, but product flows that still need a capture must not ship on approval alone — see terminal-ish row |
+| `approved` | Buyer approved (e.g. PayPal order approved **before capture**). **Not** paid-like — `isPaidOutcome` is false; never ship on approval alone. Aligns with webhook `payment.processing` for `CHECKOUT.ORDER.APPROVED` |
 | `partially_captured` | Some but not all authorized amount captured — still an open capture story |
 | `partially_refunded` | Some money returned; remaining captured balance may still exist |
 | `refund_pending` | Refund accepted/pending at provider (e.g. PayPal refund lifecycle) — not a settled payment state |
@@ -220,8 +220,8 @@ Use these as **signals**, still re-check amount/currency and your business rules
 
 | Status | Fulfillment guidance |
 |--------|----------------------|
-| `paid` | **Primary fulfill signal** for capture/sale success. Prefer **`isPaidOutcome(result)`** (`outcome === 'succeeded'` + paid-like `paid` \| `approved`); bare `success: true` is never enough |
-| `approved` | **Paid-like** for `isPaidOutcome` / `PAID_LIKE_PAYMENT_STATUSES` (e.g. some PayPal approved paths). Still confirm capture/settlement rules for your product — auth-only / uncaptured approval must not ship goods |
+| `paid` | **Primary (and only runtime paid-like) fulfill signal** for capture/sale success. Prefer **`isPaidOutcome(result)`** (`outcome === 'succeeded'` + status `paid`); bare `success: true` is never enough |
+| `approved` | **Not paid-like.** PayPal buyer approval / pre-capture only. Operation outcome is `requires_action` (not `succeeded`). Never ship on approval alone — wait for capture / `status === 'paid'` / `PAYMENT.CAPTURE.COMPLETED` |
 | `failed` | Terminal failure of the payment attempt — do not fulfill |
 | `cancelled` | Voided / cancelled / expired holds or orders — do not fulfill as paid |
 | `reversed` | Provider reversed the payment — treat as money no longer good for fulfillment |
@@ -231,7 +231,7 @@ Use these as **signals**, still re-check amount/currency and your business rules
 
 ### Critical integrator rules (current product meaning)
 
-1. **`success: true` is not “paid”.** Creates/captures can return `success: true` with `status: 'pending'` or `authorized` (API-ok ≠ settled). **Fulfill only on paid-like settlement:** **`paid` OR `approved`** (runtime `PAID_LIKE_PAYMENT_STATUSES`). Prefer Phase 6 **`isPaidOutcome(result)`**, which requires `outcome === 'succeeded'` **and** paid-like status (`paid` \| `approved`; **`authorized` is excluded**). Checking `status === 'paid'` (or `approved` when that is your product signal) is also valid; do **not** fulfill on bare `success` or on auth holds unless you intentionally treat `authorized` as reserved inventory only. See [operation-results.md](./operation-results.md).
+1. **`success: true` is not “paid”.** Creates/captures can return `success: true` with `status: 'pending'`, `authorized`, or `approved` (API-ok ≠ settled). **Fulfill only on paid-like settlement:** **`paid` only** (runtime `PAID_LIKE_PAYMENT_STATUSES`). Prefer Phase 6 **`isPaidOutcome(result)`**, which requires `outcome === 'succeeded'` **and** status `paid` (**`authorized` and `approved` are excluded**). Checking `status === 'paid'` is also valid; do **not** fulfill on bare `success`, auth holds, or PayPal buyer approval alone. See [operation-results.md](./operation-results.md).
 2. **Indeterminate is not failure.** Timeouts or ambiguous outcomes after a mutation may have been accepted must use `outcome: 'indeterminate'` + `reconciliationRequired: true` — never treat as a definitive decline without reconciliation.
 3. **Prefer verified webhooks** (or a fresh `getPayment`) over browser redirects for fulfillment.
 4. **Partial statuses** (`partially_captured`, `partially_refunded`) require amount-aware business logic; do not assume full capture or full refund.

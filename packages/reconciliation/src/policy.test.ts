@@ -147,6 +147,39 @@ describe("decideReconciliationPolicy", () => {
     const d = decideReconciliationPolicy(result, target);
     expect(d.action).toBe("do_not_create_replacement");
   });
+
+  it("provider approved (pre-capture) must NOT yield update_local_to_paid", () => {
+    const approvedProvider = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "ORDER-APPROVED",
+      status: "approved",
+      amount: money("10.00", "USD"),
+      providerStatus: "APPROVED",
+    });
+
+    const consistent: ReconciliationResult = {
+      outcome: "consistent",
+      provider: approvedProvider,
+    };
+    const pendingLocal: ReconciliationTarget = {
+      gateway: "paypal",
+      expected: { status: "pending" },
+    };
+    const d1 = decideReconciliationPolicy(consistent, pendingLocal);
+    expect(d1.action).not.toBe("update_local_to_paid");
+    // Keep/mark path — not a paid upgrade (approved is not paid-like)
+    expect(d1.action).toBe("mark_consistent");
+
+    const drift: ReconciliationResult = {
+      outcome: "drift_detected",
+      provider: approvedProvider,
+      differences: [
+        { field: "status", local: "pending", provider: "approved" },
+      ],
+    };
+    const d2 = decideReconciliationPolicy(drift, pendingLocal);
+    expect(d2.action).not.toBe("update_local_to_paid");
+    expect(d2.action).toBe("apply_drift_review");
+  });
 });
 
 describe("shouldForbidReplacementCharge", () => {
