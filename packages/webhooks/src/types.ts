@@ -169,7 +169,15 @@ export type ProcessRetryableInput = {
   owner?: string;
   /**
    * Resolve handler event/envelope from a pending record.
-   * Default: parse `payloadRef` JSON if present, else `{ key, payloadHash }`.
+   *
+   * **Default** (when omitted): parse `payloadRef` JSON if present, else
+   * `{ key, payloadHash }`. When the parse matches a
+   * `PersistedPaymentEventEnvelope` shape (`schemaVersion` + `event` +
+   * `payloadHash`), the nested `.event` is passed to the handler so dual-write
+   * workers can `fulfill(ctx.event)` without a custom resolver. Plain
+   * PaymentEvent / custom shapes are used as-is.
+   *
+   * Override for custom stores or non-envelope `payloadRef` layouts.
    */
   resolveEvent?: (record: WebhookInboxRecord) => {
     gateway: string;

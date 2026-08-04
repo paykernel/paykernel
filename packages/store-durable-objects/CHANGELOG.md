@@ -1,5 +1,12 @@
 # @paykernel/store-durable-objects
 
+## Unreleased
+
+### Patch
+
+- Reconciliation `listDue` soft-releases expired claimed rows so abandoned jobs are rediscoverable via poll; `markManualReview` requires active (unexpired) lease (parity with complete/fail).
+
+
 ## 0.1.0-next.0
 
 

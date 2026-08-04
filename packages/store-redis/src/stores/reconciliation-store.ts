@@ -53,6 +53,7 @@ import {
   normalizeScan,
   resolveRedisStoreContext,
   scanMatchForStore,
+  softReleaseExpiredClaimedViaScan,
 } from "./shared";
 
 export function createRedisReconciliationStore(
@@ -284,7 +285,21 @@ export function createRedisReconciliationStore(
           input.now !== undefined
             ? String(Date.parse(input.now))
             : clockNowMsString(ctx.clock);
+        const nowIso =
+          input.now !== undefined ? input.now : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Claim ZREMs the due index; SCAN soft-release re-indexes expired claimed
+        // so claimDue/processDue rediscover work after crash (SQL/memory parity).
+        await softReleaseExpiredClaimedViaScan({
+          port: ctx.port,
+          eval: ctx.eval,
+          match: scanMatchForStore(ctx.keys, "recon"),
+          indexKey: dueIndex,
+          getLua: RECON_GET_LUA,
+          nowMs,
+          nowIso,
+          indexName: "due",
+        });
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",

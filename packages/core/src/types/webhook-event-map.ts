@@ -47,6 +47,17 @@ export type ProviderEventMapContext = {
     isRefunded?: boolean;
   };
   /**
+   * Paymob (and similar) amount fields in **minor units**.
+   * Used so dual-write stable types agree with amount-derived status
+   * (`refunded_amount_cents` alone, `captured_amount` vs sticky `is_auth`).
+   * Prefer normalized `status` when both are present.
+   */
+  amounts?: {
+    amountCents?: number;
+    refundedAmountCents?: number;
+    capturedAmountCents?: number;
+  };
+  /**
    * Stripe checkout.session payment_status, or similar secondary signal.
    */
   paymentStatus?: string;
@@ -286,21 +297,67 @@ function mapPayPalEventType(
  */
 export const PAYMOB_TOKEN_EVENT_TYPES: readonly string[] = ["TOKEN", "token"];
 
+/**
+ * Map Paymob TRANSACTION flags/amounts to a stable type.
+ *
+ * Order aligns with `PaymobGateway.mapTransactionStatus`: normalized status
+ * first, then amount-derived refunds, then flags. Never invent
+ * `payment.succeeded` from uncertain outcomes.
+ */
 function mapPaymobFromFlags(
   flags: NonNullable<ProviderEventMapContext["flags"]>,
   status?: string,
+  amounts?: ProviderEventMapContext["amounts"],
 ): MappedStableEventType | undefined {
+  const s = (status ?? "").toLowerCase();
+  const hasAmountRefund =
+    amounts?.refundedAmountCents !== undefined && amounts.refundedAmountCents > 0;
+  const hasAmountCapture =
+    amounts?.capturedAmountCents !== undefined && amounts.capturedAmountCents > 0;
+
+  // Explicit capture action on paid-like status keeps capture domain (before generic status map).
+  if (
+    (s === "paid" || s === "approved" || s === "partially_captured") &&
+    flags.isCapture === true &&
+    flags.success === true
+  ) {
+    return "capture.completed";
+  }
+
+  // Status wins over bare success / sticky is_auth (amount-only refunds, auth+capture).
+  const fromStatus = mapPaymobStatusOnly(status);
+  if (fromStatus !== undefined) {
+    return fromStatus;
+  }
+
+  // Amount-only refund when status absent (mirrors mapTransactionStatus).
+  if (hasAmountRefund) {
+    return "refund.completed";
+  }
+
   if (flags.isVoid === true || flags.isVoided === true) {
     return "payment.cancelled";
   }
-  if (flags.isRefund === true || flags.isRefunded === true) {
+  // is_refunded = terminal state; is_refund action requires success (gateway parity).
+  if (flags.isRefunded === true) {
     return "refund.completed";
   }
+  if (flags.isRefund === true && flags.success === true) {
+    return "refund.completed";
+  }
+
+  // Capture amounts / is_capture beat sticky is_auth.
   if (flags.isAuth === true && flags.success === true) {
+    if (flags.isCapture === true || hasAmountCapture) {
+      return flags.isCapture === true ? "capture.completed" : "payment.succeeded";
+    }
     return "payment.authorized";
   }
   if (flags.isCapture === true && flags.success === true) {
     return "capture.completed";
+  }
+  if (hasAmountCapture && flags.success === true) {
+    return "payment.succeeded";
   }
   if (flags.success === true) {
     return "payment.succeeded";
@@ -312,18 +369,22 @@ function mapPaymobFromFlags(
     return "payment.failed";
   }
 
-  // Fall through to status string
+  return undefined;
+}
+
+function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined {
   const s = (status ?? "").toLowerCase();
-  if (s === "paid" || s === "approved") return "payment.succeeded";
+  if (s === "paid" || s === "approved" || s === "partially_captured") {
+    return "payment.succeeded";
+  }
   if (s === "failed") return "payment.failed";
   if (s === "authorized") return "payment.authorized";
-  if (s === "cancelled") return "payment.cancelled";
+  if (s === "cancelled" || s === "voided") return "payment.cancelled";
   if (s === "refunded" || s === "partially_refunded" || s === "refund_completed") {
     return "refund.completed";
   }
   if (s === "pending" || s === "processing") return "payment.processing";
   if (s === "setup_completed") return "payment_method.setup_completed";
-
   return undefined;
 }
 
@@ -336,7 +397,7 @@ function mapPaymobEventType(
     return "payment_method.setup_completed";
   }
 
-  // TRANSACTION / TRANSACTION_RESPONSE — require status or flags
+  // TRANSACTION / TRANSACTION_RESPONSE — require status, amounts, or flags
   if (
     upper === "TRANSACTION" ||
     upper === "TRANSACTION_RESPONSE" ||
@@ -344,25 +405,37 @@ function mapPaymobEventType(
     providerEventType === "TRANSACTION_RESPONSE"
   ) {
     if (context?.flags) {
-      const fromFlags = mapPaymobFromFlags(context.flags, context.status);
+      const fromFlags = mapPaymobFromFlags(
+        context.flags,
+        context.status,
+        context.amounts,
+      );
       if (fromFlags !== undefined) return fromFlags;
     }
-    const s = (context?.status ?? "").toLowerCase();
-    if (s === "paid" || s === "approved") return "payment.succeeded";
-    if (s === "failed") return "payment.failed";
-    if (s === "authorized") return "payment.authorized";
-    if (s === "cancelled") return "payment.cancelled";
-    if (s === "refunded" || s === "partially_refunded") return "refund.completed";
-    if (s === "pending" || s === "processing") return "payment.processing";
+    // Amount-only without decisive flags (pure mapper / incomplete context)
+    if (
+      context?.amounts?.refundedAmountCents !== undefined &&
+      context.amounts.refundedAmountCents > 0
+    ) {
+      return "refund.completed";
+    }
+    const fromStatus = mapPaymobStatusOnly(context?.status);
+    if (fromStatus !== undefined) return fromStatus;
     // Redirect-only without usable status — do not invent
     return "provider.unmapped";
   }
 
   // Unknown Paymob type: try flags/status still
   if (context?.flags) {
-    const fromFlags = mapPaymobFromFlags(context.flags, context.status);
+    const fromFlags = mapPaymobFromFlags(
+      context.flags,
+      context.status,
+      context.amounts,
+    );
     if (fromFlags !== undefined) return fromFlags;
   }
+  const fromStatus = mapPaymobStatusOnly(context?.status);
+  if (fromStatus !== undefined) return fromStatus;
 
   return "provider.unmapped";
 }

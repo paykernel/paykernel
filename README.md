@@ -15,14 +15,16 @@ A type-safe payment orchestration toolkit for TypeScript, built for MENA payment
 | [`packages/reconciliation`](./packages/reconciliation)     | [`@paykernel/reconciliation`](./packages/reconciliation)                 | Portable reconciliation primitives (safe lookup, drift, decision-only policy, store-backed schedule) — Phase 19 |
 | [`packages/observability`](./packages/observability)       | [`@paykernel/opentelemetry`](./packages/observability)                   | Phase 20 portable metrics, spans, redacting telemetry glue, optional OTEL bridge (no hard OTEL in core) |
 | [`packages/routing`](./packages/routing)                   | [`@paykernel/routing`](./packages/routing)                               | Phase 21 portable select-only gateway routing + restricted post-attempt fallback eligibility (core-only) |
-| [`packages/testkit`](./packages/testkit)                   | [`@paykernel/testkit`](./packages/testkit)                               | Mock gateway, conformance, Phase 9 store contracts, NON-PRODUCTION memory stores                     |
+| [`packages/testkit`](./packages/testkit)                   | [`@paykernel/testkit`](./packages/testkit)                               | Mock gateway, conformance, store-contracts re-exports, NON-PRODUCTION memory stores                   |
+| [`packages/store-contracts`](./packages/store-contracts) | [`@paykernel/store-contracts`](https://www.npmjs.com/package/@paykernel/store-contracts) | Publishable Phase 9 portable store contracts (lease stores, errors, manifests) |
+| [`packages/sql-foundation`](./packages/sql-foundation) | [`@paykernel/sql-foundation`](https://www.npmjs.com/package/@paykernel/sql-foundation) | Publishable Phase 11 relational foundation (schemas, migrations, claim SQL templates) |
 | [`packages/store-postgres`](./packages/store-postgres) | [`@paykernel/store-postgres`](./packages/store-postgres)             | Phase 12 PostgreSQL durable stores (idempotency, webhook inbox, reconciliation); multi-host claims   |
 | [`packages/store-redis`](./packages/store-redis)       | [`@paykernel/store-redis`](./packages/store-redis)                   | Phase 13 **optional** Redis/Valkey/Upstash stores (Lua claims); not required to use the SDK          |
 | [`packages/store-sqlite`](./packages/store-sqlite)     | [`@paykernel/store-sqlite`](./packages/store-sqlite)                 | Phase 14 **single-host** SQLite stores (Bun/Node/better-sqlite3); not multi-host                     |
 | [`packages/store-turso`](./packages/store-turso)       | [`@paykernel/store-turso`](./packages/store-turso)                   | Phase 15 **multi-host remote** Turso/libSQL stores; not local SQLite; no `/sync`                     |
 | [`packages/store-d1`](./packages/store-d1) | [`@paykernel/store-d1`](./packages/store-d1) | Phase 16 **multi-host** Cloudflare D1 stores (Workers binding); not local SQLite; not Turso; not DO |
 | [`packages/store-durable-objects`](./packages/store-durable-objects) | [`@paykernel/store-durable-objects`](./packages/store-durable-objects) | Phase 17 **multi-host partitioned** SQLite-backed Durable Objects; not D1; not local SQLite; not Turso |
-| [`internal/sql-store`](./internal/sql-store)               | `@paykernel/internal-sql-store` (**private**; never published)           | Phase 11 relational foundation: schemas, migrations, atomic claim templates for adapters             |
+| [`internal/sql-store`](./internal/sql-store)               | `@paykernel/internal-sql-store` (**private**; never published)           | Thin re-export of `@paykernel/sql-foundation` (BC shim; adapters depend on sql-foundation)             |
 
 Consumer install:
 
@@ -106,6 +108,15 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── src/
 │   │   ├── package.json
 │   │   └── README.md
+│   ├── store-contracts/           # @paykernel/store-contracts (Phase 9; portable contracts)
+│   │   ├── src/
+│   │   ├── package.json
+│   │   └── README.md
+│   ├── sql-foundation/            # @paykernel/sql-foundation (Phase 11; publishable)
+│   │   ├── src/
+│   │   ├── docs/
+│   │   ├── package.json
+│   │   └── README.md
 │   ├── store-postgres/            # @paykernel/store-postgres (Phase 12)
 │   │   ├── src/
 │   │   ├── docs/
@@ -140,7 +151,7 @@ paykernel/                         # private workspace root (not published)
 │       ├── package.json
 │       └── README.md
 ├── internal/
-│   └── sql-store/                 # @paykernel/internal-sql-store (private; Phase 11)
+│   └── sql-store/                 # @paykernel/internal-sql-store (private re-export of sql-foundation)
 ├── scripts/                       # monorepo tooling (baseline, pack, smoke, boundaries)
 ├── docs/
 │   ├── monorepo.md                # workspace DX guide

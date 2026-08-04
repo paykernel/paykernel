@@ -143,6 +143,11 @@ export function classifyFromOperationOutcome(
  * 4. Default: `indeterminate` (fail-closed for fallback)
  *
  * **Never** maps indeterminate → pre_submission_failure.
+ *
+ * **AbortError caution:** raw `AbortError` / `abort_error` classify as
+ * `not_submitted` (default-allow fallback). That is unsafe if the abort can
+ * occur after provider accept — multi-gateway apps should pass an explicit
+ * `submissionState` / treat abort as `indeterminate` (see safe-fallback.md).
  */
 export function classifySubmissionState(input: {
   submissionState?: SubmissionState;
@@ -299,6 +304,10 @@ function classifyErrorObject(error: unknown): SubmissionState | null {
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
   const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
 
+  // AbortError → not_submitted enables default-allow fallback. Unsafe if the
+  // abort can fire after the provider accepted the request (client timeout race).
+  // Multi-gateway apps should treat AbortError as indeterminate / manual_review,
+  // pass submissionState explicitly, or supply a custom classification path.
   if (name === "aborterror" || code === "abort_error") {
     return "not_submitted";
   }

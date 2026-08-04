@@ -28,12 +28,14 @@ Phase 19 dual-owns `ReconciliationStore` in this package (structurally compatibl
 | `complete` | Terminal success (lease-fenced) |
 | `fail` | Terminal fail **or** reschedule via `retryAt` |
 | `markManualReview` | Terminal human review |
-| `get` / `listDue` | Read / list due |
+| `get` / `listDue` | Read / list due (`listDue` **must** soft-release/re-index expired claims — see [crash-boundaries](./crash-boundaries.md#listdue-recovery-contract-adapters)) |
 | `deleteExpired` | Retention cleanup |
 
 Statuses: `scheduled` | `claimed` | `completed` | `failed` | `manual_review`.
 
 Claim is **never** get-then-set. Stale `leaseToken` → `StoreLeaseLostError` / `lease_lost`.
+
+`claimDue` / `processDue` discover work only via `listDue` → `claim`. Adapters that only allow key-addressed reclaim after crash (without making the job reappear in `listDue`) break poll-worker recovery.
 
 ---
 

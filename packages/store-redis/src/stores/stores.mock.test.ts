@@ -267,4 +267,28 @@ describe("reconciliation store mock port", () => {
     const r = await store.claim({ key: "missing", owner: "w", leaseMs: 1000 });
     expect(r.kind).toBe("not_found");
   });
+
+  it("fail lease_lost (expired lease) throws StoreLeaseLostError", async () => {
+    const { port } = createMockPort(() => ["lease_lost"]);
+    const store = createRedisReconciliationStore({ port });
+    await expect(
+      store.fail({
+        key: "j1",
+        leaseToken: "stale-or-expired",
+        error: "handler_error",
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
+
+  it("markManualReview lease_lost (expired lease) throws StoreLeaseLostError", async () => {
+    const { port } = createMockPort(() => ["lease_lost"]);
+    const store = createRedisReconciliationStore({ port });
+    await expect(
+      store.markManualReview({
+        key: "j1",
+        leaseToken: "stale-or-expired",
+        note: "needs_review",
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
 });

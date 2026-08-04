@@ -138,6 +138,50 @@ function envelopeToPayloadRef(envelope: unknown): string | undefined {
   }
 }
 
+/**
+ * Structural check for core `PersistedPaymentEventEnvelope`
+ * (`{ schemaVersion, event, payloadHash, storedAt? }`).
+ *
+ * Used by default `processRetryable` materialization to unwrap `.event` so
+ * handlers receive the nested PaymentEvent (or plain object), not the wrapper.
+ * Plain PaymentEvent / custom payloadRef shapes lack top-level `event`+`payloadHash`
+ * and are left as-is.
+ */
+function isPersistedPaymentEventEnvelopeShape(
+  value: unknown,
+): value is {
+  schemaVersion: unknown;
+  event: unknown;
+  payloadHash: unknown;
+} {
+  if (value === null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  return (
+    "schemaVersion" in v &&
+    "event" in v &&
+    "payloadHash" in v &&
+    typeof v.payloadHash === "string"
+  );
+}
+
+/**
+ * Default payloadRef → handler event for `processRetryable`.
+ * Dual-write envelopes auto-unwrap `.event`; plain events stay as-is.
+ */
+function materializeEventFromPayloadRef(payloadRef: string): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadRef) as unknown;
+  } catch {
+    // payloadRef may be opaque non-JSON; pass through as event.
+    return payloadRef;
+  }
+  if (isPersistedPaymentEventEnvelopeShape(parsed)) {
+    return parsed.event;
+  }
+  return parsed;
+}
+
 function isNonRetryable(error: unknown): boolean {
   if (error instanceof NonRetryableHandlerError) return true;
   if (
@@ -555,12 +599,7 @@ export function createWebhookInboxEngine(
         providerEventId = parsed?.providerEventId ?? rec.key;
         payloadHash = rec.payloadHash;
         if (rec.payloadRef) {
-          try {
-            event = JSON.parse(rec.payloadRef) as unknown;
-          } catch {
-            // payloadRef may be opaque non-JSON; pass through as event.
-            event = rec.payloadRef;
-          }
+          event = materializeEventFromPayloadRef(rec.payloadRef);
         } else {
           event = { key: rec.key, payloadHash: rec.payloadHash };
         }

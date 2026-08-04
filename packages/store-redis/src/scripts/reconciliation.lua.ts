@@ -305,6 +305,11 @@ local m = hgetall_map(rec)
 if (m['status'] or '') ~= 'claimed' or (m['lease_token'] or '') ~= leaseToken then
   return {'lease_lost'}
 end
+-- Parity with RECON_COMPLETE_LUA / WEBHOOK_FAIL_LUA / SQL fail: require unexpired lease
+local exp = tonumber(m['lease_expires_ms'] or '0') or 0
+if exp <= nowMs then
+  return {'lease_lost'}
+end
 
 if mode == 'retry' then
   redis.call('HSET', rec,
@@ -363,6 +368,11 @@ end
 
 local m = hgetall_map(rec)
 if (m['status'] or '') ~= 'claimed' or (m['lease_token'] or '') ~= leaseToken then
+  return {'lease_lost'}
+end
+-- Parity with RECON_COMPLETE_LUA / RECON_FAIL_LUA / SQL markManualReview: require unexpired lease
+local exp = tonumber(m['lease_expires_ms'] or '0') or 0
+if exp <= nowMs then
   return {'lease_lost'}
 end
 

@@ -2236,6 +2236,100 @@ describe("PaymobGateway", () => {
         expect(token.event.setup.token).toBe("tok_saved_card_123");
       }
     });
+
+    it("Phase 7 dual-write: amount-only partial refund → refund.completed (not payment.succeeded)", () => {
+      // refunded_amount_cents alone (no is_refund / is_refunded): dual-write must
+      // agree with amount-aware status (not bare success → payment.succeeded).
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: false,
+        is_refunded: false,
+        amount_cents: 10000,
+        refunded_amount_cents: 2500,
+      }));
+
+      expect(event.status).toBe("partially_refunded");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.provider?.eventType).toBe("TRANSACTION");
+    });
+
+    it("Phase 7 dual-write: amount-only full refund → refund.completed (not payment.succeeded)", () => {
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: false,
+        is_refunded: false,
+        amount_cents: 10000,
+        refunded_amount_cents: 10000,
+      }));
+
+      expect(event.status).toBe("refunded");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+    });
+
+    it("Phase 7 dual-write: full refund of partial capture amount-only → refund.completed", () => {
+      // Auth 10000, capture 5000, refund 5000 without refund flags — not payment.succeeded.
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: false,
+        is_refunded: false,
+        amount_cents: 10000,
+        captured_amount: 5000,
+        refunded_amount_cents: 5000,
+      }));
+
+      expect(event.status).toBe("refunded");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("Phase 7 dual-write: is_auth + partial captured_amount does not emit payment.authorized", () => {
+      // Sticky is_auth must not under-map capture when captured_amount is set.
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_auth: true,
+        is_capture: false,
+        is_captured: false,
+        amount_cents: 10000,
+        captured_amount: 5000,
+      }));
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.stableType).not.toBe("payment.authorized");
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.succeeded");
+    });
+
+    it("Phase 7 dual-write: is_auth + full captured_amount → payment.succeeded not authorized", () => {
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_auth: true,
+        is_capture: false,
+        is_captured: false,
+        amount_cents: 10000,
+        captured_amount: 10000,
+      }));
+
+      expect(event.status).toBe("paid");
+      expect(event.stableType).not.toBe("payment.authorized");
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.succeeded");
+    });
+
+    it("Phase 7 dual-write: failed is_refund action is payment.failed not refund.completed", () => {
+      // Align dual-write with mapTransactionStatus: failed refund action is failed.
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: false,
+        is_refund: true,
+        is_refunded: false,
+      } as Partial<PaymobWebhookPayload["obj"]>));
+
+      expect(event.status).toBe("failed");
+      expect(event.stableType).toBe("payment.failed");
+      expect(event.event?.type).toBe("payment.failed");
+    });
   });
 
   describe("Lifecycle Hooks", () => {

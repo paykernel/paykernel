@@ -325,7 +325,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Zero-decimal currencies** | `JPY`, `HUF`, and `TWD` amounts must be whole numbers |
 | **Webhook ID** | Configure in PayPal Developer Dashboard → Webhooks |
 | **Webhook reference** | `event.paymentId` uses PayPal `custom_id` when available and falls back to the purchase unit `reference_id` that the SDK sends from `orderId`. |
-| **Webhook scope** | The SDK normalizes current checkout/order, authorization, capture, and refund-pending/failed events. Refund lifecycle events use `refund_pending` / `refund_failed` so they are not confused with original payment state. Unsupported PayPal events are rejected instead of being guessed as `pending` with a fake amount. |
+| **Webhook scope** | The SDK normalizes current checkout/order, authorization, capture, and refund lifecycle events (`PAYMENT.REFUND.PENDING` / `COMPLETED` / `FAILED`, plus `PAYMENT.CAPTURE.REFUNDED`). Refund lifecycle statuses use `refund_pending` / `refunded` / `refund_failed` so they are not confused with original payment state. Unsupported PayPal events are rejected instead of being guessed as `pending` with a fake amount. |
 | **Webhook amounts** | `event.amount` and `event.currency` are present only when PayPal includes amount data. `CHECKOUT.PAYMENT-APPROVAL.REVERSED` does not include amount data in PayPal's documented payload, so those fields are undefined. |
 | **Refund webhook IDs** | For refund lifecycle webhooks, `event.gatewayPaymentId` is the related capture ID when PayPal includes it in `supplementary_data.related_ids.capture_id` or a `rel: "up"` capture link; `event.gatewayObjectId` is the refund ID. Refund resource `custom_id` is not treated as the original payment ID. |
 | **Reversals** | `PAYMENT.CAPTURE.REVERSED` maps to `reversed`, not `refunded`, because reversals can represent chargebacks or other non-merchant refund flows. |
@@ -353,4 +353,5 @@ app.post('/webhooks/paypal', async (req) => {
 | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | `partially_captured` |
 | `PAYMENT.AUTHORIZATION.VOIDED` | `cancelled` |
 | `PAYMENT.REFUND.PENDING` | `refund_pending` |
+| `PAYMENT.REFUND.COMPLETED` | `refunded` (stable dual-write `refund.completed`) |
 | `PAYMENT.REFUND.FAILED` | `refund_failed` |

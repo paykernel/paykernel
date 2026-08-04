@@ -65,6 +65,24 @@ On successful reserve / claim / renew that issues a new lease:
 - **`WEBHOOK_CLAIM_LUA`**: when `status == pending` and `available_ms > nowMs`, returns tag `not_available` (does not burn attempts). Expired `claimed` leases still reclaim for crash recovery.
 - **`WEBHOOK_FAIL_LUA`**: requires unexpired lease (`lease_expires_ms > nowMs`) — same fence as `WEBHOOK_COMPLETE_LUA` / SQL fail. Expired token → `lease_lost`.
 
+## Reconciliation fail fencing
+
+- **`RECON_FAIL_LUA`**: requires unexpired lease (`lease_expires_ms > nowMs`) after status=`claimed` + token match — same fence as `RECON_COMPLETE_LUA` / `WEBHOOK_FAIL_LUA` / SQL fail. Expired token → `lease_lost` (no schedule/terminal mutate).
+
+## List rediscovery after abandoned claim (Approach A)
+
+Claim scripts **ZREM** the logical key from the retry/due ZSET. Soft-release + **ZADD** lives in `WEBHOOK_GET_LUA` / `RECON_GET_LUA` for key-addressed reads.
+
+For scheduler poll paths (`listRetryable` / `listDue`), Redis also runs a **bulk soft-release** before `ZRANGEBYSCORE`:
+
+1. `SCAN` store record keys (skip the index key).
+2. Run the store's GET Lua with injectable `nowMs` — expired `claimed` → `pending`/`scheduled` + re-index.
+3. Then `ZRANGEBYSCORE` + hydrate scheduled/pending rows.
+
+This is **Approach A** (list bulk soft-release via SCAN + existing GET soft-release), matching SQL `listRetryable` bulk UPDATE of expired claimed and memory `listDue`/`listRetryable` soft-release. It does **not** keep claimed keys on the due/retry index until complete (Approach B) and does **not** maintain a parallel claimed-expiry ZSET (Approach C).
+
+Without this path, `processRetryable` / `claimDue`/`processDue` starve after a mid-claim crash because abandoned keys stay off-index until an external `get`.
+
 ## Per-store scripts (registry)
 
 | Store | Scripts |

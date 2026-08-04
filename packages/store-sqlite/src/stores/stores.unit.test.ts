@@ -190,6 +190,70 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(got?.status).toBe("completed");
   });
 
+  it("listDue rediscovers abandoned expired claims without prior get", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    await store.schedule({
+      key: "abandoned-job",
+      subjectId: "pay_ab",
+      reason: "indeterminate",
+      dueAt,
+    });
+    const claimed = await store.claim({
+      key: "abandoned-job",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+
+    let listed = await store.listDue({ now: new Date(clock.nowMs()).toISOString() });
+    expect(listed.find((r) => r.key === "abandoned-job")).toBeUndefined();
+
+    clock.advance(2_000);
+    listed = await store.listDue({ now: new Date(clock.nowMs()).toISOString() });
+    const row = listed.find((r) => r.key === "abandoned-job");
+    expect(row).toBeDefined();
+    expect(row?.status).toBe("scheduled");
+    expect(row?.attempts).toBe(1);
+    expect(row?.leaseToken).toBeUndefined();
+  });
+
+  it("markManualReview rejects expired lease with lease_lost", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    await store.schedule({
+      key: "manual-exp",
+      subjectId: "pay_m",
+      reason: "ambiguous",
+      dueAt,
+    });
+    const claimed = await store.claim({
+      key: "manual-exp",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.markManualReview({
+        key: "manual-exp",
+        leaseToken: claimed.leaseToken,
+        note: "late",
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    // Still reclaimable after expiry (not terminal).
+    const again = await store.claim({
+      key: "manual-exp",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("acquired");
+  });
+
   it("createSqliteStores shares namespace and does not migrate", async () => {
     const db = openBunSqliteDatabase(":memory:");
     const bare = createExecutorFromBunSqlite(db);

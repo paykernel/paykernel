@@ -184,15 +184,25 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Moyasar | `payment_authorized` | `payment.authorized` | |
 | PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded` |
 | PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` | |
+| PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource; capture id via `rel: up` / related_ids |
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
 | Paymob | `TOKEN` | `payment_method.setup_completed` | |
-| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` context |
+| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context |
+| Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without refund flags) | **`refund.completed`** | Status `refunded`/`partially_refunded` + dual-write agree; **not** `payment.succeeded` |
+| Paymob | `TRANSACTION` `is_auth` + `captured_amount` | `payment.succeeded` | Not `payment.authorized` when status is `paid`/`partially_captured` |
 | Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
 
 **PayPal capture choice:** `PAYMENT.CAPTURE.COMPLETED` maps to
 `capture.completed` (capture domain), not `payment.succeeded`. Apps that
 fulfill when money is captured should handle `capture.completed` (and may still
 inspect normalized `WebhookEvent.status === 'paid'` during migration).
+
+**Paymob amount-only refunds:** Prefer `status` / amount-derived signals over bare
+`success` flags. When Paymob sends `refunded_amount_cents > 0` without `is_refund`
+/ `is_refunded`, dual-write sets `stableType` / `PaymentEvent.type` to
+`refund.completed` (matching status `refunded` / `partially_refunded`) — **not**
+`payment.succeeded`. Fulfillment handlers that key only on `payment.succeeded`
+must not treat amount-only refund TRANSACTION webhooks as paid.
 
 Tables are pure data (`STRIPE_EVENT_TYPE_MAP`, `MOYASAR_EVENT_TYPE_MAP`,
 `PAYPAL_EVENT_TYPE_MAP`, …) plus `mapProviderEventTypeToStable`.

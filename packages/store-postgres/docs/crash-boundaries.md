@@ -77,6 +77,8 @@ This document answers: if a worker dies before or after a side effect and before
 
 
 **Webhook abandoned claims:** `listRetryable` / `get` soft-release `status=claimed` rows whose `lease_expires_at <= now` back to `pending` (lease fields cleared, attempts preserved) so `processRetryable` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases.
+
+**Reconciliation abandoned claims:** `listDue` soft-releases `status=claimed` rows whose `lease_expires_at <= now` back to `scheduled` (lease fields cleared, attempts preserved) so `claimDue` / `processDue` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases. `markManualReview` requires an active (unexpired) lease, matching complete/fail.
 ## Lease reclaim (dual fencing)
 
 1. Lease expires (`lease_expires_at` compared with injectable `now` bound into SQL — not hard-dependent on `SQL NOW()` for test paths).

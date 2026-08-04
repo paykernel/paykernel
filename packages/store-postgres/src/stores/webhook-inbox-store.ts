@@ -198,7 +198,8 @@ export function createPostgresWebhookInboxStore(
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
       return withMappedErrors(async () => {
-        // Soft-release abandoned expired claims so get matches memory/Redis visibility.
+        // Soft-release abandoned expired claims so get reclaims expired leases for this key
+        // (parity with memory get soft-release and Redis WEBHOOK_GET_LUA).
         const now = clockNowIso(ctx.clock);
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
@@ -223,7 +224,8 @@ export function createPostgresWebhookInboxStore(
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them
-        // (attempts kept; lease fields cleared). Matches memory/Redis recovery.
+        // (attempts kept; lease fields cleared). Matches memory list recovery and
+        // Redis listRetryable also bulk SCAN soft-releases expired claimed rows.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'pending',

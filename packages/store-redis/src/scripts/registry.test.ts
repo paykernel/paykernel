@@ -63,4 +63,25 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(fail).toMatch(/attempts\s*=\s*math\.max/);
   });
 
+
+  it("recon fail requires unexpired lease (parity with complete / webhook fail)", () => {
+    const fail = REDIS_SCRIPT_REGISTRY.reconciliation.fail;
+    const complete = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
+    expect(fail).toContain("lease_expires_ms");
+    expect(fail).toContain("lease_lost");
+    // Same fence as complete: exp <= nowMs → lease_lost
+    expect(fail).toContain("exp <= nowMs");
+    expect(complete).toContain("exp <= nowMs");
+  });
+
+
+  it("recon markManualReview requires unexpired lease (parity with complete/fail)", () => {
+    const mark = REDIS_SCRIPT_REGISTRY.reconciliation.markManualReview;
+    const complete = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
+    expect(mark).toContain("lease_expires_ms");
+    expect(mark).toContain("lease_lost");
+    expect(mark).toContain("exp <= nowMs");
+    expect(complete).toContain("exp <= nowMs");
+  });
+
 });

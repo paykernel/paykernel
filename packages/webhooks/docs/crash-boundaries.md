@@ -46,7 +46,7 @@ Lease expiry / process death while claimed is treated like abandon: another work
 - No inbox mutation for this delivery (or prior terminal/pending row from an earlier delivery only).
 - If this is the first delivery of the key: key is **absent**.
 - If a previous attempt already completed: row remains `completed`.
-- If a previous attempt left `pending` / `failed` retryable: unchanged until a later claim.
+- If a previous attempt left `pending` (retryable after fail): unchanged until a later claim. (Engine never writes status `failed`; that enum member is vestigial for custom stores.)
 
 ### Handler
 

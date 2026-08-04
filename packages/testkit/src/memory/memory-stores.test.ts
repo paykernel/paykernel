@@ -372,4 +372,45 @@ describe("createMemoryReconciliationStore", () => {
     await store.complete({ key: "r_rnw", leaseToken: renewed.leaseToken });
     expect((await store.get("r_rnw"))?.status).toBe("completed");
   });
+
+  /**
+   * Regression: listDue must soft-release expired claimed→scheduled so poll
+   * workers (claimDue/processDue) rediscover abandoned jobs without get(key).
+   * Memory is the reference impl; durable adapters must match this contract.
+   */
+  it("listDue soft-releases expired claimed jobs (poll recovery)", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_list_soft",
+      subjectId: "pay_soft",
+      reason: "indeterminate",
+      dueAt: clock.nowIso(),
+    });
+    const claimed = await store.claim({
+      key: "r_list_soft",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+
+    expect(
+      (await store.listDue({ now: clock.nowIso(), limit: 10 })).some(
+        (r) => r.key === "r_list_soft",
+      ),
+    ).toBe(false);
+
+    clock.advance(1_001);
+
+    const due = await store.listDue({ now: clock.nowIso(), limit: 10 });
+    const row = due.find((r) => r.key === "r_list_soft");
+    expect(row).toBeDefined();
+    expect(row?.status).toBe("scheduled");
+    expect(row?.leaseToken).toBeUndefined();
+    expect(row?.leaseExpiresAt).toBeUndefined();
+
+    // Soft-release must persist for subsequent get.
+    const got = await store.get("r_list_soft");
+    expect(got?.status).toBe("scheduled");
+  });
 });

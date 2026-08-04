@@ -27,7 +27,9 @@ This document describes process crashes relative to reconciliation schedule, cla
 | After lookup, before complete | Result known in memory; store not yet terminal |
 | After complete / manual_review / failed | Terminal store status |
 
-Lease expiry while claimed: another worker may **reclaim** after `leaseExpiresAt` via atomic `store.claim`. Stale `leaseToken` on complete → `StoreLeaseLostError`.
+Lease expiry while claimed: another worker may **reclaim** after `leaseExpiresAt` via atomic `store.claim`. Stale or expired `leaseToken` on complete / fail / `markManualReview` → `StoreLeaseLostError`.
+
+For poll-based workers (`claimDue` / `processDue`), reclaim requires the job to reappear in `listDue` after the lease expires — adapters must soft-release / re-index expired claims (memory and SQL adapters soft-release inside `listDue`; Redis must re-index abandoned claimed keys off the due ZSET).
 
 ---
 
@@ -76,6 +78,7 @@ Lease expiry while claimed: another worker may **reclaim** after `leaseExpiresAt
 ### Recovery
 
 - After lease expiry, another worker reclaims (generation++, new token).
+- **Poll path:** `createReconciliationScheduler.claimDue` / `processDue` discover work only via `store.listDue` then `store.claim`. Adapters **must** soft-release or re-index expired `claimed` rows inside `listDue` so abandoned jobs reappear for pure poll workers (see [listDue recovery contract](#listdue-recovery-contract-adapters)). Key-addressed `claim(knownKey)` alone is not sufficient for the documented recovery path.
 - Re-run full safe lookup order. Provider reads are side-effect free.
 - **Do not** create a replacement charge because the first attempt timed out.
 - **Do not** mark local payment `failed` solely because the worker died mid-lookup.
@@ -137,6 +140,28 @@ Across **all** crash positions above:
 2. `ambiguous_match` → manual resolution; never pick-first and never re-charge blindly.
 3. `temporarily_unavailable` → retry later; never invent local `failed`.
 4. Policy `do_not_create_replacement` / `shouldForbidReplacementCharge` → hard stop on replacement `createPayment`.
+
+---
+
+## listDue recovery contract (adapters)
+
+`createReconciliationScheduler` **never** walks keys or SCANS claimed rows. Discovery is:
+
+```text
+listDue({ now, limit }) → for each record → store.claim({ key, ... })
+```
+
+Therefore every conforming `ReconciliationStore` **must** ensure that after `leaseExpiresAt`, an abandoned `claimed` job becomes visible again to `listDue` (and claimable) without an out-of-band `get(key)`:
+
+| Adapter class | Required behavior |
+| ------------- | ----------------- |
+| **Memory** (reference) | Soft-release inside `listDue` / `get` / `claim`: expired `claimed` → `scheduled`, clear lease fields, then include when `dueAt <= now`. |
+| **SQL** (postgres, sqlite, turso, d1, DO) | Soft-release expired `claimed` → `scheduled` inside `listDue` (or a pre-scan `UPDATE` matching webhook `listRetryable`), **not** scheduled-only `SELECT`. Key-addressed reclaim on known keys is insufficient for poll workers. |
+| **Redis** | On claim the due ZSET member is typically removed. `listDue` must bulk soft-release / re-ZADD expired claimed keys (or keep them indexed until complete). Soft-release only on `GET` leaves abandoned jobs off-index and **starves** `claimDue` / `processDue`. |
+
+**Regression bar (shared conformance):** schedule → claim → abandon (no complete) → advance clock past `leaseExpiresAt` → `listDue` **must** return the job → subsequent `claim` acquires a new token. Package-level scheduler tests prove the same path through `claimDue` / `processDue` on the memory store.
+
+Without this contract, mid-claim process death can stall the indeterminate-payment safety net indefinitely even though key-addressed reclaim still works.
 
 ---
 

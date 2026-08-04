@@ -938,7 +938,7 @@ describe('PayPalGateway', () => {
             expect(() => gateway.parseWebhookEvent(payload)).toThrow(InvalidRequestError);
         });
 
-        it('should reject refund completed events because PayPal Payments v2 does not document them', () => {
+        it('should map PAYMENT.REFUND.COMPLETED to refunded with refund.completed dual-write', () => {
             const payload = {
                 id: 'WH-refund-completed',
                 event_type: 'PAYMENT.REFUND.COMPLETED',
@@ -951,10 +951,25 @@ describe('PayPalGateway', () => {
                         currency_code: 'USD',
                         value: '5.00',
                     },
+                    links: [
+                        {
+                            rel: 'up',
+                            href: 'https://api-m.paypal.com/v2/payments/captures/CAPTURE-FOR-REFUND',
+                            method: 'GET',
+                        },
+                    ],
                 },
             };
 
-            expect(() => gateway.parseWebhookEvent(payload)).toThrow(InvalidRequestError);
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('refunded');
+            expect(event.gatewayPaymentId).toBe('CAPTURE-FOR-REFUND');
+            expect(event.gatewayObjectId).toBe('REFUND-COMPLETED');
+            expect(event.stableType).toBe('refund.completed');
+            expect(event.event?.type).toBe('refund.completed');
+            expect(event.amount).toBe(5);
+            expect(event.currency).toBe('USD');
         });
 
         it('should keep refund lifecycle webhooks distinct from payment failure state', () => {

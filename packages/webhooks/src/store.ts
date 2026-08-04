@@ -106,6 +106,18 @@ export function isStoreLeaseLostError(error: unknown): boolean {
 
 // ─── Webhook inbox ───────────────────────────────────────────────────────────
 
+/**
+ * Inbox row lifecycle status.
+ *
+ * **Engine + official stores only write:** `pending` | `claimed` | `completed` |
+ * `dead_letter`. On fail the engine always targets `pending` (retryable) or
+ * `dead_letter` (terminal) — never `failed`.
+ *
+ * **`failed` is retained on the public union for 0.x schema / claim-surface
+ * compatibility** (custom stores may still surface it as terminal via
+ * `duplicate_failed`). It is not produced by `createWebhookInboxEngine` or
+ * package memory/SQL/Redis adapters.
+ */
 export type WebhookInboxStatus =
   | "pending"
   | "claimed"

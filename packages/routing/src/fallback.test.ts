@@ -144,6 +144,19 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
   it("unknown defaults to indeterminate (fail-closed)", () => {
     expect(classifySubmissionState({})).toBe("indeterminate");
   });
+
+  it("maps AbortError shape to not_submitted (default-allow; multi-gateway caution)", () => {
+    // Documented residual: abort after provider accept can double-charge if auto-fallback.
+    // Prefer explicit submissionState / indeterminate for multi-gateway (safe-fallback.md).
+    const err = new Error("The operation was aborted");
+    err.name = "AbortError";
+    expect(classifySubmissionState({ error: err })).toBe("not_submitted");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({ error: err }),
+      }).allowed,
+    ).toBe(true);
+  });
 });
 
 describe("trySelectFallbackGateway", () => {

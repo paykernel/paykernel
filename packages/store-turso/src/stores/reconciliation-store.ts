@@ -291,6 +291,7 @@ export function createTursoReconciliationStore(
             ? enforceMaxSanitizedError(input.note) ?? null
             : null;
 
+        // Active-lease fence (parity with complete/fail).
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `UPDATE ${table} SET
              status = 'manual_review',
@@ -302,8 +303,10 @@ export function createTursoReconciliationStore(
            WHERE key = ?
              AND lease_token = ?
              AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > ?
            RETURNING key, status, generation`,
-          [note, now, input.key, input.leaseToken],
+          [note, now, input.key, input.leaseToken, now],
         );
         if (rows.length === 0) {
           throw new StoreLeaseLostError(
@@ -321,6 +324,21 @@ export function createTursoReconciliationStore(
       return withMappedErrors(async () => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processDue/claimDue can
+        // rediscover them after worker crash (attempts kept; lease cleared).
+        // Matches memory listDue releaseExpiredLease + webhook listRetryable.
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'scheduled',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             updated_at = ?
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now],
+        );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${RECON_SELECT_COLS}
            FROM ${table}

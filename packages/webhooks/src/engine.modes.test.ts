@@ -198,3 +198,166 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(o2.outcome).toBe("scheduled_for_retry");
   });
 });
+
+
+describe("processRetryable default envelope unwrap", () => {
+  const paymentEvent = {
+    schemaVersion: "1",
+    type: "payment.succeeded",
+    provider: {
+      gateway: "stripe",
+      eventId: "evt_n2_env",
+      eventType: "payment_intent.succeeded",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    },
+    payment: {
+      status: "succeeded",
+      references: { providerPaymentId: "pi_1" },
+    },
+  };
+
+  it("unwraps PersistedPaymentEventEnvelope so handler receives .event", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+      clock,
+    });
+
+    const envelope = {
+      schemaVersion: "1",
+      event: paymentEvent,
+      payloadHash: "hash_n2_env",
+      storedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_n2_env",
+      payloadHash: "hash_n2_env",
+      envelope,
+    });
+
+    let seen: unknown;
+    const result = await engine.processRetryable({
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
+    // Auto-unwrap: handler must see PaymentEvent, not the envelope wrapper.
+    expect(seen).toEqual(paymentEvent);
+    expect(seen).not.toHaveProperty("payloadHash");
+    expect(seen).not.toHaveProperty("storedAt");
+    expect((seen as { type?: string }).type).toBe("payment.succeeded");
+  });
+
+  it("passes plain PaymentEvent payloadRef through without wrap/unwrap", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+      clock,
+    });
+
+    // Plain PaymentEvent shape (schemaVersion + type + provider; no top-level event+payloadHash).
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_n2_plain",
+      payloadHash: "hash_n2_plain",
+      envelope: paymentEvent,
+    });
+
+    let seen: unknown;
+    const result = await engine.processRetryable({
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
+    expect(seen).toEqual(paymentEvent);
+    expect((seen as { type?: string }).type).toBe("payment.succeeded");
+  });
+
+  it("resolveEvent override still wins over default unwrap", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+      clock,
+    });
+
+    const envelope = {
+      schemaVersion: "1",
+      event: paymentEvent,
+      payloadHash: "hash_n2_override",
+      storedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_n2_override",
+      payloadHash: "hash_n2_override",
+      envelope,
+    });
+
+    const custom = { custom: true, id: "resolved" };
+    let seen: unknown;
+    const result = await engine.processRetryable({
+      resolveEvent: (rec) => ({
+        gateway: "stripe",
+        providerEventId: "evt_n2_override",
+        payloadHash: rec.payloadHash,
+        event: custom,
+      }),
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
+    expect(seen).toEqual(custom);
+  });
+
+  it("opaque non-JSON payloadRef is passed through as event", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+      clock,
+    });
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_n2_opaque",
+      payloadHash: "hash_n2_opaque",
+      // string envelope stored as-is (not JSON object)
+      envelope: "opaque-ref-token",
+    });
+
+    let seen: unknown;
+    const result = await engine.processRetryable({
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
+    expect(seen).toBe("opaque-ref-token");
+  });
+});

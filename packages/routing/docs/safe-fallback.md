@@ -69,6 +69,30 @@ The following are **always** denied for automatic multi-gateway retry unless a v
 
 Generic network errors without a safe classification fail closed to **`indeterminate`** (not `pre_submission_failure`).
 
+### AbortError / AbortSignal caution (multi-gateway)
+
+Default `classifySubmissionState` maps `AbortError` / `code: "abort_error"` to **`not_submitted`**, which is **default-allow** for post-attempt fallback (`evaluateFallback` → `allowed: true`).
+
+That is only safe when the abort is known to fire **before** the provider accepted the request (e.g. cancelled before the outbound HTTP call). If the abort can race **after** accept (client timeout, `AbortSignal` deadline while the provider already committed), treating it as `not_submitted` and auto-routing to another gateway risks **double charge**.
+
+**Recommendations for multi-gateway integrators:**
+
+- Prefer classifying aborts as **`indeterminate`** (or recon / manual_review) unless you control the abort boundary pre-submit.
+- Pass explicit `submissionState` / `errorKind` rather than relying on raw `AbortError` shape when the request may have left your process.
+- Or supply a custom classification wrapper around `classifySubmissionState` that maps abort → `indeterminate` for multi-gateway paths.
+- Never widen `SAFE_STATES` to include `timeout` / `connection_reset` / bare network errors.
+
+```typescript
+// Conservative multi-gateway pattern
+const raw = classifySubmissionState({ error: err });
+const state =
+  err instanceof Error && err.name === "AbortError"
+    ? "indeterminate"
+    : raw;
+const eligibility = evaluateFallback({ submissionState: state });
+```
+
+
 ### Classification helpers
 
 #### `classifyFromOperationOutcome(outcome)`
@@ -103,6 +127,8 @@ classifySubmissionState({ errorKind: "not_submitted" }); // → "not_submitted"
 classifySubmissionState({ errorKind: "provider_5xx_uncertain" }); // → "provider_5xx_uncertain"
 classifySubmissionState({ outcome: "indeterminate" }); // → "indeterminate"
 classifySubmissionState({}); // → "indeterminate" (fail-closed)
+// AbortError shape → "not_submitted" (default-allow). Unsafe if abort can be post-accept;
+// see AbortError caution above for multi-gateway.
 ```
 
 ### Expert override API (opt-in, loud, never defaulted)

@@ -37,8 +37,10 @@ const outcome = await engine.processVerified({
   providerEventId: "evt_123",
   payloadHash: hashWebhookPayload(rawBody),
   event: normalizedPaymentEvent,
-  // Optional sanitized envelope only (never raw signatures / secrets):
-  // envelope: { schemaVersion: "1", type: "payment.succeeded" },
+  // Optional sanitized dual-write envelope (never raw signatures / secrets):
+  // envelope: toPersistedPaymentEventEnvelope(paymentEvent, { payloadHash }),
+  // → payloadRef = { schemaVersion, event, payloadHash, storedAt }
+  // processRetryable default auto-unwraps .event into ctx.event
   handler: async (ctx) => {
     // Long work: await ctx.renew(30_000);
     await fulfill(ctx.event);
@@ -109,6 +111,11 @@ Mode is fixed at `createWebhookInboxEngine` construction. Process methods never 
 `processRetryable` is valid **only** on `durable_retry` engines (throws on `inline`).
 `ackAfterClaim` is valid **only** with `durable_retry` (constructor throws otherwise).
 
+**Default `processRetryable` materialization:** if `payloadRef` is a
+`PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
+the engine unwraps `.event` so handlers receive the PaymentEvent. Plain events
+and custom shapes pass through; override `resolveEvent` when needed.
+
 **Silent acknowledgment of failed work is forbidden.** Always inspect `WebhookProcessingOutcome`.
 
 ## Outcomes (no HTTP hardcoding)
@@ -126,7 +133,7 @@ type WebhookProcessingOutcome =
 
 Policy notes:
 
-- Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal dead_letter/failed).
+- Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
 - Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry` without burning attempts.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease.
@@ -161,6 +168,8 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 | next attempt / claim gate | `availableAt` |
 | completion time | `updatedAt` when `status === "completed"` |
 | sanitized error | `lastError` |
+
+**Status honesty:** the public `WebhookInboxStatus` union still includes `failed` for 0.x/custom-store compatibility, but the engine and official adapters only write `pending` | `claimed` | `completed` | `dead_letter` (fail → `pending` or `dead_letter`).
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
 

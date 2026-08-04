@@ -2234,6 +2234,7 @@ export class PayPalGateway extends BaseGateway {
       "PAYMENT.CAPTURE.PENDING": "pending",
       "PAYMENT.CAPTURE.REVERSED": "reversed",
       "PAYMENT.REFUND.PENDING": "refund_pending",
+      "PAYMENT.REFUND.COMPLETED": "refunded",
       "PAYMENT.REFUND.FAILED": "refund_failed",
     };
 

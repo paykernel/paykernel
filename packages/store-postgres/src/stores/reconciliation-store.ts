@@ -261,7 +261,7 @@ export function createPostgresReconciliationStore(
             ? enforceMaxSanitizedError(input.note) ?? null
             : null;
 
-        // Token + claimed status (memory parity: no strict active-lease gate).
+        // Active-lease fence (parity with complete/fail).
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `UPDATE ${table} SET
              status = 'manual_review',
@@ -273,6 +273,8 @@ export function createPostgresReconciliationStore(
            WHERE key = $1
              AND lease_token = $2
              AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > $4
            RETURNING key, status, generation`,
           [input.key, input.leaseToken, note, now],
         );
@@ -292,6 +294,21 @@ export function createPostgresReconciliationStore(
       return withMappedErrors(async () => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processDue/claimDue can
+        // rediscover them after worker crash (attempts kept; lease cleared).
+        // Matches memory listDue releaseExpiredLease + webhook listRetryable.
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'scheduled',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             updated_at = $1
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= $1`,
+          [now],
+        );
         // SKIP LOCKED is for multi-worker fairness on durable rows only.
         // listDue is a non-mutating scan; FOR UPDATE SKIP LOCKED is optional
         // when selecting candidates inside a transaction. Default path is a

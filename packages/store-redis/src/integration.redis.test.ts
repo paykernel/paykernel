@@ -19,6 +19,7 @@ import {
 } from "@paykernel/testkit";
 import {
   createRedisIdempotencyStore,
+  createRedisReconciliationStore,
   createRedisStores,
   createRedisWebhookInboxStore,
 } from "./index-stores";
@@ -164,9 +165,9 @@ describe.skipIf(!live)("integration: lease reclaim + stale token", () => {
 });
 
 describe.skipIf(!live)("integration: abandoned claim re-index", () => {
-  it("listRetryable sees claim after lease expiry soft-release via get", async () => {
-    // Memory store re-indexes expired claims on read; Redis must ZADD on soft-release
-    // or workers that poll listRetryable never see abandoned work.
+  it("listRetryable rediscovers expired claimed without prior get", async () => {
+    // Claim ZREMs retry ZSET; listRetryable must bulk soft-release + re-index
+    // so processRetryable drains abandoned work after crash (SQL parity).
     const { port, close } = await createLivePort();
     const prefix = uniqueKeyPrefix("abandon");
     try {
@@ -184,11 +185,94 @@ describe.skipIf(!live)("integration: abandoned claim re-index", () => {
       });
       expect(claimed.kind).toBe("acquired");
       clock.advance(1_500);
-      // Soft-release path (get) must re-add to retry ZSET
-      const after = await store.get("evt_abandon");
-      expect(after?.status).toBe("pending");
+      // No get() — list path alone must rediscover
       const retryable = await store.listRetryable({ limit: 20 });
       expect(retryable.some((r) => r.key === "evt_abandon")).toBe(true);
+      expect(retryable.find((r) => r.key === "evt_abandon")?.status).toBe(
+        "pending",
+      );
+    } finally {
+      await close();
+    }
+  }, 60_000);
+
+  it("listDue rediscovers expired claimed without prior get", async () => {
+    const { port, close } = await createLivePort();
+    const prefix = uniqueKeyPrefix("recon_abandon");
+    try {
+      const clock = createFakeClock(new Date("2026-04-01T00:00:00.000Z"));
+      const store = createRedisReconciliationStore({
+        port,
+        clock,
+        keys: { prefix },
+      });
+      const dueAt = clock.now().toISOString();
+      const scheduled = await store.schedule({
+        key: "job_abandon",
+        subjectId: "subj1",
+        reason: "test",
+        dueAt,
+      });
+      expect(scheduled.kind).toBe("scheduled");
+      const claimed = await store.claim({
+        key: "job_abandon",
+        owner: "w_dead",
+        leaseMs: 1_000,
+      });
+      expect(claimed.kind).toBe("acquired");
+      // While claimed, off due index
+      const mid = await store.listDue({ limit: 20 });
+      expect(mid.some((r) => r.key === "job_abandon")).toBe(false);
+      clock.advance(1_500);
+      // No get() — listDue alone must soft-release + re-index
+      const due = await store.listDue({ limit: 20 });
+      expect(due.some((r) => r.key === "job_abandon")).toBe(true);
+      expect(due.find((r) => r.key === "job_abandon")?.status).toBe("scheduled");
+    } finally {
+      await close();
+    }
+  }, 60_000);
+});
+
+describe.skipIf(!live)("integration: recon fail lease expiry fence (R7/R9)", () => {
+  it("claim, expire lease (FakeClock), fail → StoreLeaseLostError", async () => {
+    const { port, close } = await createLivePort();
+    const prefix = uniqueKeyPrefix("recon_fail");
+    try {
+      const clock = createFakeClock(new Date("2026-05-01T00:00:00.000Z"));
+      const store = createRedisReconciliationStore({
+        port,
+        clock,
+        keys: { prefix },
+      });
+      await store.schedule({
+        key: "job_fail_exp",
+        subjectId: "s",
+        reason: "r",
+        dueAt: clock.now().toISOString(),
+      });
+      const a = await store.claim({
+        key: "job_fail_exp",
+        owner: "w1",
+        leaseMs: 1_000,
+      });
+      expect(a.kind).toBe("acquired");
+      if (a.kind !== "acquired") return;
+      clock.advance(2_000);
+      await expect(
+        store.fail({
+          key: "job_fail_exp",
+          leaseToken: a.leaseToken,
+          error: "too_late",
+        }),
+      ).rejects.toBeInstanceOf(StoreLeaseLostError);
+      // Recovery: expired lease reclaim still works
+      const b = await store.claim({
+        key: "job_fail_exp",
+        owner: "w2",
+        leaseMs: 30_000,
+      });
+      expect(b.kind).toBe("acquired");
     } finally {
       await close();
     }

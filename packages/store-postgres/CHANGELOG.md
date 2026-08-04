@@ -1,5 +1,14 @@
 # @paykernel/store-postgres
 
+## Unreleased
+
+### Patch
+
+- Reconciliation `listDue` soft-releases expired claimed rows so abandoned jobs are rediscoverable via poll; `markManualReview` requires active (unexpired) lease (parity with complete/fail).
+
+- Docs honesty: webhook `listRetryable` comments note Redis bulk SCAN soft-release + ZSET re-index list-discovery parity (R8 fixed).
+
+
 ## 0.1.0-next.0
 
 

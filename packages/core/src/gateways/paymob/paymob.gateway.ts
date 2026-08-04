@@ -1190,9 +1190,15 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Build Paymob flag context for stable event mapping.
+   * Build Paymob flag + amount context for stable event mapping.
    * Uses {@link parseBoolean} so redirect callbacks (string `"true"`/`"false"`)
    * contribute flags the same way as processed JSON booleans.
+   *
+   * Amounts are included so Phase 7 dual-write agrees with
+   * {@link mapTransactionStatus} for amount-only refunds (`refunded_amount_cents`
+   * without `is_refund` / `is_refunded`) and auth+capture (`captured_amount`
+   * while `is_auth` remains true). Prefer normalized `WebhookEvent.status`
+   * (merged by {@link attachPaymentEvent}); amounts are defense-in-depth.
    */
   private paymobMapContextFromTransaction(
     obj: Pick<
@@ -1205,6 +1211,9 @@ export class PaymobGateway extends BaseGateway {
       | "is_refund"
       | "is_voided"
       | "is_refunded"
+      | "amount_cents"
+      | "refunded_amount_cents"
+      | "captured_amount"
     >,
   ): ProviderEventMapContext {
     const flags: NonNullable<ProviderEventMapContext["flags"]> = {};
@@ -1225,7 +1234,27 @@ export class PaymobGateway extends BaseGateway {
     if (isRefund !== undefined) flags.isRefund = isRefund;
     if (isVoided !== undefined) flags.isVoided = isVoided;
     if (isRefunded !== undefined) flags.isRefunded = isRefunded;
-    return { flags };
+
+    const amounts: NonNullable<ProviderEventMapContext["amounts"]> = {};
+    if (typeof obj.amount_cents === "number") {
+      amounts.amountCents = obj.amount_cents;
+    }
+    if (typeof obj.refunded_amount_cents === "number") {
+      amounts.refundedAmountCents = obj.refunded_amount_cents;
+    }
+    if (typeof obj.captured_amount === "number") {
+      amounts.capturedAmountCents = obj.captured_amount;
+    }
+
+    const ctx: ProviderEventMapContext = { flags };
+    if (
+      amounts.amountCents !== undefined ||
+      amounts.refundedAmountCents !== undefined ||
+      amounts.capturedAmountCents !== undefined
+    ) {
+      ctx.amounts = amounts;
+    }
+    return ctx;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════

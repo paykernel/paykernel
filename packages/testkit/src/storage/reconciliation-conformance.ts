@@ -7,6 +7,12 @@
  * - `concurrency: true` exercises **same-isolate** concurrent double-claim only.
  *   Multi-connection concurrent claim is a Phase 11 adapter requirement and is
  *   not proved by this suite alone; declare coordination scope on the manifest.
+ *
+ * ## listDue recovery (poll path)
+ * - `createReconciliationScheduler.claimDue` / `processDue` discover work only
+ *   via `listDue` then `claim`. Key-addressed reclaim is not enough.
+ * - After abandon + lease expiry, `listDue` must soft-release / re-index the
+ *   job so pure poll workers rediscover it (SQL soft-release, Redis re-index).
  */
 
 import type { ReconciliationStore } from "./contracts";
@@ -259,6 +265,68 @@ export async function runReconciliationStoreConformanceSuite(
       assert(due.some((r) => r.key === "rec_7"), "rec_7 due");
       assert(!due.some((r) => r.key === "rec_8"), "rec_8 not due");
     }),
+  );
+
+  results.push(
+    await runCase(
+      "listDue rediscovers abandoned claim after lease expiry (soft-release)",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const dueAt = new Date(clock.nowMs()).toISOString();
+        await store.schedule({
+          key: "rec_list_abandon",
+          subjectId: "pay_list_abandon",
+          reason: "indeterminate",
+          dueAt,
+        });
+        const c = await store.claim({
+          key: "rec_list_abandon",
+          owner: "w_dead",
+          leaseMs: 1_000,
+        });
+        assert(c.kind === "acquired", "acquired");
+
+        // Still leased — must not appear as due scheduled work.
+        const mid = await store.listDue({
+          now: new Date(clock.nowMs()).toISOString(),
+          limit: 50,
+        });
+        assert(
+          !mid.some((r) => r.key === "rec_list_abandon"),
+          "active claim must not listDue",
+        );
+
+        // Process crash: no complete / renew. Advance past lease expiry.
+        clock.advance(1_001);
+
+        // Poll path only (no key-addressed get/claim first) — listDue must soft-release.
+        const due = await store.listDue({
+          now: new Date(clock.nowMs()).toISOString(),
+          limit: 50,
+        });
+        assert(
+          due.some((r) => r.key === "rec_list_abandon"),
+          "listDue must soft-release/re-index expired claimed → scheduled",
+        );
+        const row = due.find((r) => r.key === "rec_list_abandon")!;
+        assert(row.status === "scheduled", `status after soft-release: ${row.status}`);
+        assert(row.leaseToken === undefined, "lease cleared");
+
+        // Subsequent claim via poll-discovered key must acquire a new token.
+        const c2 = await store.claim({
+          key: "rec_list_abandon",
+          owner: "w_new",
+          leaseMs: 30_000,
+        });
+        assert(c2.kind === "acquired", `reclaim after listDue got ${c2.kind}`);
+        assert(c2.leaseToken !== c.leaseToken, "token rotated");
+        await store.complete({
+          key: "rec_list_abandon",
+          leaseToken: c2.leaseToken,
+        });
+      },
+    ),
   );
 
   results.push(

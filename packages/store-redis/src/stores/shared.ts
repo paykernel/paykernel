@@ -94,4 +94,41 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
   return { cursor, keys };
 }
 
+/**
+ * SCAN store record keys and run GET_LUA on each so expired `claimed` rows
+ * soft-release + re-index into the due/retry ZSET.
+ *
+ * Claim paths ZREM the list index; without this bulk path, listDue / listRetryable
+ * never rediscover abandoned work after lease expiry (SQL bulk soft-release parity).
+ */
+export async function softReleaseExpiredClaimedViaScan(options: {
+  port: RedisCommandPort;
+  eval: EvalHelper;
+  match: string;
+  indexKey: string;
+  getLua: string;
+  nowMs: string;
+  nowIso: string;
+  /** Skip keys ending with this segment (e.g. "due", "retry"). */
+  indexName: string;
+}): Promise<void> {
+  const { port, eval: evalHelper, match, indexKey, getLua, nowMs, nowIso, indexName } =
+    options;
+  let cursor = "0";
+  do {
+    const scanRaw = await port.send("SCAN", [
+      cursor,
+      "MATCH",
+      match,
+      "COUNT",
+      "50",
+    ]);
+    const scan = normalizeScan(scanRaw);
+    cursor = scan.cursor;
+    for (const redisKey of scan.keys) {
+      if (redisKey === indexKey || redisKey.endsWith(`:${indexName}`)) continue;
+      await evalHelper.eval(getLua, [redisKey, indexKey], [nowMs, nowIso]);
+    }
+  } while (cursor !== "0");
+}
 

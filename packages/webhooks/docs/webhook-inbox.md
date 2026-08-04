@@ -236,7 +236,7 @@ Domain-owned in this package; structurally compatible with Phase 9 testkit.
 | Field | Role |
 | --- | --- |
 | `key` | Stable claim key (`gateway:providerEventId`) |
-| `status` | `pending` \| `claimed` \| `completed` \| `failed` \| `dead_letter` |
+| `status` | `pending` \| `claimed` \| `completed` \| `dead_letter` (engine-written). Type also allows `failed` for 0.x/custom stores — **engine never writes `failed`**; fail always → `pending` or `dead_letter` |
 | `payloadHash` | Hash for duplicate / conflict detection |
 | `payloadRef?` | Optional **sanitized** snapshot for durable workers (JSON string) |
 | `leaseOwner?` / `leaseToken?` / `leaseExpiresAt?` | Lease fencing |
@@ -273,7 +273,7 @@ Adapters **may** add first-class columns later without breaking this lean contra
 - Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
 - Unsanitized exception messages that may embed secrets
 
-Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
+Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
 
 ---
 
@@ -320,14 +320,22 @@ const durableEngine = createWebhookInboxEngine({
 
 `processRetryable` is **only valid on `durable_retry` engines** (throws if `mode === "inline"`). Use a dedicated durable worker engine; do not mix modes via the retry path.
 
+**Default event materialization:** when `payloadRef` parses as a core
+`PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
+`processRetryable` **auto-unwraps** `.event` so `ctx.event` is the nested
+PaymentEvent — recommended dual-write workers can `fulfill(ctx.event)` without
+a custom `resolveEvent`. Plain PaymentEvent JSON (or any non-envelope shape) is
+passed through unchanged. Override `resolveEvent` for custom stores.
+
 ```typescript
 const result = await durableEngine.processRetryable({
   limit: 10,
   handler: async (ctx) => {
+    // With toPersistedPaymentEventEnvelope on claim, ctx.event is already PaymentEvent
     await fulfill(ctx.event);
   },
-  // Optional: map record → gateway/id/event/hash
-  // resolveEvent: (rec) => ({ ... }),
+  // Optional override for custom payloadRef layouts:
+  // resolveEvent: (rec) => ({ gateway, providerEventId, payloadHash, event }),
 });
 // result.items: { key, outcome }[]
 ```

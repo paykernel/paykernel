@@ -285,7 +285,7 @@ export function createSqliteReconciliationStore(
             ? enforceMaxSanitizedError(input.note) ?? null
             : null;
 
-        // Token + claimed status (memory parity: no strict active-lease gate).
+        // Active-lease fence (parity with complete/fail).
         const result = ctx.getExecutor().run(
           `UPDATE ${table} SET
              status = 'manual_review',
@@ -296,8 +296,10 @@ export function createSqliteReconciliationStore(
              updated_at = ?
            WHERE key = ?
              AND lease_token = ?
-             AND status = 'claimed'`,
-          [note, now, input.key, input.leaseToken],
+             AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at > ?`,
+          [note, now, input.key, input.leaseToken, now],
         );
         if (result.changes === 0) {
           throw new StoreLeaseLostError(
@@ -315,6 +317,21 @@ export function createSqliteReconciliationStore(
       return withMappedErrors(() => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processDue/claimDue can
+        // rediscover them after worker crash (attempts kept; lease cleared).
+        // Matches memory listDue releaseExpiredLease + webhook listRetryable.
+        ctx.getExecutor().run(
+          `UPDATE ${table} SET
+             status = 'scheduled',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             updated_at = ?
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now],
+        );
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${SELECT_COLS}
            FROM ${table}

@@ -91,8 +91,20 @@ See [scripts-atomicity.md](./scripts-atomicity.md).
 
 1. Lease expires (`lease_expires_ms` compared with injectable `nowMs` ARGV — **not** hard-dependent on Redis `TIME` alone so FakeClock works).
 2. Peer claim/reserve succeeds with **new** `leaseToken` and higher `generation`.
-3. Prior token fails all token-gated mutators.
+3. Prior token fails all token-gated mutators (complete **and** fail require unexpired lease + matching token).
 4. Handler may run again (at-least-once). Idempotent side effects are mandatory for webhooks/recon.
+
+### List-based recovery (webhook + recon)
+
+Claim removes the key from the retry/due ZSET. After lease expiry:
+
+| Path | Behavior |
+| ---- | -------- |
+| Key-addressed `get` | Soft-releases expired `claimed` → `pending`/`scheduled` and **ZADD**s the index. |
+| `listRetryable` / `listDue` | **Bulk SCAN soft-release** (Approach A) re-indexes expired claimed rows, then `ZRANGEBYSCORE` — so `processRetryable` / `claimDue`/`processDue` rediscover abandoned work **without** a prior `get`. |
+| Key-addressed `claim` | Reclaims expired leases with a new token (attempts++). |
+
+This matches SQL/memory list soft-release recovery for durable_retry / recon poll workers.
 
 ---
 

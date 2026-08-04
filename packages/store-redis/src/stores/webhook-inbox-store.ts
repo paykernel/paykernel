@@ -47,6 +47,7 @@ import {
   normalizeScan,
   resolveRedisStoreContext,
   scanMatchForStore,
+  softReleaseExpiredClaimedViaScan,
 } from "./shared";
 
 export function createRedisWebhookInboxStore(
@@ -233,7 +234,21 @@ export function createRedisWebhookInboxStore(
           input.now !== undefined
             ? String(Date.parse(input.now))
             : clockNowMsString(ctx.clock);
+        const nowIso =
+          input.now !== undefined ? input.now : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Claim ZREMs the retry index; SCAN soft-release re-indexes expired claimed
+        // so processRetryable rediscovers work after crash (SQL/memory parity).
+        await softReleaseExpiredClaimedViaScan({
+          port: ctx.port,
+          eval: ctx.eval,
+          match: scanMatchForStore(ctx.keys, "whinbox"),
+          indexKey,
+          getLua: WEBHOOK_GET_LUA,
+          nowMs,
+          nowIso,
+          indexName: "retry",
+        });
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           indexKey,
           "-inf",

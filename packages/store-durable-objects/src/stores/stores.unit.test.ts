@@ -339,3 +339,72 @@ describe("webhook store unit (B5/B4)", () => {
   });
 });
 
+
+describe("reconciliation store unit (listDue recovery + markManualReview fence)", () => {
+  it("listDue soft-releases expired claimed rows then selects scheduled", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const executor = createScriptedExecutor({
+      onRun: () => ({ changes: 1 }),
+      onQuery: (sql) => {
+        if (sql.includes("SELECT") && sql.includes("scheduled")) {
+          return [
+            {
+              key: "abandoned-job",
+              status: "scheduled",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: now,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+              completed_at: null,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createDoReconciliationStore({ executor, clock });
+    const listed = await store.listDue({ now });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.key).toBe("abandoned-job");
+    const soft = executor.calls.find(
+      (c) =>
+        c.sql.includes("status = 'claimed'") &&
+        c.sql.includes("lease_expires_at") &&
+        c.sql.toLowerCase().includes("status = 'scheduled'"),
+    );
+    expect(soft).toBeDefined();
+  });
+
+  it("markManualReview requires active lease (expired → lease_lost)", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: () => [],
+    });
+    const store = createDoReconciliationStore({ executor, clock });
+    await expect(
+      store.markManualReview({
+        key: "job-exp",
+        leaseToken: "stale",
+        note: "review",
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    const call = executor.calls.find(
+      (c) => c.sql.includes("manual_review") && c.sql.includes("UPDATE"),
+    );
+    expect(call).toBeDefined();
+    expect(call!.sql).toContain("lease_expires_at");
+    expect(call!.sql).toContain("lease_expires_at >");
+    expect(call!.params).toContain(now);
+  });
+});
+

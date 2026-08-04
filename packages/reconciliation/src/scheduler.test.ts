@@ -241,4 +241,110 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(remainingStripe?.status).toBe("scheduled");
     expect(remainingStripe?.leaseToken).toBeUndefined();
   });
+
+  /**
+   * Crash recovery via the production poll path (listDue → claim).
+   * schedule → claimDue → abandon mid-claim → expire lease → claimDue must
+   * rediscover the job. Key-addressed reclaim alone is insufficient proof:
+   * createReconciliationScheduler only discovers via store.listDue.
+   */
+  it("claimDue rediscovers abandoned job after lease expiry via listDue", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      owner: "w1",
+      defaultLeaseMs: 1_000,
+    });
+
+    const runAt = new Date(clock.nowMs()).toISOString();
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_abandon" },
+      runAt,
+      reason: "indeterminate_create",
+    });
+
+    const first = await scheduler.claimDue({ limit: 5 });
+    expect(first).toHaveLength(1);
+    const key = first[0]!.key;
+    const abandonedToken = first[0]!.leaseToken;
+
+    // Worker crash: no complete / fail / renew. Job stays claimed until lease expires.
+    const mid = await store.get(key);
+    expect(mid?.status).toBe("claimed");
+
+    // Before expiry, listDue must not surface the still-leased claim.
+    const stillHeld = await store.listDue({
+      now: new Date(clock.nowMs()).toISOString(),
+      limit: 10,
+    });
+    expect(stillHeld.some((r) => r.key === key)).toBe(false);
+    const noReclaim = await scheduler.claimDue({ limit: 5, owner: "w2" });
+    expect(noReclaim).toHaveLength(0);
+
+    // Lease expires → listDue soft-releases claimed→scheduled → claimDue rediscovers.
+    clock.advance(1_001);
+    const rediscovered = await scheduler.claimDue({ limit: 5, owner: "w2" });
+    expect(rediscovered).toHaveLength(1);
+    expect(rediscovered[0]!.key).toBe(key);
+    expect(rediscovered[0]!.leaseToken).not.toBe(abandonedToken);
+    expect(rediscovered[0]!.record.generation).toBeGreaterThan(
+      first[0]!.record.generation,
+    );
+
+    await scheduler.complete({
+      key: rediscovered[0]!.key,
+      leaseToken: rediscovered[0]!.leaseToken,
+    });
+    expect((await store.get(key))?.status).toBe("completed");
+  });
+
+  it("processDue rediscovers abandoned job after lease expiry via listDue", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      owner: "w1",
+      defaultLeaseMs: 1_000,
+    });
+
+    const runAt = new Date(clock.nowMs()).toISOString();
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_process_abandon" },
+      runAt,
+      reason: "indeterminate_create",
+    });
+
+    // Claim then abandon (simulate crash mid-handler without processDue complete).
+    const first = await scheduler.claimDue({ limit: 5 });
+    expect(first).toHaveLength(1);
+    const key = first[0]!.key;
+
+    // processDue while lease active: listDue empty → nothing processed.
+    const blocked = await scheduler.processDue({
+      owner: "w2",
+      leaseMs: 30_000,
+      handler: async () => {
+        throw new Error("should not run while lease held");
+      },
+    });
+    expect(blocked.processed).toBe(0);
+
+    clock.advance(1_001);
+
+    const handled: string[] = [];
+    const recovered = await scheduler.processDue({
+      owner: "w2",
+      leaseMs: 30_000,
+      handler: async (job) => {
+        handled.push(job.key);
+      },
+    });
+    expect(recovered.processed).toBe(1);
+    expect(recovered.completed).toBe(1);
+    expect(handled).toEqual([key]);
+    expect((await store.get(key))?.status).toBe("completed");
+  });
 });

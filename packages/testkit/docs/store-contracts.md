@@ -89,13 +89,15 @@ Prefer the type alias `LeaseAwareIdempotencyStore` when core 0.x `IdempotencySto
 | `complete(input)`             | Terminal success; **requires** current `leaseToken`.                                                |
 | `fail(input)`                 | Terminal fail or reschedule via `retryAt`; **requires** current `leaseToken`.                       |
 | `markManualReview(input)`     | Human review terminal; **requires** current `leaseToken`.                                           |
-| `get(key)` / `listDue(input)` | Read / list due jobs.                                                                               |
+| `get(key)` / `listDue(input)` | Read / list due jobs. **`listDue` must soft-release or re-index expired `claimed` jobs** so poll workers rediscover abandoned work (see conformance case + [crash-boundaries](../../reconciliation/docs/crash-boundaries.md#listdue-recovery-contract-adapters)). |
 | `deleteExpired(input)`        | Retention cleanup.                                                                                  |
 | `withTransaction?(fn)`        | Optional helper only.                                                                               |
 
 `claim` result kinds: `acquired` | `not_due` | `in_progress` | `already_terminal` | `not_found`.
 
-**Dual ownership (Phase 19):** `@paykernel/reconciliation` exports its own `ReconciliationStore` + `StoreLeaseLostError` (domain engine / scheduler must not import testkit). Types are **structurally compatible** with this package; memory factories here remain assignable to the reconciliation interface (covered by assignability tests). Durable adapters **must** still pass `runReconciliationStoreConformanceSuite` from **testkit**. Domain primitives (lookup, policy, scheduler wrappers, `createPaymentReconciler`) live in the reconciliation package — not here. Docs: [reconciliation overview](../../reconciliation/docs/overview.md) · [scheduling](../../reconciliation/docs/scheduling.md).
+**listDue recovery (poll path):** `createReconciliationScheduler.claimDue` / `processDue` only discover via `listDue` → `claim`. Key-addressed reclaim after expiry is necessary but **not sufficient**. Conformance requires: schedule → claim → abandon → advance past `leaseExpiresAt` → `listDue` returns the job as `scheduled` (soft-release / re-index). Memory is the reference; SQL/Redis adapters must match.
+
+**Dual ownership (Phase 19):** `@paykernel/reconciliation` exports its own `ReconciliationStore` + `StoreLeaseLostError` (domain engine / scheduler must not import testkit). Types are **structurally compatible** with this package; memory factories here remain assignable to the reconciliation interface (covered by assignability tests). Durable adapters **must** still pass `runReconciliationStoreConformanceSuite` from **testkit**. Domain primitives (lookup, policy, scheduler wrappers, `createPaymentReconciler`) live in the reconciliation package — not here. Docs: [reconciliation overview](../../reconciliation/docs/overview.md) · [scheduling](../../reconciliation/docs/scheduling.md) · [crash-boundaries](../../reconciliation/docs/crash-boundaries.md).
 
 ---
 
