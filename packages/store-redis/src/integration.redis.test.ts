@@ -195,6 +195,94 @@ describe.skipIf(!live)("integration: abandoned claim re-index", () => {
   }, 60_000);
 });
 
+describe.skipIf(!live)("integration: webhook fail lease expiry fence (B6)", () => {
+  it("claim, expire lease (FakeClock), fail → StoreLeaseLostError", async () => {
+    const { port, close } = await createLivePort();
+    const prefix = uniqueKeyPrefix("whfail");
+    try {
+      const clock = createFakeClock(new Date("2026-05-01T00:00:00.000Z"));
+      const store = createRedisWebhookInboxStore({
+        port,
+        clock,
+        keys: { prefix },
+      });
+      const a = await store.claim({
+        key: "evt_fail_exp",
+        payloadHash: "h1",
+        owner: "w1",
+        leaseMs: 1_000,
+      });
+      expect(a.kind).toBe("acquired");
+      if (a.kind !== "acquired") return;
+      clock.advance(2_000);
+      await expect(
+        store.fail({
+          key: "evt_fail_exp",
+          leaseToken: a.leaseToken,
+          error: "too_late",
+          retryAfterMs: 5_000,
+        }),
+      ).rejects.toBeInstanceOf(StoreLeaseLostError);
+      // Recovery: expired lease reclaim still works
+      const b = await store.claim({
+        key: "evt_fail_exp",
+        payloadHash: "h1",
+        owner: "w2",
+        leaseMs: 30_000,
+      });
+      expect(b.kind).toBe("acquired");
+    } finally {
+      await close();
+    }
+  }, 60_000);
+});
+
+describe.skipIf(!live)("integration: webhook claim availableAt backoff (B4)", () => {
+  it("pending with future available_ms → not_available; after clock advance → acquired", async () => {
+    const { port, close } = await createLivePort();
+    const prefix = uniqueKeyPrefix("whavail");
+    try {
+      const clock = createFakeClock(new Date("2026-05-01T00:00:00.000Z"));
+      const store = createRedisWebhookInboxStore({
+        port,
+        clock,
+        keys: { prefix },
+      });
+      const a = await store.claim({
+        key: "evt_backoff",
+        payloadHash: "h1",
+        owner: "w1",
+        leaseMs: 30_000,
+      });
+      expect(a.kind).toBe("acquired");
+      if (a.kind !== "acquired") return;
+      await store.fail({
+        key: "evt_backoff",
+        leaseToken: a.leaseToken,
+        error: "retryable",
+        retryAfterMs: 10_000,
+      });
+      const early = await store.claim({
+        key: "evt_backoff",
+        payloadHash: "h1",
+        owner: "w2",
+        leaseMs: 30_000,
+      });
+      expect(early.kind).toBe("not_available");
+      clock.advance(10_001);
+      const later = await store.claim({
+        key: "evt_backoff",
+        payloadHash: "h1",
+        owner: "w2",
+        leaseMs: 30_000,
+      });
+      expect(later.kind).toBe("acquired");
+    } finally {
+      await close();
+    }
+  }, 60_000);
+});
+
 describe.skipIf(!live)("integration: deleteExpired TTL cleanup", () => {
   it("deleteExpired removes completed past before; keeps reserved", async () => {
     const { port, close } = await createLivePort();

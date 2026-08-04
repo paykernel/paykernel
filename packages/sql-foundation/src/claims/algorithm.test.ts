@@ -302,6 +302,70 @@ describe("decideWebhookClaim", () => {
       expect(expired.leaseToken).toBe("t3");
     }
   });
+
+  it("blocks pending when availableAt is in the future (not_available)", () => {
+    const blocked = decideWebhookClaim({
+      key: "e",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+      newLeaseToken: "t",
+      clock: { nowMs },
+      existing: {
+        status: "pending",
+        payloadHash: "h1",
+        generation: 2,
+        attempts: 2,
+        createdAt: "2026-01-15T11:00:00.000Z",
+        availableAt: "2026-01-15T12:30:00.000Z",
+      },
+    });
+    expect(blocked.kind).toBe("not_available");
+  });
+
+  it("allows pending reclaim when availableAt is due", () => {
+    const due = decideWebhookClaim({
+      key: "e",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+      newLeaseToken: "t2",
+      clock: { nowMs },
+      existing: {
+        status: "pending",
+        payloadHash: "h1",
+        generation: 2,
+        attempts: 2,
+        createdAt: "2026-01-15T11:00:00.000Z",
+        availableAt: "2026-01-15T11:59:00.000Z",
+      },
+    });
+    expect(due.kind).toBe("acquired");
+  });
+
+  it("allows expired lease reclaim even when availableAt is still future", () => {
+    const reclaim = decideWebhookClaim({
+      key: "e",
+      payloadHash: "h1",
+      owner: "w2",
+      leaseMs: 1000,
+      newLeaseToken: "t3",
+      clock: { nowMs },
+      existing: {
+        status: "claimed",
+        payloadHash: "h1",
+        leaseExpiresAt: "2026-01-15T11:59:00.000Z",
+        generation: 3,
+        attempts: 3,
+        createdAt: "2026-01-15T11:00:00.000Z",
+        availableAt: "2026-01-15T12:30:00.000Z",
+      },
+    });
+    expect(reclaim.kind).toBe("acquired");
+    if (reclaim.kind === "acquired") {
+      expect(reclaim.generation).toBe(4);
+    }
+  });
 });
 
 describe("decideReconciliationClaim", () => {
@@ -571,6 +635,11 @@ describe("dialect claim templates", () => {
     const wh = webhookClaimTemplates(ns);
     expect(pickClaimTemplate(wh, "postgres").dialect).toBe("postgres");
     expect(pickClaimTemplate(wh, "sqlite").sql).toContain("INSERT OR IGNORE");
+    // B4: pending reclaim requires available_at <= now; expired claimed may reclaim.
+    expect(wh.postgres.sql).toContain("available_at");
+    expect(wh.postgres.sql).toContain("status = 'pending'");
+    expect(wh.postgres.sql).toContain("status = 'claimed'");
+    expect(wh.sqlite.sql).toContain("available_at");
 
     const rec = reconciliationClaimTemplates(ns);
     expect(rec.postgres.sql).toContain("UPDATE");
@@ -595,8 +664,12 @@ describe("dialect claim templates", () => {
     expect(whc.postgres.sql).toContain("status = 'claimed'");
     const whf = webhookFailTemplates();
     expect(whf.postgres.params).toContain("lastError");
+    expect(whf.postgres.params).toContain("restoreAttemptFlag");
+    expect(whf.sqlite.params).toContain("restoreAttemptFlag");
     expect(whf.postgres.sql).toContain("last_error_sanitized");
     expect(whf.sqlite.sql).toContain("last_error_sanitized");
+    expect(whf.postgres.sql).toContain("attempts");
+    expect(whf.sqlite.sql).toContain("attempts");
     // Must never write the non-existent bare column name.
     expect(whf.postgres.sql).not.toMatch(/\blast_error\s*=/);
     expect(whf.sqlite.sql).not.toMatch(/\blast_error\s*=/);

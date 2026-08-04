@@ -75,6 +75,8 @@ This document answers: if a worker dies before or after a side effect and before
 
 ---
 
+
+**Webhook abandoned claims:** `listRetryable` / `get` soft-release `status=claimed` rows whose `lease_expires_at <= now` back to `pending` (lease fields cleared, attempts preserved) so `processRetryable` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases.
 ## Lease reclaim (dual fencing)
 
 1. Lease expires (`lease_expires_at` compared with injectable `now` bound into SQL — not hard-dependent on `SQL NOW()` for test paths).
@@ -111,6 +113,16 @@ When using `@paykernel/webhooks` with this adapter’s inbox store:
 - Reclaim after crash ⇒ handler re-run. See engine [crash-boundaries.md](../../webhooks/docs/crash-boundaries.md).
 
 ---
+
+
+## Clock fencing (multi-host)
+
+Lease reclaim / complete / fail predicates bind an injectable client `now` (ISO TEXT) rather than dialect `NOW()` / `datetime('now')`. Reasons:
+
+1. Timestamps are stored as ISO-8601 **TEXT** for portability across Postgres/SQLite-family adapters; dialect clock functions return formats that do not lexicographically compare cleanly with ISO `T`/`Z` strings on all engines.
+2. Unit tests use **FakeClock** to advance time without wall-clock waits.
+
+**Production multi-host requirement:** keep worker host clocks NTP-synced (or otherwise tightly synchronized). Large skew can early-reclaim still-live leases or reject completes near expiry. Prefer one DB primary for these tables; do not run multi-primary active-active without a single consensus clock/leader.
 
 ## Related
 

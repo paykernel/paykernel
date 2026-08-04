@@ -501,6 +501,17 @@ export function createMemoryWebhookInboxStore(
         if (rec.status === "claimed" && isLeaseActive(rec, clock)) {
           return { kind: "in_progress", record: rec };
         }
+        // True backoff: pending with future availableAt must not reacquire.
+        if (
+          rec.status === "pending" &&
+          Date.parse(rec.availableAt) > clock.nowMs()
+        ) {
+          return {
+            kind: "not_available",
+            record: rec,
+            availableAt: rec.availableAt,
+          };
+        }
         // pending or expired lease → re-claim below using existing payload hash
       }
 
@@ -508,6 +519,7 @@ export function createMemoryWebhookInboxStore(
       const generation = (existing?.generation ?? 0) + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const now = iso(clock);
+      // availableAt gate already applied above when `existing` was present.
       const base = existing ? releaseExpiredLease(input.key, existing) : undefined;
       if (base && base.payloadHash !== input.payloadHash) {
         return { kind: "payload_hash_conflict", record: base };
@@ -583,6 +595,10 @@ export function createMemoryWebhookInboxStore(
       }
       const retryAfterMs = input.retryAfterMs ?? 0;
       const dead = input.deadLetter === true;
+      const attempts =
+        input.restoreAttempt === true
+          ? Math.max(0, rec.attempts - 1)
+          : rec.attempts;
       entries.set(input.key, {
         ...rec,
         status: dead ? "dead_letter" : "pending",
@@ -590,6 +606,7 @@ export function createMemoryWebhookInboxStore(
         leaseToken: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        attempts,
         availableAt: new Date(clock.nowMs() + retryAfterMs).toISOString(),
         updatedAt: iso(clock),
       });

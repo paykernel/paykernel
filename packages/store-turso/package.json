@@ -38,8 +38,8 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*"
   },
   "peerDependencies": {
     "@libsql/client": ">=0.14.0",
@@ -57,7 +57,8 @@
     "@libsql/client": "^0.17.4",
     "@tursodatabase/serverless": "^1.4.0",
     "@types/bun": "latest",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@paykernel/testkit": "workspace:*"
   },
   "keywords": [
     "payments",

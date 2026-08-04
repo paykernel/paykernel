@@ -113,7 +113,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "DIALECT_SAMPLES",
 ] as const;
 
-describe("public API (private package) surface", () => {
+describe("public API surface", () => {
   it("exports every expected runtime symbol", () => {
     for (const name of EXPECTED_RUNTIME_EXPORTS) {
       expect(name in api).toBe(true);
@@ -147,16 +147,19 @@ describe("public API (private package) surface", () => {
     }
   });
 
-  it("package.json is private: true and has no public publishConfig", () => {
+  it("package.json is publishable sql-foundation (not private internal)", () => {
     const pkgPath = join(import.meta.dir, "..", "package.json");
     const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
       name: string;
       private?: boolean;
       publishConfig?: { access?: string };
+      paymentsSdk?: { privateInternal?: boolean; portable?: boolean };
     };
-    expect(pkg.name).toBe("@paykernel/internal-sql-store");
-    expect(pkg.private).toBe(true);
-    expect(pkg.publishConfig?.access).not.toBe("public");
+    expect(pkg.name).toBe("@paykernel/sql-foundation");
+    expect(pkg.private).not.toBe(true);
+    expect(pkg.publishConfig?.access).toBe("public");
+    expect(pkg.paymentsSdk?.privateInternal).not.toBe(true);
+    expect(pkg.paymentsSdk?.portable).toBe(true);
   });
 
   it("importing the package does not call migrate (no side-effect DDL)", () => {

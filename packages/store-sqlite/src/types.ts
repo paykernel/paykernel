@@ -5,7 +5,7 @@
 import type {
   ResolvedSchemaNamespace,
   SchemaNamespaceConfig,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type { SqliteExecutor } from "./executor";
 import type { StoreClock } from "./clock";
 
@@ -30,11 +30,11 @@ export type SqliteStoreOptions = {
 };
 
 export type SqliteStoresBundle = {
-  idempotency: import("@paykernel/testkit").IdempotencyStore;
-  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
-  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  idempotency: import("@paykernel/store-contracts").IdempotencyStore;
+  webhookInbox: import("@paykernel/store-contracts").WebhookInboxStore;
+  reconciliation: import("@paykernel/store-contracts").ReconciliationStore;
   executor: SqliteExecutor;
   namespace: ResolvedSchemaNamespace;
   clock: StoreClock;
-  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+  manifest: import("@paykernel/store-contracts").StorageAdapterManifest;
 };

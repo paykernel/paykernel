@@ -8,7 +8,7 @@
 import type {
   ResolvedSchemaNamespace,
   SchemaNamespaceConfig,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type { D1Executor } from "./executor";
 import type { StoreClock } from "./clock";
 
@@ -79,11 +79,11 @@ export type D1BindingStoreOptions = {
 };
 
 export type D1StoresBundle = {
-  idempotency: import("@paykernel/testkit").IdempotencyStore;
-  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
-  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  idempotency: import("@paykernel/store-contracts").IdempotencyStore;
+  webhookInbox: import("@paykernel/store-contracts").WebhookInboxStore;
+  reconciliation: import("@paykernel/store-contracts").ReconciliationStore;
   executor: D1Executor;
   namespace: ResolvedSchemaNamespace;
   clock: StoreClock;
-  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+  manifest: import("@paykernel/store-contracts").StorageAdapterManifest;
 };

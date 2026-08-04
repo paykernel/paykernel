@@ -43,8 +43,8 @@ import type {
   WebhookEventKey,
   WebhookInboxRecord,
   WebhookInboxStore,
-} from "@paykernel/testkit";
-import { createSchemaNamespace } from "@paykernel/internal-sql-store";
+} from "@paykernel/store-contracts";
+import { createSchemaNamespace } from "@paykernel/sql-foundation";
 import type {
   DoClientStoreOptions,
   DoFromStorageOptions,

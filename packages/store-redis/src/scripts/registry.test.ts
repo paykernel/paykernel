@@ -37,4 +37,30 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     );
     expect(REDIS_SCRIPT_REGISTRY.idempotency.reserve).toContain("'indeterminate'");
   });
+
+  it("webhook fail requires unexpired lease (parity with complete)", () => {
+    const fail = REDIS_SCRIPT_REGISTRY.webhookInbox.fail;
+    const complete = REDIS_SCRIPT_REGISTRY.webhookInbox.complete;
+    expect(fail).toContain("lease_expires_ms");
+    expect(fail).toContain("lease_lost");
+    // Same fence as complete: exp <= nowMs → lease_lost
+    expect(fail).toContain("exp <= nowMs");
+    expect(complete).toContain("exp <= nowMs");
+  });
+
+  // Offline source-contract smoke (no Redis): behavioral coverage is in
+  // stores.mock.test.ts + integration.redis.test.ts when live Redis is set.
+  it("webhook claim script encodes available_ms backoff and recovery reclaim", () => {
+    const claim = REDIS_SCRIPT_REGISTRY.webhookInbox.claim;
+    expect(claim).toContain("not_available");
+    expect(claim).toContain("available_ms");
+    expect(claim).toContain("expired lease");
+  });
+
+  it("webhook fail script encodes restoreAttempt parking decrement", () => {
+    const fail = REDIS_SCRIPT_REGISTRY.webhookInbox.fail;
+    expect(fail).toContain("restoreAttempt");
+    expect(fail).toMatch(/attempts\s*=\s*math\.max/);
+  });
+
 });

@@ -6,7 +6,7 @@
  * interpolate user values into SQL strings. Placeholders: `?` (SQLite).
  */
 
-import type { SqlExecutor } from "@paykernel/internal-sql-store";
+import type { SqlExecutor } from "@paykernel/sql-foundation";
 
 /**
  * Minimal async SQL port used by store factories and migrate helpers.

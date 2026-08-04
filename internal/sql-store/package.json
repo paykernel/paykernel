@@ -2,7 +2,7 @@
   "name": "@paykernel/internal-sql-store",
   "version": "0.1.0",
   "private": true,
-  "description": "Private shared relational schemas, codecs, migrations, and claim algorithms for PayKernel durable adapters. Not a public npm product.",
+  "description": "Thin monorepo re-export of @paykernel/sql-foundation. Prefer @paykernel/sql-foundation in new code. Not published.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,16 +26,13 @@
     "node": ">=18",
     "bun": ">=1.0.0"
   },
+  "dependencies": {
+    "@paykernel/sql-foundation": "workspace:*"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5.9.3"
   },
-  "keywords": [
-    "payments",
-    "sql-store",
-    "internal",
-    "private"
-  ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",
   "repository": {

@@ -176,6 +176,15 @@ export type WebhookClaimDecision =
     }
   | { kind: "already_completed" }
   | { kind: "in_progress" }
+  /**
+   * Pending row is not yet due for claim (`availableAt` in the future).
+   * Backoff / retryAfterMs gate — do not increment attempts.
+   * Distinct from `in_progress` (active lease held by a worker).
+   *
+   * Expired-lease reclaim is still allowed even when `availableAt` is in the future
+   * (crash recovery path); only `status=pending` is gated by `availableAt`.
+   */
+  | { kind: "not_available" }
   | { kind: "payload_hash_conflict" }
   | { kind: "duplicate_failed" };
 
@@ -217,7 +226,16 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
     return { kind: "in_progress" };
   }
 
-  // pending or expired lease → reclaim
+  // pending + future availableAt → block claim (backoff). Expired lease reclaim
+  // is allowed even if availableAt is still in the future (crash recovery).
+  if (existing.status === "pending") {
+    const availableMs = Date.parse(existing.availableAt);
+    if (Number.isFinite(availableMs) && availableMs > clock.nowMs) {
+      return { kind: "not_available" };
+    }
+  }
+
+  // pending (due) or expired lease → reclaim
   const payloadRef = input.payloadRef ?? existing.payloadRef;
   const acquired: WebhookClaimDecision = {
     kind: "acquired",

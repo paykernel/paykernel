@@ -6,7 +6,7 @@
 
 import type { DoNamespaceLike, DoStubLike, DoStorageLike } from "../types";
 import type { StoreClock } from "../clock";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 import type { DoAlarmOptions } from "../types";
 import { createMockDoSql, type MockDoSqlHandle } from "./mock-do-sql";
 import { PaymentsStoreObject } from "../object/payments-store-object";

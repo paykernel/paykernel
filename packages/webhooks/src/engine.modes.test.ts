@@ -109,6 +109,8 @@ describe("modes: inline vs durable_retry (A6)", () => {
     const rec = await store.get("stripe:evt_ack");
     expect(rec?.status).toBe("pending");
     expect(rec?.payloadRef).toContain("payment.succeeded");
+    // Parking claim is free vs maxAttempts handler budget.
+    expect(rec?.attempts).toBe(0);
   });
 
   it("ackAfterClaim with mode inline throws at construction", () => {

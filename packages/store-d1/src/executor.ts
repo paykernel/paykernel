@@ -9,7 +9,7 @@
  * Verified against Cloudflare D1 Workers Binding API (pin date in manifest notes).
  */
 
-import type { SqlExecutor } from "@paykernel/internal-sql-store";
+import type { SqlExecutor } from "@paykernel/sql-foundation";
 import type { D1DatabaseLike, D1PreparedStatementLike } from "./types";
 
 /**

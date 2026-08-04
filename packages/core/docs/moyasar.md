@@ -210,7 +210,7 @@ const result = await client.createPayment({
 | **Capture window** | Capture before the issuer auth hold expires. **mada** authorizations are typically capturable for up to **14 days**; other schemes follow issuer rules. If the hold lapses, Moyasar may still report `authorized` while the issuer has released funds — re-fetch before capturing and handle capture failures |
 | **Void window** | Void authorized (uncaptured) payments while the hold is active. For already-**paid**/auto-captured payments, Moyasar may allow void only within a short settlement window (commonly ~**2 hours**); after that use refund |
 | **Verified status** | Moyasar `verified` is a zero-amount card **setup/verification**, not an authorization hold — mapped to SDK `setup_completed` |
-| **Partial statuses** | When amounts are present, `refunded > 0 && refunded < amount` maps to `partially_refunded`; full refund amount maps to `refunded`; partial capture maps to `partially_captured` |
+| **Partial statuses** | Refund completeness uses a **captured baseline** when `captured > 0`, else authorization `amount`: `refunded > 0 && refunded < baseline` → `partially_refunded`; `refunded >= baseline && baseline > 0` → `refunded` (so full refund of a partial capture is `refunded`); partial capture maps to `partially_captured` |
 | **Callback URL** | Moyasar requires it for card/token sources. When omitting `callbackUrl` (STC Pay, etc.) or using Moyasar-only fields (`splits`), pass the second arg `'moyasar'` or call `client.gateway('moyasar').createPayment(...)` |
 | **STC Pay Confirmation** | Do not browser-redirect to `source.transaction_url`; `redirectUrl` is undefined for STC Pay, so collect the OTP and call `confirmStcPayOtp` |
 | **Sandbox** | `sandbox` config is ignored; test/live is determined by the secret key prefix |
@@ -317,9 +317,13 @@ when present on the payment (create/get/capture/refund responses and webhooks):
 
 | Condition | SDK Status |
 |-----------|------------|
-| `refunded > 0` and `refunded < amount` | `partially_refunded` |
-| `refunded >= amount` and `amount > 0` | `refunded` |
+| `refunded > 0` and `refunded < refundBaseline` | `partially_refunded` |
+| `refunded >= refundBaseline` and `refundBaseline > 0` | `refunded` |
 | `captured > 0` and `captured < amount` (auth/paid family) | `partially_captured` |
+
+**Refund baseline:** `refundBaseline = captured > 0 ? captured : amount`. Full refund of a
+partial capture (e.g. `amount=10000`, `captured=3000`, `refunded=3000`) maps to `refunded`,
+not `partially_refunded`. When `captured` is 0/absent, completeness uses authorization `amount`.
 
 Partial refunds take precedence over partial capture when both amount fields apply.
 

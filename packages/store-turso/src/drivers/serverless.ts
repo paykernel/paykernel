@@ -14,7 +14,7 @@ import {
 } from "../index-stores";
 import type { TursoStoreOptions, TursoStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 
 /**
  * Minimal surface of `@tursodatabase/serverless` Connection / Transaction.

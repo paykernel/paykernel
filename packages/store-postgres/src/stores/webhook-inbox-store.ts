@@ -9,7 +9,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
   ClaimWebhookResult,
@@ -23,8 +23,8 @@ import type {
   WebhookEventKey,
   WebhookInboxRecord,
   WebhookInboxStore,
-} from "@paykernel/testkit";
-import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { PostgresStoreOptions } from "../types";
@@ -63,6 +63,7 @@ export function createPostgresWebhookInboxStore(
         const payloadRef = input.payloadRef ?? null;
 
         // params: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now
+        // Template gates pending on available_at <= now; expired claimed leases may reclaim.
         const claimed = await ctx.getExecutor().query<Record<string, unknown>>(
           claimTpl.sql,
           [
@@ -97,6 +98,14 @@ export function createPostgresWebhookInboxStore(
         }
         if (existing.status === "failed" || existing.status === "dead_letter") {
           return { kind: "duplicate_failed", record: existing };
+        }
+        // pending + failed claim SQL = available_at gate (do not burn attempts)
+        if (existing.status === "pending") {
+          return {
+            kind: "not_available",
+            record: existing,
+            availableAt: existing.availableAt,
+          };
         }
         return { kind: "in_progress", record: existing };
       });
@@ -167,10 +176,19 @@ export function createPostgresWebhookInboxStore(
         const statusTarget = dead ? "dead_letter" : "pending";
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
-        // params: key, leaseToken, statusTarget, lastError, availableAt, now
+        // params: key, leaseToken, statusTarget, lastError, availableAt, now, restoreAttemptFlag
+        const restoreAttemptFlag = input.restoreAttempt === true ? 1 : 0;
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           failTpl.sql,
-          [input.key, input.leaseToken, statusTarget, lastError, availableAt, now],
+          [
+            input.key,
+            input.leaseToken,
+            statusTarget,
+            lastError,
+            availableAt,
+            now,
+            restoreAttemptFlag,
+          ],
         );
         if (rows.length === 0) {
           throw new StoreLeaseLostError("fail: lease token rejected or key not found");
@@ -179,13 +197,46 @@ export function createPostgresWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(async () => selectByKey(key));
+      return withMappedErrors(async () => {
+        // Soft-release abandoned expired claims so get matches memory/Redis visibility.
+        const now = clockNowIso(ctx.clock);
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = $1,
+             updated_at = $1
+           WHERE key = $2
+             AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= $1`,
+          [now, key],
+        );
+        return selectByKey(key);
+      });
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processRetryable can drain them
+        // (attempts kept; lease fields cleared). Matches memory/Redis recovery.
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = $1,
+             updated_at = $1
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= $1`,
+          [now],
+        );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT key, status, payload_hash, payload_ref, gateway, provider_event_id,
                   lease_owner, lease_token, lease_expires_at, attempts, generation,

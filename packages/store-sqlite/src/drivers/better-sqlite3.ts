@@ -9,7 +9,7 @@
  */
 
 import Database from "better-sqlite3";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 import type { SqliteExecutor } from "../executor";
 import {
   createSqliteIdempotencyStore,

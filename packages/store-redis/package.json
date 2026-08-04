@@ -46,7 +46,7 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/store-contracts": "workspace:*"
   },
   "peerDependencies": {
     "ioredis": ">=5.0.0",
@@ -69,7 +69,8 @@
     "@upstash/redis": "^1.35.3",
     "ioredis": "^5.7.0",
     "redis": "^5.8.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@paykernel/testkit": "workspace:*"
   },
   "keywords": [
     "payments",

@@ -1461,6 +1461,11 @@ export class MoyasarGateway extends BaseGateway {
   /**
    * After mapping the provider status string, refine using amount fields so
    * partial refunds/captures surface as partially_refunded / partially_captured.
+   *
+   * Refund completeness uses a **captured baseline** when `captured > 0`, else
+   * the original authorization `amount` (matches Stripe/Paymob + behavioral
+   * contracts: full refund of a partial capture is `refunded`).
+   *
    * @param baseStatus - Optional precomputed `mapStatus` result (avoids double map/warn).
    */
   private resolvePaymentStatus(
@@ -1483,10 +1488,12 @@ export class MoyasarGateway extends BaseGateway {
         ? payment.captured
         : 0;
 
-    if (refunded > 0 && refunded < amount) {
+    // Full refund of partial capture (refunded === captured < amount) => refunded.
+    const refundBaseline = captured > 0 ? captured : amount;
+    if (refunded > 0 && refunded < refundBaseline) {
       return "partially_refunded";
     }
-    if (refunded >= amount && amount > 0) {
+    if (refunded >= refundBaseline && refundBaseline > 0) {
       return "refunded";
     }
 

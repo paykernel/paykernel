@@ -871,6 +871,92 @@ describe("MoyasarGateway", () => {
       expect(result.refundedAmount).toBe(25);
     });
 
+    it("maps full refund of partial capture to refunded (captured baseline)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: 3000,
+          refunded: 3000,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("refunded");
+      expect(result.refundedAmount).toBe(30);
+      expect(result.capturedAmount).toBe(30);
+    });
+
+    it("maps partial refund of partial capture to partially_refunded", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: 3000,
+          refunded: 1000,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("partially_refunded");
+      expect(result.refundedAmount).toBe(10);
+      expect(result.capturedAmount).toBe(30);
+    });
+
+    it("maps full refund of full capture to refunded", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 10000,
+          refunded: 10000,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("refunded");
+      expect(result.refundedAmount).toBe(100);
+    });
+
+    it("uses authorization amount as refund baseline when captured is 0", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: 0,
+          refunded: 4000,
+        }),
+      );
+
+      const partial = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+      expect(partial.status).toBe("partially_refunded");
+
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 0,
+          refunded: 10000,
+        }),
+      );
+
+      const full = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+      expect(full.status).toBe("refunded");
+    });
+
     it("maps Moyasar verified status to setup_completed (not authorized)", async () => {
       mockFetchJson(
         paymentResponse({
@@ -1428,6 +1514,25 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("partially_refunded");
+    });
+
+    it("maps full refund of partial capture on webhooks to refunded (captured baseline)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_123",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          refunded: 3000,
+          captured: 3000,
+        },
+      });
+
+      expect(event.status).toBe("refunded");
     });
 
     it("maps unmapped provider statuses to failed (fail-closed)", () => {

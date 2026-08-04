@@ -21,7 +21,7 @@ import {
 import type { RedisStoreOptions, RedisStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
 import type { KeyOptions } from "../keys";
-import { StoreUnsupportedFeatureError } from "@paykernel/testkit";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 
 /** Minimal Bun RedisClient surface (send for non-first-class commands). */
 export type BunRedisClientLike = {

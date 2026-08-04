@@ -11,7 +11,7 @@
  * Verified against CF DO SQLite storage API docs (2026-08-03).
  */
 
-import type { SqlExecutor } from "@paykernel/internal-sql-store";
+import type { SqlExecutor } from "@paykernel/sql-foundation";
 import type { DoStorageLike, SqlStorageLike } from "./types";
 
 /**

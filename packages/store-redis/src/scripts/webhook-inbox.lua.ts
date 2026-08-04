@@ -96,9 +96,17 @@ if status == 'claimed' then
     local p = pack(m)
     return {'in_progress', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
   end
+  -- expired lease → fall through to re-claim (recovery)
+elseif status == 'pending' then
+  -- Backoff gate: fail(retryAfterMs) / available_ms must delay key-addressed claim
+  local avail = tonumber(m['available_ms'] or '0') or 0
+  if avail > nowMs then
+    local p = pack(m)
+    return {'not_available', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+  end
 end
 
--- pending or expired claim → re-claim
+-- pending (available) or expired claim → re-claim
 local gen = (tonumber(m['generation'] or '0') or 0) + 1
 local attempts = (tonumber(m['attempts'] or '0') or 0) + 1
 local created = m['created_at'] or nowIso
@@ -242,7 +250,8 @@ return {'ok'}
 
 /**
  * KEYS[1]=record KEYS[2]=retryIndex
- * ARGV: nowMs, nowIso, leaseToken, error, deadLetter(0|1), availableAt, availableMs, logicalKey, retentionTtlSec
+ * ARGV: nowMs, nowIso, leaseToken, error, deadLetter(0|1), availableAt, availableMs,
+ *       logicalKey, retentionTtlSec, restoreAttempt(0|1)
  */
 export const WEBHOOK_FAIL_LUA = `
 local rec = KEYS[1]
@@ -256,6 +265,7 @@ local availableAt = ARGV[6]
 local availableMs = ARGV[7]
 local logicalKey = ARGV[8]
 local retentionTtlSec = tonumber(ARGV[9]) or 0
+local restoreAttempt = ARGV[10] or '0'
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -274,10 +284,20 @@ local m = hgetall_map(rec)
 if (m['status'] or '') ~= 'claimed' or (m['lease_token'] or '') ~= leaseToken then
   return {'lease_lost'}
 end
+-- Parity with WEBHOOK_COMPLETE_LUA / SQL fail: require unexpired lease
+local exp = tonumber(m['lease_expires_ms'] or '0') or 0
+if exp <= nowMs then
+  return {'lease_lost'}
+end
 
 local status = 'pending'
 if dead == '1' then
   status = 'dead_letter'
+end
+
+local attempts = tonumber(m['attempts'] or '0') or 0
+if restoreAttempt == '1' then
+  attempts = math.max(0, attempts - 1)
 end
 
 redis.call('HSET', rec,
@@ -289,6 +309,7 @@ redis.call('HSET', rec,
   'lease_expires_ms', '0',
   'available_at', availableAt,
   'available_ms', availableMs,
+  'attempts', tostring(attempts),
   'updated_at', nowIso
 )
 

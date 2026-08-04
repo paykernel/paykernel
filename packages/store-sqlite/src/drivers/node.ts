@@ -13,7 +13,7 @@
  */
 
 import { DatabaseSync } from "node:sqlite";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 import type { SqliteExecutor } from "../executor";
 import {
   createSqliteIdempotencyStore,

@@ -8,7 +8,7 @@
 import {
   assertStorageAdapterManifest,
   type StorageAdapterManifest,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 
 /**
  * Declared guarantees when using a shared Cloudflare D1 database from Workers.

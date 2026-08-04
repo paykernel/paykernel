@@ -12,7 +12,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
   ClaimWebhookResult,
@@ -26,8 +26,8 @@ import type {
   WebhookEventKey,
   WebhookInboxRecord,
   WebhookInboxStore,
-} from "@paykernel/testkit";
-import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { SqliteStoreOptions } from "../types";
@@ -106,7 +106,8 @@ export function createSqliteWebhookInboxStore(
           }
 
           // step2: conditional reclaim
-          // bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now
+          // bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now, now
+          // (available_at gate + lease_expires_at gate each bind now)
           const reclaimed = exec.run(updateSql, [
             payloadRef,
             input.owner,
@@ -116,6 +117,7 @@ export function createSqliteWebhookInboxStore(
             now,
             input.key,
             input.payloadHash,
+            now,
             now,
           ]);
 
@@ -147,6 +149,14 @@ export function createSqliteWebhookInboxStore(
           }
           if (existing.status === "failed" || existing.status === "dead_letter") {
             return { kind: "duplicate_failed" as const, record: existing };
+          }
+          // pending + failed claim SQL = available_at gate (do not burn attempts)
+          if (existing.status === "pending") {
+            return {
+              kind: "not_available" as const,
+              record: existing,
+              availableAt: existing.availableAt,
+            };
           }
           return { kind: "in_progress" as const, record: existing };
         }, { mode: "immediate" });
@@ -223,12 +233,14 @@ export function createSqliteWebhookInboxStore(
         const statusTarget = dead ? "dead_letter" : "pending";
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
-        // params: statusTarget, lastError, availableAt, now, key, leaseToken, now
+        // params: statusTarget, lastError, availableAt, now, restoreAttemptFlag, key, leaseToken, now
+        const restoreAttemptFlag = input.restoreAttempt === true ? 1 : 0;
         const result = ctx.getExecutor().run(failTpl.sql, [
           statusTarget,
           lastError,
           availableAt,
           now,
+          restoreAttemptFlag,
           input.key,
           input.leaseToken,
           now,
@@ -242,13 +254,44 @@ export function createSqliteWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(() => selectByKey(key));
+      return withMappedErrors(() => {
+        const now = clockNowIso(ctx.clock);
+        ctx.getExecutor().run(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = ?,
+             updated_at = ?
+           WHERE key = ?
+             AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now, key, now],
+        );
+        return selectByKey(key);
+      });
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(() => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processRetryable can drain them.
+        ctx.getExecutor().run(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = ?,
+             updated_at = ?
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now, now],
+        );
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${SELECT_COLS}
            FROM ${table}

@@ -2,16 +2,54 @@
  * Pure snapshot compare → machine-readable ReconciliationDifference[].
  */
 
-import type { Money } from "@paykernel/core";
+import { MoneyAmountError, toMinorUnits, type Money } from "@paykernel/core";
 import type {
   LocalPaymentSnapshot,
   ProviderPaymentSnapshot,
   ReconciliationDifference,
 } from "./types";
 
-/** Money equality: amount string + currency, case-sensitive. */
+/**
+ * Parse options for numeric money equality: zero refunds and marketplace
+ * reverse splits must still compare; excess precision stays reject (fail-closed).
+ */
+const MONEY_EQ_PARSE = {
+  allowZero: true,
+  allowNegative: true,
+} as const;
+
+/**
+ * Money equality for reconciliation drift detection.
+ *
+ * - **Currency** strings are compared exactly (case-sensitive).
+ * - **Amounts** compare by currency-scale minor units (`bigint` via core
+ *   `toMinorUnits`), so equivalent decimal spellings match
+ *   (`"10"` ≡ `"10.00"` for USD; `"1.25"` ≡ `"1.250"` for KWD).
+ * - Unparseable / excess-precision amounts are not equal (unless amount
+ *   strings are identical).
+ *
+ * Never uses float multiply or `Number` compare.
+ */
 export function moneyEquals(a: Money, b: Money): boolean {
-  return a.amount === b.amount && a.currency === b.currency;
+  if (a.currency !== b.currency) {
+    return false;
+  }
+  if (a.amount === b.amount) {
+    return true;
+  }
+  try {
+    return (
+      toMinorUnits(a.amount, a.currency, MONEY_EQ_PARSE) ===
+      toMinorUnits(b.amount, b.currency, MONEY_EQ_PARSE)
+    );
+  } catch (err) {
+    // Fail-closed: invalid/excess-precision amounts are not equal.
+    // Re-throw unexpected errors (not amount parse failures).
+    if (err instanceof MoneyAmountError) {
+      return false;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -19,7 +57,7 @@ export function moneyEquals(a: Money, b: Money): boolean {
  * Empty differences → consistent path.
  *
  * Only fields present on `local` are compared (partial local knowledge).
- * Amount fields compare Money amount+currency strings.
+ * Amount fields use {@link moneyEquals} (minor-unit numeric equality + exact currency).
  */
 export function compareSnapshots(
   local: LocalPaymentSnapshot | undefined,

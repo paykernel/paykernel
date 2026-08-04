@@ -29,15 +29,16 @@ Scripts return a **Redis array** whose first element is a **string tag**:
 | `already_completed` / `already_terminal` | Terminal success already recorded |
 | `fingerprint_conflict` / `payload_hash_conflict` | Same key, different body/fingerprint |
 | `indeterminate` | Uncertain outcome blocks reserve (A4) |
-| `lease_lost` | Token/generation fence failed |
+| `lease_lost` | Token/generation fence failed (incl. **expired** lease on complete/fail) |
+| `not_available` | Webhook claim: `pending` but `available_ms > nowMs` (backoff not elapsed) |
 | `ok` | Renew / mutator success |
 | `not_found` / `not_due` | Reconciliation schedule/claim outcomes |
 
 Parsers (`parseTaggedResult`, `parseIdempotencyRecord`, …) map tags to Phase 9 result discriminants. Do **not** rely on bare integers `0`/`1` as the only wire format — tags make mis-mapping fail loudly.
 
-## Injectable `now` ARGV (FakeClock)
+## Injectable `now` ARGV (FakeClock) — TIME caveat
 
-Scripts take **caller-supplied time** as ARGV (epoch ms + ISO strings), not Redis `TIME` alone.
+Scripts take **caller-supplied time** as ARGV (epoch ms + ISO strings), **not** Redis `TIME` alone.
 
 Why:
 
@@ -45,7 +46,11 @@ Why:
 2. Deterministic reclaim predicates in multi-worker tests.
 3. Operators still may pass wall-clock `now` in production.
 
-Reclaim compares stored `lease_expires_ms` against `ARGV nowMs`.
+Reclaim, complete, fail, and claim backoff compare stored `lease_expires_ms` / `available_ms` against **`ARGV nowMs`**.
+
+### TIME caveat (B7 residual)
+
+Production multi-host safety depends on reasonably synchronized client clocks. Redis `TIME` is **not** used as the sole lease authority (would break FakeClock and some managed clients). Under large clock skew, a worker can early-reclaim a still-live lease or reject a complete/fail near expiry. Prefer NTP; a hybrid Redis-`TIME` + client-skew bound is optional hardening, not required for 0.x FakeClock conformance.
 
 ## generation++ and leaseToken
 
@@ -54,6 +59,11 @@ On successful reserve / claim / renew that issues a new lease:
 - `generation` increments (monotonic fencing).
 - A new unguessable `leaseToken` is issued (opaque string from the client ARGV; script stores it).
 - Prior tokens fail subsequent mutators (`lease_lost`).
+
+## Webhook claim backoff + fail fencing
+
+- **`WEBHOOK_CLAIM_LUA`**: when `status == pending` and `available_ms > nowMs`, returns tag `not_available` (does not burn attempts). Expired `claimed` leases still reclaim for crash recovery.
+- **`WEBHOOK_FAIL_LUA`**: requires unexpired lease (`lease_expires_ms > nowMs`) — same fence as `WEBHOOK_COMPLETE_LUA` / SQL fail. Expired token → `lease_lost`.
 
 ## Per-store scripts (registry)
 

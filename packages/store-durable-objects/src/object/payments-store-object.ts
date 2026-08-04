@@ -46,8 +46,8 @@ import type {
   ScheduleResult,
   WebhookEventKey,
   WebhookInboxRecord,
-} from "@paykernel/testkit";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+} from "@paykernel/store-contracts";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 import type { DoStorageLike } from "../types";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";

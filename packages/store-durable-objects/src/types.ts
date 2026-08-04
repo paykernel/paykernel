@@ -11,7 +11,7 @@
 import type {
   ResolvedSchemaNamespace,
   SchemaNamespaceConfig,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type { StoreClock } from "./clock";
 import type { DoExecutor } from "./sql-executor";
 import type { DoShardingStrategy } from "./sharding";
@@ -19,7 +19,6 @@ import type { DoShardingStrategy } from "./sharding";
 export type { StoreClock } from "./clock";
 export type { DoExecutor } from "./sql-executor";
 export type { SchemaNamespaceConfig, ResolvedSchemaNamespace };
-export type { DoShardingStrategy } from "./sharding";
 
 /**
  * Minimal cursor surface from `storage.sql.exec(...)`.
@@ -153,12 +152,12 @@ export type DoFromStorageOptions = {
 };
 
 export type DoStoresBundle = {
-  idempotency: import("@paykernel/testkit").IdempotencyStore;
-  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
-  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  idempotency: import("@paykernel/store-contracts").IdempotencyStore;
+  webhookInbox: import("@paykernel/store-contracts").WebhookInboxStore;
+  reconciliation: import("@paykernel/store-contracts").ReconciliationStore;
   namespace: ResolvedSchemaNamespace;
   clock: StoreClock;
-  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+  manifest: import("@paykernel/store-contracts").StorageAdapterManifest;
   /** Present when built from an executor (not Worker client). */
   executor?: DoExecutor;
   /** Present when built from Worker namespace client. */

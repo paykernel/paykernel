@@ -45,9 +45,11 @@ import {
  * whenever they were present on that original object.
  *
  * Includes fee / capturedAmount / refundedAmount / clientSecret so after-hooks
- * cannot forge settlement totals or client secrets. `nextAction` is frozen so
- * hooks cannot forge/strip 3DS / redirect / OTP action payloads (rawResponse
- * remains additive and is intentionally not listed here).
+ * cannot forge settlement totals or client secrets. `nextAction` and
+ * `references` are frozen (including nested own-properties such as
+ * `redirectUrl` / `providerObjectId`) so hooks cannot forge/strip 3DS /
+ * redirect / OTP action payloads or provider identity refs (`rawResponse`
+ * remains additive and is intentionally not listed / not deep-cloned).
  */
 const MONEY_IDENTITY_KEYS = [
     'success',
@@ -73,10 +75,33 @@ const MONEY_IDENTITY_KEYS = [
 ] as const;
 
 /**
+ * Shallow-clone a plain object (own enumerable props only). Non-objects and
+ * arrays are returned as-is. Used for nested identity fields (`nextAction`,
+ * `references`) — not for large additive bags like `rawResponse`.
+ */
+function clonePlainObject(value: unknown): unknown {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        return { ...(value as Record<string, unknown>) };
+    }
+    return value;
+}
+
+/**
+ * Nested money/identity object keys whose *own* properties must also be
+ * detached from the hook-visible clone (so `nextAction.redirectUrl` /
+ * `references.providerObjectId` in-place rewrites cannot poison freeze).
+ */
+const NESTED_IDENTITY_KEYS = ['nextAction', 'references'] as const;
+
+/**
  * Restore critical money/identity fields from the original gateway result onto
  * an after-hook `modifiedResult`. Hooks cannot flip paid status or amounts,
  * and cannot introduce identity fields (e.g. forge `outcome: 'succeeded'` or
  * clear `reconciliationRequired`) that the gateway did not set.
+ *
+ * Nested identity objects (`nextAction`, `references`) are always reattached as
+ * detached shallow copies of the original so nested own-property rewrites on a
+ * shared reference cannot stick on the returned result.
  *
  * If `modified` is not a non-null object (null / undefined / primitive), it is
  * ignored and the original gateway result is returned unchanged.
@@ -100,8 +125,18 @@ function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
 
     for (const key of MONEY_IDENTITY_KEYS) {
         if (Object.prototype.hasOwnProperty.call(orig, key)) {
-            if (out[key] !== orig[key]) {
-                out[key] = orig[key];
+            const origVal = orig[key];
+            if (
+                (key === 'nextAction' || key === 'references') &&
+                origVal !== null &&
+                typeof origVal === 'object' &&
+                !Array.isArray(origVal)
+            ) {
+                // Always re-snapshot nested identity from the freeze original.
+                out[key] = clonePlainObject(origVal);
+                touched = true;
+            } else if (out[key] !== origVal) {
+                out[key] = origVal;
                 touched = true;
             }
         } else if (Object.prototype.hasOwnProperty.call(out, key)) {
@@ -118,12 +153,24 @@ function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
 /**
  * Shallow-clone a gateway result so after-hooks that mutate the argument
  * in-place cannot poison the freeze snapshot used by restoreMoneyIdentityFields.
+ *
+ * Also detaches nested identity objects (`nextAction`, `references`) so rewrites
+ * of their own properties (e.g. `redirectUrl`, `providerObjectId`) do not mutate
+ * the freeze snapshot. `rawResponse` is intentionally not deep-cloned.
  */
 function shallowCloneResult<R>(result: R): R {
     if (result === null || typeof result !== 'object') {
         return result;
     }
-    return { ...(result as Record<string, unknown>) } as R;
+    const clone: Record<string, unknown> = {
+        ...(result as Record<string, unknown>),
+    };
+    for (const key of NESTED_IDENTITY_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(clone, key)) {
+            clone[key] = clonePlainObject(clone[key]);
+        }
+    }
+    return clone as R;
 }
 
 /**

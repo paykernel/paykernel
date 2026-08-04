@@ -48,8 +48,8 @@ Strong claims require:
 
 1. Single Lua script per ownership transition.
 2. No application get-then-set claim strategy across connections.
-3. Token-gated mutators that return `lease_lost` when fencing fails.
-4. Tagged script results mapped correctly (not ambiguous integers alone).
+3. Token-gated mutators that return `lease_lost` when fencing fails (wrong token **or** expired lease on complete/fail).
+4. Tagged script results mapped correctly (not ambiguous integers alone), including webhook `not_available` for pre-`available_ms` claim.
 
 If an operator reimplements claim as non-atomic get-then-set, they must **not** advertise this manifest.
 

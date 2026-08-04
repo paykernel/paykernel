@@ -169,3 +169,22 @@ See [docs/testing.md](./docs/testing.md).
 - This package does **not** implement Redis / SQLite / Turso / D1 / Durable Object adapters.
 - Core and webhooks must **not** depend on this adapter; inject stores at the app layer.
 - Does not publish or re-export private `internal/sql-store` as a public ORM.
+
+## Packaging / install graph
+
+Published adapters depend on:
+
+| Runtime dependency | Role |
+| --- | --- |
+| [`@paykernel/store-contracts`](../store-contracts) | Lease-aware store interfaces + `StoreError` taxonomy + manifests |
+| [`@paykernel/sql-foundation`](../sql-foundation) | Shared relational schemas, codecs, migrations, claim SQL templates |
+
+**Decision (ship-blocker B8 option B):** the former private monorepo package
+`@paykernel/internal-sql-store` is packaged as public **`@paykernel/sql-foundation`**.
+Adapters do **not** list private `internal/*` packages as runtime dependencies.
+`@paykernel/testkit` is a **devDependency** only (conformance + fake clocks);
+production install graphs do not pull mock gateways or NON_PRODUCTION memory factories.
+
+See also [`docs/monorepo.md`](../../docs/monorepo.md) and
+[`docs/workspace-boundaries.md`](../../docs/workspace-boundaries.md).
+

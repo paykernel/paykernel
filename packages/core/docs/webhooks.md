@@ -27,7 +27,8 @@ app.post(
       req.body, // Buffer from express.raw()
       req.headers['stripe-signature'] as string,
     );
-    // fulfill from event.status / event.gatewayPaymentId
+    // Prefer isPaidOutcome(event) / PaymentEvent fields over raw event.status strings
+    // before fulfillment (authorized is not paid; see behavioral-contracts.md).
     res.json({ received: true });
   },
 );

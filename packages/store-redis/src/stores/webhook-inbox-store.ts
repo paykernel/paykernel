@@ -15,11 +15,11 @@ import type {
   WebhookEventKey,
   WebhookInboxRecord,
   WebhookInboxStore,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   StoreCorruptedRecordError,
   StoreLeaseLostError,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   clockAddMsIso,
   clockAddMsString,
@@ -122,6 +122,13 @@ export function createRedisWebhookInboxStore(
         if (tagged.tag === "in_progress") {
           return { kind: "in_progress", record };
         }
+        if (tagged.tag === "not_available") {
+          return {
+            kind: "not_available",
+            record,
+            availableAt: record.availableAt,
+          };
+        }
         throw new StoreCorruptedRecordError(
           `claim: unexpected script tag ${tagged.tag}`,
         );
@@ -204,6 +211,7 @@ export function createRedisWebhookInboxStore(
             clockAddMsString(ctx.clock, retryAfterMs),
             input.key,
             String(ctx.retentionTtlSec),
+            input.restoreAttempt === true ? "1" : "0",
           ],
         );
         const tagged = parseTaggedResult(raw);

@@ -16,7 +16,7 @@ import type {
   IdempotencyStore,
   ReconciliationStore,
   WebhookInboxStore,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 
 function bindingToStoreOptions(options: D1BindingStoreOptions): D1StoreOptions {
   const executorOpts =

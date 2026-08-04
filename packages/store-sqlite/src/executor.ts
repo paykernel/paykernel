@@ -7,7 +7,7 @@
  * Transaction callbacks MUST be synchronous (no async/await inside).
  */
 
-import type { SqlExecutor } from "@paykernel/internal-sql-store";
+import type { SqlExecutor } from "@paykernel/sql-foundation";
 
 export type SqliteTransactionMode = "deferred" | "immediate" | "exclusive";
 

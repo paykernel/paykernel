@@ -92,22 +92,29 @@ After hooks run **after** the gateway operation has already succeeded. They
 ### After-hooks cannot change money identity fields
 
 After-hooks may return `modifiedResult` to attach additive fields (e.g.
-metadata bags, `rawResponse` annotations, `redirectUrl` tweaks). The SDK
-**restores critical money / identity fields** from the original gateway result
-whenever they were present on that original object — including when the hook
-mutates the result argument **in-place** (hooks receive a shallow clone; the
-freeze snapshot stays clean):
+metadata bags, `rawResponse` annotations). The SDK **restores critical money /
+identity fields** from the original gateway result whenever they were present
+on that original object — including when the hook mutates the result argument
+**in-place** (hooks receive a shallow clone with nested identity objects
+detached; the freeze snapshot stays clean):
 
-`success`, `status`, `amount`, `gatewayId`, `captureId`, `authorizationId`,
-`orderId`, `totalRefunded`, `refundId`, `gatewayRefundId`, `fee`,
-`capturedAmount`, `refundedAmount`, `clientSecret`
+`success`, `outcome`, `status`, `amount`, `gatewayId`, `captureId`,
+`authorizationId`, `orderId`, `totalRefunded`, `refundId`, `gatewayRefundId`,
+`fee`, `capturedAmount`, `refundedAmount`, `clientSecret`, `nextAction`,
+`references`, `decline`, `reconciliationRequired`, `providerRequestId`
+
+Nested own-properties on frozen identity objects are also protected: after-hooks
+cannot rewrite `nextAction.redirectUrl` (or other `nextAction` own fields) or
+`references.providerObjectId` on the returned result. Large additive bags such
+as `rawResponse` are **not** deep-cloned and remain free for annotations.
 
 A non-object `modifiedResult` (`null` / primitive) is **ignored** and the
 original gateway result is returned (warn-logged when a logger is configured).
 
-Hooks **cannot** flip paid status, amounts, fees, client secrets, or gateway
-identity IDs. Do not rely on after-hooks to “correct” financial outcomes —
-change the gateway call or use before-hooks instead.
+Hooks **cannot** flip paid status, amounts, fees, client secrets, gateway
+identity IDs, `nextAction`, or `references`. Do not rely on after-hooks to
+“correct” financial outcomes — change the gateway call or use before-hooks
+instead.
 
 The SDK **does not reverse** the gateway side effect in either case:
 

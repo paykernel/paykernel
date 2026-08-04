@@ -1,6 +1,6 @@
 # Monorepo developer guide
 
-This repository is a **Bun workspaces** monorepo. The publishable SDK lives under `packages/core` and keeps the npm name `@paykernel/core`. The portable webhook inbox engine is `@paykernel/webhooks` under `packages/webhooks`. The portable reconciliation domain package is `@paykernel/reconciliation` under `packages/reconciliation` (Phase 19: safe lookup, machine-readable drift, decision-only policy, store-backed scheduling — **no** mandatory queue). The portable observability package is `@paykernel/opentelemetry` under `packages/observability` (Phase 20: portable `PaymentMetrics`, optional span instrumentation, redacting telemetry glue, optional OTEL bridge — **no** hard OTEL dep in core). The portable routing package is `@paykernel/routing` under `packages/routing` (Phase 21: deterministic select-only gateway choice, money-safe amount ranges, restricted post-attempt fallback eligibility — **no** auto multi-gateway retry after indeterminate). The portable test kit is `@paykernel/testkit` under `packages/testkit`. The Phase 12 PostgreSQL adapter is `@paykernel/store-postgres` under `packages/store-postgres`. The Phase 13 Redis/Valkey/Upstash adapter is `@paykernel/store-redis` under `packages/store-redis` (**optional** — Redis is never required to use the SDK). The Phase 14 local SQLite adapter is `@paykernel/store-sqlite` under `packages/store-sqlite` (**single-host only** — never multi-host for a local file). The Phase 15 Turso / libSQL adapter is `@paykernel/store-turso` under `packages/store-turso` (**multi-host remote** shared SQLite-compatible — not local single-host SQLite; **no** `/sync` export). The Phase 16 Cloudflare D1 adapter is `@paykernel/store-d1` under `packages/store-d1` (**multi-host** shared D1 via Workers binding — **not** local SQLite, **not** Turso, **not** Durable Objects). The Phase 17 Cloudflare Durable Objects adapter is `@paykernel/store-durable-objects` under `packages/store-durable-objects` (**multi-host partitioned** SQLite-backed DO — **not** shared D1, **not** local SQLite, **not** Turso; never one global DO). Private shared foundations live under `internal/*` (never published) — currently `internal/sql-store` (`@paykernel/internal-sql-store`, Phase 11 relational foundation).
+This repository is a **Bun workspaces** monorepo. The publishable SDK lives under `packages/core` and keeps the npm name `@paykernel/core`. The portable webhook inbox engine is `@paykernel/webhooks` under `packages/webhooks`. The portable reconciliation domain package is `@paykernel/reconciliation` under `packages/reconciliation` (Phase 19: safe lookup, machine-readable drift, decision-only policy, store-backed scheduling — **no** mandatory queue). The portable observability package is `@paykernel/opentelemetry` under `packages/observability` (Phase 20: portable `PaymentMetrics`, optional span instrumentation, redacting telemetry glue, optional OTEL bridge — **no** hard OTEL dep in core). The portable routing package is `@paykernel/routing` under `packages/routing` (Phase 21: deterministic select-only gateway choice, money-safe amount ranges, restricted post-attempt fallback eligibility — **no** auto multi-gateway retry after indeterminate). The portable test kit is `@paykernel/testkit` under `packages/testkit`. The Phase 12 PostgreSQL adapter is `@paykernel/store-postgres` under `packages/store-postgres`. The Phase 13 Redis/Valkey/Upstash adapter is `@paykernel/store-redis` under `packages/store-redis` (**optional** — Redis is never required to use the SDK). The Phase 14 local SQLite adapter is `@paykernel/store-sqlite` under `packages/store-sqlite` (**single-host only** — never multi-host for a local file). The Phase 15 Turso / libSQL adapter is `@paykernel/store-turso` under `packages/store-turso` (**multi-host remote** shared SQLite-compatible — not local single-host SQLite; **no** `/sync` export). The Phase 16 Cloudflare D1 adapter is `@paykernel/store-d1` under `packages/store-d1` (**multi-host** shared D1 via Workers binding — **not** local SQLite, **not** Turso, **not** Durable Objects). The Phase 17 Cloudflare Durable Objects adapter is `@paykernel/store-durable-objects` under `packages/store-durable-objects` (**multi-host partitioned** SQLite-backed DO — **not** shared D1, **not** local SQLite, **not** Turso; never one global DO). Shared relational foundation is publishable `@paykernel/sql-foundation` under `packages/sql-foundation` (Phase 11). Slim production contracts live in `@paykernel/store-contracts`. `internal/sql-store` remains a private thin re-export of sql-foundation (never published).
 
 ## Layout
 
@@ -37,37 +37,48 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── docs/                     # overview, routing-inputs, selection, safe-fallback, telemetry
 │   │   ├── package.json              # paymentsSdk.portable: true; depends on core only
 │   │   └── README.md
+│   ├── store-contracts/              # @paykernel/store-contracts (portable; publishable)
+│   │   ├── src/                      # lease-aware contracts + StoreError + manifests
+│   │   ├── dist/
+│   │   ├── package.json              # zero runtime workspace deps
+│   │   └── README.md
 │   ├── testkit/                      # @paykernel/testkit (portable; publishable)
 │   │   ├── src/
 │   │   ├── dist/
-│   │   ├── docs/                     # store-contracts.md (Phase 9)
+│   │   ├── docs/                     # store-contracts.md (Phase 9; re-exports store-contracts)
 │   │   ├── package.json
 │   │   └── README.md
-│   ├── adapter-postgres/             # @paykernel/store-postgres (Phase 12; publishable)
+│   ├── sql-foundation/               # @paykernel/sql-foundation (publishable relational foundation)
+│   │   ├── src/                      # schemas, codecs, migrations, claims
+│   │   ├── dist/
+│   │   ├── docs/
+│   │   ├── package.json
+│   │   └── README.md
+│   ├── store-postgres/               # @paykernel/store-postgres (Phase 12; publishable)
 │   │   ├── src/                      # stores, migrate, drivers (subpaths), tests
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, drivers, migrations, crash-boundaries, …
 │   │   ├── package.json
 │   │   └── README.md
-│   ├── adapter-redis/                # @paykernel/store-redis (Phase 13; optional; publishable)
+│   ├── store-redis/                  # @paykernel/store-redis (Phase 13; optional; publishable)
 │   │   ├── src/                      # port, Lua scripts, stores, drivers (subpaths), tests
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, drivers, persistence, hybrid-examples, …
 │   │   ├── package.json
 │   │   └── README.md
-│   ├── adapter-sqlite/               # @paykernel/store-sqlite (Phase 14; single-host; publishable)
+│   ├── store-sqlite/                 # @paykernel/store-sqlite (Phase 14; single-host; publishable)
 │   │   ├── src/                      # stores, migrate, pragmas, drivers (/bun|/node|/better-sqlite3)
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, claims, drivers, deployment-limits, …
 │   │   ├── package.json
 │   │   └── README.md
-│   ├── adapter-turso/                # @paykernel/store-turso (Phase 15; multi-host remote; publishable)
+│   ├── store-turso/                  # @paykernel/store-turso (Phase 15; multi-host remote; publishable)
 │   │   ├── src/                      # stores, migrate, drivers (/serverless|/libsql), tests
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, drivers, claims, crash-boundaries, …
 │   │   ├── package.json
 │   │   └── README.md
-│   ├── adapter-cloudflare-d1/        # @paykernel/store-d1 (Phase 16; multi-host D1; publishable)
+│   ├── store-d1/                     # @paykernel/store-d1 (Phase 16; multi-host D1; publishable)
 │   │   ├── src/                      # stores, migrate, executor, sessions, mock D1 tests
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, binding, claims, sessions-and-replication, …
@@ -75,7 +86,7 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── migrations/               # D1-compatible SQL (no BEGIN/COMMIT)
 │   │   ├── package.json              # paymentsSdk.runtime: cloudflare-only
 │   │   └── README.md
-│   └── adapter-cloudflare-do/        # @paykernel/store-durable-objects (Phase 17; partitioned SQLite DO; publishable)
+│   └── store-durable-objects/        # @paykernel/store-durable-objects (Phase 17; partitioned SQLite DO; publishable)
 │       ├── src/                      # stores, client, sharding, object, mock DO tests
 │       ├── dist/
 │       ├── docs/                     # overview, sharding, claims, transactions, alarms, limits, …
@@ -83,10 +94,9 @@ paykernel/                         # private workspace root (not published)
 │       ├── package.json              # paymentsSdk.runtime: cloudflare-only
 │       └── README.md
 ├── internal/
-│   └── sql-store/                    # @paykernel/internal-sql-store (private; Phase 11)
-│       ├── src/                      # schemas, codecs, migrations, claims, reference
+│   └── sql-store/                    # @paykernel/internal-sql-store (private thin re-export of sql-foundation)
+│       ├── src/                      # re-export barrel only
 │       ├── dist/
-│       ├── docs/                     # relational-foundation, migrations, atomic-claims
 │       ├── package.json              # private: true — never publish
 │       └── README.md
 ├── docs/
@@ -105,17 +115,17 @@ paykernel/                         # private workspace root (not published)
 └── roadmap.md
 ```
 
-Root workspaces: `["packages/*", "internal/*"]`. Production adapters live under `packages/adapter-*` (Phase 12: `adapter-postgres`; Phase 13: `adapter-redis` — **optional**; Phase 14: `adapter-sqlite` — **single-host only**; Phase 15: `adapter-turso` — **multi-host remote** Turso/libSQL; Phase 16: `adapter-cloudflare-d1` — **multi-host** Workers D1 binding; Phase 17: `adapter-cloudflare-do` — **multi-host partitioned** SQLite-backed Durable Objects). Domain packages: `webhooks` (Phase 10), `reconciliation` (Phase 19), `observability` (Phase 20), and `routing` (Phase 21) — all portable; webhooks/reconciliation/observability/routing depend on **core only** among workspace packages (storage / OTEL injected at the app layer; routing never depends on observability). Further adapters and plugins land later without changing the core consumer import path. `internal/sql-store` is shared foundation for **relational** adapters only — Redis adapter must **not** depend on it.
+Root workspaces: `["packages/*", "internal/*"]`. Production adapters live under `packages/store-*` (Phase 12: `store-postgres`; Phase 13: `store-redis` — **optional**; Phase 14: `store-sqlite` — **single-host only**; Phase 15: `store-turso` — **multi-host remote** Turso/libSQL; Phase 16: `store-d1` — **multi-host** Workers D1 binding; Phase 17: `store-durable-objects` — **multi-host partitioned** SQLite-backed Durable Objects). Domain packages: `webhooks` (Phase 10), `reconciliation` (Phase 19), `observability` (Phase 20), and `routing` (Phase 21) — all portable; webhooks/reconciliation/observability/routing depend on **core only** among workspace packages (storage / OTEL injected at the app layer; routing never depends on observability). Further adapters and plugins land later without changing the core consumer import path. `@paykernel/sql-foundation` is the shared foundation for **relational** adapters only — Redis adapter must **not** depend on it. Adapters depend on `@paykernel/store-contracts` at runtime (not full testkit).
 
 **Redis is optional infrastructure.** PostgreSQL alone can satisfy Phase 9 store contracts. Do not introduce Redis solely because this monorepo ships an adapter.
 
-**SQLite is single-host.** Local file SQLite (`adapter-sqlite`) must never be advertised as multi-host or multi-region coordination. For multi-host SQL, use PostgreSQL, **Turso remote** (`adapter-turso`), **Cloudflare D1** (`adapter-cloudflare-d1`), or **partitioned Durable Objects** (`adapter-cloudflare-do`) — do not conflate those with local SQLite.
+**SQLite is single-host.** Local file SQLite (`store-sqlite`) must never be advertised as multi-host or multi-region coordination. For multi-host SQL, use PostgreSQL, **Turso remote** (`store-turso`), **Cloudflare D1** (`store-d1`), or **partitioned Durable Objects** (`store-durable-objects`) — do not conflate those with local SQLite.
 
 **Turso is multi-host remote.** Shared remote Turso / libSQL only for production multi-host claims. Subpaths: `/serverless`, `/libsql` only — **no** `/sync`; do not advertise untested embedded-replica local-first.
 
-**D1 is multi-host Workers-native.** Shared Cloudflare D1 via Workers binding (`adapter-cloudflare-d1`). **Not** local SQLite, **not** Turso/libSQL clients, **not** Durable Objects. Marked `paymentsSdk.runtime: "cloudflare-only"`. Normal operation needs the binding only — no REST/account token.
+**D1 is multi-host Workers-native.** Shared Cloudflare D1 via Workers binding (`store-d1`). **Not** local SQLite, **not** Turso/libSQL clients, **not** Durable Objects. Marked `paymentsSdk.runtime: "cloudflare-only"`. Normal operation needs the binding only — no REST/account token.
 
-**Durable Objects are multi-host partitioned.** SQLite-backed DO via Workers binding + deterministic sharding (`adapter-cloudflare-do`). Strong coordination is **per partition** (per DO instance) — never a silent global DO. **Not** shared D1, **not** local SQLite, **not** Turso. Separate package from D1; no generic `adapter-cloudflare` umbrella. Marked `paymentsSdk.runtime: "cloudflare-only"`. Requires Wrangler `new_sqlite_classes`.
+**Durable Objects are multi-host partitioned.** SQLite-backed DO via Workers binding + deterministic sharding (`store-durable-objects`). Strong coordination is **per partition** (per DO instance) — never a silent global DO. **Not** shared D1, **not** local SQLite, **not** Turso. Separate package from D1; no generic `adapter-cloudflare` umbrella. Marked `paymentsSdk.runtime: "cloudflare-only"`. Requires Wrangler `new_sqlite_classes`.
 
 ## Choosing a storage adapter (Phase 18)
 
@@ -159,9 +169,9 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 
 | Command                            | Purpose                                                                                      |
 | ---------------------------------- | -------------------------------------------------------------------------------------------- |
-| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → testkit → sql-store → adapter-postgres → adapter-redis → adapter-sqlite → adapter-turso → adapter-cloudflare-d1 → adapter-cloudflare-do |
+| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
 | `bun run build:types`              | Emit declaration files (same order, including reconciliation, observability, routing, and adapters) |
-| `bun test`                         | Run core + testkit + webhooks + reconciliation + observability + routing + sql-store + adapter-postgres + adapter-redis + adapter-sqlite + adapter-turso + adapter-cloudflare-d1 + adapter-cloudflare-do |
+| `bun test`                         | Run core + store-contracts + testkit + webhooks + reconciliation + observability + routing + sql-foundation + internal-sql-store + store-* adapters |
 | `bun run test:coverage`            | Core tests with coverage thresholds (`bunfig.toml`; core-focused)                            |
 | `bun run test:testkit`             | Testkit tests only                                                                           |
 | `bun run test:sql-store`           | Private sql-store tests only                                                                 |
@@ -186,7 +196,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 | `bun run baseline`                 | Regenerate Phase 0 API + package baselines                                                   |
 | `bun run changeset`                | Record a Changeset for the next release                                                      |
 
-**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only; no observability/testkit/adapters), then `testkit` (depends on core + webhooks + optional reconciliation for dual-store assignability), then `internal/sql-store` (private foundation), then `adapter-postgres` (depends on testkit + sql-store), then `adapter-redis` (depends on testkit only; **not** sql-store), then `adapter-sqlite` (depends on testkit + sql-store; single-host), then `adapter-turso` (depends on testkit + sql-store; multi-host remote), then `adapter-cloudflare-d1` (depends on testkit + sql-store; multi-host D1; cloudflare-only), then `adapter-cloudflare-do` (depends on testkit + sql-store; multi-host partitioned DO; cloudflare-only).
+**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only), then `store-contracts` (zero workspace deps), then `testkit` (core + webhooks + reconciliation + store-contracts; re-exports contracts for BC), then `sql-foundation` (publishable relational foundation), then `internal/sql-store` (private thin re-export), then `store-postgres` / `store-sqlite` / `store-turso` / `store-d1` / `store-durable-objects` (runtime: store-contracts + sql-foundation; testkit dev-only), then `store-redis` (runtime: store-contracts only; **not** sql-foundation).
 
 Package-local work:
 
@@ -281,18 +291,18 @@ bun run check:boundaries
 
 Summary:
 
-- **Core must not import adapter packages** (including `adapter-postgres`, `adapter-redis`, `adapter-sqlite`, `adapter-turso`, `adapter-cloudflare-d1`, and `adapter-cloudflare-do`), `webhooks`, `reconciliation`, `observability`, `routing`, `testkit`, `internal/sql-store`, or any `@opentelemetry/*` package.
-- **Webhooks must not depend on adapters or `internal/sql-store`** (storage is injected at the app/adapter layer). Webhooks must not depend on Redis clients, testkit, reconciliation, observability, or routing.
-- **Reconciliation must not depend on adapters, testkit, webhooks, observability, routing, Redis clients, or `internal/sql-store`** (storage is injected; depends on core only). Portable (`paymentsSdk.portable: true`).
-- **Observability must not depend on adapters, testkit, webhooks, reconciliation, routing, Redis clients, or `internal/sql-store`** (depends on core only; optional peer `@opentelemetry/api` for the OTEL bridge). Portable (`paymentsSdk.portable: true`). Core must never depend on observability or OTEL.
-- **Routing must not depend on adapters, testkit, webhooks, reconciliation, observability, Redis clients, or `internal/sql-store`** (depends on core only; select-only — never mutates payments). Portable (`paymentsSdk.portable: true`). Core must never depend on routing.
+- **Core must not import adapter packages** (including `store-postgres`, `store-redis`, `store-sqlite`, `store-turso`, `store-d1`, and `store-durable-objects`), `webhooks`, `reconciliation`, `observability`, `routing`, `testkit`, `@paykernel/sql-foundation` (or private internal re-export), or any `@opentelemetry/*` package.
+- **Webhooks must not depend on adapters or `@paykernel/sql-foundation` (or private internal re-export)** (storage is injected at the app/adapter layer). Webhooks must not depend on Redis clients, testkit, reconciliation, observability, or routing.
+- **Reconciliation must not depend on adapters, testkit, webhooks, observability, routing, Redis clients, or `@paykernel/sql-foundation` (or private internal re-export)** (storage is injected; depends on core only). Portable (`paymentsSdk.portable: true`).
+- **Observability must not depend on adapters, testkit, webhooks, reconciliation, routing, Redis clients, or `@paykernel/sql-foundation` (or private internal re-export)** (depends on core only; optional peer `@opentelemetry/api` for the OTEL bridge). Portable (`paymentsSdk.portable: true`). Core must never depend on observability or OTEL.
+- **Routing must not depend on adapters, testkit, webhooks, reconciliation, observability, Redis clients, or `@paykernel/sql-foundation` (or private internal re-export)** (depends on core only; select-only — never mutates payments). Portable (`paymentsSdk.portable: true`). Core must never depend on routing.
 - **Internal packages** under `internal/*` must be `"private": true` and are never published (e.g. `@paykernel/internal-sql-store`).
-- **adapter-postgres** may depend on testkit contracts + internal sql-store; optional drivers only on subpaths.
-- **adapter-redis** may depend on testkit only; **must not** depend on sql-store, core, or webhooks; optional Redis drivers only on subpaths; root entry imports no drivers.
-- **adapter-sqlite** may depend on testkit + sql-store; root entry must **not** import `bun:sqlite` / `node:sqlite` / `better-sqlite3` (drivers only on `/bun`, `/node`, `/better-sqlite3`); **single-host** only (honest manifest); must not be depended on by core/webhooks/postgres/redis/turso/d1/do.
-- **adapter-turso** may depend on testkit + sql-store; root entry must **not** import `@tursodatabase/serverless` / `@libsql/client` (drivers only on `/serverless`, `/libsql`); **multi-host remote** honesty; **no** `/sync`; must not be depended on by core/webhooks/postgres/redis/sqlite/d1/do.
-- **adapter-cloudflare-d1** may depend on testkit + sql-store; root entry must **not** static-import `cloudflare:workers` (structural D1 types); **multi-host** shared D1 honesty; `paymentsSdk.runtime: "cloudflare-only"`; must not be depended on by core/webhooks/testkit/postgres/redis/sqlite/turso/do; must not leak Workers protocol imports into portable packages.
-- **adapter-cloudflare-do** may depend on testkit + sql-store; root entry must **not** static-import `cloudflare:workers` (structural DO/SqlStorage types); **multi-host partitioned** DO honesty (never silent global DO); `paymentsSdk.runtime: "cloudflare-only"`; must not be depended on by core/webhooks/testkit/postgres/redis/sqlite/turso/d1; separate package from D1 (no generic `adapter-cloudflare`).
+- **store-postgres** may depend on store-contracts + sql-foundation (testkit in devDependencies only); optional drivers only on subpaths.
+- **store-redis** may depend on store-contracts at runtime (testkit in devDependencies only); **must not** depend on sql-store, core, or webhooks; optional Redis drivers only on subpaths; root entry imports no drivers.
+- **store-sqlite** may depend on store-contracts + sql-foundation (testkit in devDependencies only); root entry must **not** import `bun:sqlite` / `node:sqlite` / `better-sqlite3` (drivers only on `/bun`, `/node`, `/better-sqlite3`); **single-host** only (honest manifest); must not be depended on by core/webhooks/postgres/redis/turso/d1/do.
+- **store-turso** may depend on store-contracts + sql-foundation (testkit in devDependencies only); root entry must **not** import `@tursodatabase/serverless` / `@libsql/client` (drivers only on `/serverless`, `/libsql`); **multi-host remote** honesty; **no** `/sync`; must not be depended on by core/webhooks/postgres/redis/sqlite/d1/do.
+- **store-d1** may depend on store-contracts + sql-foundation (testkit in devDependencies only); root entry must **not** static-import `cloudflare:workers` (structural D1 types); **multi-host** shared D1 honesty; `paymentsSdk.runtime: "cloudflare-only"`; must not be depended on by core/webhooks/testkit/postgres/redis/sqlite/turso/do; must not leak Workers protocol imports into portable packages.
+- **store-durable-objects** may depend on store-contracts + sql-foundation (testkit in devDependencies only); root entry must **not** static-import `cloudflare:workers` (structural DO/SqlStorage types); **multi-host partitioned** DO honesty (never silent global DO); `paymentsSdk.runtime: "cloudflare-only"`; must not be depended on by core/webhooks/testkit/postgres/redis/sqlite/turso/d1; separate package from D1 (no generic `adapter-cloudflare`).
 - Portable packages must not accidentally pull Node-only modules outside an explicit allowlist.
 - Adapter package roots must not import optional peer drivers.
 - Circular package dependencies are forbidden.
@@ -312,7 +322,7 @@ bun run version-packages   # bump versions + changelogs
 bun run release            # publish (CI; OIDC provenance)
 ```
 
-The monorepo root package is **private** and must never be published. Publishable packages include `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may version and publish **separately** from core). **Never** publish packages under `internal/*` (e.g. sql-store). Consumers of the postgres/sqlite/turso/d1/do adapters use monorepo workspace linking until a public packaging strategy for the private sql-store dependency is finalized for npm. The Redis adapter depends only on testkit among workspace packages.
+The monorepo root package is **private** and must never be published. Publishable packages include `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may version and publish **separately** from core). **Never** publish packages under `internal/*`. Relational adapters depend on publishable `@paykernel/sql-foundation` + `@paykernel/store-contracts` at runtime (not private internal-sql-store, not full testkit). Redis depends only on `@paykernel/store-contracts` among workspace runtime deps (testkit is devDependency for conformance).
 
 ## Consumer import (unchanged for core)
 
@@ -514,19 +524,19 @@ const stores = createDoPaymentStores({
 
 **Boundaries:**
 
-- **Core** must never depend on webhooks, reconciliation, observability, routing, testkit, adapters, `internal/sql-store`, or `@opentelemetry/*`.
-- **Webhooks** depends on core only (`workspace:*`). Must not depend on testkit, reconciliation, observability, routing, adapters, Redis, or `internal/sql-store`.
-- **Reconciliation** depends on core only (`workspace:*`). Must not depend on testkit, webhooks, observability, routing, adapters, Redis, or `internal/sql-store`. Dual-owns a structurally compatible `ReconciliationStore` with testkit (no recon→testkit import).
-- **Observability** depends on core only (`workspace:*`). Optional peer `@opentelemetry/api` (never a hard dep in core). Must not depend on testkit, webhooks, reconciliation, routing, adapters, Redis, or `internal/sql-store`. Root import works without OTEL installed.
-- **Routing** depends on core only (`workspace:*`). Select-only (never mutates payments). Must not depend on testkit, webhooks, reconciliation, observability, adapters, Redis, or `internal/sql-store`. App composes `decision.gateway` into `PaymentClient`.
+- **Core** must never depend on webhooks, reconciliation, observability, routing, testkit, adapters, `@paykernel/sql-foundation` (or private internal re-export), or `@opentelemetry/*`.
+- **Webhooks** depends on core only (`workspace:*`). Must not depend on testkit, reconciliation, observability, routing, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export).
+- **Reconciliation** depends on core only (`workspace:*`). Must not depend on testkit, webhooks, observability, routing, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export). Dual-owns a structurally compatible `ReconciliationStore` with testkit (no recon→testkit import).
+- **Observability** depends on core only (`workspace:*`). Optional peer `@opentelemetry/api` (never a hard dep in core). Must not depend on testkit, webhooks, reconciliation, routing, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export). Root import works without OTEL installed.
+- **Routing** depends on core only (`workspace:*`). Select-only (never mutates payments). Must not depend on testkit, webhooks, reconciliation, observability, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export). App composes `decision.gateway` into `PaymentClient`.
 - **Testkit** depends on core and may depend on webhooks and reconciliation (engine/domain integration / structural assignability proofs). Does not require sql-store for Phase 9 contracts.
-- **`internal/sql-store`** is private shared foundation for relational adapters (Phase 12+). Must not depend on core or the webhooks/reconciliation engines. Not published.
-- **`adapter-postgres`** may depend on testkit + sql-store; must not be depended on by core/webhooks; must not depend on adapter-redis, adapter-sqlite, adapter-turso, adapter-cloudflare-d1, or adapter-cloudflare-do.
-- **`adapter-redis`** may depend on testkit only; must not depend on sql-store, core, webhooks, adapter-postgres, adapter-sqlite, adapter-turso, adapter-cloudflare-d1, or adapter-cloudflare-do; must not be depended on by core/webhooks.
-- **`adapter-sqlite`** may depend on testkit + sql-store; must not depend on adapter-postgres, adapter-redis, adapter-turso, adapter-cloudflare-d1, or adapter-cloudflare-do; must not be depended on by core/webhooks; root imports no SQLite drivers; **single-host** only.
-- **`adapter-turso`** may depend on testkit + sql-store; must not depend on adapter-postgres, adapter-redis, adapter-sqlite, adapter-cloudflare-d1, or adapter-cloudflare-do; must not be depended on by core/webhooks; root imports no Turso/libsql drivers; **multi-host remote** only (honest; no untested `/sync`).
-- **`adapter-cloudflare-d1`** may depend on testkit + sql-store; must not depend on adapter-postgres, adapter-redis, adapter-sqlite, adapter-turso, or adapter-cloudflare-do; must not be depended on by core/webhooks/testkit; root has no static `cloudflare:workers` import; **multi-host** shared D1 only (honest; not local SQLite, not Turso, not DO).
-- **`adapter-cloudflare-do`** may depend on testkit + sql-store; must not depend on adapter-postgres, adapter-redis, adapter-sqlite, adapter-turso, or adapter-cloudflare-d1; must not be depended on by core/webhooks/testkit; root has no static `cloudflare:workers` import; **multi-host partitioned** SQLite-backed DO only (honest; not shared D1, not local SQLite, not Turso; never one global DO).
+- **`@paykernel/sql-foundation` (or private internal re-export)** is private shared foundation for relational adapters (Phase 12+). Must not depend on core or the webhooks/reconciliation engines. Not published.
+- **`store-postgres`** runtime deps: store-contracts + sql-foundation (testkit dev-only); must not be depended on by core/webhooks; must not depend on other store adapters.
+- **`store-redis`** runtime deps: store-contracts only (testkit dev-only); must not depend on sql-foundation, core, webhooks, or other store adapters; must not be depended on by core/webhooks.
+- **`store-sqlite`** runtime deps: store-contracts + sql-foundation (testkit dev-only); single-host only; root imports no SQLite drivers.
+- **`store-turso`** runtime deps: store-contracts + sql-foundation (testkit dev-only); multi-host remote only; root imports no Turso/libsql drivers; no untested `/sync`.
+- **`store-d1`** runtime deps: store-contracts + sql-foundation (testkit dev-only); multi-host shared D1; root has no static `cloudflare:workers` import.
+- **`store-durable-objects`** runtime deps: store-contracts + sql-foundation (testkit dev-only); multi-host partitioned DO only; never one global DO; root has no static `cloudflare:workers` import.
 
 ## Related docs
 

@@ -4,8 +4,10 @@
 import { describe, expect, it, beforeEach, afterEach } from "bun:test";
 import {
   createFakeClock,
-  StoreLeaseLostError,
 } from "@paykernel/testkit";
+import {
+  StoreLeaseLostError,
+} from "@paykernel/store-contracts";
 import {
   createSqliteIdempotencyStore,
   createSqliteWebhookInboxStore,
@@ -229,4 +231,148 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     const got = await store.get("ind");
     expect(got?.status).toBe("indeterminate");
   });
+
+  it("listRetryable surfaces abandoned expired claims after lease expiry", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const claimed = await store.claim({
+      key: "abandoned-evt",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+
+    // Still within lease — not listable (still claimed).
+    let listed = await store.listRetryable({ now: new Date(clock.nowMs()).toISOString() });
+    expect(listed.find((r) => r.key === "abandoned-evt")).toBeUndefined();
+
+    clock.advance(2_000);
+    listed = await store.listRetryable({ now: new Date(clock.nowMs()).toISOString() });
+    const row = listed.find((r) => r.key === "abandoned-evt");
+    expect(row).toBeDefined();
+    expect(row?.status).toBe("pending");
+    expect(row?.attempts).toBe(1);
+    expect(row?.leaseToken).toBeUndefined();
+
+    const got = await store.get("abandoned-evt");
+    expect(got?.status).toBe("pending");
+  });
+
+  it("claim blocks pending when availableAt is in the future", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const first = await store.claim({
+      key: "backoff-evt",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 5_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    await store.fail({
+      key: "backoff-evt",
+      leaseToken: first.leaseToken,
+      error: "transient",
+      retryAfterMs: 60_000,
+    });
+
+    const blocked = await store.claim({
+      key: "backoff-evt",
+      payloadHash: "h1",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    // SQL gate leaves row pending; adapter returns not_available (ClaimWebhookResult parity).
+    expect(blocked.kind).toBe("not_available");
+    if (blocked.kind === "not_available") {
+      expect(blocked.record.status).toBe("pending");
+      expect(blocked.record.attempts).toBe(1);
+      expect(blocked.availableAt).toBe(blocked.record.availableAt);
+    }
+
+    clock.advance(60_000);
+    const due = await store.claim({
+      key: "backoff-evt",
+      payloadHash: "h1",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(due.kind).toBe("acquired");
+    if (due.kind === "acquired") {
+      expect(due.record.attempts).toBe(2);
+    }
+  });
+
+  it("fail restoreAttempt decrements attempts (parking claim parity)", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const first = await store.claim({
+      key: "park-evt",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 5_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    expect(first.record.attempts).toBe(1);
+
+    await store.fail({
+      key: "park-evt",
+      leaseToken: first.leaseToken,
+      error: "ack_after_claim",
+      retryAfterMs: 0,
+      restoreAttempt: true,
+    });
+
+    const got = await store.get("park-evt");
+    expect(got?.status).toBe("pending");
+    expect(got?.attempts).toBe(0);
+
+    const again = await store.claim({
+      key: "park-evt",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("acquired");
+    if (again.kind === "acquired") {
+      expect(again.record.attempts).toBe(1);
+    }
+  });
+
+  it("claim reclaims expired lease even if availableAt would still be future", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const first = await store.claim({
+      key: "expire-reclaim",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+
+    // Directly push available_at into the future while leaving claimed+short lease.
+    // (recovery path: expired lease must reclaim regardless of available_at)
+    executor.run(
+      `UPDATE payment_webhook_inbox SET available_at = ? WHERE key = ?`,
+      [new Date(clock.nowMs() + 86_400_000).toISOString(), "expire-reclaim"],
+    );
+
+    clock.advance(2_000);
+    const reclaim = await store.claim({
+      key: "expire-reclaim",
+      payloadHash: "h1",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(reclaim.kind).toBe("acquired");
+    if (reclaim.kind === "acquired") {
+      expect(reclaim.leaseToken).not.toBe(first.leaseToken);
+      expect(reclaim.record.generation).toBeGreaterThan(first.record.generation);
+    }
+  });
+
 });

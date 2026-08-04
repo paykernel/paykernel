@@ -31,8 +31,8 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*"
   },
   "peerDependencies": {
     "@cloudflare/workers-types": ">=4.0.0"
@@ -44,7 +44,8 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@paykernel/testkit": "workspace:*"
   },
   "keywords": [
     "payments",

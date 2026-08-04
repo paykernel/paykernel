@@ -159,9 +159,20 @@ function isNonRetryable(error: unknown): boolean {
   return false;
 }
 
-/** Whether store.fail should mark dead_letter (terminal) vs pending retry. */
+/**
+ * Whether store.fail should mark dead_letter (terminal) vs pending retry.
+ *
+ * `maxAttempts` is max **handler** attempts (claim counter after real handler
+ * work; parking `ackAfterClaim` restores the parking claim via restoreAttempt).
+ */
 function shouldDeadLetter(error: unknown, attempts: number, maxAttempts: number, mode: WebhookProcessingMode): boolean {
-  if (error instanceof NonRetryableHandlerError) return error.deadLetter;
+  if (error instanceof NonRetryableHandlerError) {
+    if (error.deadLetter) return true;
+    // { deadLetter: false } is an opt-in non-terminal path. Prefer default
+    // (deadLetter true). In durable_retry still exhaust maxAttempts so a poison
+    // message cannot spin forever via processRetryable / redelivery.
+    return mode === "durable_retry" && attempts >= maxAttempts;
+  }
   if (
     typeof error === "object" &&
     error !== null &&
@@ -172,7 +183,7 @@ function shouldDeadLetter(error: unknown, attempts: number, maxAttempts: number,
   }
   // Non-retryable without explicit deadLetter=false → terminal.
   if (isNonRetryable(error)) return true;
-  // durable_retry: exhaust attempts → dead letter.
+  // durable_retry: exhaust handler attempts → dead letter.
   if (mode === "durable_retry" && attempts >= maxAttempts) return true;
   return false;
 }
@@ -422,6 +433,9 @@ export function createWebhookInboxEngine(
       case "duplicate_failed":
         // Terminal failed / dead_letter at store level — not retryable via engine.
         return outcomeHandlerFailed(false);
+      case "not_available":
+        // Backoff: provider redelivery during availableAt window must not burn attempts.
+        return outcomeScheduledForRetry();
       case "acquired":
         break;
       default: {
@@ -435,12 +449,15 @@ export function createWebhookInboxEngine(
     if (ackAfterClaim) {
       // Store contract has no "release to pending" op: fail with retryAfterMs=0
       // parks the row for processRetryable without treating HTTP as processed.
+      // restoreAttempt undoes the parking claim's attempt++ so maxAttempts remains
+      // max *handler* attempts (parking claim is free).
       try {
         await store.fail({
           key,
           leaseToken: claim.leaseToken,
           error: "ack_after_claim: scheduled for durable worker",
           retryAfterMs: 0,
+          restoreAttempt: true,
         });
       } catch (err) {
         if (isStoreLeaseLostError(err)) {
@@ -619,6 +636,8 @@ function mapClaimKindToOutcome(
       return outcomePayloadConflict();
     case "duplicate_failed":
       return outcomeHandlerFailed(false);
+    case "not_available":
+      return outcomeScheduledForRetry();
     default: {
       const _e: never = claim;
       return outcomeInvalidWebhook(String(_e));

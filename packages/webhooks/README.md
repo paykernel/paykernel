@@ -103,7 +103,7 @@ const outcome = await engine.processWithVerifier({
 | --- | --- |
 | `inline` | Await handler under lease. Failure → `handler_failed { retryable }`. |
 | `durable_retry` | Await handler by default; retryable failure → `store.fail` + `scheduled_for_retry`. |
-| `durable_retry` + `ackAfterClaim: true` | After durable claim, release to pending and return `scheduled_for_retry` **without** running the handler. Workers call `processRetryable`. |
+| `durable_retry` + `ackAfterClaim: true` | After durable claim, release to pending and return `scheduled_for_retry` **without** running the handler (parking claim free vs `maxAttempts`). Workers call `processRetryable`. |
 
 Mode is fixed at `createWebhookInboxEngine` construction. Process methods never switch modes implicitly.
 `processRetryable` is valid **only** on `durable_retry` engines (throws on `inline`).
@@ -127,6 +127,7 @@ type WebhookProcessingOutcome =
 Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal dead_letter/failed).
+- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry` without burning attempts.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease.
 
@@ -157,7 +158,7 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 | state / attempts | `status` / `attempts` |
 | lease owner, token, expiry | `leaseOwner`, `leaseToken`, `leaseExpiresAt` |
 | first / last received | `createdAt` / `updatedAt` |
-| next attempt | `availableAt` |
+| next attempt / claim gate | `availableAt` |
 | completion time | `updatedAt` when `status === "completed"` |
 | sanitized error | `lastError` |
 

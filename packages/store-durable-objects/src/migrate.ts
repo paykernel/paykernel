@@ -21,11 +21,11 @@ import {
   type MigrateResult,
   type VerifySchemaOptions,
   type VerifySchemaResult,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   SchemaNamespaceConfig,
   ResolvedSchemaNamespace,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type { DoExecutor } from "./sql-executor";
 import {
   createDoExecutor,

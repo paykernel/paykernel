@@ -10,7 +10,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   ClaimReconciliationInput,
   ClaimResult,
@@ -27,8 +27,8 @@ import type {
   RenewReconciliationLeaseResult,
   ScheduleReconciliationInput,
   ScheduleResult,
-} from "@paykernel/testkit";
-import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { SqliteStoreOptions } from "../types";

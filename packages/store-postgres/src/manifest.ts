@@ -5,7 +5,7 @@
 import {
   assertStorageAdapterManifest,
   type StorageAdapterManifest,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 
 /**
  * Declared guarantees when using a shared PostgreSQL cluster with this adapter.

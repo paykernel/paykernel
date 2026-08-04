@@ -334,7 +334,9 @@ export function isPortablePackage(pkg: WorkspacePackage): boolean {
     pkg.name === "@paykernel/reconciliation" ||
     pkg.name === "@paykernel/opentelemetry" ||
     pkg.name === "@paykernel/routing" ||
-    pkg.name === "@paykernel/testkit"
+    pkg.name === "@paykernel/testkit" ||
+    pkg.name === "@paykernel/store-contracts" ||
+    pkg.name === "@paykernel/sql-foundation"
   ) {
     return true;
   }
@@ -395,12 +397,23 @@ const RECONCILIATION_PACKAGE_NAME = "@paykernel/reconciliation";
 const OBSERVABILITY_PACKAGE_NAME = "@paykernel/opentelemetry";
 const ROUTING_PACKAGE_NAME = "@paykernel/routing";
 const TESTKIT_PACKAGE_NAME = "@paykernel/testkit";
-/** Phase 11 private relational foundation. */
+/** Production store contracts (slim; no mock/memory factories). */
+const STORE_CONTRACTS_PACKAGE_NAME = "@paykernel/store-contracts";
+/** Phase 11 relational foundation — public packaging. */
+const SQL_FOUNDATION_PACKAGE_NAME = "@paykernel/sql-foundation";
+/** Phase 11 private thin re-export of sql-foundation (never publish). */
 const SQL_STORE_PACKAGE_NAME = "@paykernel/internal-sql-store";
+
+function isSqlFoundationOrInternal(name: string): boolean {
+  return name === SQL_FOUNDATION_PACKAGE_NAME || name === SQL_STORE_PACKAGE_NAME;
+}
 
 function isSqlStorePathDep(version: string): boolean {
   const pathVersion = version.replace(/\\/g, "/");
-  return /internal\/sql-store/.test(pathVersion);
+  return (
+    /internal\/sql-store/.test(pathVersion) ||
+    /packages\/sql-foundation/.test(pathVersion)
+  );
 }
 
 function isOpenTelemetryPackageName(name: string): boolean {
@@ -454,7 +467,7 @@ export function checkCoreDependencies(pkg: WorkspacePackage): Violation[] {
       });
     }
     // Phase 11: core must not depend on private sql-store foundation.
-    if (name === SQL_STORE_PACKAGE_NAME || isSqlStorePathDep(version)) {
+    if (isSqlFoundationOrInternal(name) || isSqlStorePathDep(version)) {
       violations.push({
         rule: "a/core-no-sql-store",
         package: pkg.name,
@@ -536,7 +549,7 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
         });
       }
       // Phase 11: webhooks engine must not depend on sql-store (storage is injected).
-      if (name === SQL_STORE_PACKAGE_NAME || isSqlStorePathDep(version)) {
+      if (isSqlFoundationOrInternal(name) || isSqlStorePathDep(version)) {
         violations.push({
           rule: "a/webhooks-no-sql-store",
           package: pkg.name,
@@ -632,7 +645,7 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `reconciliation must not depend on Redis client "${name}" (${field}). Storage is injected; no mandatory queue.`,
         });
       }
-      if (name === SQL_STORE_PACKAGE_NAME || isSqlStorePathDep(version)) {
+      if (isSqlFoundationOrInternal(name) || isSqlStorePathDep(version)) {
         violations.push({
           rule: "a/reconciliation-no-sql-store",
           package: pkg.name,
@@ -728,7 +741,7 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `observability must not depend on Redis client "${name}" (${field}).`,
         });
       }
-      if (name === SQL_STORE_PACKAGE_NAME || isSqlStorePathDep(version)) {
+      if (isSqlFoundationOrInternal(name) || isSqlStorePathDep(version)) {
         violations.push({
           rule: "a/observability-no-sql-store",
           package: pkg.name,
@@ -824,7 +837,7 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `routing must not depend on Redis client "${name}" (${field}).`,
         });
       }
-      if (name === SQL_STORE_PACKAGE_NAME || isSqlStorePathDep(version)) {
+      if (isSqlFoundationOrInternal(name) || isSqlStorePathDep(version)) {
         violations.push({
           rule: "a/routing-no-sql-store",
           package: pkg.name,
@@ -870,32 +883,71 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
     });
   }
 
-  // Phase 11: private sql-store foundation must not depend on core or domain engines.
+  // Phase 11: sql foundation (public + private re-export) must not depend on core or domain engines.
+  const relDirNorm = pkg.relDir.replace(/\\/g, "/");
   const isSqlStorePkg =
-    pkg.name === SQL_STORE_PACKAGE_NAME || pkg.relDir.replace(/\\/g, "/") === "internal/sql-store";
+    isSqlFoundationOrInternal(pkg.name) ||
+    relDirNorm === "internal/sql-store" ||
+    relDirNorm === "packages/sql-foundation";
   if (isSqlStorePkg) {
     eachDep(pkg.manifest, (field, name, version) => {
       if (
         name === CORE_PACKAGE_NAME ||
         name === WEBHOOKS_PACKAGE_NAME ||
-        name === RECONCILIATION_PACKAGE_NAME
+        name === RECONCILIATION_PACKAGE_NAME ||
+        name === TESTKIT_PACKAGE_NAME ||
+        name === STORE_CONTRACTS_PACKAGE_NAME
       ) {
         violations.push({
           rule: "a/sql-store-no-core-webhooks",
           package: pkg.name,
-          message: `sql-store must not depend on "${name}" (${field}: "${version}"). Private foundation stays free of core/domain runtime deps.`,
+          message: `sql foundation must not depend on "${name}" (${field}: "${version}"). Foundation stays free of core/domain/testkit runtime deps.`,
         });
       }
       const pathVersion = version.replace(/\\/g, "/");
       if (
         /packages\/core/.test(pathVersion) ||
         /packages\/webhooks/.test(pathVersion) ||
-        /packages\/reconciliation/.test(pathVersion)
+        /packages\/reconciliation/.test(pathVersion) ||
+        /packages\/testkit/.test(pathVersion) ||
+        /packages\/store-contracts/.test(pathVersion)
       ) {
         violations.push({
           rule: "a/sql-store-no-core-webhooks",
           package: pkg.name,
-          message: `sql-store must not path-depend into core, webhooks, or reconciliation (${field}: "${name}": "${version}").`,
+          message: `sql foundation must not path-depend into core, webhooks, reconciliation, testkit, or store-contracts (${field}: "${name}": "${version}").`,
+        });
+      }
+    });
+  }
+
+  // Production adapters: runtime contracts from store-contracts; testkit only in devDependencies.
+  if (isAdapterPackageName(pkg.name)) {
+    const runtimeDeps = pkg.manifest.dependencies ?? {};
+    if (runtimeDeps[TESTKIT_PACKAGE_NAME]) {
+      violations.push({
+        rule: "a/adapter-no-runtime-testkit",
+        package: pkg.name,
+        message: `production adapter must not list "${TESTKIT_PACKAGE_NAME}" in dependencies (use @paykernel/store-contracts at runtime; testkit only in devDependencies for conformance).`,
+      });
+    }
+    if (runtimeDeps[SQL_STORE_PACKAGE_NAME]) {
+      violations.push({
+        rule: "a/adapter-no-private-sql-store",
+        package: pkg.name,
+        message: `production adapter must not list private "${SQL_STORE_PACKAGE_NAME}" in dependencies (use publishable @paykernel/sql-foundation).`,
+      });
+    }
+  }
+
+  // store-contracts: zero workspace runtime deps (portable contracts only).
+  if (pkg.name === STORE_CONTRACTS_PACKAGE_NAME) {
+    eachDep(pkg.manifest, (field, name, version) => {
+      if (name.startsWith("@paykernel/")) {
+        violations.push({
+          rule: "a/store-contracts-no-workspace-deps",
+          package: pkg.name,
+          message: `store-contracts must not depend on workspace package "${name}" (${field}: "${version}"). Contracts package stays zero-dep.`,
         });
       }
     });

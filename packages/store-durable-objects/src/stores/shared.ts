@@ -14,12 +14,12 @@ import {
   idempotencyRowToRecord,
   webhookInboxRowToRecord,
   reconciliationRowToRecord,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   IdempotencyRecord,
   WebhookInboxRecord,
   ReconciliationRecord,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import type { DoExecutor } from "../sql-executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";

@@ -133,6 +133,7 @@ export type MemoryRelationalStore = {
     | { kind: "acquired"; record: WebhookInboxRecordShape; leaseToken: string }
     | { kind: "already_completed"; record: WebhookInboxRecordShape }
     | { kind: "in_progress"; record: WebhookInboxRecordShape }
+    | { kind: "not_available"; record: WebhookInboxRecordShape; availableAt: string }
     | { kind: "payload_hash_conflict"; record: WebhookInboxRecordShape }
     | { kind: "duplicate_failed"; record: WebhookInboxRecordShape }
   >;
@@ -191,6 +192,8 @@ export type MemoryRelationalStore = {
     error: string;
     deadLetter?: boolean;
     retryAfterMs?: number;
+    /** When true, decrement attempts by 1 (parking claim restore). */
+    restoreAttempt?: boolean;
   }): Promise<void>;
 
   /**
@@ -431,7 +434,27 @@ export function createMemoryRelationalStore(
         });
 
         if (decision.kind !== "acquired") {
-          return { kind: decision.kind, record: existingRec! };
+          // Narrow by kind so exactOptionalPropertyTypes / union assignability stays sound.
+          switch (decision.kind) {
+            case "already_completed":
+              return { kind: "already_completed", record: existingRec! };
+            case "in_progress":
+              return { kind: "in_progress", record: existingRec! };
+            case "not_available":
+              return {
+                kind: "not_available",
+                record: existingRec!,
+                availableAt: existingRec!.availableAt,
+              };
+            case "payload_hash_conflict":
+              return { kind: "payload_hash_conflict", record: existingRec! };
+            case "duplicate_failed":
+              return { kind: "duplicate_failed", record: existingRec! };
+            default: {
+              const _exhaustive: never = decision;
+              return _exhaustive;
+            }
+          }
         }
 
         const record: WebhookInboxRecordShape = {
@@ -656,12 +679,17 @@ export function createMemoryRelationalStore(
         const retryAfterMs = input.retryAfterMs ?? 0;
         const availableAt = new Date(clockMs + retryAfterMs).toISOString();
         const lastError = enforceMaxSanitizedError(input.error);
+        const attempts =
+          input.restoreAttempt === true
+            ? Math.max(0, existing!.attempts - 1)
+            : existing!.attempts;
         const record: WebhookInboxRecordShape = {
           ...existing!,
           status: dead ? "dead_letter" : "pending",
           leaseOwner: undefined,
           leaseToken: undefined,
           leaseExpiresAt: undefined,
+          attempts,
           updatedAt: now,
           availableAt,
         };

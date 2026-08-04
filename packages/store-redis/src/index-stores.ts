@@ -7,7 +7,7 @@ import type {
   IdempotencyStore,
   ReconciliationStore,
   WebhookInboxStore,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import { createRedisIdempotencyStore } from "./stores/idempotency-store";
 import { createRedisWebhookInboxStore } from "./stores/webhook-inbox-store";
 import { createRedisReconciliationStore } from "./stores/reconciliation-store";

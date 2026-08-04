@@ -188,8 +188,9 @@ INSERT OR IGNORE INTO ${t} (
 export function webhookClaimTemplates(namespace?: ResolvedSchemaNamespace): ClaimTemplateSet {
   const t = table(LOGICAL_TABLES.webhookInbox, namespace);
   const intent =
-    "Atomic claim: insert-if-absent or reclaim pending/expired lease only; " +
-    "payload_hash must match on conflict; increment generation/attempts.";
+    "Atomic claim: insert-if-absent or reclaim pending-when-due/expired lease only; " +
+    "pending requires available_at <= now; expired claimed lease may reclaim for recovery " +
+    "even if available_at is future; payload_hash must match; increment generation/attempts.";
 
   const postgresSql = `
 INSERT INTO ${t} (
@@ -211,9 +212,17 @@ ON CONFLICT (key) DO UPDATE SET
 WHERE ${t}.payload_hash = EXCLUDED.payload_hash
   AND ${t}.status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
-    ${t}.status = 'pending'
-    OR ${t}.lease_expires_at IS NULL
-    OR ${t}.lease_expires_at <= $7
+    (
+      ${t}.status = 'pending'
+      AND (${t}.available_at IS NULL OR ${t}.available_at <= $7)
+    )
+    OR (
+      ${t}.status = 'claimed'
+      AND (
+        ${t}.lease_expires_at IS NULL
+        OR ${t}.lease_expires_at <= $7
+      )
+    )
   )
 RETURNING *
 `.trim();
@@ -240,9 +249,17 @@ WHERE key = ?
   AND payload_hash = ?
   AND status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
-    status = 'pending'
-    OR lease_expires_at IS NULL
-    OR lease_expires_at <= ?
+    (
+      status = 'pending'
+      AND (available_at IS NULL OR available_at <= ?)
+    )
+    OR (
+      status = 'claimed'
+      AND (
+        lease_expires_at IS NULL
+        OR lease_expires_at <= ?
+      )
+    )
   )
 `.trim();
 
@@ -257,7 +274,7 @@ WHERE key = ?
     sqlite: {
       dialect: "sqlite",
       // Multi-step in one transaction; bind each step separately (see sql comments).
-      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now):\n${sqliteUpdate}`,
+      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now, now):\n${sqliteUpdate}`,
       params: [
         "step1:key",
         "step1:payloadHash",
@@ -276,6 +293,7 @@ WHERE key = ?
         "step2:now",
         "step2:key",
         "step2:payloadHash",
+        "step2:now",
         "step2:now",
       ],
       intent: intent + " SQLite multi-step txn; bind each step separately.",
@@ -505,9 +523,11 @@ WHERE key = ?
 export function webhookFailTemplates(namespace?: ResolvedSchemaNamespace): ClaimTemplateSet {
   const t = table(LOGICAL_TABLES.webhookInbox, namespace);
   const intent =
-    "Atomic webhook fail: requires active lease; set pending/dead_letter + sanitized last_error only.";
+    "Atomic webhook fail: requires active lease; set pending/dead_letter + sanitized last_error only; " +
+    "optional restoreAttempt (0|1) decrements attempts for non-handler parking releases.";
 
   // statusTarget bound as param ($3 / ?) must be 'pending' or 'dead_letter' (adapter-validated).
+  // restoreAttemptFlag ($7 / ?) is 0|1 — when 1, attempts = max(attempts-1, 0).
   // Column must match foundation DDL: last_error_sanitized (never raw last_error).
   const postgresSql = `
 UPDATE ${t} SET
@@ -517,7 +537,8 @@ UPDATE ${t} SET
   lease_token = NULL,
   lease_expires_at = NULL,
   available_at = $5,
-  updated_at = $6
+  updated_at = $6,
+  attempts = CASE WHEN $7 = 1 AND ${t}.attempts > 0 THEN ${t}.attempts - 1 ELSE ${t}.attempts END
 WHERE key = $1
   AND lease_token = $2
   AND status = 'claimed'
@@ -534,7 +555,8 @@ UPDATE ${t} SET
   lease_token = NULL,
   lease_expires_at = NULL,
   available_at = ?,
-  updated_at = ?
+  updated_at = ?,
+  attempts = CASE WHEN ? = 1 AND attempts > 0 THEN attempts - 1 ELSE attempts END
 WHERE key = ?
   AND lease_token = ?
   AND status = 'claimed'
@@ -547,19 +569,44 @@ WHERE key = ?
     postgres: {
       dialect: "postgres",
       sql: postgresSql,
-      params: ["key", "leaseToken", "statusTarget", "lastError", "availableAt", "now"],
+      params: [
+        "key",
+        "leaseToken",
+        "statusTarget",
+        "lastError",
+        "availableAt",
+        "now",
+        "restoreAttemptFlag",
+      ],
       intent,
     },
     sqlite: {
       dialect: "sqlite",
       sql: sqliteSql,
-      params: ["statusTarget", "lastError", "availableAt", "now", "key", "leaseToken", "now"],
+      params: [
+        "statusTarget",
+        "lastError",
+        "availableAt",
+        "now",
+        "restoreAttemptFlag",
+        "key",
+        "leaseToken",
+        "now",
+      ],
       intent,
     },
     generic: {
       dialect: "generic",
-      sql: `-- Portable webhook fail: conditional UPDATE by lease_token + sanitized error.`,
-      params: ["key", "leaseToken", "statusTarget", "lastError", "availableAt", "now"],
+      sql: `-- Portable webhook fail: conditional UPDATE by lease_token + sanitized error + optional restoreAttempt.`,
+      params: [
+        "key",
+        "leaseToken",
+        "statusTarget",
+        "lastError",
+        "availableAt",
+        "now",
+        "restoreAttemptFlag",
+      ],
       intent,
     },
   };

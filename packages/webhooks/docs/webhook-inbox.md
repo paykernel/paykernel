@@ -240,7 +240,7 @@ Domain-owned in this package; structurally compatible with Phase 9 testkit.
 | `payloadHash` | Hash for duplicate / conflict detection |
 | `payloadRef?` | Optional **sanitized** snapshot for durable workers (JSON string) |
 | `leaseOwner?` / `leaseToken?` / `leaseExpiresAt?` | Lease fencing |
-| `attempts` | Claim/attempt count |
+| `attempts` | Handler/claim attempt count (parking `ackAfterClaim` restores so it does not consume budget) |
 | `lastError?` | **Sanitized** error only |
 | `createdAt` / `updatedAt` / `availableAt` | ISO-8601 strings |
 | `generation` | Monotonic; increments on claim/renew |
@@ -259,7 +259,7 @@ First-class columns for gateway, provider type, schema version, etc. are **not**
 | Lease owner, token, expiry | `leaseOwner`, `leaseToken`, `leaseExpiresAt` |
 | First received | `createdAt` |
 | Last received / updated | `updatedAt` |
-| Next attempt | `availableAt` |
+| Next attempt / claim gate | `availableAt` (key-addressed `claim` + `listRetryable`) |
 | Completion timestamp | `updatedAt` when `status === "completed"` |
 | Sanitized last error | `lastError` |
 
@@ -285,7 +285,7 @@ Mode is **required** on `createWebhookInboxEngine` and is **fixed for the life o
 | --- | --- |
 | `inline` | Await handler under lease. Retryable throw → `store.fail` → `{ outcome: "handler_failed", retryable: true }`. Non-retryable / dead letter → `handler_failed { retryable: false }`. |
 | `durable_retry` | Await handler by default. Retryable throw → `store.fail` with delay → `{ outcome: "scheduled_for_retry" }`. |
-| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`) and return `scheduled_for_retry` **without** running the handler. Workers call `processRetryable`. |
+| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `scheduled_for_retry` **without** running the handler. Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. |
 
 ```typescript
 // Explicit — never omit mode
@@ -302,6 +302,19 @@ const durableEngine = createWebhookInboxEngine({
 ```
 
 `ackAfterClaim` is only valid with `mode: "durable_retry"` (constructor throws otherwise). Per-call `ackAfterClaim` on `processVerified` may override the engine default in durable mode only.
+
+### Attempt budget and backoff
+
+- `maxAttempts` is max **handler** attempts before `dead_letter` on `durable_retry` (default 5).
+- Each successful store `claim` acquire increments `attempts`. The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
+- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry`.
+- `listRetryable` only returns rows with `availableAt <= now` (same gate).
+
+### `NonRetryableHandlerError`
+
+- **Default** (`deadLetter` omitted / `true`): mark `dead_letter` immediately — preferred for poison messages.
+- **`{ deadLetter: false }` (opt-in footgun):** outcome is still `handler_failed { retryable: false }`, but the row stays **pending**. Redelivery / `processRetryable` can re-run the handler (poison spin) until `maxAttempts` is exhausted in `durable_retry`, at which point the engine dead-letters. Prefer the default.
+
 
 ### Worker path
 

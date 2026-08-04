@@ -13,7 +13,7 @@ import {
   StoreTimeoutError,
   StoreUnavailableError,
   type StoreErrorCode,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 
 const MAX_MESSAGE = 256;
 

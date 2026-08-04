@@ -135,10 +135,13 @@ import {
 } from "@paykernel/reconciliation";
 
 const diffs = compareSnapshots(target.expected, provider);
-// Money: amount string + currency, case-sensitive
+// Money: currency case-sensitive; amounts compare by minor units
+// so "10" and "10.00" match for the same currency (not raw string equality).
 ```
 
 Only fields present on the local snapshot are compared. Pure function — no I/O.
+
+`moneyEquals` uses core `toMinorUnits` (bigint) for amount equality. Equivalent decimal spellings of the same numeric value match; different currencies or unparseable/excess-precision amounts do not.
 
 ---
 

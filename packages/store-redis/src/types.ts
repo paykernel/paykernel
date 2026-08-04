@@ -32,11 +32,11 @@ export type RedisStoreOptions = {
 };
 
 export type RedisStoresBundle = {
-  idempotency: import("@paykernel/testkit").IdempotencyStore;
-  webhookInbox: import("@paykernel/testkit").WebhookInboxStore;
-  reconciliation: import("@paykernel/testkit").ReconciliationStore;
+  idempotency: import("@paykernel/store-contracts").IdempotencyStore;
+  webhookInbox: import("@paykernel/store-contracts").WebhookInboxStore;
+  reconciliation: import("@paykernel/store-contracts").ReconciliationStore;
   port: RedisCommandPort;
   keys: ResolvedKeyDesign;
   clock: StoreClock;
-  manifest: import("@paykernel/testkit").StorageAdapterManifest;
+  manifest: import("@paykernel/store-contracts").StorageAdapterManifest;
 };

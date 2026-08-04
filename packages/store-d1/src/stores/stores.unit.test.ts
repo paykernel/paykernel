@@ -4,8 +4,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   createFakeClock,
-  StoreLeaseLostError,
 } from "@paykernel/testkit";
+import {
+  StoreLeaseLostError,
+} from "@paykernel/store-contracts";
 import {
   createD1IdempotencyStore,
   createD1WebhookInboxStore,
@@ -222,3 +224,106 @@ describe("createD1Stores / createD1PaymentStores bundle", () => {
     expect(prepareCalls).toBe(0);
   });
 });
+
+describe("webhook store unit (B5/B4)", () => {
+  it("listRetryable soft-releases expired claimed rows then selects pending", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ changes: 1 }),
+      onRun: () => ({ changes: 1 }),
+      onQuery: (sql) => {
+        if (sql.includes("SELECT") && sql.includes("pending")) {
+          return [
+            {
+              key: "abandoned",
+              status: "pending",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              available_at: now,
+              first_received_at: now,
+              last_received_at: now,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createD1WebhookInboxStore({ executor, clock });
+    const listed = await store.listRetryable({ now });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.key).toBe("abandoned");
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+  });
+
+  it("claim SQL gates pending on available_at", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const future = new Date(clock.nowMs() + 60_000).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT") || sql.includes("on conflict")) {
+          return [];
+        }
+        if (sql.includes("SELECT")) {
+          return [
+            {
+              key: "backoff",
+              status: "pending",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              available_at: future,
+              first_received_at: now,
+              last_received_at: now,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createD1WebhookInboxStore({ executor, clock });
+    const r = await store.claim({
+      key: "backoff",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("not_available");
+    if (r.kind === "not_available") {
+      expect(r.availableAt).toBe(future);
+      expect(r.record.status).toBe("pending");
+    }
+    const claimCall = executor.calls.find(
+      (c) => c.sql.includes("ON CONFLICT") || c.sql.includes("on conflict") || c.sql.includes("INSERT"),
+    );
+    expect(claimCall?.sql).toContain("available_at");
+  });
+});
+

@@ -14,6 +14,39 @@ const provider = buildProviderPaymentSnapshot({
   providerStatus: "succeeded",
 });
 
+describe("moneyEquals", () => {
+  // N5 regression: decimal spelling must not produce false drift.
+  it.each([
+    ["10", "10.00", "USD"],
+    ["10.0", "10.00", "USD"],
+    ["10.00", "10.00", "USD"],
+    ["0", "0.00", "USD"],
+    ["1.25", "1.250", "KWD"],
+  ] as const)(
+    "treats %s and %s as equal for %s (same minor units)",
+    (left, right, currency) => {
+      expect(moneyEquals(money(left, currency), money(right, currency))).toBe(
+        true,
+      );
+    },
+  );
+
+  it.each([
+    ["10", "10.01", "USD", "USD"],
+    ["10.00", "10.00", "USD", "EUR"],
+    ["1", "1", "usd", "USD"],
+    // USD exponent 2 → excess precision is fail-closed unequal
+    ["10.001", "10.00", "USD", "USD"],
+  ] as const)(
+    "rejects %s %s vs %s %s",
+    (leftAmt, rightAmt, leftCur, rightCur) => {
+      expect(
+        moneyEquals(money(leftAmt, leftCur), money(rightAmt, rightCur)),
+      ).toBe(false);
+    },
+  );
+});
+
 describe("compareSnapshots (A2 machine-readable fields)", () => {
   it("returns empty when local undefined", () => {
     expect(compareSnapshots(undefined, provider)).toEqual([]);
@@ -30,6 +63,14 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
         provider,
       ),
     ).toEqual([]);
+  });
+
+  it("does not flag amount when only decimal spelling differs (N5)", () => {
+    const diffs = compareSnapshots(
+      { amount: money("10", "USD") },
+      provider,
+    );
+    expect(diffs).toEqual([]);
   });
 
   it("emits status field path on mismatch", () => {
@@ -69,5 +110,15 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
       "capturedAmount",
       "refundedAmount",
     ]);
+  });
+
+  it("matches captured/refunded when zero spelling differs", () => {
+    const diffs = compareSnapshots(
+      {
+        refundedAmount: money("0", "USD"),
+      },
+      provider,
+    );
+    expect(diffs).toEqual([]);
   });
 });

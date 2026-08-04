@@ -8,7 +8,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
   ClaimWebhookResult,
@@ -22,8 +22,8 @@ import type {
   WebhookEventKey,
   WebhookInboxRecord,
   WebhookInboxStore,
-} from "@paykernel/testkit";
-import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { TursoStoreOptions } from "../types";
@@ -59,9 +59,17 @@ ON CONFLICT (key) DO UPDATE SET
 WHERE ${table}.payload_hash = excluded.payload_hash
   AND ${table}.status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
-    ${table}.status = 'pending'
-    OR ${table}.lease_expires_at IS NULL
-    OR ${table}.lease_expires_at <= excluded.updated_at
+    (
+      ${table}.status = 'pending'
+      AND (${table}.available_at IS NULL OR ${table}.available_at <= excluded.updated_at)
+    )
+    OR (
+      ${table}.status = 'claimed'
+      AND (
+        ${table}.lease_expires_at IS NULL
+        OR ${table}.lease_expires_at <= excluded.updated_at
+      )
+    )
   )
 RETURNING ${WEBHOOK_SELECT_COLS}
 `.trim();
@@ -130,6 +138,14 @@ export function createTursoWebhookInboxStore(
         }
         if (existing.status === "failed" || existing.status === "dead_letter") {
           return { kind: "duplicate_failed", record: existing };
+        }
+        // pending + failed claim SQL = available_at gate (do not burn attempts)
+        if (existing.status === "pending") {
+          return {
+            kind: "not_available",
+            record: existing,
+            availableAt: existing.availableAt,
+          };
         }
         return { kind: "in_progress", record: existing };
       });
@@ -210,6 +226,7 @@ export function createTursoWebhookInboxStore(
         const statusTarget = dead ? "dead_letter" : "pending";
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
+        const restoreAttemptFlag = input.restoreAttempt === true ? 1 : 0;
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `UPDATE ${table} SET
              status = ?,
@@ -218,7 +235,8 @@ export function createTursoWebhookInboxStore(
              lease_token = NULL,
              lease_expires_at = NULL,
              available_at = ?,
-             updated_at = ?
+             updated_at = ?,
+             attempts = CASE WHEN ? = 1 AND attempts > 0 THEN attempts - 1 ELSE attempts END
            WHERE key = ?
              AND lease_token = ?
              AND status = 'claimed'
@@ -230,6 +248,7 @@ export function createTursoWebhookInboxStore(
             lastError,
             availableAt,
             now,
+            restoreAttemptFlag,
             input.key,
             input.leaseToken,
             now,
@@ -244,13 +263,44 @@ export function createTursoWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(async () => selectByKey(key));
+      return withMappedErrors(async () => {
+        const now = clockNowIso(ctx.clock);
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = ?,
+             updated_at = ?
+           WHERE key = ?
+             AND status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now, key, now],
+        );
+        return selectByKey(key);
+      });
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
+        // Soft-release abandoned expired claims so processRetryable can drain them.
+        await ctx.getExecutor().execute(
+          `UPDATE ${table} SET
+             status = 'pending',
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             available_at = ?,
+             updated_at = ?
+           WHERE status = 'claimed'
+             AND lease_expires_at IS NOT NULL
+             AND lease_expires_at <= ?`,
+          [now, now, now],
+        );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${WEBHOOK_SELECT_COLS}
            FROM ${table}

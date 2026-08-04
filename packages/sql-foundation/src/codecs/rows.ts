@@ -22,8 +22,6 @@ import {
   validateWebhookInboxStatus,
 } from "./validation";
 
-export type { IdempotencyStatusSql, ReconciliationStatusSql, WebhookInboxStatusSql };
-
 // ─── Contract-shaped records (mirror Phase 9; local definitions) ─────────────
 
 export type IdempotencyRecordShape = {

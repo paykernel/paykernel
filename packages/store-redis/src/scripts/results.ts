@@ -12,8 +12,8 @@ import type {
   ReconciliationStatus,
   WebhookInboxRecord,
   WebhookInboxStatus,
-} from "@paykernel/testkit";
-import { StoreCorruptedRecordError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreCorruptedRecordError } from "@paykernel/store-contracts";
 
 export type TaggedResult = {
   tag: string;

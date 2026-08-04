@@ -151,6 +151,7 @@ describe("parseTaggedResult preserves known outcome tags", () => {
       "fingerprint_conflict",
       "payload_hash_conflict",
       "duplicate_failed",
+      "not_available",
       "lease_lost",
       "not_found",
       "wrong_status",

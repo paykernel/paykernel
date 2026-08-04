@@ -9,7 +9,7 @@
 import {
   assertStorageAdapterManifest,
   type StorageAdapterManifest,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 
 /**
  * Declared guarantees when using SQLite-backed Durable Objects with

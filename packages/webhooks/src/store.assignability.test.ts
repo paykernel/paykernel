@@ -24,7 +24,7 @@ describe("WebhookInboxStore structural contract", () => {
     expect(typeof store.deleteExpired).toBe("function");
   });
 
-  it("claim result kinds include acquired | already_completed | in_progress | payload_hash_conflict | duplicate_failed", async () => {
+  it("claim result kinds include acquired | already_completed | in_progress | payload_hash_conflict | duplicate_failed | not_available", async () => {
     const store = createMemoryWebhookInboxStore();
     const a = await store.claim({
       key: "stripe:evt_a",
@@ -49,6 +49,29 @@ describe("WebhookInboxStore structural contract", () => {
       leaseMs: 30_000,
     });
     expect(c.kind).toBe("payload_hash_conflict");
+
+    // not_available: fail with future availableAt then claim
+    const d = await store.claim({
+      key: "stripe:evt_backoff",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 30_000,
+    });
+    expect(d.kind).toBe("acquired");
+    if (d.kind !== "acquired") return;
+    await store.fail({
+      key: "stripe:evt_backoff",
+      leaseToken: d.leaseToken,
+      error: "later",
+      retryAfterMs: 60_000,
+    });
+    const e = await store.claim({
+      key: "stripe:evt_backoff",
+      payloadHash: "h",
+      owner: "w2",
+      leaseMs: 30_000,
+    });
+    expect(e.kind).toBe("not_available");
   });
 
   it("renew rotates token and rejects stale", async () => {

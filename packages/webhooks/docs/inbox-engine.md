@@ -33,6 +33,7 @@ Modes are never mixed implicitly inside `process*`. `processRetryable` throws on
 Outcomes are framework-agnostic. **Silent ACK of failed work is forbidden.** Map outcomes to HTTP only in your adapter.
 
 Store claim `duplicate_failed` → `handler_failed { retryable: false }`.
+Store claim `not_available` (pending, `availableAt` in future) → `scheduled_for_retry` (no attempt burn).
 
 ## Lean record vs 10.2 fields
 

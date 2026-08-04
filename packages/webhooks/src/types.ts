@@ -21,7 +21,8 @@ import type {
  * - `durable_retry`: await handler by default; on retryable throw → store.fail with
  *   delay → `scheduled_for_retry`. When `ackAfterClaim: true`, claim persists and
  *   returns `scheduled_for_retry` without running the handler (worker via
- *   `processRetryable`).
+ *   `processRetryable`). The parking claim does **not** count toward `maxAttempts`
+ *   (store `fail({ restoreAttempt: true })`).
  */
 export type WebhookProcessingMode = "inline" | "durable_retry";
 
@@ -53,8 +54,17 @@ export type EngineClock = {
 // ─── Handler ─────────────────────────────────────────────────────────────────
 
 /**
- * Application-thrown error that marks non-retryable failure (dead letter).
- * Other throws are treated as retryable unless `deadLetter` is set.
+ * Application-thrown error that marks non-retryable failure.
+ *
+ * **Default (`deadLetter` omitted or `true`):** store marks `dead_letter` and
+ * outcome is `handler_failed { retryable: false }` — preferred for poison messages.
+ *
+ * **`{ deadLetter: false }` (opt-in footgun):** engine still returns
+ * `handler_failed { retryable: false }` but leaves the row **pending**. Provider
+ * redelivery / `processRetryable` can re-run the handler (poison spin risk) until
+ * `maxAttempts` is exhausted in `durable_retry` (engine then dead-letters). Prefer
+ * the default so poison messages terminal immediately. Use `false` only when you
+ * intentionally want a non-retryable signal without terminal storage (rare).
  */
 export class NonRetryableHandlerError extends Error {
   readonly deadLetter: boolean;
@@ -118,7 +128,7 @@ export type ProcessVerifiedInput = {
   /**
    * Per-call override for durable_retry ack-after-claim (defaults to engine
    * option). When true, returns `scheduled_for_retry` after durable claim
-   * without running the handler.
+   * without running the handler. Parking claim does not consume `maxAttempts`.
    */
   ackAfterClaim?: boolean;
 };
@@ -194,14 +204,24 @@ export type CreateWebhookInboxEngineOptions = {
   owner?: string;
   /** Default lease duration in ms. Default: 30_000. */
   defaultLeaseMs?: number;
-  /** Max handler attempts before dead-letter on durable_retry. Default: 5. */
+  /**
+   * Max **handler** attempts before dead-letter on durable_retry. Default: 5.
+   * Each claim that runs (or would run) the handler increments store `attempts`.
+   * The `ackAfterClaim` parking claim is free (`fail({ restoreAttempt: true })`).
+   * Provider redelivery while `availableAt` is in the future returns
+   * `not_available` / `scheduled_for_retry` and does not increment attempts.
+   */
   maxAttempts?: number;
-  /** Default retry delay after handler failure (ms). Default: 5_000. */
+  /**
+   * Default retry delay after handler failure (ms). Default: 5_000.
+   * Sets store `availableAt`; both key-addressed claim and listRetryable respect it.
+   */
   defaultRetryAfterMs?: number;
   /**
    * durable_retry only: when true, `processVerified` returns
    * `scheduled_for_retry` after successful claim without running the handler.
    * Workers must call `processRetryable`. Default: false (run handler in-process).
+   * Parking does not consume handler attempt budget.
    */
   ackAfterClaim?: boolean;
   /** Injectable clock for lease expiry deltas / tests. Default: Date.now. */

@@ -11,7 +11,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 import type {
   CleanupInput,
   CleanupResult,
@@ -24,8 +24,8 @@ import type {
   RenewIdempotencyReservationInput,
   RenewReservationResult,
   ReserveIdempotencyInput,
-} from "@paykernel/testkit";
-import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
+import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { PostgresStoreOptions } from "../types";

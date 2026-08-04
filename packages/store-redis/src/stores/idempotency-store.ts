@@ -14,11 +14,11 @@ import type {
   RenewIdempotencyReservationInput,
   RenewReservationResult,
   ReserveIdempotencyInput,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   StoreCorruptedRecordError,
   StoreLeaseLostError,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   clockAddMsIso,
   clockAddMsString,

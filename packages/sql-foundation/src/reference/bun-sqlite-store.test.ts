@@ -33,10 +33,8 @@ import {
 } from "../schema/namespace";
 import { LOGICAL_TABLES } from "../schema/tables";
 import { buildFoundationMigrationSql } from "../migrations/definitions";
-import { ReferenceLeaseLostError, isReferenceLeaseLostError } from "./memory-relational-store";
+import { ReferenceLeaseLostError } from "./memory-relational-store";
 
-export const BUN_SQLITE_NON_PRODUCTION = true as const;
-export const BUN_SQLITE_NON_DISTRIBUTED = true as const;
 export const BUN_SQLITE_ATOMICITY_MODEL = "sqlite_single_sync_transaction" as const;
 
 export type BunSqliteRelationalOptions = {
@@ -631,4 +629,4 @@ export function createBunSqliteRelationalStore(
   };
 }
 
-export { isReferenceLeaseLostError, ReferenceLeaseLostError };
+

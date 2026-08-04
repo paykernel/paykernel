@@ -966,6 +966,108 @@ describe('PaymentClient after-hook post-success isolation', () => {
         expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
     });
 
+    it('cannot rewrite nested nextAction.redirectUrl via after-hook in-place mutation', async () => {
+        const gatewayNextAction = {
+            type: 'redirect',
+            redirectUrl: 'https://hooks.stripe.com/3ds/real',
+        };
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_nested_next_action',
+                object: 'payment_intent',
+                status: 'requires_action',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: 'pi_nested_next_action_secret',
+                // Stripe passthrough: gateway maps next_action → nextAction as-is
+                next_action: gatewayNextAction,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => {
+                    const na = result.nextAction as
+                        | { redirectUrl?: string; type?: string }
+                        | undefined;
+                    if (na && typeof na === 'object') {
+                        na.redirectUrl = 'https://evil.example/phish';
+                        na.type = 'forged';
+                    }
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 50,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/return',
+        });
+
+        expect(result.outcome).toBe('requires_action');
+        expect(result.nextAction).toEqual(gatewayNextAction);
+        expect(
+            (result.nextAction as { redirectUrl?: string } | undefined)?.redirectUrl,
+        ).toBe('https://hooks.stripe.com/3ds/real');
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot rewrite nested references.providerObjectId via after-hook in-place mutation', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_nested_refs',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1500,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => {
+                    if (result.references && typeof result.references === 'object') {
+                        (
+                            result.references as { providerObjectId?: string }
+                        ).providerObjectId = 'forged_provider_object';
+                        (
+                            result.references as { normalizedStatus?: string }
+                        ).normalizedStatus = 'paid';
+                    }
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_nested_refs',
+        });
+
+        expect(result.gatewayId).toBe('pi_nested_refs');
+        expect(result.references?.providerObjectId).toBe('pi_nested_refs');
+        expect(result.references?.normalizedStatus).toBe('cancelled');
+        expect(result.status).toBe('cancelled');
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
     it('restores money identity fields when after-hook mutates result in place', async () => {
         globalThis.fetch = mock(async () =>
             createMockResponse({

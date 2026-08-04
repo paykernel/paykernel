@@ -18,11 +18,11 @@ import type {
   RenewReconciliationLeaseResult,
   ScheduleReconciliationInput,
   ScheduleResult,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   StoreCorruptedRecordError,
   StoreLeaseLostError,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import {
   clockAddMsIso,
   clockAddMsString,

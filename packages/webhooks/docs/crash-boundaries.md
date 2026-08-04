@@ -233,8 +233,8 @@ After reclaim, the **old** worker’s `complete`/`fail`/`renew` with the pre-rec
 ### `durable_retry`
 
 - Retryable handler failure → `store.fail` + `scheduled_for_retry` (row becomes pending after delay).
-- `ackAfterClaim: true`: returns `scheduled_for_retry` after durable claim/release **without** running the handler. Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work.
-- Max attempts / `NonRetryableHandlerError` → dead letter → `handler_failed { retryable: false }`.
+- `ackAfterClaim: true`: returns `scheduled_for_retry` after durable claim/release **without** running the handler. Parking claim does not consume `maxAttempts` (`restoreAttempt`). Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work.
+- Max **handler** attempts / default `NonRetryableHandlerError` → dead letter → `handler_failed { retryable: false }`. `{ deadLetter: false }` leaves pending until `maxAttempts` (prefer default).
 - `processRetryable` is **only** valid on `durable_retry` engines (throws if the engine was built with `inline`).
 
 ---

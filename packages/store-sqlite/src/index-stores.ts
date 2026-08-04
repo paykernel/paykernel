@@ -7,7 +7,7 @@ import type {
   IdempotencyStore,
   ReconciliationStore,
   WebhookInboxStore,
-} from "@paykernel/testkit";
+} from "@paykernel/store-contracts";
 import { createSqliteIdempotencyStore } from "./stores/idempotency-store";
 import { createSqliteWebhookInboxStore } from "./stores/webhook-inbox-store";
 import { createSqliteReconciliationStore } from "./stores/reconciliation-store";

@@ -278,6 +278,48 @@ describe("createMemoryWebhookInboxStore", () => {
     await store.complete({ key: "e_rnw", leaseToken: renewed.leaseToken });
     expect((await store.get("e_rnw"))?.status).toBe("completed");
   });
+
+  it("claim respects availableAt; restoreAttempt undoes parking attempt", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_backoff",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    expect(a.record.attempts).toBe(1);
+    await store.fail({
+      key: "e_backoff",
+      leaseToken: a.leaseToken,
+      error: "park",
+      retryAfterMs: 10_000,
+      restoreAttempt: true,
+    });
+    expect((await store.get("e_backoff"))?.attempts).toBe(0);
+    const early = await store.claim({
+      key: "e_backoff",
+      payloadHash: "h",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(early.kind).toBe("not_available");
+    expect((await store.get("e_backoff"))?.attempts).toBe(0);
+    expect(await store.listRetryable({ limit: 10 })).toHaveLength(0);
+    clock.advance(10_000);
+    const late = await store.claim({
+      key: "e_backoff",
+      payloadHash: "h",
+      owner: "w3",
+      leaseMs: 5_000,
+    });
+    expect(late.kind).toBe("acquired");
+    if (late.kind === "acquired") {
+      expect(late.record.attempts).toBe(1);
+    }
+  });
 });
 
 describe("createMemoryReconciliationStore", () => {

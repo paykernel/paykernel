@@ -4,11 +4,11 @@
  */
 import { describe, expect, it } from "bun:test";
 import { createFakeClock } from "@paykernel/testkit";
+import { StoreLeaseLostError } from "@paykernel/store-contracts";
 import { createRedisIdempotencyStore } from "./idempotency-store";
 import { createRedisWebhookInboxStore } from "./webhook-inbox-store";
 import { createRedisReconciliationStore } from "./reconciliation-store";
 import type { RedisCommandPort } from "../port";
-import { StoreLeaseLostError } from "@paykernel/testkit";
 
 type SendCall = { command: string; args: readonly string[] };
 
@@ -144,23 +144,51 @@ describe("idempotency store mock port", () => {
   });
 });
 
+function webhookPack(overrides: Partial<Record<string, string>> = {}): string[] {
+  const base = {
+    key: "e1",
+    status: "pending",
+    payload_hash: "h1",
+    payload_ref: "",
+    lease_owner: "",
+    lease_token: "",
+    lease_expires_at: "",
+    attempts: "1",
+    generation: "1",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    available_at: "2026-01-01T00:05:00.000Z",
+    last_error: "retry later",
+  };
+  const m = { ...base, ...overrides };
+  return [
+    m.key,
+    m.status,
+    m.payload_hash,
+    m.payload_ref,
+    m.lease_owner,
+    m.lease_token,
+    m.lease_expires_at,
+    m.attempts,
+    m.generation,
+    m.created_at,
+    m.updated_at,
+    m.available_at,
+    m.last_error,
+  ];
+}
+
 describe("webhook store mock port", () => {
   it("claim payload_hash_conflict", async () => {
-    const fields = [
-      "e1",
-      "claimed",
-      "other",
-      "",
-      "w",
-      "t",
-      "2099-01-01T00:00:00.000Z",
-      "1",
-      "1",
-      "2026-01-01T00:00:00.000Z",
-      "2026-01-01T00:00:00.000Z",
-      "2026-01-01T00:00:00.000Z",
-      "",
-    ];
+    const fields = webhookPack({
+      status: "claimed",
+      payload_hash: "other",
+      lease_owner: "w",
+      lease_token: "t",
+      lease_expires_at: "2099-01-01T00:00:00.000Z",
+      available_at: "2026-01-01T00:00:00.000Z",
+      last_error: "",
+    });
     const { port } = createMockPort(() => ["payload_hash_conflict", ...fields]);
     const store = createRedisWebhookInboxStore({ port });
     const r = await store.claim({
@@ -170,6 +198,38 @@ describe("webhook store mock port", () => {
       leaseMs: 1000,
     });
     expect(r.kind).toBe("payload_hash_conflict");
+  });
+
+  it("claim not_available maps tagged result (availableAt backoff)", async () => {
+    const fields = webhookPack();
+    const { port } = createMockPort(() => ["not_available", ...fields]);
+    const store = createRedisWebhookInboxStore({ port });
+    const r = await store.claim({
+      key: "e1",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("not_available");
+    expect(r.record.key).toBe("e1");
+    expect(r.record.status).toBe("pending");
+    expect(r.record.availableAt).toBe("2026-01-01T00:05:00.000Z");
+    if (r.kind === "not_available") {
+      expect(r.availableAt).toBe("2026-01-01T00:05:00.000Z");
+    }
+  });
+
+  it("fail lease_lost (expired lease) throws StoreLeaseLostError", async () => {
+    const { port } = createMockPort(() => ["lease_lost"]);
+    const store = createRedisWebhookInboxStore({ port });
+    await expect(
+      store.fail({
+        key: "e1",
+        leaseToken: "stale-or-expired",
+        error: "handler_error",
+        retryAfterMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
 });
 

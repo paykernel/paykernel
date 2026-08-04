@@ -4,9 +4,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   createFakeClock,
-  StoreLeaseLostError,
-  StoreUnavailableError,
 } from "@paykernel/testkit";
+import {
+  StoreLeaseLostError, StoreUnavailableError,
+} from "@paykernel/store-contracts";
 import {
   createPostgresIdempotencyStore,
   createPostgresWebhookInboxStore,
@@ -175,6 +176,107 @@ describe("webhook store unit", () => {
     await expect(
       store.fail({ key: "e", leaseToken: "t", error: "x" }),
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
+
+  it("listRetryable soft-releases expired claimed rows then selects pending", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ rowCount: 1 }),
+      onQuery: (sql) => {
+        if (sql.includes("SELECT") && sql.includes("pending")) {
+          return [
+            {
+              key: "abandoned",
+              status: "pending",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              available_at: now,
+              first_received_at: now,
+              last_received_at: now,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createPostgresWebhookInboxStore({ executor, clock });
+    const listed = await store.listRetryable({ now });
+    expect(listed).toHaveLength(1);
+    expect(listed[0]?.key).toBe("abandoned");
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft?.sql.toLowerCase()).toContain("status = 'pending'");
+  });
+
+  it("claim SQL template requires available_at for pending reclaim", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const future = new Date(clock.nowMs() + 60_000).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT")) {
+          // Simulate available_at gate: no reclaim
+          return [];
+        }
+        if (sql.includes("SELECT")) {
+          return [
+            {
+              key: "backoff",
+              status: "pending",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              available_at: future,
+              first_received_at: now,
+              last_received_at: now,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createPostgresWebhookInboxStore({ executor, clock });
+    const r = await store.claim({
+      key: "backoff",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("not_available");
+    if (r.kind === "not_available") {
+      expect(r.availableAt).toBe(future);
+      expect(r.record.status).toBe("pending");
+    }
+    const claimCall = executor.calls.find((c) => c.sql.includes("ON CONFLICT"));
+    expect(claimCall?.sql).toContain("available_at");
+    expect(claimCall?.sql).toContain("status = 'pending'");
+    expect(claimCall?.sql).toContain("status = 'claimed'");
   });
 });
 

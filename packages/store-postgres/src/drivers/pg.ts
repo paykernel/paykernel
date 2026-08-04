@@ -11,7 +11,7 @@ import {
 } from "../index-stores";
 import type { PostgresStoreOptions, PostgresStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
-import type { SchemaNamespaceConfig } from "@paykernel/internal-sql-store";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 
 /** Minimal surface of `pg` Pool / Client used by the adapter. */
 export type PgQueryable = {

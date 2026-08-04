@@ -23,7 +23,7 @@ import {
 import {
   BUN_SQLITE_ATOMICITY_MODEL,
   createBunSqliteRelationalStore,
-} from "./reference/bun-sqlite-store";
+} from "./reference/bun-sqlite-store.test";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

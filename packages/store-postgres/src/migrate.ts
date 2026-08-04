@@ -12,8 +12,8 @@ import {
   type MigrateResult,
   type VerifySchemaOptions,
   type VerifySchemaResult,
-} from "@paykernel/internal-sql-store";
-import type { SchemaNamespaceConfig, ResolvedSchemaNamespace } from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
+import type { SchemaNamespaceConfig, ResolvedSchemaNamespace } from "@paykernel/sql-foundation";
 import type { PostgresExecutor } from "./executor";
 import { toSqlStoreExecutor } from "./executor";
 import { withMappedErrors } from "./errors";

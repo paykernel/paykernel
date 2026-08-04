@@ -23,7 +23,7 @@ This document answers: if a worker dies before or after a side effect and before
 
 - **Claims** are engine-level: one Lua script per transition (reserve/claim, renew, complete, fail, markIndeterminate, …).
 - Never get-then-set across connections for claim correctness.
-- Mutators fence on current `lease_token` inside the script. Tag `lease_lost` → `StoreLeaseLostError`.
+- Mutators fence on current `lease_token` **and** unexpired lease inside the script (complete **and** fail). Tag `lease_lost` → `StoreLeaseLostError`.
 - ZSET indexes (retry/due) update **inside** the same script as the HASH where applicable — not a separate non-atomic follow-up for the critical path.
 - **Pub/Sub is never** used for delivery correctness or retries.
 

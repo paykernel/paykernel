@@ -33,7 +33,7 @@
  * | lease owner / token / expiry| `leaseOwner` / `leaseToken` / `leaseExpiresAt` |
  * | first received              | `createdAt`                                |
  * | last received / updated     | `updatedAt`                                |
- * | next attempt                | `availableAt`                              |
+ * | next attempt (claim gate)   | `availableAt`                              |
  * | completion timestamp        | `updatedAt` when `status === "completed"`  |
  * | sanitized last error        | `lastError`                                |
  *
@@ -131,10 +131,19 @@ export type WebhookInboxRecord = {
   leaseOwner?: string | undefined;
   leaseToken?: LeaseToken | undefined;
   leaseExpiresAt?: IsoTimestamp | undefined;
+  /**
+   * Claim/handler attempt count. Each successful `claim` acquire increments by 1
+   * unless a subsequent `fail({ restoreAttempt: true })` undoes the parking claim
+   * (engine `ackAfterClaim` path). Engine `maxAttempts` is max **handler** attempts.
+   */
   attempts: number;
   lastError?: string | undefined;
   createdAt: IsoTimestamp;
   updatedAt: IsoTimestamp;
+  /**
+   * Earliest time a key-addressed `claim` may reacquire a **pending** row
+   * (true backoff). Also filters `listRetryable`. Set by `fail(retryAfterMs)`.
+   */
   availableAt: IsoTimestamp;
   /** Monotonic generation; increments on successful claim/renew. */
   generation: number;
@@ -149,12 +158,28 @@ export type ClaimWebhookInput = {
   payloadRef?: string;
 };
 
+/**
+ * Result of an atomic claim attempt.
+ *
+ * - `acquired` — caller holds the lease; run handler or park
+ * - `already_completed` / `duplicate_failed` — terminal; do not re-run
+ * - `in_progress` — active lease held by another worker
+ * - `payload_hash_conflict` — same key, different body hash
+ * - `not_available` — pending but `availableAt` is still in the future (backoff);
+ *   must **not** increment attempts; engine maps to `scheduled_for_retry`
+ */
 export type ClaimWebhookResult =
   | { kind: "acquired"; record: WebhookInboxRecord; leaseToken: LeaseToken }
   | { kind: "already_completed"; record: WebhookInboxRecord }
   | { kind: "in_progress"; record: WebhookInboxRecord }
   | { kind: "payload_hash_conflict"; record: WebhookInboxRecord }
-  | { kind: "duplicate_failed"; record: WebhookInboxRecord };
+  | { kind: "duplicate_failed"; record: WebhookInboxRecord }
+  | {
+      kind: "not_available";
+      record: WebhookInboxRecord;
+      /** Echo of `record.availableAt` (when the row becomes claimable). */
+      availableAt: IsoTimestamp;
+    };
 
 export type RenewWebhookLeaseInput = {
   key: WebhookEventKey;
@@ -185,8 +210,19 @@ export type FailWebhookInput = {
   error: string;
   /** When true, mark dead_letter; otherwise leave retryable (pending after lease). */
   deadLetter?: boolean;
-  /** Delay before next claim (ms). Default: immediate availability. */
+  /**
+   * Delay before the row is claimable again (ms). Sets `availableAt = now + retryAfterMs`.
+   * Applies to **both** key-addressed `claim` and `listRetryable` (true backoff).
+   * Default: immediate availability (`0`).
+   */
   retryAfterMs?: number;
+  /**
+   * When true, decrement `attempts` by 1 (floor 0) after this fail.
+   * Engine uses this for non-handler releases (`ackAfterClaim` parking) so the
+   * parking claim does not consume the `maxAttempts` **handler** budget.
+   * Adapters MUST treat `undefined` as false.
+   */
+  restoreAttempt?: boolean;
 };
 
 export type ListRetryableInput = {
@@ -208,12 +244,15 @@ export type ListRetryableInput = {
  * Same event key: second claim with same payload hash while in-progress → in_progress;
  * completed → already_completed; different hash → payload_hash_conflict;
  * dead_letter/failed → duplicate_failed;
+ * pending with `availableAt` in the future → `not_available` (no acquire, no attempt++);
  * expired lease may be re-acquired with a new fencing token (generation++).
  */
 export interface WebhookInboxStore extends WithTransaction {
   /**
-   * Atomic claim (or re-claim after lease expiry).
+   * Atomic claim (or re-claim after lease expiry / due availableAt).
    * Increments `generation` and issues a new unguessable `leaseToken` on acquire.
+   * MUST NOT acquire a pending row whose `availableAt` is still in the future —
+   * return `{ kind: "not_available", ... }` instead (no attempt increment).
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 
@@ -232,6 +271,8 @@ export interface WebhookInboxStore extends WithTransaction {
   /**
    * Record sanitized failure; optionally dead-letter or schedule retry.
    * **Requires active `leaseToken`.** Stale/wrong → {@link StoreLeaseLostError}.
+   * Sets `availableAt` from `retryAfterMs` (claim gate + list filter).
+   * When `restoreAttempt: true`, decrements `attempts` by 1 (floor 0).
    */
   fail(input: FailWebhookInput): Promise<void>;
 
