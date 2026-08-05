@@ -47,11 +47,12 @@ import {
  * Includes fee / capturedAmount / refundedAmount / clientSecret so after-hooks
  * cannot forge settlement totals or client secrets. Top-level `redirectUrl` and
  * `gatewayObjectId` are frozen so hooks cannot phishing-redirect customers or
- * forge secondary provider object IDs. `nextAction` and `references` are
- * deep-cloned (including nested redirect graphs such as
- * `redirect_to_url.url`) so hooks cannot forge/strip 3DS / redirect / OTP
- * action payloads or provider identity refs (`rawResponse` remains additive
- * and is intentionally not listed / not deep-cloned).
+ * forge secondary provider object IDs. `nextAction`, `references`, and `decline`
+ * are deep-cloned (including nested redirect graphs such as
+ * `redirect_to_url.url` and nested decline `code`/`message`/`softDecline`) so
+ * hooks cannot forge/strip 3DS / redirect / OTP action payloads, hard-fail vs
+ * soft-retry decline identity, or provider identity refs (`rawResponse` remains
+ * additive and is intentionally not listed / not deep-cloned).
  */
 const MONEY_IDENTITY_KEYS = [
     'success',
@@ -82,17 +83,18 @@ const MONEY_IDENTITY_KEYS = [
  * Nested money/identity object keys that must be fully detached (deep-cloned)
  * from the hook-visible clone and freeze snapshot so nested rewrites
  * (`nextAction.redirectUrl`, `nextAction.redirect_to_url.url`,
- * `references.providerObjectId`) cannot poison freeze — including when the
- * gateway aliases `nextAction` into `rawResponse` (e.g. Stripe).
+ * `references.providerObjectId`, `decline.code` / `decline.softDecline`) cannot
+ * poison freeze — including when the gateway aliases `nextAction` into
+ * `rawResponse` (e.g. Stripe).
  */
-const NESTED_IDENTITY_KEYS = ['nextAction', 'references'] as const;
+const NESTED_IDENTITY_KEYS = ['nextAction', 'references', 'decline'] as const;
 
 /**
  * Deep-clone plain objects / arrays (own enumerable props). Used for nested
- * identity fields (`nextAction`, `references`) so multi-level redirect graphs
- * are fully detached. Not for large additive bags like `rawResponse`.
- * Cycle-safe via WeakMap. Non-plain objects (class instances, Date, etc.) are
- * returned as-is — identity graphs are expected to be JSON-like.
+ * identity fields (`nextAction`, `references`, `decline`) so multi-level
+ * redirect/decline graphs are fully detached. Not for large additive bags like
+ * `rawResponse`. Cycle-safe via WeakMap. Non-plain objects (class instances,
+ * Date, etc.) are returned as-is — identity graphs are expected to be JSON-like.
  */
 function deepClonePlain(value: unknown, seen?: WeakMap<object, unknown>): unknown {
     if (value === null || typeof value !== 'object') {
@@ -155,9 +157,9 @@ function detachNestedIdentityFields<R>(result: R): R {
  * and cannot introduce identity fields (e.g. forge `outcome: 'succeeded'` or
  * clear `reconciliationRequired`) that the gateway did not set.
  *
- * Nested identity objects (`nextAction`, `references`) are always reattached as
- * deep clones of the freeze original so multi-level nested rewrites cannot
- * stick on the returned result.
+ * Nested identity objects (`nextAction`, `references`, `decline`) are always
+ * reattached as deep clones of the freeze original so multi-level nested
+ * rewrites cannot stick on the returned result.
  *
  * If `modified` is not a non-null object (null / undefined / primitive), it is
  * ignored and the original gateway result is returned unchanged.
@@ -183,7 +185,7 @@ function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
         if (Object.prototype.hasOwnProperty.call(orig, key)) {
             const origVal = orig[key];
             if (
-                (key === 'nextAction' || key === 'references') &&
+                (NESTED_IDENTITY_KEYS as readonly string[]).includes(key) &&
                 origVal !== null &&
                 typeof origVal === 'object'
             ) {
@@ -209,9 +211,10 @@ function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
  * Shallow-clone a gateway result so after-hooks that mutate the argument
  * in-place cannot poison the freeze snapshot used by restoreMoneyIdentityFields.
  *
- * Also deep-detaches nested identity objects (`nextAction`, `references`) so
- * multi-level rewrites (e.g. `redirect_to_url.url`, `providerObjectId`) do not
- * mutate the freeze snapshot. `rawResponse` is intentionally not deep-cloned.
+ * Also deep-detaches nested identity objects (`nextAction`, `references`,
+ * `decline`) so multi-level rewrites (e.g. `redirect_to_url.url`,
+ * `providerObjectId`, `decline.softDecline`) do not mutate the freeze snapshot.
+ * `rawResponse` is intentionally not deep-cloned.
  */
 function shallowCloneResult<R>(result: R): R {
     if (result === null || typeof result !== 'object') {

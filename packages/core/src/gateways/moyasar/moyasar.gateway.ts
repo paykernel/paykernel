@@ -37,7 +37,11 @@ import type {
   MoyasarWebhookPayload,
   WebhookEvent,
 } from "../../types/webhook.types";
-import { attachPaymentEvent } from "../../types/payment-event";
+import {
+  attachPaymentEvent,
+  paymentFromWebhookEvent,
+  PAYMENT_EVENT_SCHEMA_VERSION,
+} from "../../types/payment-event";
 import type { MoyasarConfig } from "../../types/config.types";
 import type { HooksManager } from "../../hooks/hooks.manager";
 import type { MoyasarPaymentSource } from "../../types/moyasar-source.types";
@@ -322,12 +326,16 @@ export class MoyasarGateway extends BaseGateway {
   ): Promise<R> {
     const store: IdempotencyStore | undefined = this.moyasarConfig.idempotencyStore;
     if (!store) {
+      // MOYASAR-2: fail closed — never silently ignore an explicit idempotencyKey.
+      // Unguarded capture/refund/void under a key pretends safety while allowing
+      // double-apply on retries / multi-worker (highest risk: double refund).
       if (idempotencyKey) {
-        this.logger.warn(
-          `[Moyasar] ${operation} was called with idempotencyKey but no ` +
-            "idempotencyStore is configured; the key is ignored and the mutation " +
-            "runs unguarded. Configure moyasar.idempotencyStore to protect " +
-            "capture/refund/void across retries and workers.",
+        throw new InvalidRequestError(
+          `Moyasar ${operation} was called with idempotencyKey but no ` +
+            "idempotencyStore is configured. Configure moyasar.idempotencyStore " +
+            "(preferably with atomic reserve()) before using idempotencyKey, or " +
+            "omit the key for a single unguarded attempt.",
+          [{ path: ["idempotencyKey"] }],
         );
       }
       return executor();
@@ -1091,7 +1099,11 @@ export class MoyasarGateway extends BaseGateway {
       rawPayload: rawWithoutSecret,
     };
 
-    return attachPaymentEvent(legacy, { computePayloadHash: true });
+    const attached = attachPaymentEvent(legacy, { computePayloadHash: true });
+    // Amount-derived partially_captured must not dual-write payment.succeeded /
+    // capture.completed (type-only over-fulfill). Align with Stripe/PayPal demotion
+    // and isPaidOutcome (partial is not paid-like).
+    return this.demotePartialCaptureWebhookDualWrite(attached);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1567,6 +1579,50 @@ export class MoyasarGateway extends BaseGateway {
     }
 
     return status;
+  }
+
+  /**
+   * When domain status is amount-derived `partially_captured`, demote Phase-7
+   * dual-write from `payment.succeeded` / `capture.completed` → `payment.processing`
+   * so type-only fulfillment matches `isPaidOutcome` (open money story).
+   *
+   * Moyasar envelope types `payment_paid` / `payment_captured` map to settled
+   * stable types before amount refinement; this mirrors Stripe
+   * `payment_intent.succeeded` + partial and PayPal non-final capture demotion.
+   */
+  private demotePartialCaptureWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (event.status !== "partially_captured" || !event.event || !event.provider) {
+      return event;
+    }
+
+    const settledArm =
+      event.stableType === "payment.succeeded" ||
+      event.stableType === "capture.completed" ||
+      event.event.type === "payment.succeeded" ||
+      event.event.type === "capture.completed";
+
+    if (!settledArm) {
+      return event;
+    }
+
+    // capture.completed.payment is optional; payment.processing requires Payment.
+    const payment =
+      ("payment" in event.event && event.event.payment
+        ? event.event.payment
+        : undefined) ?? paymentFromWebhookEvent(event);
+
+    return {
+      ...event,
+      stableType: "payment.processing",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "payment.processing",
+        payment,
+        provider: event.provider,
+      },
+    };
   }
 
   /**

@@ -274,9 +274,9 @@ Adapters **may** add first-class columns later without breaking this lean contra
 - Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
 - Unsanitized exception messages that may embed secrets
 
-**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **String** envelopes are stored as-is (opaque refs). Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
+**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **JSON string** envelopes that parse as object/array are also redacted then re-stringified; opaque non-JSON strings are stored as-is. On `durable_retry`, if `envelope` is omitted a redacted snapshot of `event` is stored so redrive has payment fields. Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
 
-Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
+Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). **Missing `payloadRef` never stubs** `{ key, payloadHash }` — workers dead-letter with `handler_failed { retryable: false }`. Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
 
 ---
 

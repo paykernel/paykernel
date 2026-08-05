@@ -152,4 +152,20 @@ describe("fixture safety", () => {
       }),
     ).not.toThrow();
   });
+
+  it("assertFixtureSafe rejects non-string cleartext under sensitive keys (TESTKIT-2)", () => {
+    // Numeric PAN-shaped value under a sensitive key must not pass CI
+    expect(() =>
+      assertFixtureSafe({ cardNumber: 4242424242424242 }),
+    ).toThrow(/sensitive key|non-string cleartext|fixture safety/i);
+    expect(() => assertFixtureSafe({ pan: 4111111111111111 })).toThrow();
+    expect(() => assertFixtureSafe({ password: true })).toThrow(
+      /sensitive key|non-string cleartext|fixture safety/i,
+    );
+    expect(() => assertFixtureSafe({ cvc: 123 })).toThrow();
+    // amount is allowlisted operational key — numbers OK
+    expect(() =>
+      assertFixtureSafe({ amount: 4242424242424242, currency: "USD" }),
+    ).not.toThrow();
+  });
 });

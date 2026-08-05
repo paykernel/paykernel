@@ -190,9 +190,10 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
 | Paymob | `TOKEN` | `payment_method.setup_completed` | |
 | Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context; **processed** server webhook only |
-| Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without refund flags) | **`refund.completed`** | Status `refunded`/`partially_refunded` + dual-write agree; **not** `payment.succeeded` |
-| Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled |
-| Paymob | `TRANSACTION` `partially_captured` (status or partial `captured_amount`) | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like); amount-aware capture logic required |
+| Paymob | `TRANSACTION` + signed `is_refunded` (or HMAC `is_refund` alias) | **`refund.completed`** | Domain status **`refund_completed`** (incomplete snapshot) — **not** full `refunded` / `partially_refunded`. Unsigned `refunded_amount_cents` is stripped after HMAC and cannot choose partial vs full |
+| Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without signed refund flags) | **ignored for refund** | Status stays non-refund; **not** `payment.succeeded` and **not** forged `refunded` |
+| Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled; capture totals on webhooks still require inquiry for multi-partial (unsigned `captured_amount` stripped) |
+| Paymob | `TRANSACTION` `partially_captured` (status or partial `captured_amount` on **API** path) | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like); amount-aware capture logic required |
 | Paymob | `TRANSACTION` `is_capture` + success | `capture.completed` | Capture domain; still amount-aware for partials |
 | Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
 | Paymob | `TRANSACTION_RESPONSE` + success / paid / capture signals | **`payment.processing`** | **Never** `payment.succeeded` / `capture.completed` on redirect; wait for processed `TRANSACTION` |
@@ -224,12 +225,16 @@ handlers that fulfill solely on `payment.succeeded` will not over-fulfill
 partials; amount-aware logic still needed for partial inventory/settlement.
 Fulfill only with status `paid` or `isPaidOutcome`.
 
-**Paymob amount-only refunds:** Prefer `status` / amount-derived signals over bare
-`success` flags. When Paymob sends `refunded_amount_cents > 0` without `is_refund`
-/ `is_refunded`, dual-write sets `stableType` / `PaymentEvent.type` to
-`refund.completed` (matching status `refunded` / `partially_refunded`) — **not**
-`payment.succeeded`. Fulfillment handlers that key only on `payment.succeeded`
-must not treat amount-only refund TRANSACTION webhooks as paid.
+**Paymob refund HMAC honesty:** Transaction HMAC covers signed refund flags
+(`is_refunded` / `is_refund` when it is the HMAC source), **not**
+`refunded_amount_cents`. After verify the SDK **always strips** unsigned
+`refunded_amount_cents` / `captured_amount` / `is_captured` before status map.
+Signed `is_refunded: true` → domain status **`refund_completed`** (incomplete
+money snapshot) with dual-write `refund.completed`; partial vs full completeness
+requires transaction inquiry. Refund domain webhooks **omit `amount`** when no
+trusted refunded total is available so consumers do not book order
+`amount_cents` as the refund. Amount-only `refunded_amount_cents` without a signed
+refund flag does **not** upgrade status to refunded.
 
 Tables are pure data (`STRIPE_EVENT_TYPE_MAP`, `MOYASAR_EVENT_TYPE_MAP`,
 `PAYPAL_EVENT_TYPE_MAP`, …) plus `mapProviderEventTypeToStable`.

@@ -337,7 +337,10 @@ Partial refunds take precedence over partial capture when both amount fields app
 
 **Partial capture outcome:** `partially_captured` maps to operation outcome
 `requires_action` (open money story), not `succeeded`. `isPaidOutcome` is false either
-way (paid-like is `paid` only).
+way (paid-like is `paid` only). On webhooks, Phase-7 dual-write also demotes
+`payment_paid` / `payment_captured` from `payment.succeeded` / `capture.completed` to
+`payment.processing` when status is amount-derived `partially_captured`, so type-only
+handlers cannot over-fulfill.
 
 ## Capture Payment
 
@@ -484,6 +487,12 @@ payment total. For `payment_captured` / `partially_captured`, amount prefers
 **captured**. Do not restock or ship from `event.amount` alone without also checking
 `status` and re-fetching when amounts are incomplete.
 
+**Phase-7 dual-write honesty:** When amount refinement yields `partially_captured`,
+`event.stableType` / `event.event.type` are demoted to `payment.processing` even if
+the Moyasar envelope was `payment_paid` or `payment_captured` (those would otherwise
+map to `payment.succeeded` / `capture.completed`). Provider-native `event.type` is
+unchanged. Full capture still dual-writes settled types.
+
 ### Unsupported: card authentication webhooks
 
 Standalone 3DS (`card_auth_*`) webhooks — e.g. `card_auth_authenticated`,
@@ -511,9 +520,10 @@ failures clear the reservation so a caller retry is allowed.
 
 **Production multi-worker deployments must configure `idempotencyStore`** (Redis,
 SQL, or another shared store). The in-memory store only dedupes within a single
-process. The SDK logs a warning when no store is configured, and again (once per
-mutation call) when you pass `idempotencyKey` without a store — the key is
-ignored in that case and the mutation runs unguarded.
+process. The SDK logs a warning when no store is configured. Passing
+`idempotencyKey` **without** a store **throws** `InvalidRequestError` (fail-closed)
+so callers cannot believe the key is protecting a mutation that still runs
+unguarded — configure the store or omit the key for a single unguarded attempt.
 
 ```typescript
 import { PaymentClient, InMemoryIdempotencyStore } from '@paykernel/core';

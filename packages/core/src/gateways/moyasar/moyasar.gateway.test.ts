@@ -1644,6 +1644,36 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("partially_captured");
       expect(event.amount).toBe(40);
+      // Dual-write demotion: not capture.completed (type-only over-fulfill).
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      // Provider-native type stays on the envelope.
+      expect(event.type).toBe("payment_captured");
+    });
+
+    it("demotes payment_paid + amount-derived partially_captured dual-write to payment.processing", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_partial_paid",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 4000,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.amount).toBe(40);
+      // Never dual-write payment.succeeded while domain status is partial.
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.type).toBe("payment_paid");
+      expect(event.provider?.eventType).toBe("payment_paid");
     });
 
     it("uses full captured amount on payment_paid when captured is present", () => {
@@ -1663,6 +1693,9 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("paid");
       expect(event.amount).toBe(100);
+      // Full settlement keeps payment.succeeded dual-write.
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.succeeded");
     });
 
     it("maps unmapped provider statuses to failed (fail-closed)", () => {
@@ -2113,21 +2146,20 @@ describe("MoyasarGateway", () => {
       );
     });
 
-    it("warns once per mutation when idempotencyKey is set without a store", async () => {
-      const { warnings, logger } = captureWarnings();
+    it("fails closed when idempotencyKey is set without a store (MOYASAR-2)", async () => {
+      const { logger } = captureWarnings();
       const gateway = new MoyasarGateway(CONFIG, new HooksManager(), logger);
       mockFetchJson(paymentResponse({ status: "refunded", refunded: 10000 }));
 
-      await gateway.refundPayment({
-        gatewayPaymentId: PAYMENT_ID,
-        idempotencyKey: "unguarded-key",
-      });
+      await expect(
+        gateway.refundPayment({
+          gatewayPaymentId: PAYMENT_ID,
+          idempotencyKey: "unguarded-key",
+        }),
+      ).rejects.toThrow(/idempotencyKey but no idempotencyStore/);
 
-      const mutationWarnings = warnings.filter((w) =>
-        w.includes("idempotencyKey but no idempotencyStore"),
-      );
-      expect(mutationWarnings).toHaveLength(1);
-      expect(fetchCalls).toHaveLength(1);
+      // Must not hit the network — key without store is not silently unguarded.
+      expect(fetchCalls).toHaveLength(0);
     });
   });
 });

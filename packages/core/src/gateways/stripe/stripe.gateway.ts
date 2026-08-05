@@ -23,7 +23,11 @@ import type {
   StripeWebhookPayload,
   WebhookEvent,
 } from "../../types/webhook.types";
-import { attachPaymentEvent } from "../../types/payment-event";
+import {
+  attachPaymentEvent,
+  paymentFromWebhookEvent,
+  PAYMENT_EVENT_SCHEMA_VERSION,
+} from "../../types/payment-event";
 import type { ProviderEventMapContext } from "../../types/webhook-event-map";
 import type { StripeConfig } from "../../types/config.types";
 import type { HooksManager } from "../../hooks/hooks.manager";
@@ -1050,7 +1054,17 @@ export class StripeGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
+        // Succeeded PI: same settled-amount fail-closed as getPayment/capture.
+        // Missing amount_received/amount_captured → processing (not full paid).
+        const status =
+          response.status === "succeeded"
+            ? this.succeededPaymentIntentWebhookStatus(
+                response as unknown as StripeWebhookPayload["data"]["object"],
+              )
+            : undefined;
+
         return this.mapPaymentIntentResult(response, {
+          ...(status !== undefined ? { status } : {}),
           amount: fromStripeAmount(
             response.amount,
             response.currency ?? currency,
@@ -1808,7 +1822,10 @@ export class StripeGateway extends BaseGateway {
           status = "refunded";
         } else if (
           typeof charge.amount_refunded === "number" &&
-          Number.isFinite(charge.amount_refunded)
+          Number.isFinite(charge.amount_refunded) &&
+          // Align with getPayment: amount_refunded must be > 0. Zero is not a
+          // proven partial refund (would overstate money moved as partial).
+          charge.amount_refunded > 0
         ) {
           const capturedBase =
             typeof charge.amount_captured === "number" &&
@@ -1823,8 +1840,8 @@ export class StripeGateway extends BaseGateway {
               ? "refunded"
               : "partially_refunded";
         } else {
-          // Incomplete snapshot: do not fail-open to full `refunded`. Align with
-          // mapStripeRefundWebhookStatus → refund_completed when totals incomplete.
+          // Incomplete snapshot (missing or zero amount_refunded without
+          // refunded:true): do not fail-open to full `refunded` or invent partial.
           status = "refund_completed";
         }
         break;
@@ -1917,10 +1934,13 @@ export class StripeGateway extends BaseGateway {
       mapContext.mode = sessionMode;
     }
 
-    return attachPaymentEvent(legacy, {
+    const attached = attachPaymentEvent(legacy, {
       computePayloadHash: true,
       mapContext,
     });
+    // Incomplete settled money (status processing) must not dual-write
+    // payment.succeeded — type-only handlers would over-fulfill (STRIPE-1).
+    return this.demoteIncompleteSettledWebhookDualWrite(attached);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2152,6 +2172,11 @@ export class StripeGateway extends BaseGateway {
   /**
    * Stripe PI native status → operation outcome.
    * requires_action / requires_payment_method / requires_confirmation never succeed.
+   *
+   * **Fulfillment honesty:** `outcome === "succeeded"` is not paid alone.
+   * Prefer {@link import('../../types/operation-result').isPaidOutcome} or
+   * `status === "paid"`. Partial capture is open money → `requires_action`
+   * (Paymob parity; isPaidOutcome excludes partially_captured).
    */
   private mapStripeOutcome(
     nativeStatus: string,
@@ -2176,12 +2201,52 @@ export class StripeGateway extends BaseGateway {
       // forceOutcome: "succeeded" for intentional void completion.
       return "failed";
     }
-    if (mappedStatus === "pending" || mappedStatus === "processing") {
-      // Still settling / needs confirm — never fulfill as paid.
+    if (
+      mappedStatus === "pending" ||
+      mappedStatus === "processing" ||
+      // Open money: partial capture is not full settlement (Paymob demotes too).
+      mappedStatus === "partially_captured"
+    ) {
+      // Still settling / needs confirm / incomplete capture — never fulfill as paid.
       return "requires_action";
     }
-    // paid | authorized | partially_* | refunded
+    // paid | authorized | partially_refunded | refunded | setup_completed
     return "succeeded";
+  }
+
+  /**
+   * When domain status is `processing` on `payment_intent.succeeded` (incomplete
+   * settled snapshot), demote Phase-7 dual-write from `payment.succeeded` →
+   * `payment.processing` so type-only fulfillment matches isPaidOutcome.
+   * Partial capture is already demoted in webhook-event-map; this covers the
+   * fail-closed incomplete-settled arm (STRIPE-1).
+   */
+  private demoteIncompleteSettledWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (
+      event.status !== "processing" ||
+      event.type !== "payment_intent.succeeded" ||
+      event.stableType !== "payment.succeeded" ||
+      !event.event ||
+      event.event.type !== "payment.succeeded" ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    const payment = event.event.payment ?? paymentFromWebhookEvent(event);
+
+    return {
+      ...event,
+      stableType: "payment.processing",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "payment.processing",
+        payment,
+        provider: event.provider,
+      },
+    };
   }
 
   /**

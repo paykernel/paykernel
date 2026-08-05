@@ -1411,6 +1411,179 @@ describe('PaymentClient after-hook post-success isolation', () => {
         expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
     });
 
+    it('cannot rewrite nested decline identity via after-hook in-place or replace', async () => {
+        // CORE-1 (audit): decline is nested identity — shallow restore is not enough.
+        // Hooks must not forge hard-fail vs soft-retry or customer-facing decline codes.
+        const gatewayDecline = {
+            code: 'card_declined',
+            message: 'Your card was declined',
+            providerCode: 'generic_decline',
+            softDecline: false,
+            raw: { network_status: 'declined_by_network' },
+        };
+
+        class DeclineFreezeGateway extends BaseGateway {
+            readonly name = 'declinefreeze';
+
+            constructor(hooks: HooksManager) {
+                super({}, hooks, undefined, {
+                    payments: true,
+                    immediateCapture: true,
+                    authorization: false,
+                    partialCapture: false,
+                    refunds: false,
+                    partialRefunds: false,
+                    voids: false,
+                });
+            }
+
+            async createPayment(
+                params: CreatePaymentParams,
+            ): Promise<GatewayPaymentResult> {
+                return this.executeWithHooks('createPayment', params, async () => ({
+                    success: false,
+                    outcome: 'declined' as const,
+                    gatewayId: 'pi_declined_real',
+                    status: 'failed' as const,
+                    amount: params.amount,
+                    decline: gatewayDecline,
+                    rawResponse: { last_payment_error: { decline_code: 'generic_decline' } },
+                }));
+            }
+
+            async capturePayment(): Promise<GatewayPaymentResult> {
+                throw new OperationNotSupportedError('capture', this.name);
+            }
+
+            async refundPayment(): Promise<GatewayRefundResult> {
+                throw new OperationNotSupportedError('refund', this.name);
+            }
+
+            verifyWebhook(): boolean {
+                return true;
+            }
+
+            parseWebhookEvent(payload: unknown): WebhookEvent {
+                return {
+                    id: 'evt_decline_freeze',
+                    type: 'payment_failed',
+                    gateway: this.name,
+                    paymentId: undefined,
+                    gatewayPaymentId: 'pi_declined_real',
+                    status: 'failed',
+                    timestamp: new Date(),
+                    rawPayload: payload,
+                };
+            }
+        }
+
+        const client = createPaymentClient({
+            gateways: {
+                declinefreeze: {
+                    name: 'declinefreeze',
+                    manifest: {
+                        name: 'declinefreeze',
+                        displayName: 'Decline Freeze Test',
+                    },
+                    create(ctx: GatewayContext) {
+                        return new DeclineFreezeGateway(ctx.hooks);
+                    },
+                },
+            },
+            defaultGateway: 'declinefreeze',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => {
+                    const d = result.decline as
+                        | {
+                              code?: string;
+                              message?: string;
+                              softDecline?: boolean;
+                              raw?: { network_status?: string };
+                          }
+                        | undefined;
+                    if (d && typeof d === 'object') {
+                        d.code = 'insufficient_funds';
+                        d.message = 'forged soft message';
+                        d.softDecline = true;
+                        if (d.raw && typeof d.raw === 'object') {
+                            d.raw.network_status = 'forged_approved_for_retry';
+                        }
+                    }
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            decline: {
+                                code: 'replaced_soft',
+                                message: 'replaced entirely',
+                                softDecline: true,
+                                raw: { network_status: 'replaced' },
+                            },
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 10,
+            currency: 'USD',
+        });
+
+        expect(result.outcome).toBe('declined');
+        expect(result.success).toBe(false);
+        expect(result.decline).toEqual(gatewayDecline);
+        expect(result.decline?.code).toBe('card_declined');
+        expect(result.decline?.softDecline).toBe(false);
+        expect(
+            (result.decline?.raw as { network_status?: string } | undefined)
+                ?.network_status,
+        ).toBe('declined_by_network');
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot invent decline via after-hook when gateway omitted it', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_no_decline',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 2000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        decline: {
+                            code: 'forged_decline',
+                            message: 'hook invented decline',
+                            softDecline: false,
+                        },
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_no_decline',
+        });
+
+        expect(result.gatewayId).toBe('pi_no_decline');
+        expect(result.outcome).toBe('succeeded');
+        expect(result.decline).toBeUndefined();
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
     it('restores money identity fields when after-hook mutates result in place', async () => {
         globalThis.fetch = mock(async () =>
             createMockResponse({
@@ -1650,6 +1823,46 @@ describe('PaymentClient webhook error isolation', () => {
         }
         expect(firstCalled).toBe(true);
         expect(secondCalled).toBe(false);
+    });
+
+    it('CORE-2: onWebhookVerified cannot rewrite verified status/amount/ids/stableType', async () => {
+        const client = new PaymentClient({
+            moyasar: {
+                secretKey: 'sk_test_moyasar',
+                webhookSecret: 'whsec_moyasar_test',
+            },
+            defaultGateway: 'moyasar',
+            hooks: {
+                onWebhookVerified: async (event) => {
+                    event.status = 'failed';
+                    event.amount = 1;
+                    event.gatewayPaymentId = 'forged_pay';
+                    event.stableType = 'payment.failed';
+                    if (event.event && 'type' in event.event) {
+                        (event.event as { type: string }).type = 'payment.failed';
+                    }
+                },
+            },
+        });
+
+        const event = await client.handleWebhook('moyasar', {
+            id: 'evt_paid_core2',
+            type: 'payment_paid',
+            created_at: '2024-01-01T00:00:00Z',
+            secret_token: 'whsec_moyasar_test',
+            data: {
+                id: 'pay_core2',
+                status: 'paid',
+                amount: 5000,
+                currency: 'SAR',
+            },
+        });
+
+        expect(event.status).toBe('paid');
+        expect(event.gatewayPaymentId).toBe('pay_core2');
+        expect(event.amount).toBe(50);
+        expect(event.stableType).toBe('payment.succeeded');
+        expect(event.event?.type).toBe('payment.succeeded');
     });
 });
 

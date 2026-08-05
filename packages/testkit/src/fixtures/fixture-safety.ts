@@ -182,6 +182,14 @@ export function findFixtureSafetyIssues(
             reason: `sensitive key "${k}" must not hold cleartext in fixtures`,
             evidence: truncate(String(v)),
           });
+        } else if (typeof v === "number" || typeof v === "boolean") {
+          // TESTKIT-2: numeric PANs / secret booleans under sensitive keys
+          // must not pass CI just because they are non-string.
+          issues.push({
+            path: child,
+            reason: `sensitive key "${k}" must not hold non-string cleartext in fixtures`,
+            evidence: truncate(String(v)),
+          });
         } else if (typeof v === "object") {
           // Nested objects under sensitive keys still walked below
         }

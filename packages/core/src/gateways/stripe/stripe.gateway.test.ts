@@ -619,6 +619,35 @@ describe("StripeGateway", () => {
       expect(event.gatewayPaymentId).toBe("pi_flag_full");
     });
 
+    it("should fail closed on charge.refunded when amount_refunded is 0 (not partially_refunded)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_charge_refunded_zero",
+        type: "charge.refunded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "ch_zero_refund",
+            object: "charge",
+            status: "succeeded",
+            amount: 2500,
+            amount_captured: 2500,
+            amount_refunded: 0,
+            refunded: false,
+            currency: "usd",
+            payment_intent: "pi_zero_refund",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      // STRIPE-4: zero amount_refunded is not a proven partial refund.
+      expect(event.status).toBe("refund_completed");
+      expect(event.status).not.toBe("partially_refunded");
+      expect(event.status).not.toBe("refunded");
+      expect(event.amount).toBe(25);
+    });
+
     it("should compare charge.refunded amount_refunded to amount_captured when present", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_charge_captured_base",
@@ -997,10 +1026,15 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      // STRIPE-2: missing settled amount must not claim full paid / isPaidOutcome.
+      // Domain status fail-closed (incomplete settled).
       expect(event.status).toBe("processing");
       expect(event.status).not.toBe("paid");
       expect(event.amount).toBe(100); // authorized amount only (display)
+      // STRIPE-1: dual-write must not promote incomplete settled to payment.succeeded
+      // (type-only handlers would over-fulfill on auth amount alone).
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
     });
 
     it("should use amount_captured fallback when amount_received is missing", () => {
@@ -1718,6 +1752,54 @@ describe("StripeGateway", () => {
       expect(result.amount).toBe(1.29);
     });
 
+    it("should fail closed on createPayment when PI succeeded but settled amount missing", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_create_incomplete",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 5000,
+          currency: "usd",
+          client_secret: null,
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+        stripePaymentMethodId: "pm_card_visa",
+      });
+
+      // STRIPE-3: never map succeeded→paid without settled amount.
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.outcome).not.toBe("succeeded");
+      expect(result.amount).toBe(50);
+    });
+
+    it("should mark createPayment paid when succeeded with amount_received", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_create_paid",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 5000,
+          amount_received: 5000,
+          currency: "usd",
+          client_secret: null,
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+        stripePaymentMethodId: "pm_card_visa",
+      });
+
+      expect(result.status).toBe("paid");
+      expect(result.outcome).toBe("succeeded");
+    });
+
     it("should reject Stripe metadata keys that exceed Stripe limits", async () => {
       await expect(
         gateway.createPayment({
@@ -1811,6 +1893,9 @@ describe("StripeGateway", () => {
 
       expect(result.status).toBe("partially_captured");
       expect(result.amount).toBe(60);
+      // STRIPE-2: open money is not outcome-succeeded (Paymob parity / isPaidOutcome).
+      expect(result.outcome).toBe("requires_action");
+      expect(result.outcome).not.toBe("succeeded");
     });
 
     it("should fail closed when capture response omits amount_received and amount_captured", async () => {

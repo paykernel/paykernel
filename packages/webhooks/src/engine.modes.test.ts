@@ -56,6 +56,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       gateway: "stripe",
       providerEventId: "evt_durable_fail",
       payloadHash: "hash1",
+      event: { id: "evt_durable_fail", type: "payment.succeeded" },
       handler: async () => {
         throw new Error("temporary outage");
       },
@@ -68,6 +69,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
     const rec = await store.get("stripe:evt_durable_fail");
     expect(rec?.status).toBe("pending");
     expect(rec?.lastError).toContain("temporary outage");
+    expect(rec?.payloadRef).toContain("payment.succeeded");
   });
 
   it("inline non-retryable → handler_failed retryable false + dead_letter", async () => {
@@ -133,12 +135,40 @@ describe("modes: inline vs durable_retry (A6)", () => {
       payloadHash: "h",
     });
 
-    expect(outcome).toEqual({
-      outcome: "invalid_webhook",
-      reason:
-        "envelope is required for ackAfterClaim (durable workers need a payloadRef)",
-    });
+    expect(outcome.outcome).toBe("invalid_webhook");
+    if (outcome.outcome === "invalid_webhook") {
+      expect(outcome.reason).toMatch(/envelope is required for ackAfterClaim/i);
+    }
     expect(store.size).toBe(0);
+  });
+
+  it("ackAfterClaim parks using redacted event when envelope omitted", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack_from_event",
+      payloadHash: "h",
+      event: {
+        id: "evt_ack_from_event",
+        type: "payment.succeeded",
+        secret_token: "tok",
+      },
+    });
+
+    expect(outcome).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "parked",
+    });
+    const rec = await store.get("stripe:evt_ack_from_event");
+    expect(rec?.status).toBe("pending");
+    expect(rec?.payloadRef).toContain("payment.succeeded");
+    expect(rec?.payloadRef).not.toContain('"tok"');
   });
 
   it("ackAfterClaim with empty-string envelope refuses before claim", async () => {
@@ -266,10 +296,12 @@ describe("modes: inline vs durable_retry (A6)", () => {
     });
     expect(o1.outcome).toBe("handler_failed");
 
+    // durable_retry with event → payloadRef snapshot → handler_retry on throw
     const o2 = await durable.processVerified({
       gateway: "g",
       providerEventId: "m2",
       payloadHash: "h2",
+      event: { id: "m2", type: "payment.succeeded" },
       handler: async () => {
         throw new Error("x");
       },
@@ -278,6 +310,80 @@ describe("modes: inline vs durable_retry (A6)", () => {
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });
+    const rec = await store.get("g:m2");
+    expect(rec?.payloadRef).toContain("payment.succeeded");
+  });
+
+  it("durable_retry without envelope/event dead-letters retryable failure (no stub redrive)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_no_payload",
+      payloadHash: "h",
+      // no envelope, no event → no payloadRef
+      handler: async () => {
+        throw new Error("transient");
+      },
+    });
+
+    expect(outcome).toEqual({
+      outcome: "handler_failed",
+      retryable: false,
+    });
+    const rec = await store.get("stripe:evt_no_payload");
+    expect(rec?.status).toBe("dead_letter");
+    expect(rec?.lastError).toMatch(/missing payloadRef/i);
+  });
+
+  it("processRetryable dead-letters rows with missing payloadRef (never stubs event)", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    // Seed a legacy pending row without payloadRef (simulates pre-fix durable fail).
+    const claim = await store.claim({
+      key: "stripe:evt_legacy_stub",
+      payloadHash: "h_legacy",
+      owner: "seed",
+      leaseMs: 30_000,
+    });
+    if (claim.kind !== "acquired") throw new Error("expected acquired");
+    await store.fail({
+      key: "stripe:evt_legacy_stub",
+      leaseToken: claim.leaseToken,
+      error: "prior fail",
+      retryAfterMs: 0,
+    });
+
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+    });
+
+    let handlerRuns = 0;
+    let seenEvent: unknown;
+    const result = await engine.processRetryable({
+      handler: async (ctx) => {
+        handlerRuns++;
+        seenEvent = ctx.event;
+      },
+    });
+
+    expect(handlerRuns).toBe(0);
+    expect(seenEvent).toBeUndefined();
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({
+      outcome: "handler_failed",
+      retryable: false,
+    });
+    const rec = await store.get("stripe:evt_legacy_stub");
+    expect(rec?.status).toBe("dead_letter");
+    expect(rec?.lastError).toMatch(/missing payloadRef/i);
   });
 });
 
@@ -441,6 +547,87 @@ describe("processRetryable default envelope unwrap", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
     expect(seen).toBe("opaque-ref-token");
+  });
+
+  it("JSON-string envelope is redacted before payloadRef store", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_json_str",
+      payloadHash: "h",
+      envelope: JSON.stringify({
+        id: "evt_json_str",
+        secret_token: "leak-me-please",
+        type: "payment.succeeded",
+      }),
+    });
+
+    expect(outcome).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "parked",
+    });
+    const rec = await store.get("stripe:evt_json_str");
+    expect(rec?.payloadRef).toBeDefined();
+    expect(rec?.payloadRef).not.toContain("leak-me-please");
+    expect(rec?.payloadRef).toContain("[REDACTED]");
+    expect(rec?.payloadRef).toContain("evt_json_str");
+  });
+
+  it("durable_retry snapshots redacted event into payloadRef when envelope omitted", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+      clock,
+    });
+
+    const event = {
+      id: "evt_from_event",
+      type: "payment.succeeded",
+      secret_token: "should-redact",
+      amount: 1000,
+    };
+
+    const failOnce = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_from_event",
+      payloadHash: "h_evt",
+      event,
+      handler: async () => {
+        throw new Error("transient");
+      },
+    });
+    expect(failOnce).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
+
+    const pending = await store.get("stripe:evt_from_event");
+    expect(pending?.payloadRef).toBeDefined();
+    expect(pending?.payloadRef).not.toContain("should-redact");
+    expect(pending?.payloadRef).toContain("[REDACTED]");
+
+    let seen: unknown;
+    const result = await engine.processRetryable({
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
+    expect(seen).toMatchObject({
+      id: "evt_from_event",
+      type: "payment.succeeded",
+      amount: 1000,
+    });
+    expect((seen as { secret_token?: string }).secret_token).toBe("[REDACTED]");
   });
 });
 

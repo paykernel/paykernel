@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import type { Money } from "@paykernel/core";
 import { resolveProviderSnapshot, type ProviderLookupPort } from "./lookup";
+import { decideReconciliationPolicy } from "./policy";
 import {
   buildProviderPaymentSnapshot,
   type ProviderPaymentSnapshot,
@@ -95,6 +96,10 @@ describe("safe lookup order", () => {
         result.differences.some((d) => d.field === "gatewayPaymentId"),
       ).toBe(true);
     }
+    // Policy must not safe-upgrade against the wrong charge
+    const decision = decideReconciliationPolicy(result, target);
+    expect(decision.action).not.toBe("update_local_to_paid");
+    expect(decision.safe).toBe(false);
   });
 
   it("falls back through localReference then providerRequestId", async () => {

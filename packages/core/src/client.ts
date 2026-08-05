@@ -44,6 +44,81 @@ import {
 import { createRedactingLogger, noopLogger, type Logger } from "./utils/logger";
 
 /**
+ * Deep-clone a verified {@link WebhookEvent} for `onWebhookVerified` hooks.
+ *
+ * CORE-2: hooks must not rewrite money/status identity (status, amount, ids,
+ * stableType, dual-write event) on the object returned to callers. `Date`
+ * timestamps are re-instantiated; `rawPayload` is shallow-copied when it is a
+ * plain object so hook annotation of raw is isolated from the returned event.
+ */
+function cloneWebhookEventForHooks(event: WebhookEvent): WebhookEvent {
+  const clone: WebhookEvent = {
+    id: event.id,
+    type: event.type,
+    gateway: event.gateway,
+    paymentId: event.paymentId,
+    gatewayPaymentId: event.gatewayPaymentId,
+    status: event.status,
+    timestamp: new Date(event.timestamp.getTime()),
+    rawPayload: clonePlainJson(event.rawPayload),
+  };
+  if (event.gatewayObjectId !== undefined) {
+    clone.gatewayObjectId = event.gatewayObjectId;
+  }
+  if (event.gatewaySubscriptionId !== undefined) {
+    clone.gatewaySubscriptionId = event.gatewaySubscriptionId;
+  }
+  if (event.gatewayToken !== undefined) {
+    clone.gatewayToken = event.gatewayToken;
+  }
+  if (event.livemode !== undefined) {
+    clone.livemode = event.livemode;
+  }
+  if (event.apiVersion !== undefined) {
+    clone.apiVersion = event.apiVersion;
+  }
+  if (event.amount !== undefined) {
+    clone.amount = event.amount;
+  }
+  if (event.currency !== undefined) {
+    clone.currency = event.currency;
+  }
+  if (event.schemaVersion !== undefined) {
+    clone.schemaVersion = event.schemaVersion;
+  }
+  if (event.event !== undefined) {
+    clone.event = clonePlainJson(event.event) as typeof event.event;
+  }
+  if (event.provider !== undefined) {
+    clone.provider = clonePlainJson(event.provider) as typeof event.provider;
+  }
+  if (event.stableType !== undefined) {
+    clone.stableType = event.stableType;
+  }
+  if (event.payloadHash !== undefined) {
+    clone.payloadHash = event.payloadHash;
+  }
+  return clone;
+}
+
+function clonePlainJson(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (value instanceof Date) {
+    return new Date(value.getTime());
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => clonePlainJson(item));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    out[k] = clonePlainJson(v);
+  }
+  return out;
+}
+
+/**
  * Whether a gateway exposes a Phase 3 capability surface
  * (`capabilities` + `supports`). Pre-Phase-3 plain objects omit these and
  * fall back to optional-method presence checks only.
@@ -663,12 +738,16 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       event = attachPaymentEvent(event, { computePayloadHash: true });
     }
 
+    // CORE-2: hooks receive a deep clone. Mutations to status/amount/ids/stableType
+    // must not rewrite the verified event returned to callers (false fulfillment).
+    const forHooks = cloneWebhookEventForHooks(event);
+
     // Verified path: onWebhookVerified failures are rethrown so the HTTP
     // handler can return 5xx and the provider will retry. Log first so the
     // failure is visible even if the caller swallows the error. (Unlike
     // onWebhookFailed, we do not swallow — fulfillment must not silently skip.)
     try {
-      await this.hooksManager.runWebhookVerified(event);
+      await this.hooksManager.runWebhookVerified(forHooks);
     } catch (hookError) {
       this.logger.error("onWebhookVerified hook failed", {
         gateway,

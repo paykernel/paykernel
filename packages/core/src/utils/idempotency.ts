@@ -194,16 +194,27 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  * Money / AmountInput shapes are canonicalized so economically identical
  * amounts fingerprint the same way, e.g. `money("10.50","SAR")`,
  * `{ amount: "10.50", currency: "SAR" }`, and `{ amount: 10.5, currency: "SAR" }`.
+ * Duck-typed bags with extra keys keep those siblings (orderId, etc.) so they
+ * cannot collide after amount/currency normalization.
  *
- * Non-JSON primitives are encoded distinctly: `NaN`/`Infinity` do not collapse
- * to `null`, `bigint` does not throw, and `Date` uses ISO-8601 rather than `{}`.
+ * Non-JSON primitives use unquoted type tags so they never equal the JSON
+ * encoding of ordinary strings: `NaN`/`Infinity`/`undefined`/`bigint` do not
+ * collide with `"NaN"` / `"Infinity"` / `"undefined"` / `"10n"`. `Date` uses
+ * ISO-8601 rather than `{}`.
  */
 export function fingerprintParams(value: unknown): string {
   return stableStringify(value);
 }
 
-/** Sentinel so `undefined` does not collapse to the same encoding as `null`. */
-const UNDEFINED_SENTINEL = '"__undefined__"';
+/**
+ * Unquoted type tags for values JSON cannot represent faithfully.
+ * Ordinary strings are always `JSON.stringify`'d (quoted), so these never
+ * collide with string forms like `"NaN"` or `"10n"`.
+ */
+const UNDEFINED_TAG = "undefined";
+const NAN_TAG = "NaN";
+const POS_INFINITY_TAG = "Infinity";
+const NEG_INFINITY_TAG = "-Infinity";
 
 /** Parse options that never reject zero/negative amounts during fingerprinting. */
 const FINGERPRINT_MONEY_OPTS = {
@@ -212,15 +223,31 @@ const FINGERPRINT_MONEY_OPTS = {
 } as const;
 
 /**
+ * True when `value` has only `amount` and/or `currency` own keys (pure Money).
+ * Bags with extra siblings must not be reduced to amount+currency alone.
+ */
+function isPureMoneyKeys(value: object): boolean {
+  for (const key of Object.keys(value)) {
+    if (key !== "amount" && key !== "currency") {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Try to normalize an amount+currency pair to canonical Money major-unit form.
  * Returns undefined when the value cannot be parsed as money (caller falls back
  * to structural encoding).
  *
  * - `number` / decimal `string` amounts use the sibling `currency`.
  * - Nested {@link Money} under `amount` is re-validated via its own currency;
- *   the sibling currency is still normalized so
+ *   only when the sibling currency matches (case-insensitive) do we collapse to
+ *   `{ amount: "10.50", currency: "SAR" }` so
  *   `{ amount: money("10.50","SAR"), currency: "SAR" }` matches
  *   `{ amount: 10.5, currency: "SAR" }`.
+ * - On currency mismatch, returns undefined so structural encoding keeps the
+ *   nested Money currency distinct from the sibling.
  */
 function tryCanonicalAmountCurrency(
   amount: unknown,
@@ -238,12 +265,8 @@ function tryCanonicalAmountCurrency(
       if (sibling === m.currency) {
         return { amount: m.amount, currency: m.currency };
       }
-      // Mismatched sibling still collapses the nested Money amount string so
-      // structural fingerprints stay stable; currencies remain distinct.
-      if (sibling.length > 0) {
-        return { amount: m.amount, currency: sibling };
-      }
-      return { amount: m.amount, currency: m.currency };
+      // Mismatched sibling: do not overwrite nested Money.currency.
+      return undefined;
     }
   } catch {
     return undefined;
@@ -253,39 +276,40 @@ function tryCanonicalAmountCurrency(
 
 function stableStringify(value: unknown): string {
   if (value === undefined) {
-    return UNDEFINED_SENTINEL;
+    return UNDEFINED_TAG;
   }
 
   if (typeof value === "number") {
-    // JSON.stringify(NaN/±Infinity) is "null" — encode distinctly (MONEY-5).
+    // JSON.stringify(NaN/±Infinity) is "null" — unquoted tags ≠ string forms.
     if (Number.isNaN(value)) {
-      return '"NaN"';
+      return NAN_TAG;
     }
     if (value === Number.POSITIVE_INFINITY) {
-      return '"Infinity"';
+      return POS_INFINITY_TAG;
     }
     if (value === Number.NEGATIVE_INFINITY) {
-      return '"-Infinity"';
+      return NEG_INFINITY_TAG;
     }
     return JSON.stringify(value);
   }
 
   if (typeof value === "bigint") {
-    // JSON.stringify(bigint) throws — encode as decimal digits + "n" (MONEY-5).
-    return JSON.stringify(`${value.toString()}n`);
+    // Unquoted `${n}n` so it never equals JSON string `"10n"`.
+    return `${value.toString()}n`;
   }
 
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value) ?? "null";
   }
 
-  // Date → ISO string (default object walk yields "{}") (MONEY-5).
+  // Date → ISO string (default object walk yields "{}").
   if (value instanceof Date) {
     return JSON.stringify(value.toISOString());
   }
 
-  // Canonical Money shape (MONEY-1).
-  if (isMoney(value)) {
+  // Pure Money only (no extra siblings) — canonicalize amount+currency.
+  // Bags like `{ amount, currency, orderId }` fall through so siblings survive.
+  if (isMoney(value) && isPureMoneyKeys(value)) {
     try {
       const m = money(value.amount, value.currency, FINGERPRINT_MONEY_OPTS);
       return stableStringify({ amount: m.amount, currency: m.currency });
@@ -301,7 +325,8 @@ function stableStringify(value: unknown): string {
   const record = value as Record<string, unknown>;
 
   // Canonicalize AmountInput+currency siblings so number | Money | decimal
-  // string amounts with the same economic value share a fingerprint (MONEY-1).
+  // string amounts with the same economic value share a fingerprint, while
+  // preserving any other keys on the object.
   let source: Record<string, unknown> = record;
   if (
     Object.prototype.hasOwnProperty.call(record, "amount") &&

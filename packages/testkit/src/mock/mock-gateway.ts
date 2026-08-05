@@ -1361,13 +1361,26 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         }
 
         const refundId = nextId("ref");
+        // Ledger-derived totals are authoritative (TESTKIT-3). Scripted
+        // `result` may add metadata but must not override reported money
+        // fields after the ledger has already been mutated.
         const base = defaultRefundResult(
           refundId,
           "completed",
           minorToMajor(state.refundedAmountMinor, state.currency),
         );
         if (outcome?.outcome === "partial_refund" || outcome?.result) {
-          return { ...base, ...outcome.result };
+          const override = (outcome.result ?? {}) as Partial<GatewayRefundResult>;
+          return {
+            ...base,
+            ...override,
+            // Re-assert ledger-derived money identity after spread
+            status: base.status,
+            totalRefunded: base.totalRefunded,
+            success: base.success,
+            outcome: base.outcome,
+            gatewayRefundId: override.gatewayRefundId ?? base.gatewayRefundId,
+          };
         }
         return base;
       });

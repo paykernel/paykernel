@@ -87,20 +87,19 @@ export class StoreLeaseLostError extends Error {
 }
 
 /**
- * True when `error` is a lease/fencing rejection (this package's class, or any
- * Error with `name === "StoreLeaseLostError"` / `code === "lease_lost"`).
+ * True when `error` is a store lease/fencing rejection.
+ *
+ * Matches:
+ * - {@link StoreLeaseLostError} instances (including cross-realm subclasses)
+ * - Errors with `name === "StoreLeaseLostError"` (portable dual copies / testkit)
+ *
+ * Does **not** match bare `{ code: "lease_lost" }` domain throws — handlers
+ * reusing that code for business errors must not skip `store.fail` or look like
+ * fencing losses (WEBHOOKS-6).
  */
 export function isStoreLeaseLostError(error: unknown): boolean {
   if (error instanceof StoreLeaseLostError) return true;
   if (error instanceof Error && error.name === "StoreLeaseLostError") return true;
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "lease_lost"
-  ) {
-    return true;
-  }
   return false;
 }
 
@@ -290,6 +289,17 @@ export interface WebhookInboxStore extends WithTransaction {
   fail(input: FailWebhookInput): Promise<void>;
 
   get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined>;
+
+  /**
+   * Rows due for worker redrive (`status === "pending"` and `availableAt <= now`).
+   *
+   * **Soft-release (required):** expired `claimed` rows (lease expired) MUST be
+   * treated as reclaimable for poll-only recovery — either soft-release to
+   * `pending` (clear lease fields, set `availableAt` <= now) before filtering,
+   * or include them as due with equivalent semantics. Official adapters soft-release
+   * on `listRetryable` / `get` / `claim` paths. Without this, crash mid-handler after
+   * provider 200 can leave money webhooks stuck until a key-addressed claim path runs.
+   */
   listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]>;
   deleteExpired(input: CleanupInput): Promise<CleanupResult>;
 }

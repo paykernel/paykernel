@@ -2,6 +2,10 @@
  * Shared helpers for Redis store implementations.
  */
 
+import {
+  StoreInvalidSchemaError,
+  StoreSerializationFailureError,
+} from "@paykernel/store-contracts";
 import type { RedisCommandPort } from "../port";
 import { createEvalHelper, type EvalHelper } from "../port";
 import type { StoreClock } from "../clock";
@@ -50,21 +54,40 @@ export function resolveRedisStoreContext(
   };
 }
 
+/**
+ * Serialize an idempotency cached result for Redis storage.
+ *
+ * Fail closed when the JSON exceeds {@link MAX_RESULT_JSON_BYTES}: never store a
+ * truncation marker as an authoritative money outcome (REDIS-1 / audit).
+ */
 export function serializeResultJson(result: unknown): string {
   const s = JSON.stringify(result);
   if (s.length > MAX_RESULT_JSON_BYTES) {
-    // Truncate safely — prefer marker over secrets
-    return JSON.stringify({
-      _truncated: true,
-      preview: s.slice(0, Math.min(256, MAX_RESULT_JSON_BYTES - 64)),
-    });
+    throw new StoreSerializationFailureError(
+      `idempotency result JSON exceeds MAX_RESULT_JSON_BYTES (${MAX_RESULT_JSON_BYTES}); refusing to store truncated money outcome`,
+    );
   }
   return s;
 }
 
+/**
+ * Parse an ISO-8601 timestamp to epoch milliseconds as a decimal string for Lua scores.
+ *
+ * Invalid / non-finite values fail closed — never map to `0` (epoch), which would
+ * make work immediately claimable (REDIS-2 / audit).
+ */
 export function msFromIso(iso: string): string {
+  if (typeof iso !== "string" || iso.length === 0) {
+    throw new StoreInvalidSchemaError(
+      "invalid ISO timestamp for due/retry scheduling: empty",
+    );
+  }
   const n = Date.parse(iso);
-  if (!Number.isFinite(n)) return "0";
+  if (!Number.isFinite(n)) {
+    throw new StoreInvalidSchemaError(
+      "invalid ISO timestamp for due/retry scheduling",
+    );
+  }
   return String(n);
 }
 

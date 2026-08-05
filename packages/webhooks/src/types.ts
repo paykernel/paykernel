@@ -131,7 +131,11 @@ export type ProcessVerifiedInput = {
   /**
    * Optional sanitized envelope snapshot for durable retry (JSON string or
    * serializable object → JSON). NEVER pass raw signatures/secrets.
-   * Stored only as `payloadRef` on claim.
+   * Stored only as `payloadRef` on claim (object envelopes are force-redacted).
+   *
+   * **durable_retry:** when omitted, a redacted snapshot of `event` is stored
+   * as `payloadRef` so `processRetryable` can redrive. `ackAfterClaim` still
+   * requires a non-empty envelope (or event-derived payloadRef).
    */
   envelope?: unknown;
   /** Override default lease duration for this claim. */
@@ -193,12 +197,16 @@ export type ProcessRetryableInput = {
   /**
    * Resolve handler event/envelope from a pending record.
    *
-   * **Default** (when omitted): parse `payloadRef` JSON if present, else
-   * `{ key, payloadHash }`. When the parse matches a
-   * `PersistedPaymentEventEnvelope` shape (`schemaVersion` + `event` +
-   * `payloadHash`), the nested `.event` is passed to the handler so dual-write
-   * workers can `fulfill(ctx.event)` without a custom resolver. Plain
+   * **Default** (when omitted): parse `payloadRef` JSON when present. When the
+   * parse matches a `PersistedPaymentEventEnvelope` shape (`schemaVersion` +
+   * `event` + `payloadHash`), the nested `.event` is passed to the handler so
+   * dual-write workers can `fulfill(ctx.event)` without a custom resolver. Plain
    * PaymentEvent / custom shapes are used as-is.
+   *
+   * **No stub events:** if `payloadRef` is missing and this resolver is omitted
+   * (or returns no `event` / envelope), the row is dead-lettered with
+   * `handler_failed { retryable: false }` — never materializes `{ key, payloadHash }`
+   * stubs that can ACK then drop paid fulfillment.
    *
    * Override for custom stores or non-envelope `payloadRef` layouts.
    */

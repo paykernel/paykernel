@@ -765,19 +765,18 @@ export class PaymobGateway extends BaseGateway {
           "Paymob Capture API response is missing success",
           data,
         );
-        // Prefer provider cumulative `captured_amount`. When omitted, sum this-op
-        // amount_cents onto inquiry-known prior captured total (multi-partial).
-        const thisOpCapturedCents = data.captured_amount ?? data.amount_cents;
+        // Prefer provider cumulative `captured_amount` when present (including 0).
+        // When omitted, sum THIS REQUEST's amount onto inquiry prior (multi-partial).
+        // Do not treat response `amount_cents` as this-op — it may be the order
+        // total and would overstate cumulative (PAYMOB-4).
         const currency = this.resolveCurrency(data.currency ?? resolvedAmount.currency);
-        const cumulativeCapturedAmountCents = data.captured_amount ??
-          (thisOpCapturedCents !== undefined
-            ? (resolvedAmount.capturedAmountCents ?? 0) + thisOpCapturedCents
-            : resolvedAmount.capturedAmountCents);
+        const cumulativeCapturedAmountCents =
+          typeof data.captured_amount === "number"
+            ? data.captured_amount
+            : (resolvedAmount.capturedAmountCents ?? 0) + resolvedAmount.amountCents;
         const status = this.mapCaptureStatus(data, success, {
           transactionAmountCents: resolvedAmount.transactionAmountCents,
-          ...(cumulativeCapturedAmountCents !== undefined
-            ? { cumulativeCapturedAmountCents }
-            : {}),
+          cumulativeCapturedAmountCents,
         });
         const gatewayId = String(data.id ?? p.gatewayPaymentId);
         const outcome = this.mapPaymobOutcome(status, success);
@@ -787,15 +786,18 @@ export class PaymobGateway extends BaseGateway {
             gatewayId,
             status,
             rawResponse: data,
-            // Ledger/inventory must use cumulative captured total, not this-op only.
-            ...(cumulativeCapturedAmountCents !== undefined
+            // Ledger/inventory: publish cumulative only when positive; zero is
+            // honest for provider-reported 0 but never implies paid (PAYMOB-1).
+            ...(cumulativeCapturedAmountCents > 0
               ? {
                   capturedAmount: this.fromMinorUnits(
                     cumulativeCapturedAmountCents,
                     currency,
                   ),
                 }
-              : {}),
+              : cumulativeCapturedAmountCents === 0
+                ? { capturedAmount: 0 }
+                : {}),
             providerNativeStatus: success ? "success" : "failed",
             gateway: "paymob",
           },
@@ -1132,14 +1134,22 @@ export class PaymobGateway extends BaseGateway {
       this.stringOrUndefined(creationExtras?.orderId) ??
       this.stringOrUndefined(order?.merchant_order_id);
 
+    const status = this.mapTransactionStatus(statusSource);
+    const amount = this.resolveWebhookEventAmount(
+      status,
+      obj.amount_cents,
+      obj.currency,
+      statusSource.refunded_amount_cents,
+    );
+
     const legacy: WebhookEvent = {
       id: String(obj.id),
       type: normalized.type,
       gateway: "paymob",
       paymentId,
       gatewayPaymentId: String(obj.id),
-      status: this.mapTransactionStatus(statusSource),
-      amount: this.fromMinorUnits(obj.amount_cents, obj.currency),
+      status,
+      ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
       currency: obj.currency.toUpperCase(),
       timestamp: this.parseTimestamp(obj.created_at),
@@ -1189,6 +1199,13 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(statusData, "is_auth", payload.is_auth);
     this.assignOptionalBoolean(statusData, "is_capture", payload.is_capture);
     const statusSource = this.sanitizeWebhookTransactionForStatus(statusData);
+    const status = this.mapTransactionStatus(statusSource);
+    const amount = this.resolveWebhookEventAmount(
+      status,
+      amountCents,
+      payload.currency,
+      statusSource.refunded_amount_cents,
+    );
 
     // type defaults to TRANSACTION_RESPONSE so callers can distinguish redirect/response
     // callbacks from processed TRANSACTION webhooks. Dual-write demotes settlement arms
@@ -1199,8 +1216,8 @@ export class PaymobGateway extends BaseGateway {
       gateway: "paymob",
       paymentId: this.stringOrUndefined(payload.merchant_order_id),
       gatewayPaymentId: String(payload.id),
-      status: this.mapTransactionStatus(statusSource),
-      amount: this.fromMinorUnits(amountCents, payload.currency),
+      status,
+      ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
       currency: payload.currency.toUpperCase(),
       timestamp: this.parseTimestamp(payload.created_at),
@@ -1223,9 +1240,9 @@ export class PaymobGateway extends BaseGateway {
    * is_voided are absent (`readHmacField`). When both are present, only the
    * signed current-state flag is trusted.
    *
-   * refunded_amount_cents may refine partial vs full **only** when a signed
-   * refund flag already establishes refund (demotion is fail-closed-safer than
-   * upgrading paid→refunded from an unsigned amount alone).
+   * refunded_amount_cents is never HMAC-covered — always strip it on the webhook
+   * path. Signed `is_refunded` alone maps to incomplete `refund_completed`;
+   * partial vs full completeness requires transaction inquiry (PAYMOB-2).
    *
    * @see https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac
    */
@@ -1234,9 +1251,10 @@ export class PaymobGateway extends BaseGateway {
   ): PaymobTransactionResponse {
     const out: PaymobTransactionResponse = { ...data };
 
-    // Never covered by Paymob transaction HMAC.
+    // Never covered by Paymob transaction HMAC — do not drive paid/partial/refund totals.
     delete out.is_captured;
     delete out.captured_amount;
+    delete out.refunded_amount_cents;
 
     // Drop action aliases when current-state flags are present (HMAC used the latter).
     if (out.is_refunded !== undefined) {
@@ -1246,17 +1264,38 @@ export class PaymobGateway extends BaseGateway {
       delete out.is_void;
     }
 
-    // Amount-only refund upgrades are unsigned — require a signed refund signal.
-    const signedRefund =
-      out.is_refunded === true ||
-      (out.is_refunded === undefined &&
-        out.is_refund === true &&
-        out.success === true);
-    if (!signedRefund) {
-      delete out.refunded_amount_cents;
+    return out;
+  }
+
+  /**
+   * Money on WebhookEvent for dual-write / refund snapshots.
+   * Charge statuses use signed amount_cents. Refund domain statuses must not
+   * publish order total as the refund amount (PAYMOB-3) — only a positive
+   * trusted refunded total (API path; webhooks strip unsigned cents) qualifies.
+   * Incomplete refunds omit amount so consumers inquire rather than book order total.
+   */
+  private resolveWebhookEventAmount(
+    status: PaymentStatus,
+    amountCents: number,
+    currency: string,
+    refundedAmountCents?: number,
+  ): number | undefined {
+    const isRefundDomain =
+      status === "refunded" ||
+      status === "partially_refunded" ||
+      status === "refund_completed" ||
+      status === "refund_pending" ||
+      status === "refund_failed";
+
+    if (!isRefundDomain) {
+      return this.fromMinorUnits(amountCents, currency);
     }
 
-    return out;
+    if (refundedAmountCents !== undefined && refundedAmountCents > 0) {
+      return this.fromMinorUnits(refundedAmountCents, currency);
+    }
+
+    return undefined;
   }
 
   /**
@@ -1632,8 +1671,8 @@ export class PaymobGateway extends BaseGateway {
     if (data.pending) return "pending";
     if (data.is_voided === true || (data.success === true && data.is_void === true)) return "cancelled";
 
-    // Explicit refund flags, or refunded_amount_cents alone (API/inquiry path; webhooks
-    // sanitize so amount-only upgrades do not apply without a signed refund flag).
+    // Explicit refund flags, or refunded_amount_cents alone (API/inquiry path only —
+    // webhooks always strip unsigned refunded_amount_cents / captured_amount).
     // When captured_amount > 0 (partial capture), completeness is vs captured total — not auth amount_cents.
     // Full refund of captured amount => refunded even if captured < amount_cents.
     if (
@@ -1703,20 +1742,23 @@ export class PaymobGateway extends BaseGateway {
   ): PaymentStatus {
     if (!success) return "failed";
 
+    // PAYMOB-1: never map capture success to paid / isPaidOutcome without a
+    // positive captured total. Sparse bodies and captured_amount:0 fall through
+    // mapTransactionStatus to paid when is_capture blocks the auth branch.
+    const cumulative = resolved?.cumulativeCapturedAmountCents ?? data.captured_amount;
+    if (cumulative === undefined || cumulative <= 0) {
+      return "processing";
+    }
+
     const statusData: Parameters<typeof this.mapTransactionStatus>[0] = {
       success: true,
       is_capture: true,
+      captured_amount: cumulative,
     };
     if (resolved) {
       statusData.amount_cents = resolved.transactionAmountCents;
-      if (resolved.cumulativeCapturedAmountCents !== undefined) {
-        statusData.captured_amount = resolved.cumulativeCapturedAmountCents;
-      }
     } else if (data.amount_cents !== undefined) {
       statusData.amount_cents = data.amount_cents;
-    }
-    if (!resolved && data.captured_amount !== undefined) {
-      statusData.captured_amount = data.captured_amount;
     }
 
     return this.mapTransactionStatus(statusData);

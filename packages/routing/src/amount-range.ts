@@ -74,16 +74,24 @@ export function amountInRange(
     return false;
   }
 
+  // ROUTE-1: zero / setup / trial amounts must match rules with min/max 0.
+  // Core money defaults reject zero; routing intentionally allows it here.
+  const zeroOk = { allowZero: true as const };
+
   let inputMinor: bigint;
   try {
-    inputMinor = toMinorUnits(resolved.amount, ruleCurrency);
+    inputMinor = toMinorUnits(resolved.amount, ruleCurrency, zeroOk);
   } catch {
     return false;
   }
 
   if (hasMin && match.amountMin !== undefined) {
     try {
-      const minMinor = toMinorUnits(String(match.amountMin).trim(), ruleCurrency);
+      const minMinor = toMinorUnits(
+        String(match.amountMin).trim(),
+        ruleCurrency,
+        zeroOk,
+      );
       if (inputMinor < minMinor) return false;
     } catch {
       return false;
@@ -92,7 +100,11 @@ export function amountInRange(
 
   if (hasMax && match.amountMax !== undefined) {
     try {
-      const maxMinor = toMinorUnits(String(match.amountMax).trim(), ruleCurrency);
+      const maxMinor = toMinorUnits(
+        String(match.amountMax).trim(),
+        ruleCurrency,
+        zeroOk,
+      );
       if (inputMinor > maxMinor) return false;
     } catch {
       return false;

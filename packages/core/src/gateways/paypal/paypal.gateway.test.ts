@@ -949,7 +949,9 @@ describe('PayPalGateway', () => {
             expect(() => gateway.parseWebhookEvent(payload)).toThrow(InvalidRequestError);
         });
 
-        it('should map PAYMENT.REFUND.COMPLETED to refunded with refund.completed dual-write', () => {
+        it('should map PAYMENT.REFUND.COMPLETED to refund_completed not full refunded (PAYPAL-2)', () => {
+            // Refund resource amount is this-op only; without capture aggregate we
+            // must not overstate payment status as fully refunded.
             const payload = {
                 id: 'WH-refund-completed',
                 event_type: 'PAYMENT.REFUND.COMPLETED',
@@ -974,7 +976,9 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
-            expect(event.status).toBe('refunded');
+            expect(event.status).toBe('refund_completed');
+            expect(event.status).not.toBe('refunded');
+            expect(event.status).not.toBe('partially_refunded');
             expect(event.gatewayPaymentId).toBe('CAPTURE-FOR-REFUND');
             expect(event.gatewayObjectId).toBe('REFUND-COMPLETED');
             expect(event.stableType).toBe('refund.completed');
@@ -3591,6 +3595,61 @@ describe('PayPalGateway', () => {
             expect(result.status).toBe('paid');
             expect(result.amount).toBe(44);
             expect(requestedUrls.some((url) => url.includes('/v2/payments/captures/CAP-LOOKUP-123'))).toBe(true);
+        });
+
+        it('getPayment by capture ID with final_capture false → partially_captured not paid (PAYPAL-1 audit)', async () => {
+            // capturePayment returns gatewayId = capture.id; re-poll by that id must
+            // not over-promote non-final COMPLETED captures to paid / isPaidOutcome.
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-NONFINAL-GET')) {
+                    return createMockResponse(
+                        {
+                            name: 'RESOURCE_NOT_FOUND',
+                            message: 'Order not found',
+                        },
+                        false,
+                        404
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-NONFINAL-GET',
+                    status: 'COMPLETED',
+                    final_capture: false,
+                    amount: {
+                        currency_code: 'USD',
+                        value: '20.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            order_id: 'ORDER-OPEN-AUTH',
+                            authorization_id: 'AUTH-OPEN',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-NONFINAL-GET',
+            });
+
+            expect(result.gatewayId).toBe('CAP-NONFINAL-GET');
+            expect(result.captureId).toBe('CAP-NONFINAL-GET');
+            expect(result.orderId).toBe('ORDER-OPEN-AUTH');
+            expect(result.authorizationId).toBe('AUTH-OPEN');
+            expect(result.status).toBe('partially_captured');
+            expect(result.amount).toBe(20);
+            expect(result.outcome).toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
         });
 
         it('should retrieve authorization details when gatewayPaymentId is a PayPal authorization ID', async () => {

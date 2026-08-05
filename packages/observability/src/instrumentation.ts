@@ -76,6 +76,25 @@ function isIndeterminateOutcome(outcome: string | undefined): boolean {
   return lower === "indeterminate" || lower.startsWith("indeterminate.");
 }
 
+/**
+ * Non-throw outcomes that should end the span as error (OBS-1).
+ * Failed / declined / error / indeterminate money results must not report
+ * span status OK — OTEL error rates would undercount payment failures.
+ * `requires_action` / `succeeded` / missing outcome stay OK.
+ */
+function isSpanErrorOutcome(outcome: string | undefined): boolean {
+  if (outcome === undefined) return false;
+  if (isIndeterminateOutcome(outcome)) return true;
+  const lower = outcome.toLowerCase();
+  return (
+    lower === "failed" ||
+    lower === "declined" ||
+    lower === "error" ||
+    lower.startsWith("failed.") ||
+    lower.startsWith("declined.")
+  );
+}
+
 function spanAttributesFromContext(
   ctx: OperationContext,
 ): Record<string, string | number | boolean> {
@@ -255,6 +274,16 @@ function finalizeSpan(
     } else {
       span.end({ code: "error" });
     }
+    return;
+  }
+  // OBS-1: non-throw failed/indeterminate money outcomes end error, not OK.
+  // Message is the outcome label only (enum-ish — not secret-bearing text).
+  const outcome = finished.normalizedOutcome;
+  if (isSpanErrorOutcome(outcome) && outcome !== undefined) {
+    span.end({
+      code: "error",
+      message: outcome,
+    });
     return;
   }
   span.end({ code: "ok" });

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { route } from "./route";
 import {
+  costScore,
   gatewayHasCapabilities,
   isGatewayHealthy,
   ruleMatches,
@@ -172,5 +173,41 @@ describe("isGatewayHealthy", () => {
     expect(
       isGatewayHealthy("stripe", { health: { moyasar: false } }, 1),
     ).toBe(true);
+  });
+
+  it("ROUTE-1/2: health map gateway ids are case-insensitive", () => {
+    expect(
+      isGatewayHealthy("Stripe", { health: { stripe: false } }, 1),
+    ).toBe(false);
+    expect(
+      isGatewayHealthy("stripe", { health: { STRIPE: 0.1 } }, 1),
+    ).toBe(false);
+    expect(
+      isGatewayHealthy("STRIPE", { health: { Stripe: true } }, 1),
+    ).toBe(true);
+  });
+});
+
+describe("gatewayHasCapabilities / costScore case maps", () => {
+  it("capability map gateway ids are case-insensitive", () => {
+    expect(
+      gatewayHasCapabilities("Stripe", ["payments"], {
+        gatewayCapabilities: { stripe: { payments: true } },
+      }),
+    ).toBe(true);
+    expect(
+      gatewayHasCapabilities("stripe", ["payments"], {
+        gatewayCapabilities: { STRIPE: { payments: false } },
+      }),
+    ).toBe(false);
+  });
+
+  it("cost map gateway ids are case-insensitive", () => {
+    expect(
+      costScore("Stripe", { cost: { stripe: 1 } }),
+    ).toBe(1);
+    expect(
+      costScore("stripe", { cost: { STRIPE: "2.5" } }),
+    ).toBe(2.5);
   });
 });

@@ -53,6 +53,7 @@ import {
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
 } from "../../utils/money";
+import { getCurrencyExponent } from "../../utils/currency";
 import { PAYPAL_CAPABILITIES } from "../builtin-capabilities";
 import type { GatewayRuntimeDeps } from "../../runtime/payment-runtime";
 import {
@@ -1249,11 +1250,22 @@ export class PayPalGateway extends BaseGateway {
 
     this.assertPaymentResource(data, `get ${resourceType}`);
 
+    // Capture-resource GET must honor final_capture the same as capturePayment /
+    // order getPayment / webhooks. COMPLETED + final_capture:false is only a
+    // slice — partially_captured, never paid / isPaidOutcome.
+    let status = this.mapResourceStatus(data.status);
+    if (status === "paid" && data.final_capture === false) {
+      status = "partially_captured";
+      this.logger.warn(
+        "[PayPal] Capture resource is non-final (final_capture=false); getPayment status is partially_captured, not paid",
+      );
+    }
+
     const relatedIds = data.supplementary_data?.related_ids;
     return this.mapPayPalPaymentResult({
       gatewayId: data.id,
       captureId: data.id,
-      status: this.mapResourceStatus(data.status),
+      status,
       amount: this.parseAmount(data.amount, `get ${resourceType}`),
       rawResponse: data,
       providerNativeStatus: data.status,
@@ -2088,10 +2100,17 @@ export class PayPalGateway extends BaseGateway {
     }
   }
 
+  /**
+   * PayPal amount scale: ISO 4217 minor units, with PayPal zero-decimal
+   * overrides (HUF/JPY/TWD). Do not force 2dp for GCC 3-decimal currencies
+   * (KWD/BHD/OMR/…) — that rejects or mis-parses real PayPal payloads (PAYPAL-3).
+   */
   private getCurrencyScale(currency: string): number {
-    return PAYPAL_ZERO_DECIMAL_CURRENCIES.has(this.normalizeCurrencyCode(currency))
-      ? 0
-      : 2;
+    const code = this.normalizeCurrencyCode(currency);
+    if (PAYPAL_ZERO_DECIMAL_CURRENCIES.has(code)) {
+      return 0;
+    }
+    return getCurrencyExponent(code);
   }
 
   private formatAmount(amount: AmountInput, currency: string): string {
@@ -2348,7 +2367,11 @@ export class PayPalGateway extends BaseGateway {
       "PAYMENT.CAPTURE.PENDING": "pending",
       "PAYMENT.CAPTURE.REVERSED": "reversed",
       "PAYMENT.REFUND.PENDING": "refund_pending",
-      "PAYMENT.REFUND.COMPLETED": "refunded",
+      // PAYPAL-2: refund resource COMPLETED proves this refund op finished, not
+      // that the capture is fully refunded. Prefer incomplete `refund_completed`
+      // (and dual-write refund.completed) over full `refunded` overstatement.
+      // Aggregate completeness comes from CAPTURE.REFUNDED resource status or getPayment.
+      "PAYMENT.REFUND.COMPLETED": "refund_completed",
       "PAYMENT.REFUND.FAILED": "refund_failed",
     };
 

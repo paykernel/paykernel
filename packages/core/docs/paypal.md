@@ -234,16 +234,19 @@ if (result.status === 'cancelled' || result.outcome === 'succeeded') {
 
 ## Get Payment Details
 
-Retrieve the current status and details of a PayPal order.
+Retrieve the current status and details of a PayPal order, capture, or authorization.
+
+> **Capture ID polling**: After `capturePayment`, `result.gatewayId` is the **capture ID**. Looking that ID up via `getPayment` hits `/v2/payments/captures/{id}` when the order path 404s. If the capture is non-final (`final_capture: false`), status is **`partially_captured`** (not `paid`) and **`isPaidOutcome` is false** — same rule as `capturePayment` and webhooks. Multi-capture order lookups keep the **latest** capture id for refunds but **aggregate** successful capture amounts and demote status when auth is still `PARTIALLY_CAPTURED` or totals are under the order/auth amount.
 
 ```typescript
 const payment = await client.getPayment({
-  // PayPal order ID, capture ID, or authorization ID
+  // PayPal order ID, capture ID (e.g. capturePayment gatewayId), or authorization ID
   gatewayPaymentId: 'ORDER-123',
 }, 'paypal');
 
-console.log(payment.status); // 'pending', 'authorized', 'paid', etc.
+console.log(payment.status); // 'pending', 'authorized', 'partially_captured', 'paid', etc.
 console.log(payment.amount);
+console.log(payment.capturedAmount); // aggregated when multi-capture on order lookup
 ```
 
 ## Webhook Verification
@@ -322,7 +325,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Webhook cert URL** | `paypal-cert-url` must be HTTPS on a `*.paypal.com` host; other URLs are rejected before calling PayPal. |
 | **Authorization ID** | Store the authorization ID from `authorizePayment()` for voids or delayed captures |
 | **AUTHORIZATION webhooks** | `PAYMENT.AUTHORIZATION.CAPTURED` maps to `paid`, but if PayPal does not include a capture id, `gatewayPaymentId` is the **authorization id** — that is **not** refundable. Prefer capture webhooks / stored `captureId` for refunds. |
-| **Status lookup IDs** | `getPayment()` and `getPaymentStatus()` accept PayPal order IDs, capture IDs, and authorization IDs, so the `gatewayId` returned from create, authorize, or capture can be checked later. |
+| **Status lookup IDs** | `getPayment()` and `getPaymentStatus()` accept PayPal order IDs, capture IDs, and authorization IDs, so the `gatewayId` returned from create, authorize, or capture can be checked later. Capture-resource lookup applies the same **`final_capture: false` → `partially_captured`** demotion as capture/webhook paths (do not fulfill remaining auth on re-poll). |
 | **Authorization captures** | `capturePayment()` only accepts `amount` with `paypalCaptureType: 'authorization'` |
 | **Authorize params** | `authorizePayment()` only accepts `gatewayPaymentId` and `idempotencyKey`; capture-only fields are rejected. |
 | **Final capture** | PayPal API default for `final_capture` is `false`. SDK product defaults: **no amount** (full remaining) → `true`; **amount set** (partial) → `false` unless `paypalFinalCapture === true`. When the capture is non-final (`final_capture: false`), result/webhook status is **`partially_captured`**, not `paid`. |
@@ -359,7 +362,7 @@ app.post('/webhooks/paypal', async (req) => {
 | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | `partially_captured` (stable dual-write **`payment.processing`** — not `capture.completed` / `payment.succeeded`; do not fulfill remaining auth) |
 | `PAYMENT.AUTHORIZATION.VOIDED` | `cancelled` |
 | `PAYMENT.REFUND.PENDING` | `refund_pending` |
-| `PAYMENT.REFUND.COMPLETED` | `refunded` (stable dual-write `refund.completed`) |
+| `PAYMENT.REFUND.COMPLETED` | **`refund_completed`** (this refund op finished; not proven full capture refund — fail-closed vs overstated `refunded`; stable dual-write `refund.completed`). Use `PAYMENT.CAPTURE.REFUNDED` resource status / `getPayment` for aggregate completeness |
 | `PAYMENT.REFUND.FAILED` | `refund_failed` |
 
 > **Partial authorization / non-final capture:** Both

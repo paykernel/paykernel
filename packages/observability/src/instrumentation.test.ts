@@ -111,6 +111,7 @@ describe("withPaymentOperation", () => {
 
   it("counts indeterminate separately and keeps outcome label", async () => {
     const metrics = createInMemoryPaymentMetrics();
+    const { tracer, spans } = recordingTracer();
     const ctx = createOperationContext({
       operationId: "op_ind",
       gateway: "paymob",
@@ -118,7 +119,7 @@ describe("withPaymentOperation", () => {
     });
 
     await withPaymentOperation(
-      { context: ctx, metrics, clock: fakeClock([0, 5]) },
+      { context: ctx, metrics, tracer, clock: fakeClock([0, 5]) },
       async () => ({
         result: null,
         contextPatch: {
@@ -139,6 +140,66 @@ describe("withPaymentOperation", () => {
     expect(
       outcomes.every((o) => o.attributes?.outcome !== "failed"),
     ).toBe(true);
+    // OBS-1: non-throw indeterminate must not end span OK
+    expect(spans[0]!.status?.code).toBe("error");
+    expect(spans[0]!.status?.message).toBe("indeterminate");
+  });
+
+  it("ends span error for non-throw failed outcomes (OBS-1)", async () => {
+    const { tracer, spans } = recordingTracer();
+    const ctx = createOperationContext({
+      operationId: "op_fail_span",
+      gateway: "stripe",
+      operationType: "payment.capture",
+    });
+
+    await withPaymentOperation(
+      { context: ctx, tracer, clock: fakeClock([0, 2]) },
+      async () => ({
+        result: { ok: false },
+        contextPatch: { normalizedOutcome: "failed" },
+      }),
+    );
+
+    expect(spans[0]!.status?.code).toBe("error");
+    expect(spans[0]!.status?.message).toBe("failed");
+
+    const { tracer: t2, spans: s2 } = recordingTracer();
+    await withPaymentOperation(
+      {
+        context: createOperationContext({
+          operationId: "op_ok_span",
+          gateway: "stripe",
+          operationType: "payment.create",
+        }),
+        tracer: t2,
+        clock: fakeClock([0, 1]),
+      },
+      async () => ({
+        result: true,
+        contextPatch: { normalizedOutcome: "succeeded" },
+      }),
+    );
+    expect(s2[0]!.status?.code).toBe("ok");
+
+    // requires_action is not a failure — still OK
+    const { tracer: t3, spans: s3 } = recordingTracer();
+    await withPaymentOperation(
+      {
+        context: createOperationContext({
+          operationId: "op_ra_span",
+          gateway: "stripe",
+          operationType: "payment.create",
+        }),
+        tracer: t3,
+        clock: fakeClock([0, 1]),
+      },
+      async () => ({
+        result: true,
+        contextPatch: { normalizedOutcome: "requires_action" },
+      }),
+    );
+    expect(s3[0]!.status?.code).toBe("ok");
   });
 
   it("emits redacted telemetry including providerRequestId", async () => {

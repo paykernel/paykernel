@@ -11,6 +11,7 @@ import type {
 } from "./store";
 import { StoreLeaseLostError, isStoreLeaseLostError } from "./store";
 import { createMemoryWebhookInboxStore } from "./memory-store";
+import { createTestClock } from "./test-clock";
 
 describe("WebhookInboxStore structural contract", () => {
   it("memory store is assignable to WebhookInboxStore", () => {
@@ -144,4 +145,25 @@ describe("WebhookInboxStore structural contract", () => {
     expect(typeof rec.availableAt).toBe("string");
   });
 
+  it("listRetryable soft-releases expired claimed rows (poll-only recovery)", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "evt_soft_release",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    if (a.kind !== "acquired") throw new Error("expected acquired");
+
+    // Still leased → not listable as pending.
+    expect(await store.listRetryable({ limit: 10 })).toHaveLength(0);
+
+    clock.advance(2_000);
+    const listed = await store.listRetryable({ limit: 10 });
+    expect(listed.some((r) => r.key === "evt_soft_release")).toBe(true);
+    expect(listed.find((r) => r.key === "evt_soft_release")?.status).toBe(
+      "pending",
+    );
+  });
 });

@@ -43,7 +43,7 @@ Store claim `not_available` (pending, `availableAt` in future) → `scheduled_fo
 
 ## Lean record vs 10.2 fields
 
-See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. Object envelopes are force-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`; still prefer `toPersistedPaymentEventEnvelope` so raw never enters.
+See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. Object/JSON-string envelopes are force-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`; `durable_retry` also snapshots redacted `event` when envelope is omitted. Missing `payloadRef` on redrive dead-letters (no stub events). Still prefer `toPersistedPaymentEventEnvelope` so raw never enters.
 
 ## Crash boundaries (10.6)
 

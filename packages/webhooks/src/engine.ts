@@ -167,19 +167,30 @@ export function computePayloadHash(raw: unknown): string {
 // ─── Envelope → payloadRef ───────────────────────────────────────────────────
 
 /**
- * Serialize an envelope for `payloadRef` storage.
+ * Serialize an envelope/event for `payloadRef` storage.
  *
  * - **Objects / arrays:** deep-redacted via core `redactWebhookPayloadSecrets`
  *   (known secret keys → `"[REDACTED]"`) then `JSON.stringify`. Prefer also
  *   passing `toPersistedPaymentEventEnvelope` so raw signatures never enter.
- * - **Strings:** stored as-is (opaque refs / pre-serialized tokens). Callers
- *   must not put secrets in plain string envelopes.
+ * - **JSON strings:** parse → redact object/array values → re-stringify when
+ *   parse succeeds as object/array (defense-in-depth for pre-serialized
+ *   envelopes). Opaque non-JSON / non-object JSON strings stored as-is.
  * - Never stores undefined / empty string.
  */
 function envelopeToPayloadRef(envelope: unknown): string | undefined {
   if (envelope === undefined || envelope === null) return undefined;
   if (typeof envelope === "string") {
-    return envelope.length > 0 ? envelope : undefined;
+    if (envelope.length === 0) return undefined;
+    // WEBHOOKS-3/4: try redact when the string is JSON object/array.
+    try {
+      const parsed = JSON.parse(envelope) as unknown;
+      if (parsed !== null && typeof parsed === "object") {
+        return JSON.stringify(redactWebhookPayloadSecrets(parsed));
+      }
+    } catch {
+      // opaque non-JSON ref
+    }
+    return envelope;
   }
   try {
     return JSON.stringify(redactWebhookPayloadSecrets(envelope));
@@ -399,19 +410,31 @@ export function createWebhookInboxEngine(
       await args.handler(ctx);
     } catch (err) {
       // Stale renew / lease lost during handler → retryable; skip fail() with dead token.
+      // Only real fencing errors (StoreLeaseLostError / name), not bare code:"lease_lost".
       if (isStoreLeaseLostError(err)) {
         return outcomeHandlerFailed(true);
       }
 
       const nonRetry = isNonRetryable(err);
-      const deadLetter = shouldDeadLetter(
+      const budgetDeadLetter = shouldDeadLetter(
         err,
         currentRecord.attempts,
         maxAttempts,
         mode,
       );
 
-      const sanitized = sanitize(err);
+      // WEBHOOKS-1: durable retry without a stored payload cannot redrive — fail closed
+      // to dead_letter rather than schedule_for_retry that later stubs the event.
+      const hasDurablePayload =
+        typeof currentRecord.payloadRef === "string" &&
+        currentRecord.payloadRef.length > 0;
+      const missingPayloadDeadLetter =
+        mode === "durable_retry" &&
+        !budgetDeadLetter &&
+        !nonRetry &&
+        !hasDurablePayload;
+      const deadLetter = budgetDeadLetter || missingPayloadDeadLetter;
+
       const failInput: {
         key: WebhookEventKey;
         leaseToken: LeaseToken;
@@ -421,7 +444,9 @@ export function createWebhookInboxEngine(
       } = {
         key: args.key,
         leaseToken: currentToken,
-        error: sanitized,
+        error: missingPayloadDeadLetter
+          ? "missing payloadRef: cannot redrive durable webhook without stored envelope/event"
+          : sanitize(err),
       };
       if (deadLetter) {
         failInput.deadLetter = true;
@@ -512,13 +537,19 @@ export function createWebhookInboxEngine(
       input.leaseMs ?? defaultLeaseMs,
       input.leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
     );
-    const payloadRef = envelopeToPayloadRef(input.envelope);
+    // Prefer explicit envelope; for durable_retry also snapshot redacted `event`
+    // so handler failures can redrive without stub materialization (WEBHOOKS-1).
+    const payloadRef =
+      envelopeToPayloadRef(input.envelope) ??
+      (mode === "durable_retry"
+        ? envelopeToPayloadRef(input.event)
+        : undefined);
 
-    // WEBHOOKS-2: refuse durable park without a materializable payload — otherwise
-    // processRetryable stubs `{ key, payloadHash }` and dead-letters after ACK.
+    // Refuse durable park without a materializable payload — otherwise workers
+    // cannot redrive and paid fulfillment is lost after ACK.
     if (ackAfterClaim && payloadRef === undefined) {
       return outcomeInvalidWebhook(
-        "envelope is required for ackAfterClaim (durable workers need a payloadRef)",
+        "envelope is required for ackAfterClaim (durable workers need a payloadRef; provide envelope or event)",
       );
     }
 
@@ -662,7 +693,7 @@ export function createWebhookInboxEngine(
       let gateway: string;
       let providerEventId: string;
       let payloadHash: string;
-      let event: unknown;
+      let event: unknown | undefined;
 
       let payloadRef = rec.payloadRef;
       if (input.resolveEvent) {
@@ -673,6 +704,10 @@ export function createWebhookInboxEngine(
         event = resolved.event;
         const fromEnvelope = envelopeToPayloadRef(resolved.envelope);
         if (fromEnvelope !== undefined) payloadRef = fromEnvelope;
+        // If resolver only provides envelope, materialize event from it.
+        if (event === undefined && payloadRef !== undefined) {
+          event = materializeEventFromPayloadRef(payloadRef);
+        }
       } else {
         const parsed = parseWebhookEventKey(rec.key);
         gateway = parsed?.gateway ?? "unknown";
@@ -680,9 +715,8 @@ export function createWebhookInboxEngine(
         payloadHash = rec.payloadHash;
         if (rec.payloadRef) {
           event = materializeEventFromPayloadRef(rec.payloadRef);
-        } else {
-          event = { key: rec.key, payloadHash: rec.payloadHash };
         }
+        // WEBHOOKS-1: never stub `{ key, payloadHash }` — paid data would be lost.
       }
 
       // Re-claim with same hash (pending after fail/ackAfterClaim).
@@ -697,6 +731,33 @@ export function createWebhookInboxEngine(
       if (claim.kind !== "acquired") {
         const outcome = mapClaimKindToOutcome(claim, retryAfterFromRecord);
         items.push({ key: rec.key, outcome });
+        continue;
+      }
+
+      // Fail closed when no materializable handler event (legacy rows / missing ref).
+      if (event === undefined) {
+        try {
+          await store.fail({
+            key: rec.key,
+            leaseToken: claim.leaseToken,
+            error:
+              "missing payloadRef: cannot redrive durable webhook without stored envelope/event",
+            deadLetter: true,
+          });
+        } catch (failErr) {
+          if (isStoreLeaseLostError(failErr)) {
+            items.push({
+              key: rec.key,
+              outcome: outcomeHandlerFailed(true),
+            });
+            continue;
+          }
+          throw failErr;
+        }
+        items.push({
+          key: rec.key,
+          outcome: outcomeHandlerFailed(false),
+        });
         continue;
       }
 

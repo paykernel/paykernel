@@ -13,6 +13,7 @@ Portable **payment metrics**, **span instrumentation**, and an **optional OpenTe
 | **Core has no mandatory OTEL** | `@paykernel/core` never depends on `@opentelemetry/*` or this package |
 | **Structured telemetry redacted by default** | `withPaymentOperation` / `createRedactingTelemetrySink` scrub bags via core `redact()`; **metric labels and span attributes are not auto-redacted** — set non-sensitive primitives only |
 | **Exceptions sanitized on spans** | `recordException` exports name (+ optional code) only — never raw `Error.message` / stack |
+| **Failed/indeterminate spans end error** | Non-throw `failed` / `declined` / `indeterminate` outcomes end span `code: "error"` (not OK) so OTEL error rates track payment failures |
 | **`providerRequestId` for debugging** | Allow-listed and visible on `OperationContext` / redacted telemetry (A1) |
 | **Metrics without OTEL** | In-memory / no-op metrics work with zero OTEL install |
 | **Optional peer only** | `@opentelemetry/api` is optional; root import works without it |

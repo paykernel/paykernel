@@ -127,17 +127,21 @@ Mode is fixed at `createWebhookInboxEngine` construction. Process methods never 
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
 the engine unwraps `.event` so handlers receive the PaymentEvent. Plain events
 and custom shapes pass through; override `resolveEvent` when needed.
+**Missing `payloadRef` never stubs** `{ key, payloadHash }` — the row is
+dead-lettered (`handler_failed { retryable: false }`).
 
 **Silent acknowledgment of failed work is forbidden.** Always inspect `WebhookProcessingOutcome`.
 
 ## Outcomes (no HTTP hardcoding)
 
 ```ts
+type ScheduledForRetryReason = "parked" | "handler_retry" | "not_available";
+
 type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry" }
+  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -146,9 +150,11 @@ type WebhookProcessingOutcome =
 Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
-- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry` without burning attempts.
+- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available" }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
+- `scheduled_for_retry { reason: "parked" }` is safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease.
+- Durable redrive never materializes stub events: missing `payloadRef` → dead-letter / `handler_failed { retryable: false }`.
 
 ## Event key
 
@@ -185,7 +191,7 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
 
-**Envelope honesty:** the engine serializes `envelope` with `JSON.stringify` and does **not** force-redact it. Prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) before `processVerified`; otherwise secrets can land in `payloadRef`.
+**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes are stored as-is. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive.
 
 Durable adapters must pass testkit `runWebhookInboxStoreConformanceSuite`.
 

@@ -109,11 +109,11 @@ describe("mockGateway", () => {
     expect(g.history.some((h) => h.operation === "createPayment")).toBe(true);
     const rec = g.history.find((h) => h.operation === "createPayment");
     expect(rec?.error?.name).toBe("CardDeclinedError");
-    // TESTKIT-3: never store raw Error.message (may carry secrets)
+    // Never store raw Error.message (may carry secrets)
     expect(rec?.error?.message).toBe("[REDACTED]");
   });
 
-  it("history redacts error messages that look like secrets (TESTKIT-3)", async () => {
+  it("history redacts error messages that look like secrets", async () => {
     const g = mockGateway({
       createPayment: [
         { throw: new Error("Card sk_live_SECRET_TOKEN_12345 declined") },
@@ -571,6 +571,33 @@ describe("mockGateway", () => {
       "payment_intent.succeeded",
     );
 
+    // TESTKIT-1: Moyasar free-form aliases must NOT dual-write under built-in
+    // gateway names (stripe + payment_paid is not a production Stripe map entry).
+    const stripeMoyasarAlias = mockPayloadToWebhookEvent(
+      createMockWebhookPayload({
+        type: "payment_paid",
+        status: "paid",
+        gatewayPaymentId: "pi_no_alias",
+      }),
+      "stripe",
+    );
+    expect(stripeMoyasarAlias.type).toBe("payment_paid");
+    expect(stripeMoyasarAlias.stableType === "payment.succeeded").toBe(false);
+    expect(
+      stripeMoyasarAlias.event?.type === "payment.succeeded",
+    ).toBe(false);
+
+    // mock gateway still gets Moyasar-shaped free-form convenience dual-write
+    const mockAlias = mockPayloadToWebhookEvent(
+      createMockWebhookPayload({
+        type: "payment_paid",
+        status: "paid",
+        gatewayPaymentId: "mock_paid",
+      }),
+      "mock",
+    );
+    expect(mockAlias.stableType).toBe("payment.succeeded");
+
     // Unknown free-form → provider.unmapped (no invented stable name)
     const unknown = generateWebhookEvent({
       type: "invoice.paid",
@@ -663,7 +690,7 @@ describe("mockGateway", () => {
     expect(isPaidOutcome(r)).toBe(false);
   });
 
-  it("requires_action/pending create does not full-capture ledger (TESTKIT-2)", async () => {
+  it("requires_action/pending create does not full-capture ledger", async () => {
     const g3ds = mockGateway({
       createPayment: [{ outcome: "requires_action" }],
     });
@@ -693,7 +720,7 @@ describe("mockGateway", () => {
     expect(sp?.status).toBe("pending");
   });
 
-  it("non-success scripted capture does not mutate ledger (TESTKIT-1)", async () => {
+  it("non-success scripted capture does not mutate ledger", async () => {
     const g = mockGateway();
     const pay = await g.createPayment({
       ...baseCreate,
@@ -726,7 +753,7 @@ describe("mockGateway", () => {
     expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(50);
   });
 
-  it("non-success scripted void does not cancel ledger (TESTKIT-1)", async () => {
+  it("non-success scripted void does not cancel ledger (ledger integrity)", async () => {
     const g = mockGateway({
       voidPayment: [
         { outcome: "failed" },
@@ -753,6 +780,37 @@ describe("mockGateway", () => {
     const voided = await g.voidPayment!({ gatewayPaymentId: pay.gatewayId });
     expect(voided.status).toBe("cancelled");
     expect(g.getPaymentState(pay.gatewayId)?.status).toBe("cancelled");
+  });
+
+  it("scripted refund result cannot override ledger totals (TESTKIT-3)", async () => {
+    const g = mockGateway({
+      refundPayment: [
+        {
+          outcome: "succeeded",
+          result: {
+            gatewayRefundId: "ref_forged",
+            status: "failed",
+            totalRefunded: 0,
+            success: false,
+          },
+        },
+      ],
+    });
+    const pay = await g.createPayment({ ...baseCreate, amount: 40 });
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(40);
+
+    const refunded = await g.refundPayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 15,
+    });
+    // Ledger advanced by 15 — reported result must agree (not forged totals)
+    expect(refunded.status).toBe("completed");
+    expect(refunded.totalRefunded).toBe(15);
+    expect(refunded.success).toBe(true);
+    expect(refunded.gatewayRefundId).toBe("ref_forged"); // metadata override OK
+    const st = g.getPaymentState(pay.gatewayId)!;
+    expect(st.refundedAmount).toBe(15);
+    expect(st.status).toBe("partially_refunded");
   });
 
   it("implements PaymentGateway surface (name, capabilities, supports)", () => {

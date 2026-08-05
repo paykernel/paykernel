@@ -53,4 +53,37 @@ describe("sanitizeWebhookError", () => {
     expect(sanitizeWebhookError(null)).toBe("Unknown error");
     expect(sanitizeWebhookError(42)).toBe("42");
   });
+
+  it("redacts secret keys on plain object throws before stringify", () => {
+    const out = sanitizeWebhookError({
+      code: "boom",
+      secret_token: "supersecret123",
+      client_secret: "cs_live_abc",
+      nested: { password: "hunter2", ok: true },
+    });
+    expect(out).not.toContain("supersecret123");
+    expect(out).not.toContain("cs_live_abc");
+    expect(out).not.toContain("hunter2");
+    expect(out).toContain("[REDACTED]");
+    expect(out).toContain("boom");
+  });
+
+  it.each([
+    {
+      name: "api_key and client_secret assignments",
+      input: "api_key=pk_secret_value client_secret=cs_value rest",
+      forbidden: ["pk_secret_value", "cs_value"],
+    },
+    {
+      name: "Basic auth credentials",
+      input: "Basic dXNlcjpwYXNz",
+      forbidden: ["dXNlcjpwYXNz"],
+    },
+  ])("strips $name", ({ input, forbidden }) => {
+    const out = sanitizeWebhookError(input);
+    for (const secret of forbidden) {
+      expect(out).not.toContain(secret);
+    }
+    expect(out).toContain("[REDACTED]");
+  });
 });

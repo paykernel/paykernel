@@ -4,15 +4,21 @@
  */
 import { describe, expect, it } from "bun:test";
 import { createFakeClock } from "@paykernel/testkit";
-import { StoreLeaseLostError } from "@paykernel/store-contracts";
+import {
+  StoreInvalidSchemaError,
+  StoreLeaseLostError,
+  StoreSerializationFailureError,
+} from "@paykernel/store-contracts";
 import { createRedisIdempotencyStore } from "./idempotency-store";
 import { createRedisWebhookInboxStore } from "./webhook-inbox-store";
 import { createRedisReconciliationStore } from "./reconciliation-store";
 import type { RedisCommandPort } from "../port";
 import {
   enforceMaxSanitizedError,
+  MAX_RESULT_JSON_BYTES,
   MAX_SANITIZED_ERROR_LENGTH,
 } from "../limits";
+import { msFromIso, serializeResultJson } from "./shared";
 
 type SendCall = { command: string; args: readonly string[] };
 
@@ -108,6 +114,21 @@ describe("idempotency store mock port", () => {
     await expect(
       store.complete({ key: "k1", leaseToken: "bad", result: { ok: 1 } }),
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
+
+  it("complete fails closed on oversized result (no truncation marker)", async () => {
+    let evalCount = 0;
+    const { port } = createMockPort(() => {
+      evalCount++;
+      return ["ok"];
+    });
+    const store = createRedisIdempotencyStore({ port });
+    const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
+    await expect(
+      store.complete({ key: "k1", leaseToken: "lt_1", result: huge }),
+    ).rejects.toBeInstanceOf(StoreSerializationFailureError);
+    // Must not reach EVAL/complete with truncated money outcome
+    expect(evalCount).toBe(0);
   });
 
   it("renew ok rotates token", async () => {
@@ -339,6 +360,69 @@ describe("reconciliation store mock port", () => {
         note: "needs_review",
       }),
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
+});
+
+describe("serializeResultJson / msFromIso honesty (audit REDIS-1 / REDIS-2)", () => {
+  it("serializeResultJson rejects oversized payloads instead of truncating", () => {
+    const ok = { status: "paid", amount: "10.00" };
+    expect(JSON.parse(serializeResultJson(ok))).toEqual(ok);
+
+    const huge = { blob: "y".repeat(MAX_RESULT_JSON_BYTES) };
+    expect(() => serializeResultJson(huge)).toThrow(StoreSerializationFailureError);
+    try {
+      serializeResultJson(huge);
+    } catch (err) {
+      expect(err).toBeInstanceOf(StoreSerializationFailureError);
+      const msg = (err as Error).message.toLowerCase();
+      expect(msg).toContain("max_result_json_bytes");
+      expect(msg).not.toContain("_truncated");
+    }
+  });
+
+  it("msFromIso fails closed on invalid ISO (never due_ms 0 / epoch)", () => {
+    expect(msFromIso("2026-01-01T00:00:00.000Z")).toBe(
+      String(Date.parse("2026-01-01T00:00:00.000Z")),
+    );
+    expect(() => msFromIso("not-a-date")).toThrow(StoreInvalidSchemaError);
+    expect(() => msFromIso("")).toThrow(StoreInvalidSchemaError);
+    expect(() => msFromIso("not-a-date")).toThrow(/invalid ISO/i);
+  });
+
+  it("recon schedule rejects invalid dueAt before EVAL", async () => {
+    let evalCount = 0;
+    const { port } = createMockPort(() => {
+      evalCount++;
+      return ["scheduled"];
+    });
+    const store = createRedisReconciliationStore({ port });
+    await expect(
+      store.schedule({
+        key: "job1",
+        subjectId: "pay_1",
+        reason: "check",
+        dueAt: "totally-invalid",
+      }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    expect(evalCount).toBe(0);
+  });
+
+  it("recon fail rejects invalid retryAt before EVAL", async () => {
+    let evalCount = 0;
+    const { port } = createMockPort(() => {
+      evalCount++;
+      return ["ok"];
+    });
+    const store = createRedisReconciliationStore({ port });
+    await expect(
+      store.fail({
+        key: "job1",
+        leaseToken: "lt_1",
+        error: "boom",
+        retryAt: "nope",
+      }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    expect(evalCount).toBe(0);
   });
 });
 

@@ -55,11 +55,25 @@ const SENSITIVE_KEY_PATTERNS = [
   "client_secret",
   "clientsecret",
   "given_id",
-  // Banking / government identifiers (MONEY-6)
+  // Banking / government identifiers
   "iban",
   "bank",
   "ssn",
   "pin",
+  // Card expiry + tax/DOB-style PII (avoid bare "exp"/"tax" — too broad)
+  "expiry",
+  "expiration",
+  "exp_month",
+  "exp_year",
+  "expmonth",
+  "expyear",
+  "dob",
+  "date_of_birth",
+  "dateofbirth",
+  "tax_id",
+  "taxid",
+  "national_id",
+  "nationalid",
 ];
 
 /**

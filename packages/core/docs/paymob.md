@@ -201,10 +201,12 @@ The SDK verifies transaction processed callbacks, saved-card token callbacks, an
 Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). **HMAC-covered status only.** Paymob's transaction HMAC covers `is_auth`, `is_capture`, `is_refunded`, `is_voided`, `success`, `pending`, and `amount_cents` — **not** `is_captured`, `captured_amount`, `refunded_amount_cents`, `is_refund`, or `is_void`. After verification the SDK strips unsigned status-driving fields before mapping so a replayed valid signature cannot forge paid/refunded/cancelled via injected slots. Practical consequences:
 
 - Auth-only callbacks (`is_auth` + not `is_capture`) stay `authorized` even if the payload injects `is_captured` / `captured_amount`. Use **transaction inquiry** for multi-partial capture totals on the webhook path.
-- `is_refunded: true` without a positive `refunded_amount_cents` maps to `refund_completed` (incomplete money snapshot) — not full `refunded`.
-- `is_refunded` + amount can map `partially_refunded` / `refunded`. Amount-only refunds without a signed refund flag are ignored.
+- `is_refunded: true` maps to `refund_completed` (incomplete money snapshot) — not full `refunded` / `partially_refunded`. `refunded_amount_cents` is **unsigned** and is stripped after HMAC verify, so it cannot choose partial vs full completeness on webhooks. Inquire for refund totals.
+- Refund domain webhooks omit `amount` when no trusted refunded total is available so dual-write consumers do not book order `amount_cents` as the refund amount.
+- Amount-only refunds without a signed refund flag are ignored.
 - `is_refund` / `is_void` are trusted only when they are the HMAC source (the corresponding `is_refunded` / `is_voided` field is absent). When both are present, only the signed current-state flag is used.
 - Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs.
+- **`capturePayment` fail-closed:** success without a positive cumulative captured total maps to `processing` (not `paid` / not `isPaidOutcome`). When the provider omits `captured_amount`, the SDK estimates cumulative as inquiry prior + this request amount — it does **not** treat response `amount_cents` as this-op (that field may be the order total).
 
 > **Phase 7 dual-write:** Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid. Redirect callbacks remain demoted to `payment.processing`.
 

@@ -135,13 +135,14 @@ import {
 } from "@paykernel/reconciliation";
 
 const diffs = compareSnapshots(target.expected, provider);
-// Money: currency case-sensitive; amounts compare by minor units
-// so "10" and "10.00" match for the same currency (not raw string equality).
+// Money: currency codes are case-insensitive (ISO 4217 alphabetic);
+// amounts compare by minor units so "10" and "10.00" match for the same
+// currency (not raw string equality).
 ```
 
 Only fields present on the local snapshot are compared. Pure function — no I/O.
 
-`moneyEquals` uses core `toMinorUnits` (bigint) for amount equality. Equivalent decimal spellings of the same numeric value match; different currencies or unparseable/excess-precision amounts do not.
+`moneyEquals` uses core `toMinorUnits` (bigint) for amount equality. Currency codes compare case-insensitively (`"usd"` ≡ `"USD"`). Equivalent decimal spellings of the same numeric value match; different currencies or unparseable/excess-precision amounts do not.
 
 ---
 
@@ -194,10 +195,10 @@ switch (decision.action) {
 | -------- | ------ | ---- |
 | `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set |
 | `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound) |
-| `mark_consistent` | `true` | Consistent snapshot without upgrade path |
+| `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
 | `retry_later` | `false` | Temporarily unavailable / retryable not-found (when not forbidding replacement) |
-| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs |
+| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial — surface capture work) |
 | `do_not_create_replacement` | `false` | Not-found / incomplete lookup while local is indeterminate |
 
 ### Replacement charge rule
@@ -211,7 +212,10 @@ if (shouldForbidReplacementCharge(result, target)) {
 Returns `true` when:
 
 - `result.outcome === "ambiguous_match"`, or
-- local expected status is indeterminate / missing / `pending` / `processing`
+- `result.outcome === "provider_not_found"` (original may still settle), or
+- `result.outcome === "temporarily_unavailable"`, or
+- local expected is missing/indeterminate **or** any open money state
+  (`pending` / `processing` / `authorized` / `approved` / partial / `paid` / refunded / setup)
 
 **Never** convert `temporarily_unavailable` or retryable `provider_not_found` into local `failed` without a definitive provider response.
 

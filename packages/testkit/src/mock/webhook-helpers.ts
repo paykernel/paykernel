@@ -213,10 +213,10 @@ export const generateOutOfOrderWebhooks = outOfOrderWebhooks;
  *   {@link attachPaymentEvent} (no local remapping of stable names)
  *
  * Mock free-form types that match Moyasar envelope names (`payment_paid`, …)
- * are dual-written to the same stable names as production Moyasar mapping,
- * while keeping native `type` and `provider.eventType` on the wire shape.
- * Pass a built-in `gateway` (`stripe` / `moyasar` / …) to use that gateway’s
- * full core map, or pass a stable name as `type` for a direct stable dual-write.
+ * are dual-written only for `mock` / custom gateway names (not under built-in
+ * `stripe` / `paypal` / `paymob` / `moyasar` — those use their own core maps
+ * exclusively so tests cannot invent production dual-writes). Pass a stable
+ * name as `type` for a direct stable dual-write on any gateway.
  */
 export function mockPayloadToWebhookEvent(
   payload: MockWebhookPayload,
@@ -240,10 +240,25 @@ export function mockPayloadToWebhookEvent(
 }
 
 /**
+ * Production built-in gateway names. Under these, dual-write uses **only**
+ * core’s per-gateway maps — never Moyasar free-form aliases (TESTKIT-1).
+ * `stripe` + `payment_paid` must stay unmapped so tests cannot green-pass a
+ * production map that does not exist.
+ */
+const BUILTIN_GATEWAY_NAMES = new Set([
+  "stripe",
+  "paypal",
+  "paymob",
+  "moyasar",
+]);
+
+/**
  * Dual-write via core only. For custom/`mock` gateways, free-form types that
  * appear in {@link MOYASAR_EVENT_TYPE_MAP} are mapped by temporarily using the
  * stable name for `attachPaymentEvent`, then restoring the native `type` and
  * `provider.eventType` (Engineering Rule 8: do not hide provider-native names).
+ *
+ * Built-in gateway names never get this Moyasar-alias fallthrough.
  */
 function dualWriteMockWebhookEvent(
   event: WebhookEvent,
@@ -254,9 +269,15 @@ function dualWriteMockWebhookEvent(
     return first;
   }
 
-  // Built-in gateway maps already ran inside attachPaymentEvent; only fall
-  // through for free-form mock aliases (or unknown custom types that happen
-  // to match Moyasar envelope names).
+  // Built-in maps already ran inside attachPaymentEvent. Do not borrow
+  // Moyasar envelope aliases under stripe/paypal/paymob/moyasar names —
+  // that would dual-write production-mismatched stable types in tests.
+  const gw = (event.gateway ?? "").toLowerCase();
+  if (BUILTIN_GATEWAY_NAMES.has(gw)) {
+    return first;
+  }
+
+  // mock / custom only: free-form types that match Moyasar envelope names
   const alias = MOYASAR_EVENT_TYPE_MAP[event.type];
   if (alias === undefined) {
     return first;

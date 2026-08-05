@@ -52,7 +52,7 @@ Scores use millisecond epochs aligned with injectable clock ARGV.
 | `MAX_KEY_SEGMENT_LENGTH` | 128 | prefix, version, tenant, … |
 | `MAX_REDIS_KEY_LENGTH` | 512 | full key string |
 | `MAX_SANITIZED_ERROR_LENGTH` | 512 | last_error / diagnostics |
-| `MAX_RESULT_JSON_BYTES` | 16_384 | idempotency cached result |
+| `MAX_RESULT_JSON_BYTES` | 16_384 | idempotency cached result; `complete` fails closed if exceeded (no truncation marker) |
 | `MAX_PAYLOAD_REF_LENGTH` | 512 | opaque payload ref (not raw body) |
 
 Segments reject whitespace, newlines, and raw `{` / `}` (hash tags are applied only via `clusterKeys`).

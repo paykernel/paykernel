@@ -60,6 +60,34 @@ const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
   "partially_captured",
 ]);
 
+/**
+ * Provider statuses that mean money may already exist or still needs capture /
+ * fulfillment work — never treat sparse local + these as safe mark_consistent.
+ */
+const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
+  "authorized",
+  "approved",
+  "partially_captured",
+  "processing",
+  "pending",
+]);
+
+/**
+ * Local statuses where a second createPayment would risk duplicate money
+ * movement (open auth/settlement or already settled/refunded).
+ */
+const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
+  "pending",
+  "processing",
+  "authorized",
+  "approved",
+  "partially_captured",
+  "partially_refunded",
+  "paid",
+  "refunded",
+  "setup_completed",
+]);
+
 /** Definitive provider failure statuses (not timeout / unknown). */
 const DEFINITIVE_FAILED_STATUSES = new Set<string>([
   "failed",
@@ -77,6 +105,15 @@ function isIndeterminateLocal(
 function isAuthHoldLocal(local: LocalPaymentSnapshot | undefined): boolean {
   if (!local || local.status === undefined) return false;
   return AUTH_HOLD_LOCAL_STATUSES.has(local.status);
+}
+
+function isOpenIncompleteProvider(status: string): boolean {
+  return OPEN_INCOMPLETE_PROVIDER_STATUSES.has(status);
+}
+
+function isOpenMoneyLocal(local: LocalPaymentSnapshot | undefined): boolean {
+  if (!local || local.status === undefined) return true;
+  return OPEN_MONEY_LOCAL_STATUSES.has(local.status);
 }
 
 /**
@@ -120,10 +157,12 @@ function maySafeUpgradeToPaid(
  * Decide what the application should do after a reconciliation result.
  *
  * Rules:
- * - consistent → mark_consistent
+ * - consistent → mark_consistent (only when not sparse+open-provider incomplete)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
  * - local pending/indeterminate + provider definitive failed + identity-bound → update_local_to_failed
+ * - sparse/indeterminate local + open incomplete provider (auth/approved/partial) →
+ *   manual_review (never mark_consistent safe:true — surface capture work)
  * - local `authorized` / `partially_captured` → paid is **never** safe auto-upgrade
  *   (apply_drift_review) — capture totals / final_capture may still be incomplete
  * - gatewayPaymentId mismatch (target vs provider) → never safe paid/failed upgrade
@@ -163,6 +202,19 @@ export function decideReconciliationPolicy(
           action: "update_local_to_failed",
           safe: true,
           provider: result.provider,
+        };
+      }
+      // Sparse / indeterminate expected + open incomplete provider must not
+      // complete recovery as mark_consistent — capture/fulfillment may remain.
+      if (
+        isIndeterminateLocal(local) &&
+        isOpenIncompleteProvider(result.provider.status)
+      ) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider is in open/incomplete money state while local expected is sparse or indeterminate — surface capture/fulfillment work; do not mark consistent",
         };
       }
       return {
@@ -282,16 +334,27 @@ export const decideReconciliationAction = decideReconciliationPolicy;
 
 /**
  * True when creating a replacement charge would risk duplicates.
- * Call when status is indeterminate or result is ambiguous.
+ *
+ * Forbids replacement when:
+ * - result is `ambiguous_match` (never pick-first then re-charge)
+ * - result is `provider_not_found` (original may still settle or exist)
+ * - result is `temporarily_unavailable` (unknown provider state)
+ * - local expected is missing/indeterminate **or** any open money state
+ *   (`authorized` / `approved` / partial / `paid` / refunded / setup, etc.)
+ *
+ * Only terminal failed/cancelled locals without ambiguous/not-found outcomes
+ * leave room for an application-level re-attempt after review.
  */
 export function shouldForbidReplacementCharge(
   result: ReconciliationResult,
   target: ReconciliationTarget,
 ): boolean {
   if (result.outcome === "ambiguous_match") return true;
-  if (isIndeterminateLocal(target.expected)) {
-    // Indeterminate local: never create replacement while original may still settle
-    // or until the app applies an update_local_to_paid / failed decision.
+  if (result.outcome === "provider_not_found") return true;
+  if (result.outcome === "temporarily_unavailable") return true;
+  if (isOpenMoneyLocal(target.expected)) {
+    // Open or already-settled local money: never create a second charge while
+    // the original intent may still settle or already holds funds.
     return true;
   }
   return false;

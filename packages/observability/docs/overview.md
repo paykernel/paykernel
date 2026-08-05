@@ -62,7 +62,7 @@ See monorepo policy: [`docs/workspace-boundaries.md`](../../../docs/workspace-bo
 | `handlerFailures` | counter | — |
 | `expiredLeases` | counter | — |
 | `reclaimedLeases` | counter | — |
-| `reconciliationDrift` | counter | gateway, operationType |
+| `reconciliationDrift` | counter | gateway, operationType (fires on `reconciliationRequired` flag — not proven drift alone) |
 | `indeterminateOperations` | counter | gateway, operationType |
 | `adapterLatencyMs` | histogram | adapter, operation |
 | `adapterErrors` | counter | adapter, errorKind |

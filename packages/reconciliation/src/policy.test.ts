@@ -166,8 +166,9 @@ describe("decideReconciliationPolicy", () => {
     };
     const d1 = decideReconciliationPolicy(consistent, pendingLocal);
     expect(d1.action).not.toBe("update_local_to_paid");
-    // Keep/mark path — not a paid upgrade (approved is not paid-like)
-    expect(d1.action).toBe("mark_consistent");
+    // Sparse/indeterminate + open incomplete provider → manual_review (not mark_consistent)
+    expect(d1.action).toBe("manual_review");
+    expect(d1.safe).toBe(false);
 
     const drift: ReconciliationResult = {
       outcome: "drift_detected",
@@ -179,6 +180,34 @@ describe("decideReconciliationPolicy", () => {
     const d2 = decideReconciliationPolicy(drift, pendingLocal);
     expect(d2.action).not.toBe("update_local_to_paid");
     expect(d2.action).toBe("apply_drift_review");
+  });
+
+  it("sparse expected + open incomplete provider is not mark_consistent", () => {
+    for (const status of [
+      "authorized",
+      "approved",
+      "partially_captured",
+      "processing",
+    ] as const) {
+      const provider = buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_open",
+        status,
+        amount: money("10.00", "USD"),
+        providerStatus: status,
+      });
+      const result: ReconciliationResult = {
+        outcome: "consistent",
+        provider,
+      };
+      // No expected status (sparse)
+      const d = decideReconciliationPolicy(result, {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_open",
+      });
+      expect(d.action).toBe("manual_review");
+      expect(d.safe).toBe(false);
+      expect(d.action).not.toBe("mark_consistent");
+    }
   });
 
   it("RECON-1: wrong-payment identity blocks update_local_to_paid", () => {
@@ -248,5 +277,40 @@ describe("shouldForbidReplacementCharge", () => {
         { gateway: "s", expected: { status: "pending" } },
       ),
     ).toBe(true);
+  });
+
+  it("forbids open money locals (auth/approved/partial/paid) and provider_not_found", () => {
+    const consistentPaid: ReconciliationResult = {
+      outcome: "consistent",
+      provider: paidProvider,
+    };
+    for (const status of [
+      "authorized",
+      "approved",
+      "partially_captured",
+      "partially_refunded",
+      "paid",
+    ] as const) {
+      expect(
+        shouldForbidReplacementCharge(consistentPaid, {
+          gateway: "s",
+          expected: { status },
+        }),
+      ).toBe(true);
+    }
+    // provider_not_found forbids even when local looks failed (original may exist)
+    expect(
+      shouldForbidReplacementCharge(
+        { outcome: "provider_not_found", retryable: true },
+        { gateway: "s", expected: { status: "failed" } },
+      ),
+    ).toBe(true);
+    // Terminal failed + consistent leaves room for intentional re-attempt after review
+    expect(
+      shouldForbidReplacementCharge(consistentPaid, {
+        gateway: "s",
+        expected: { status: "failed" },
+      }),
+    ).toBe(false);
   });
 });

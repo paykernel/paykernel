@@ -10,6 +10,7 @@
 import { NoRouteMatchError } from "./errors";
 import {
   costScore,
+  gatewayHasCapabilities,
   isGatewayHealthy,
   ruleMatches,
 } from "./match";
@@ -185,15 +186,14 @@ function selectFallback(
     isGatewayHealthy(fallback, input, healthThreshold)
   ) {
     // Select-time fallback still honors input-level requiredCapabilities.
+    // Capability map gateway ids are matched case-insensitively.
     if (
       input.requiredCapabilities !== undefined &&
       input.requiredCapabilities.length > 0
     ) {
-      const map = input.gatewayCapabilities?.[fallback];
-      const ok =
-        map !== undefined &&
-        input.requiredCapabilities.every((k) => map[k] === true);
-      if (!ok) {
+      if (
+        !gatewayHasCapabilities(fallback, input.requiredCapabilities, input)
+      ) {
         throw new NoRouteMatchError(
           "No routing rule matched and fallback gateway lacks required capabilities",
           input,

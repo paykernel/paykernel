@@ -83,15 +83,36 @@ export function ruleMatches(
 }
 
 /**
+ * Look up a gateway-keyed map entry case-insensitively (trim + lower).
+ * Prefer exact key when present; otherwise first case-insensitive match.
+ */
+export function lookupGatewayMapEntry<T>(
+  map: Readonly<Record<string, T>> | undefined,
+  gatewayId: string,
+): T | undefined {
+  if (map === undefined) return undefined;
+  if (Object.prototype.hasOwnProperty.call(map, gatewayId)) {
+    return map[gatewayId];
+  }
+  const needle = gatewayId.trim().toLowerCase();
+  if (!needle) return undefined;
+  for (const [k, v] of Object.entries(map)) {
+    if (k.trim().toLowerCase() === needle) return v;
+  }
+  return undefined;
+}
+
+/**
  * Fail-closed capability check: every required key must be `true` on the
  * gateway's capability snapshot. Missing map or missing key → false.
+ * Gateway ids in the map are matched case-insensitively.
  */
 export function gatewayHasCapabilities(
   gatewayId: string,
   required: readonly string[],
   input: RoutingInput,
 ): boolean {
-  const map = input.gatewayCapabilities?.[gatewayId];
+  const map = lookupGatewayMapEntry(input.gatewayCapabilities, gatewayId);
   if (map === undefined) {
     return false;
   }
@@ -122,6 +143,7 @@ function tenantConfigMatches(
  * - number < threshold → unhealthy
  * - missing key → healthy (do not exclude)
  * - boolean `true` → healthy
+ * Gateway ids in the health map are matched case-insensitively.
  */
 export function isGatewayHealthy(
   gatewayId: string,
@@ -131,7 +153,7 @@ export function isGatewayHealthy(
   if (input.health === undefined) {
     return true;
   }
-  const signal = input.health[gatewayId];
+  const signal = lookupGatewayMapEntry(input.health, gatewayId);
   if (signal === undefined) {
     return true;
   }
@@ -149,13 +171,14 @@ export function isGatewayHealthy(
  * Parse a cost score for deterministic ordering.
  * Numbers used as-is; decimal strings parsed via base-10 (not money float path).
  * Missing / unparseable → +Infinity (sorted last).
+ * Gateway ids in the cost map are matched case-insensitively.
  */
 export function costScore(
   gatewayId: string,
   input: RoutingInput,
 ): number {
   if (input.cost === undefined) return Number.POSITIVE_INFINITY;
-  const raw = input.cost[gatewayId];
+  const raw = lookupGatewayMapEntry(input.cost, gatewayId);
   if (raw === undefined) return Number.POSITIVE_INFINITY;
   if (typeof raw === "number") {
     return Number.isFinite(raw) ? raw : Number.POSITIVE_INFINITY;

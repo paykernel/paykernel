@@ -387,6 +387,45 @@ describe("redact", () => {
     expect(out.amount).toBe(10.5);
     expect(out.currency).toBe("SAR");
   });
+
+  it("redacts card expiry and tax/DOB-style keys without over-matching", () => {
+    const out = redact({
+      expiry: "12/30",
+      expiration: "12/30",
+      exp_month: 12,
+      exp_year: 2030,
+      expMonth: 12,
+      expYear: 2030,
+      dob: "1990-01-01",
+      dateOfBirth: "1990-01-01",
+      date_of_birth: "1990-01-01",
+      tax_id: "12-3456789",
+      taxId: "12-3456789",
+      nationalId: "NIN-1",
+      national_id: "NIN-1",
+      // Must remain visible (bare "exp"/"tax" would over-match these)
+      expectedStatus: "paid",
+      exportFormat: "json",
+      syntaxTree: true,
+    }) as Record<string, unknown>;
+
+    expect(out.expiry).toBe("[REDACTED]");
+    expect(out.expiration).toBe("[REDACTED]");
+    expect(out.exp_month).toBe("[REDACTED]");
+    expect(out.exp_year).toBe("[REDACTED]");
+    expect(out.expMonth).toBe("[REDACTED]");
+    expect(out.expYear).toBe("[REDACTED]");
+    expect(out.dob).toBe("[REDACTED]");
+    expect(out.dateOfBirth).toBe("[REDACTED]");
+    expect(out.date_of_birth).toBe("[REDACTED]");
+    expect(out.tax_id).toBe("[REDACTED]");
+    expect(out.taxId).toBe("[REDACTED]");
+    expect(out.nationalId).toBe("[REDACTED]");
+    expect(out.national_id).toBe("[REDACTED]");
+    expect(out.expectedStatus).toBe("paid");
+    expect(out.exportFormat).toBe("json");
+    expect(out.syntaxTree).toBe(true);
+  });
 });
 
 describe("createRedactingLogger", () => {
@@ -549,6 +588,11 @@ describe("fingerprintParams", () => {
     );
     expect(fingerprintParams(asMoney)).toBe(fingerprintParams(asPadded));
 
+    // money("10.50","SAR") ≡ number 10.5 with currency SAR
+    expect(fingerprintParams(asMoney)).toBe(
+      fingerprintParams({ amount: asNumber, currency: "SAR" }),
+    );
+
     // Moyasar-style mutation fingerprint: amount is number | Money
     expect(
       fingerprintParams({ amount: asMoney, currency: "SAR" }),
@@ -561,7 +605,49 @@ describe("fingerprintParams", () => {
     ).toBe(fingerprintParams({ amount: "10.5", currency: "SAR" }));
   });
 
-  it("encodes NaN / Infinity distinctly from null (MONEY-5)", () => {
+  it("preserves sibling keys on Money-shaped bags (no orderId collision)", () => {
+    // Duck-typed Money + extra fields must not drop siblings after canonicalize.
+    const a = fingerprintParams({
+      amount: "10.00",
+      currency: "USD",
+      orderId: "A",
+    });
+    const b = fingerprintParams({
+      amount: "10.00",
+      currency: "USD",
+      orderId: "B",
+    });
+    expect(a).not.toBe(b);
+
+    // Amount forms still collapse while siblings remain distinct.
+    expect(
+      fingerprintParams({ amount: 10, currency: "usd", orderId: "A" }),
+    ).toBe(
+      fingerprintParams({ amount: "10.00", currency: "USD", orderId: "A" }),
+    );
+    expect(
+      fingerprintParams({
+        amount: money("10.00", "USD"),
+        currency: "USD",
+        orderId: "A",
+      }),
+    ).toBe(
+      fingerprintParams({ amount: "10.00", currency: "USD", orderId: "A" }),
+    );
+  });
+
+  it("keeps nested Money currency when sibling currency mismatches", () => {
+    const nested = fingerprintParams({
+      amount: money("10.50", "SAR"),
+      currency: "USD",
+    });
+    const plainUsd = fingerprintParams({ amount: "10.50", currency: "USD" });
+    const plainSar = fingerprintParams({ amount: "10.50", currency: "SAR" });
+    expect(nested).not.toBe(plainUsd);
+    expect(nested).not.toBe(plainSar);
+  });
+
+  it("encodes NaN / Infinity distinctly from null and ordinary strings", () => {
     expect(fingerprintParams(Number.NaN)).not.toBe(fingerprintParams(null));
     expect(fingerprintParams(Number.POSITIVE_INFINITY)).not.toBe(
       fingerprintParams(null),
@@ -575,13 +661,32 @@ describe("fingerprintParams", () => {
     expect(fingerprintParams({ x: Number.NaN })).not.toBe(
       fingerprintParams({ x: null }),
     );
+    // Type tags must not equal JSON string encodings of the same text.
+    expect(fingerprintParams(Number.NaN)).not.toBe(fingerprintParams("NaN"));
+    expect(fingerprintParams(Number.POSITIVE_INFINITY)).not.toBe(
+      fingerprintParams("Infinity"),
+    );
+    expect(fingerprintParams(Number.NEGATIVE_INFINITY)).not.toBe(
+      fingerprintParams("-Infinity"),
+    );
+    expect(fingerprintParams(undefined)).not.toBe(
+      fingerprintParams("undefined"),
+    );
+    expect(fingerprintParams(undefined)).not.toBe(
+      fingerprintParams("__undefined__"),
+    );
   });
 
-  it("fingerprints BigInt without throwing", () => {
+  it("fingerprints BigInt without throwing and without colliding with strings", () => {
     expect(fingerprintParams(10n)).toBe(fingerprintParams(10n));
     expect(fingerprintParams(10n)).not.toBe(fingerprintParams(11n));
+    expect(fingerprintParams(10n)).not.toBe(fingerprintParams(10));
+    expect(fingerprintParams(10n)).not.toBe(fingerprintParams("10n"));
     expect(fingerprintParams({ amount: 1050n })).toBe(
       fingerprintParams({ amount: 1050n }),
+    );
+    expect(fingerprintParams({ amount: 1050n })).not.toBe(
+      fingerprintParams({ amount: "1050n" }),
     );
   });
 

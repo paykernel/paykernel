@@ -99,11 +99,13 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
       throw new Error("fail");
     };
 
+    const event = { id: "evt_b3_inline", type: "payment.succeeded" };
     for (let i = 1; i <= 2; i++) {
       const o = await engine.processVerified({
         gateway: "stripe",
         providerEventId: "evt_b3_inline",
         payloadHash: "h",
+        event,
         handler: failHandler,
       });
       expect(o).toEqual({
@@ -115,6 +117,7 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
       gateway: "stripe",
       providerEventId: "evt_b3_inline",
       payloadHash: "h",
+      event,
       handler: failHandler,
     });
     expect(third).toEqual({ outcome: "handler_failed", retryable: false });
@@ -193,10 +196,12 @@ describe("B4: claim respects availableAt (true backoff)", () => {
     });
 
     let handlerRuns = 0;
+    const event = { id: "evt_b4_engine", type: "payment.succeeded" };
     const first = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_b4_engine",
       payloadHash: "h",
+      event,
       handler: async () => {
         handlerRuns++;
         throw new Error("transient");
@@ -215,6 +220,7 @@ describe("B4: claim respects availableAt (true backoff)", () => {
         gateway: "stripe",
         providerEventId: "evt_b4_engine",
         payloadHash: "h",
+        event,
         handler: async () => {
           handlerRuns++;
           throw new Error("should not run");

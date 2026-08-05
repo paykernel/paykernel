@@ -130,4 +130,25 @@ describe("amountInRange money-safe", () => {
       amountInRange({ amount: { amount: "5.501", currency: "KWD" } }, kwdRange),
     ).toBe(false);
   });
+
+  it("ROUTE-1: allows zero amounts and amountMin/Max of 0 (setup/trial rules)", () => {
+    expect(
+      amountInRange(
+        { amount: { amount: "0", currency: "USD" } },
+        { amountMin: "0", amountMax: "0", amountCurrency: "USD" },
+      ),
+    ).toBe(true);
+    expect(
+      amountInRange(
+        { amount: { amount: "0.00", currency: "USD" } },
+        { amountMin: "0", amountMax: "10", amountCurrency: "USD" },
+      ),
+    ).toBe(true);
+    expect(
+      amountInRange(
+        { amount: { amount: "1.00", currency: "USD" } },
+        { amountMin: "0", amountMax: "0", amountCurrency: "USD" },
+      ),
+    ).toBe(false);
+  });
 });
