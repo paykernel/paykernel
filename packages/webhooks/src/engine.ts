@@ -154,6 +154,61 @@ function outcomeInvalidWebhook(reason?: string): WebhookProcessingOutcome {
   return { outcome: "invalid_webhook" };
 }
 
+/**
+ * WEBHOOKS-2: classify verify/normalize throws that are infrastructure/transport
+ * outages (not signature forgery). Callers should map retryable handler_failed
+ * to 5xx so providers redeliver (PayPal verify postback outages, network blips).
+ */
+function isRetryableVerifyInfrastructureError(err: unknown): boolean {
+  if (err === null || err === undefined) return false;
+  if (typeof err !== "object") return false;
+  const e = err as {
+    name?: unknown;
+    code?: unknown;
+    message?: unknown;
+    statusCode?: unknown;
+    retryable?: unknown;
+  };
+  if (e.retryable === true) return true;
+  const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
+  const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  if (
+    name === "networkerror" ||
+    name === "timeouterror" ||
+    name === "aborterror" ||
+    name === "gatewayapierror" ||
+    code === "network_error" ||
+    code === "timeout" ||
+    code === "etimedout" ||
+    code === "econnreset" ||
+    code === "econnrefused" ||
+    code === "provider_5xx" ||
+    code === "gateway_error"
+  ) {
+    return true;
+  }
+  if (
+    typeof e.statusCode === "number" &&
+    e.statusCode >= 500 &&
+    e.statusCode < 600
+  ) {
+    return true;
+  }
+  if (
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("network") ||
+    message.includes("econnreset") ||
+    message.includes("socket hang up") ||
+    message.includes("fetch failed") ||
+    message.includes("temporarily unavailable")
+  ) {
+    return true;
+  }
+  return false;
+}
+
 // ─── Payload hash helper ─────────────────────────────────────────────────────
 
 /**
@@ -423,17 +478,13 @@ export function createWebhookInboxEngine(
         mode,
       );
 
-      // WEBHOOKS-1: durable retry without a stored payload cannot redrive — fail closed
-      // to dead_letter rather than schedule_for_retry that later stubs the event.
-      const hasDurablePayload =
-        typeof currentRecord.payloadRef === "string" &&
-        currentRecord.payloadRef.length > 0;
-      const missingPayloadDeadLetter =
-        mode === "durable_retry" &&
-        !budgetDeadLetter &&
-        !nonRetry &&
-        !hasDurablePayload;
-      const deadLetter = budgetDeadLetter || missingPayloadDeadLetter;
+      // WEBHOOKS-1: do NOT permanent-dead-letter solely because payloadRef is
+      // missing on a retryable handler failure — that blocks provider redelivery
+      // of paid events forever. Claim path requires materializable payload for
+      // durable_retry; if a legacy row lacks payloadRef, leave pending/retryable
+      // so redelivery or a custom resolveEvent path can recover. processRetryable
+      // still refuses stub materialization without payloadRef.
+      const deadLetter = budgetDeadLetter;
 
       const failInput: {
         key: WebhookEventKey;
@@ -444,9 +495,7 @@ export function createWebhookInboxEngine(
       } = {
         key: args.key,
         leaseToken: currentToken,
-        error: missingPayloadDeadLetter
-          ? "missing payloadRef: cannot redrive durable webhook without stored envelope/event"
-          : sanitize(err),
+        error: sanitize(err),
       };
       if (deadLetter) {
         failInput.deadLetter = true;
@@ -544,6 +593,16 @@ export function createWebhookInboxEngine(
       (mode === "durable_retry"
         ? envelopeToPayloadRef(input.event)
         : undefined);
+
+    // Refuse durable_retry claims without a materializable payload — claiming
+    // then failing cannot recover paid work, and dead-letter would permanent-block
+    // redelivery (WEBHOOKS-1). ackAfterClaim and inline-handler durable paths both
+    // need envelope or event before claim.
+    if (mode === "durable_retry" && payloadRef === undefined) {
+      return outcomeInvalidWebhook(
+        "envelope or event is required for durable_retry (workers need a payloadRef to redrive; refusing claim without materializable payload)",
+      );
+    }
 
     // Refuse durable park without a materializable payload — otherwise workers
     // cannot redrive and paid fulfillment is lost after ACK.
@@ -648,6 +707,12 @@ export function createWebhookInboxEngine(
     try {
       verified = await input.verifyAndNormalize(input.raw);
     } catch (err) {
+      // WEBHOOKS-2: infrastructure / transport failures during verify must not
+      // look like forgery (invalid_webhook → typically 400). Provider redelivery
+      // (esp. PayPal postback outages) needs a retryable signal (5xx class).
+      if (isRetryableVerifyInfrastructureError(err)) {
+        return outcomeHandlerFailed(true);
+      }
       return outcomeInvalidWebhook(sanitize(err));
     }
     if (!verified.ok) {

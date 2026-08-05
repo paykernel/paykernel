@@ -436,7 +436,11 @@ function expandableId(
 function stripeSubscriptionStatus(status: string): PaymentStatus {
   switch (status) {
     case "active":
-      return "paid";
+      // STRIPE-1: subscription lifecycle `active` is not a settled charge.
+      // Do not map to domain `paid` — status-only handlers would false-fulfill
+      // while dual-write is provider.unmapped. Use processing (open billing
+      // relationship) until invoice/PI money events confirm collection.
+      return "processing";
     case "trialing":
       // Trial has not collected payment yet — keep pending. Note: Checkout
       // `payment_status: paid` for a $0 trial session may still normalize as
@@ -1063,12 +1067,16 @@ export class StripeGateway extends BaseGateway {
               )
             : undefined;
 
+        // STRIPE-2: prefer settled minors (amount_received → amount_captured)
+        // when present; fall back to authorized amount only when unsettled.
+        const currencyCode = response.currency ?? currency;
+        const settledMinor = resolveStripeCapturedMinor(response);
+        const amountMinor =
+          settledMinor !== undefined ? settledMinor : response.amount;
+
         return this.mapPaymentIntentResult(response, {
           ...(status !== undefined ? { status } : {}),
-          amount: fromStripeAmount(
-            response.amount,
-            response.currency ?? currency,
-          ),
+          amount: fromStripeAmount(amountMinor, currencyCode),
         });
       },
       StripeCreatePaymentParamsSchema,

@@ -268,16 +268,22 @@ async function handleStripeWebhook(headers: Headers, rawBody: string) {
     // Preferred: verify + parse + hooks in one call
     const event = await client.handleWebhook('stripe', rawBody, signature);
 
-    switch (event.status) {
-        case 'paid':
-            console.log(`Payment ${event.paymentId ?? event.gatewayPaymentId} succeeded`);
+    // Prefer Phase-7 stable types + money helpers for fulfillment — not domain
+    // status alone. Subscription lifecycle events may carry non-paid statuses
+    // (e.g. active → processing); do not ship goods on status === 'paid' without
+    // confirming a money event (PI/invoice/checkout) or isPaidOutcome-equivalent.
+    switch (event.stableType ?? event.event?.type) {
+        case 'payment.succeeded':
+        case 'capture.completed':
+            if (event.status === 'paid') {
+                console.log(`Payment ${event.paymentId ?? event.gatewayPaymentId} succeeded`);
+            }
             break;
-        case 'refunded':
-        case 'partially_refunded':
-        case 'refund_completed':
-            console.log(`Payment ${event.gatewayPaymentId} was refunded`);
+        case 'refund.completed':
+        case 'refund.pending':
+            console.log(`Payment ${event.gatewayPaymentId} refund signal (${event.status})`);
             break;
-        case 'setup_completed':
+        case 'payment_method.setup_completed':
             console.log(`Setup Session ${event.gatewayPaymentId} completed`);
             break;
     }
@@ -303,15 +309,15 @@ Unhandled / unknown event types do **not** run non-`payment_intent` object statu
 
 | Stripe subscription `status` | SDK `PaymentStatus` |
 | --- | --- |
-| `active` | `paid` |
+| `active` | `processing` (not `paid` — lifecycle only; STRIPE-1) |
 | `trialing` | `pending` |
 | `past_due`, `incomplete`, `paused`, `unpaid` | `pending` |
 | `canceled`, `incomplete_expired` | `cancelled` |
 | other / unknown | `pending` |
 
-Only `canceled` and `incomplete_expired` map to `cancelled`. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. Note: a Checkout Session with `payment_status: paid` for a $0 trial can still normalize as `paid` via the `checkout.session.completed` path.
+Only `canceled` and `incomplete_expired` map to `cancelled`. **`active` maps to `processing`**, not `paid` — a live subscription is not a settled one-shot charge; fulfill from invoice/PI money events (or Checkout paid) instead of subscription status alone. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. Note: a Checkout Session with `payment_status: paid` for a $0 trial can still normalize as `paid` via the `checkout.session.completed` path.
 
-> **Warning:** subscription lifecycle webhooks set `gatewayPaymentId` to `sub_...`. Refund/capture/void still require a `pi_...` PaymentIntent ID — use dual IDs from invoice money events or resolve the PI before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void.
+> **Warning:** subscription lifecycle webhooks set `gatewayPaymentId` to `sub_...` and dual-write `provider.unmapped`. Refund/capture/void still require a `pi_...` PaymentIntent ID — use dual IDs from invoice money events or resolve the PI before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
 
 For `payment_intent.succeeded` (and other succeeded PaymentIntent payloads), webhook `amount` prefers settled money: `amount_received` → `latest_charge.amount_captured` / `charges.data[0].amount_captured` so partial captures report the settled total. When settled is finite and less than authorized `amount`, status is `partially_captured` (not `paid`). When settled fields are **missing**, status is **`processing`** (fail closed) — never map an incomplete snapshot to full `paid` / over-fulfill on auth amount alone. **Phase 7 dual-write** for both the **partial** (`partially_captured`) and **incomplete-settled** (`processing`) cases sets `stableType` / `event.type` to **`payment.processing`**, not `payment.succeeded` — aligned with Paymob and with `isPaidOutcome` (neither partial nor incomplete settled is paid-like). Full success (status `paid`) dual-writes `payment.succeeded`. Fulfill only when status is `paid` or `isPaidOutcome(...)` is true; do not ship on type-only `payment.succeeded` handlers without checking status. Amount is only set from real money fields on the event object; it is not defaulted to `0` when Stripe omits amount data. Currency is only set when Stripe includes it — missing currency is left undefined rather than defaulted to `USD`.
 

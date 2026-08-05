@@ -1059,15 +1059,58 @@ export class PayPalGateway extends BaseGateway {
     // treated as paid when a capture is present (not auth-only completed orders).
     const captureId = this.extractWebhookCaptureId(raw);
     const resourceFinalCapture = this.readResourceFinalCapture(raw.resource);
-    const status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
+    const orderCaptures = this.extractWebhookOrderCaptures(raw);
+    const orderAuthorization = this.extractWebhookOrderAuthorization(raw);
+    const lastOrderCapture = this.preferLastCapture(orderCaptures);
+
+    // Nested capture final_capture (ORDER multi-capture) + top-level capture resource.
+    const nestedFinalCapture =
+      typeof lastOrderCapture?.final_capture === "boolean"
+        ? lastOrderCapture.final_capture
+        : undefined;
+    const effectiveFinalCapture =
+      resourceFinalCapture !== undefined
+        ? resourceFinalCapture
+        : nestedFinalCapture;
+
+    let status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
       hasCapture: Boolean(captureId),
-      ...(resourceFinalCapture !== undefined
-        ? { finalCapture: resourceFinalCapture }
+      ...(effectiveFinalCapture !== undefined
+        ? { finalCapture: effectiveFinalCapture }
         : {}),
     });
     if (!status) {
       throw new InvalidRequestError(
         `Unsupported PayPal webhook event: ${raw.event_type}`,
+      );
+    }
+
+    // Align ORDER.COMPLETED with getPayment: under-total multi-capture, open
+    // PARTIALLY_CAPTURED auth, and non-final slices → partially_captured (not paid).
+    if (raw.event_type === "CHECKOUT.ORDER.COMPLETED" && captureId) {
+      // Build a minimal order snapshot for status mapping (cast avoids EOPT noise
+      // on optional amount/purchase_units from the webhook resource shape).
+      const orderLike = {
+        id: raw.resource.id ?? captureId,
+        status: raw.resource.status ?? "COMPLETED",
+        ...(raw.resource.amount !== undefined
+          ? { amount: raw.resource.amount }
+          : {}),
+        ...(raw.resource.purchase_units !== undefined
+          ? { purchase_units: raw.resource.purchase_units }
+          : {}),
+      } as PayPalOrderResponse;
+      status = this.mapPaymentResultStatus(
+        orderLike,
+        lastOrderCapture ??
+          (resourceFinalCapture !== undefined
+            ? {
+                status: raw.resource.status ?? "COMPLETED",
+                final_capture: resourceFinalCapture,
+              }
+            : { status: raw.resource.status ?? "COMPLETED" }),
+        orderAuthorization,
+        orderCaptures,
       );
     }
 
@@ -1122,8 +1165,8 @@ export class PayPalGateway extends BaseGateway {
     }
 
     const attached = attachPaymentEvent(event, { computePayloadHash: true });
-    // Non-final CAPTURE.COMPLETED must not dual-write capture.completed (fulfillment
-    // type). Demote to payment.processing so type-only handlers match isPaidOutcome.
+    // Non-final / partial captures must not dual-write fulfillment-ready types.
+    // Demote to payment.processing so type-only handlers match isPaidOutcome.
     return this.demotePartialCaptureWebhookDualWrite(attached);
   }
 
@@ -2193,12 +2236,65 @@ export class PayPalGateway extends BaseGateway {
     currency_code: string;
     value: string;
   } | undefined {
-    const lastCapture = this.preferLastCapture(
-      raw.resource.purchase_units?.[0]?.payments?.captures,
-    );
+    // Multi-capture order webhooks: aggregate successful capture amounts so
+    // event.amount matches getPayment (not last-slice only).
+    const orderCaptures = this.extractWebhookOrderCaptures(raw);
+    if (orderCaptures && orderCaptures.length > 0) {
+      const aggregated = this.sumSuccessfulCaptureAmounts(
+        orderCaptures,
+        "webhook",
+      );
+      const currencyCode = orderCaptures.find((c) => c.amount?.currency_code)
+        ?.amount?.currency_code;
+      if (aggregated !== undefined && currencyCode) {
+        try {
+          return {
+            currency_code: currencyCode,
+            value: this.formatAmount(aggregated, currencyCode),
+          };
+        } catch {
+          // Fall through to single-slice / resource amount if format fails.
+        }
+      }
+    }
+
+    const lastCapture = this.preferLastCapture(orderCaptures);
     return raw.resource.amount ??
       lastCapture?.amount ??
       raw.resource.purchase_units?.[0]?.amount;
+  }
+
+  /**
+   * Nested order captures from CHECKOUT.ORDER.* webhooks (includes optional
+   * final_capture when PayPal embeds it).
+   */
+  private extractWebhookOrderCaptures(
+    raw: PayPalWebhookPayload,
+  ): PayPalEmbeddedCapture[] | undefined {
+    const payments = raw.resource.purchase_units?.[0]?.payments as
+      | {
+          captures?: Array<
+            PayPalEmbeddedCapture & {
+              create_time?: string;
+              update_time?: string;
+            }
+          >;
+        }
+      | undefined;
+    const captures = payments?.captures;
+    if (!captures || captures.length === 0) {
+      return undefined;
+    }
+    return captures;
+  }
+
+  private extractWebhookOrderAuthorization(
+    raw: PayPalWebhookPayload,
+  ): PayPalEmbeddedAuthorization | undefined {
+    const payments = raw.resource.purchase_units?.[0]?.payments as
+      | { authorizations?: PayPalEmbeddedAuthorization[] }
+      | undefined;
+    return payments?.authorizations?.[0];
   }
 
   private extractWebhookPaymentId(raw: PayPalWebhookPayload): string | undefined {
@@ -2577,27 +2673,40 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * When status is partially_captured on CAPTURE.COMPLETED, demote dual-write
-   * from capture.completed → payment.processing (align with isPaidOutcome).
+   * When status is partially_captured on capture/order completion events, demote
+   * dual-write away from fulfillment-ready types (capture.completed /
+   * payment.succeeded / provider.unmapped) → payment.processing so type-only
+   * handlers stay aligned with isPaidOutcome.
    */
   private demotePartialCaptureWebhookDualWrite(
     event: WebhookEvent,
   ): WebhookEvent {
+    if (event.status !== "partially_captured" || !event.provider) {
+      return event;
+    }
+
+    const isPartialCaptureLifecycle =
+      event.type === "PAYMENT.CAPTURE.COMPLETED" ||
+      event.type === "CHECKOUT.ORDER.COMPLETED";
+    if (!isPartialCaptureLifecycle) {
+      return event;
+    }
+
+    // Already processing (e.g. AUTHORIZATION.PARTIALLY_CAPTURED path) — leave alone.
     if (
-      event.status !== "partially_captured" ||
-      event.type !== "PAYMENT.CAPTURE.COMPLETED" ||
-      event.stableType !== "capture.completed" ||
-      !event.event ||
-      event.event.type !== "capture.completed" ||
-      !event.provider
+      event.stableType === "payment.processing" &&
+      event.event?.type === "payment.processing"
     ) {
       return event;
     }
 
-    // capture.completed.payment is optional in the dual-write shape; payment.processing
-    // requires Payment. Prefer the attached payment, else rebuild from the envelope.
+    // Rebuild payment snapshot from the envelope (domain status already partial).
     const payment =
-      event.event.payment ?? paymentFromWebhookEvent(event);
+      (event.event &&
+      "payment" in event.event &&
+      event.event.payment !== undefined
+        ? event.event.payment
+        : undefined) ?? paymentFromWebhookEvent(event);
 
     return {
       ...event,

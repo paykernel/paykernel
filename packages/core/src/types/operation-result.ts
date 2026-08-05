@@ -573,7 +573,9 @@ export function isPaidOutcome(
     result: GatewayPaymentResult | PaymentOperationResult,
 ): boolean {
     if (isOperationResult(result)) {
-        if (result.reconciliationRequired === true) {
+        // Indeterminate arm is the only settled-uncertainty path on
+        // PaymentOperationResult; never treat it as paid for fulfillment.
+        if (result.outcome === "indeterminate") {
             return false;
         }
         return (
@@ -767,14 +769,16 @@ export function applyOutcomeToGatewayRefundResult(
 export function inferRefundOperationOutcome(
     result: GatewayRefundResult,
 ): RefundOperationOutcome {
-    if (result.outcome !== undefined) {
-        return result.outcome;
-    }
+    // CORE-1: match payment recon-first guards — uncertainty beats an explicit
+    // `outcome: 'succeeded'` so uncertain refunds never settle as completed.
     if (
         result.reconciliationRequired === true ||
         hasRawIndeterminateMarker(result.rawResponse)
     ) {
         return "indeterminate";
+    }
+    if (result.outcome !== undefined) {
+        return result.outcome;
     }
     if (result.status === "completed" && result.success) {
         return "succeeded";
@@ -789,6 +793,28 @@ export function inferRefundOperationOutcome(
 }
 
 /**
+ * CORE-2: keep Phase-6 outcome arms consistent with gateway refund status.
+ * Explicit `outcome: succeeded` must not invent a completed refund when the
+ * gateway still reports pending/failed (and the reverse for pending+completed).
+ */
+function coerceRefundOutcomeToGatewayStatus(
+    outcome: RefundOperationOutcome,
+    gatewayStatus: GatewayRefundResult["status"],
+): RefundOperationOutcome {
+    if (outcome === "succeeded") {
+        if (gatewayStatus === "pending") return "pending";
+        if (gatewayStatus === "failed") return "failed";
+        return outcome;
+    }
+    if (outcome === "pending") {
+        if (gatewayStatus === "failed") return "failed";
+        if (gatewayStatus === "completed") return "succeeded";
+        return outcome;
+    }
+    return outcome;
+}
+
+/**
  * Map a {@link GatewayRefundResult} to {@link RefundOperationResult}.
  */
 export function mapGatewayRefundToOperationResult(
@@ -796,7 +822,12 @@ export function mapGatewayRefundToOperationResult(
 ): RefundOperationResult {
     const outcome = inferRefundOperationOutcome(result);
 
-    switch (outcome) {
+    const resolvedOutcome = coerceRefundOutcomeToGatewayStatus(
+        outcome,
+        result.status,
+    );
+
+    switch (resolvedOutcome) {
         case "succeeded":
             return {
                 outcome: "succeeded",

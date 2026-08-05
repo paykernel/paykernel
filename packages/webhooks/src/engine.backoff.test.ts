@@ -75,6 +75,7 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
       gateway: "stripe",
       providerEventId: "evt_b3",
       payloadHash: "h",
+      event: { id: "evt_b3" },
       handler: failHandler,
       ackAfterClaim: false,
     });
@@ -241,6 +242,7 @@ describe("B4: claim respects availableAt (true backoff)", () => {
       gateway: "stripe",
       providerEventId: "evt_b4_engine",
       payloadHash: "h",
+      event,
       handler: async () => {
         handlerRuns++;
       },
@@ -266,6 +268,7 @@ describe("N2: NonRetryableHandlerError({ deadLetter: false }) poison risk", () =
       gateway: "stripe",
       providerEventId: "evt_n2",
       payloadHash: "h",
+      event: { id: "evt_n2", type: "payment.succeeded" },
       handler: async () => {
         throw new NonRetryableHandlerError("poison", { deadLetter: false });
       },
@@ -294,11 +297,13 @@ describe("N2: NonRetryableHandlerError({ deadLetter: false }) poison risk", () =
       runs++;
       throw new NonRetryableHandlerError("poison", { deadLetter: false });
     };
+    const event = { id: "evt_n2_cap", type: "payment.succeeded" };
 
     const first = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_n2_cap",
       payloadHash: "h",
+      event,
       handler: poison,
     });
     expect(first).toEqual({ outcome: "handler_failed", retryable: false });
@@ -308,6 +313,7 @@ describe("N2: NonRetryableHandlerError({ deadLetter: false }) poison risk", () =
       gateway: "stripe",
       providerEventId: "evt_n2_cap",
       payloadHash: "h",
+      event,
       handler: poison,
     });
     expect(second).toEqual({ outcome: "handler_failed", retryable: false });
@@ -323,6 +329,7 @@ describe("N2: NonRetryableHandlerError({ deadLetter: false }) poison risk", () =
       gateway: "stripe",
       providerEventId: "evt_n2_default",
       payloadHash: "h",
+      event: { id: "evt_n2_default", type: "payment.succeeded" },
       handler: async () => {
         throw new NonRetryableHandlerError("poison");
       },

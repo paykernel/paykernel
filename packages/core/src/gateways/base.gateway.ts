@@ -59,6 +59,7 @@ const MONEY_IDENTITY_KEYS = [
     'outcome',
     'status',
     'amount',
+    'currency',
     'gatewayId',
     'gatewayObjectId',
     'captureId',
@@ -77,6 +78,11 @@ const MONEY_IDENTITY_KEYS = [
     'decline',
     'reconciliationRequired',
     'providerRequestId',
+    // CORE-3: Checkout / session identity (phishing-rewrite surface)
+    'url',
+    'sessionId',
+    'paymentIntentId',
+    'paymentStatus',
 ] as const;
 
 /**

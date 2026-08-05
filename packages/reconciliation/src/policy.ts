@@ -362,5 +362,19 @@ export function shouldForbidReplacementCharge(
     // the original intent may still settle or already holds funds.
     return true;
   }
+  // RECON-1: when provider snapshot is present and holds paid/open money,
+  // forbid replacement even if local is terminal failed/cancelled (dual create).
+  if (
+    (result.outcome === "consistent" || result.outcome === "drift_detected") &&
+    result.provider !== undefined
+  ) {
+    const providerStatus = result.provider.status;
+    if (
+      isPaidLikePaymentStatus(providerStatus) ||
+      isOpenIncompleteProvider(providerStatus)
+    ) {
+      return true;
+    }
+  }
   return false;
 }

@@ -321,6 +321,7 @@ when present on the payment (create/get/capture/refund responses and webhooks):
 | `refunded > 0` and `refunded < refundBaseline` | `partially_refunded` |
 | `refunded >= refundBaseline` and `refundBaseline > 0` | `refunded` |
 | Provider status `refunded` but `refunded` amount missing/zero/non-finite | `refund_completed` (fail-closed; **not** full `refunded`) |
+| Webhook envelope `payment_refunded` but domain still paid-like (missing/zero `refunded`) | `refund_completed` (fail-closed; **not** `paid` / full `refunded`) |
 | `captured > 0` and `captured < amount` (auth/paid family) | `partially_captured` |
 
 **Refund baseline:** `refundBaseline = captured > 0 ? captured : amount`. Full refund of a
@@ -330,8 +331,11 @@ not `partially_refunded`. When `captured` is 0/absent, completeness uses authori
 **Incomplete refund snapshots:** Never treat provider `refunded` alone as full money
 reversal. Without a positive finite `refunded` amount that covers the baseline, the SDK
 returns `refund_completed` so handlers that key only on `status === 'refunded'` do not
-fully reverse inventory/accounting from a thin payload. Prefer re-fetching with
-`getPayment` when amounts are missing.
+fully reverse inventory/accounting from a thin payload. The same fail-closed path applies
+to `payment_refunded` webhooks whose payment object still shows a paid-like status with
+missing/zero `refunded` — domain status becomes `refund_completed`, not `paid`. Prefer
+re-fetching with `getPayment` when amounts are missing. Phase-7 dual-write may still be
+`refund.completed` (refund *entity* signal); completeness is always domain `status`.
 
 Partial refunds take precedence over partial capture when both amount fields apply.
 
@@ -503,10 +507,12 @@ if your account uses Moyasar's standalone card authentication API.
 
 ## Idempotency for refunds, captures, and voids
 
-> **Required for multi-worker production:** configure a shared
-> `moyasar.idempotencyStore` and pass `idempotencyKey` on every
-> capture/refund/void. Without a store, mutations are completely unguarded —
-> network retries or concurrent workers can double-apply (e.g. double refund).
+> **Required for all capture/refund/void (MOYASAR-1/2):** configure
+> `moyasar.idempotencyStore` with atomic `reserve()` and pass `idempotencyKey`
+> on every mutation. The SDK **throws** `InvalidRequestError` when the store,
+> key, or atomic `reserve()` is missing — unguarded mutations are refused
+> (double-refund class). Prefer a shared store (Redis/SQL) in multi-worker
+> deployments; `InMemoryIdempotencyStore` only protects a single process.
 
 Moyasar's API has **no native idempotency** for the refund, capture, and void
 endpoints. Without protection, a retried refund (e.g. after a network timeout)
@@ -514,16 +520,12 @@ can refund the customer twice.
 
 The SDK does **not** auto-retry capture/refund/void with `withRetry` (a lost
 response after a successful mutation could double-apply). `idempotencyStore` +
-`idempotencyKey` only make **your** retries safe: completed results are cached,
+`idempotencyKey` make **your** retries safe: completed results are cached,
 in-progress / unknown outcomes refuse a second attempt, and definite 4xx
-failures clear the reservation so a caller retry is allowed.
-
-**Production multi-worker deployments must configure `idempotencyStore`** (Redis,
-SQL, or another shared store). The in-memory store only dedupes within a single
-process. The SDK logs a warning when no store is configured. Passing
-`idempotencyKey` **without** a store **throws** `InvalidRequestError` (fail-closed)
-so callers cannot believe the key is protecting a mutation that still runs
-unguarded — configure the store or omit the key for a single unguarded attempt.
+failures clear the reservation so a caller retry is allowed. Stores without
+atomic `reserve()` are refused at mutation time (non-atomic get-then-set races
+under concurrency). The SDK also logs a construction-time warning when no store
+is configured or when `reserve()` is missing.
 
 ```typescript
 import { PaymentClient, InMemoryIdempotencyStore } from '@paykernel/core';

@@ -7,6 +7,7 @@ import {
 } from "@paykernel/testkit";
 import {
   StoreLeaseLostError,
+  StoreUnsupportedFeatureError,
 } from "@paykernel/store-contracts";
 import {
   createDoIdempotencyStore,
@@ -28,10 +29,19 @@ function createScriptedExecutor(handlers: {
     sql: string,
     params: readonly unknown[],
   ) => { changes: number };
-}): DoExecutor & { calls: Array<{ sql: string; params: readonly unknown[] }> } {
+  /** When true, omit transaction (and runInTransaction) for SHARED-1 fail-closed tests. */
+  omitTransaction?: boolean;
+}): DoExecutor & {
+  calls: Array<{ sql: string; params: readonly unknown[] }>;
+  transactionEntered: number;
+} {
   const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
-  return {
+  const base: DoExecutor & {
+    calls: Array<{ sql: string; params: readonly unknown[] }>;
+    transactionEntered: number;
+  } = {
     calls,
+    transactionEntered: 0,
     query<T = Row>(sql: string, params: readonly unknown[] = []): T[] {
       calls.push({ sql, params });
       const rows = handlers.onQuery?.(sql, params) ?? [];
@@ -42,9 +52,14 @@ function createScriptedExecutor(handlers: {
       return handlers.onRun?.(sql, params) ?? { changes: 0 };
     },
     transaction<T>(fn: () => T): T {
+      base.transactionEntered += 1;
       return fn();
     },
   };
+  if (handlers.omitTransaction) {
+    delete (base as { transaction?: unknown }).transaction;
+  }
+  return base;
 }
 
 describe("idempotency store unit (fake executor)", () => {
@@ -405,6 +420,60 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(call!.sql).toContain("lease_expires_at");
     expect(call!.sql).toContain("lease_expires_at >");
     expect(call!.params).toContain(now);
+  });
+});
+
+describe("withTransaction honesty (SHARED-1 / DO)", () => {
+  it("fails closed when executor lacks transaction and runInTransaction", async () => {
+    const executor = createScriptedExecutor({ omitTransaction: true });
+    expect(executor.transaction).toBeUndefined();
+    expect(executor.runInTransaction).toBeUndefined();
+    const store = createDoIdempotencyStore({ executor });
+    await expect(
+      store.withTransaction(async () => "should-not-run"),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+    await expect(
+      store.withTransaction(() => "should-not-run"),
+    ).rejects.toThrow(/refusing silent no-op/i);
+  });
+
+  it("runs sync fn inside executor.transaction (not pre-execute)", async () => {
+    const executor = createScriptedExecutor({});
+    const store = createDoIdempotencyStore({ executor });
+    let ranInside = false;
+    const out = await store.withTransaction(() => {
+      // transaction must have been entered before body runs
+      expect(executor.transactionEntered).toBe(1);
+      ranInside = true;
+      return "ok";
+    });
+    expect(out).toBe("ok");
+    expect(ranInside).toBe(true);
+    expect(executor.transactionEntered).toBe(1);
+  });
+
+  it("fails closed for async callbacks when only sync transaction is available", async () => {
+    const executor = createScriptedExecutor({});
+    expect(executor.runInTransaction).toBeUndefined();
+    const store = createDoIdempotencyStore({ executor });
+    await expect(
+      store.withTransaction(async () => "async-without-runInTransaction"),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+  });
+
+  it("uses runInTransaction when present (async ok)", async () => {
+    const executor = createScriptedExecutor({});
+    let nested = false;
+    executor.runInTransaction = async <T>(fn: () => Promise<T> | T) => {
+      nested = true;
+      return await fn();
+    };
+    const store = createDoIdempotencyStore({ executor });
+    const out = await store.withTransaction(async () => "ok");
+    expect(out).toBe("ok");
+    expect(nested).toBe(true);
+    // Prefer runInTransaction over bare transaction
+    expect(executor.transactionEntered).toBe(0);
   });
 });
 

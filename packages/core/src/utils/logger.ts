@@ -35,6 +35,8 @@ export const noopLogger: Logger = {
 const SENSITIVE_KEY_PATTERNS = [
   "secret",
   "password",
+  "passwd",
+  "pwd",
   "token",
   "authorization",
   "auth",
@@ -55,6 +57,10 @@ const SENSITIVE_KEY_PATTERNS = [
   "client_secret",
   "clientsecret",
   "given_id",
+  // Session / auth material not covered by password/token alone
+  "cookie",
+  "credentials",
+  "otp",
   // Banking / government identifiers
   "iban",
   "bank",

@@ -93,14 +93,12 @@ function cloneUnknown(value: unknown): unknown {
  *
  * Memory is capped at `maxEntries`. Expired entries are evicted lazily on
  * read, and when the store reaches capacity a write first prunes expired
- * entries and then, if still full, evicts the least-recently-updated entry
- * (Map insertion order with move-to-end on every `set`). Records returned from
- * `get`/`reserve` and stored by `set` are cloned so callers cannot mutate the
- * live cache (status / fingerprint / result).
- *
- * Under sustained pressure beyond `maxEntries`, the oldest in-progress guards
- * may be evicted, so size the cap for your throughput or use a shared store
- * for strict guarantees.
+ * entries and then, if still full, may evict an unprotected entry (status
+ * `unknown` only). **MONEY-1:** `in_progress` and `completed` records are
+ * never LRU-evicted under pressure — new keys are refused (throw) when the
+ * store is full of protected entries, so double-refund/capture guards cannot
+ * silently disappear. Records returned from `get`/`reserve` and stored by
+ * `set` are cloned so callers cannot mutate the live cache.
  */
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly entries = new Map<
@@ -133,11 +131,16 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     if (!isUpdate && this.entries.size >= this.maxEntries) {
       this.pruneExpired();
       if (this.entries.size >= this.maxEntries) {
-        this.evictOldest();
+        if (!this.evictUnprotected()) {
+          throw new Error(
+            "InMemoryIdempotencyStore at capacity with protected in_progress/completed keys; " +
+              "refusing new key to preserve mutation guards (raise maxEntries or use a shared store)",
+          );
+        }
       }
     }
 
-    // Move-to-end on update so recency tracks last write (LRU-style eviction).
+    // Move-to-end on update so recency tracks last write (LRU-style eviction of unknowns).
     if (isUpdate) {
       this.entries.delete(key);
     }
@@ -176,11 +179,19 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     }
   }
 
-  private evictOldest(): void {
-    const oldest = this.entries.keys().next().value;
-    if (oldest !== undefined) {
-      this.entries.delete(oldest);
+  /**
+   * Evict the least-recently-updated **unprotected** entry (`unknown` only).
+   * Never drops `in_progress` / `completed` (MONEY-1).
+   * @returns true if an entry was removed
+   */
+  private evictUnprotected(): boolean {
+    for (const [key, entry] of this.entries) {
+      if (entry.record.status === "unknown") {
+        this.entries.delete(key);
+        return true;
+      }
     }
+    return false;
   }
 }
 

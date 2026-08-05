@@ -310,12 +310,20 @@ describe("shouldForbidReplacementCharge", () => {
         { gateway: "s", expected: { status: "failed" } },
       ),
     ).toBe(true);
-    // Terminal failed + consistent leaves room for intentional re-attempt after review
+    // RECON-1: terminal failed local + provider paid/open still forbids replacement
+    // (provider already holds a charge — dual createPayment risk).
     expect(
       shouldForbidReplacementCharge(consistentPaid, {
         gateway: "s",
         expected: { status: "failed" },
       }),
+    ).toBe(true);
+    // Terminal failed local + definitive failed provider leaves room for re-attempt.
+    expect(
+      shouldForbidReplacementCharge(
+        { outcome: "consistent", provider: failedProvider },
+        { gateway: "s", expected: { status: "failed" } },
+      ),
     ).toBe(false);
   });
 });

@@ -687,6 +687,20 @@ describe("operation-result helpers", () => {
       }),
     ).toBe("pending");
 
+    // CORE-1: reconciliationRequired beats explicit outcome succeeded
+    expect(
+      inferRefundOperationOutcome({
+        success: true,
+        status: "completed",
+        gatewayRefundId: "re_recon",
+        amount: 1,
+        currency: "SAR",
+        rawResponse: {},
+        outcome: "succeeded",
+        reconciliationRequired: true,
+      }),
+    ).toBe("indeterminate");
+
     const mapped = mapGatewayRefundToOperationResult({
       success: false,
       status: "failed",
@@ -696,6 +710,21 @@ describe("operation-result helpers", () => {
       rawResponse: {},
     });
     expect(mapped.outcome).toBe("failed");
+
+    // CORE-2: gateway pending beats invented completed on succeeded outcome
+    const mappedPending = mapGatewayRefundToOperationResult({
+      success: true,
+      status: "pending",
+      gatewayRefundId: "re_p",
+      amount: 1,
+      currency: "SAR",
+      rawResponse: {},
+      outcome: "succeeded",
+    });
+    expect(mappedPending.outcome).toBe("pending");
+    if (mappedPending.outcome === "pending") {
+      expect(mappedPending.status).toBe("pending");
+    }
   });
 
   it("isGatewayPaymentResult narrows plain objects", () => {

@@ -278,14 +278,20 @@ function classifyErrorKind(
   ) {
     return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
+  // Local/schema validation & config errors are safely pre-submit.
+  // ROUTE-1: bare invalid_request may be post-accept provider validation —
+  // treat as indeterminate (not multi-gateway fallback-eligible) unless the
+  // caller proves non-submission via an explicit pre_submission_failure kind.
   if (
     k === "pre_submission_failure" ||
     k === "validation_error" ||
-    k === "invalid_request" ||
     k === "configuration_error" ||
     k === "auth_config_error"
   ) {
     return "pre_submission_failure";
+  }
+  if (k === "invalid_request") {
+    return "indeterminate";
   }
   if (k === "timeout" || k === "etimedout" || k === "network_timeout") {
     return "timeout";
@@ -344,13 +350,14 @@ function classifyErrorObject(
   ) {
     return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
-  if (
-    name === "invalidrequesterror" ||
-    name === "validationerror" ||
-    code === "invalid_request" ||
-    code === "validation_error"
-  ) {
+  // ValidationError / validation_error: typically local schema (safe pre-submit).
+  // InvalidRequestError / invalid_request: may be post-accept provider validation
+  // or idempotency reuse — ROUTE-1 fail-closed to indeterminate (no multi-gateway retry).
+  if (name === "validationerror" || code === "validation_error") {
     return "pre_submission_failure";
+  }
+  if (name === "invalidrequesterror" || code === "invalid_request") {
+    return "indeterminate";
   }
   if (
     code === "etimedout" ||

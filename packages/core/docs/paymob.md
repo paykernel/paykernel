@@ -90,7 +90,9 @@ if (result.redirectUrl) {
 
 You can also pass billing details explicitly with `paymobBillingData`, and override payment methods per request with `paymobIntegrationId` or `paymobPaymentMethods`.
 
-The create result `gatewayId` is the Paymob **intention** ID (often `pi_...`), and `nextAction` exposes the checkout URL, intention ID, client secret, and payment keys returned by Paymob. Capture, refund, void, and inquiry methods require the **numeric Paymob transaction ID** from a verified processed webhook (`obj.id`) or the Paymob dashboard — **not** the intention ID from `createPayment`. Passing an intention ID such as `pi_...`, a legacy order ID, or any non-numeric value is rejected before the SDK calls Paymob. Store the transaction id from the webhook when you fulfill payments.
+The create result `gatewayId` is the Paymob **intention** ID (often `pi_...`), and `nextAction` exposes the checkout URL, intention ID, client secret, and payment keys returned by Paymob. Capture, refund, void, and inquiry methods require the **numeric Paymob transaction ID** from a verified processed webhook (`obj.id`) or the Paymob dashboard — **not** the intention ID from `createPayment`. Passing an intention ID such as `pi_...` or any non-numeric value is rejected before the SDK calls Paymob.
+
+**Legacy order IDs (PAYMOB-4):** the deprecated iframe flow returns Paymob's **order** id as `gatewayId` / `orderId` (also pure digits). Transaction ids and order ids share the same numeric shape, so the SDK **cannot** distinguish them at the mutation boundary — always store **`obj.id` from a verified TRANSACTION webhook** (or dashboard transaction id) for post-pay ops. Do **not** pass the legacy create `gatewayId`/order id into capture/refund/void/getPayment. Child refund/capture webhooks set `gatewayPaymentId` to the child transaction id and, when HMAC covers a distinct `order.id`, dual-write that order id as `gatewayObjectId` for parent-order correlation (PAYMOB-5).
 
 ### Auth / capture dual model
 
@@ -165,7 +167,7 @@ When an explicit `amount` is provided, the SDK validates it against Paymob's rem
 
 ## Legacy Iframe Checkout
 
-The deprecated legacy iframe flow returns Paymob's order ID as `gatewayId`, `gatewayObjectId`, and `orderId` because no transaction exists until the customer pays. Capture, refund, void, and inquiry methods still require the numeric Paymob transaction ID from the processed callback or dashboard.
+The deprecated legacy iframe flow returns Paymob's order ID as `gatewayId`, `gatewayObjectId`, and `orderId` because no transaction exists until the customer pays. Capture, refund, void, and inquiry methods still require the **transaction** id from the processed callback or dashboard — **not** this order id (order and transaction ids are both numeric; the SDK cannot auto-reject order ids by shape alone).
 
 ## Get Payment Details
 
@@ -205,11 +207,12 @@ The SDK verifies transaction processed callbacks, saved-card token callbacks, an
 Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). **HMAC-covered status only.** Paymob's transaction HMAC covers `is_auth`, `is_capture`, `is_refunded`, `is_voided`, `success`, `pending`, and `amount_cents` — **not** `is_captured`, `captured_amount`, `refunded_amount_cents`, `is_refund`, or `is_void`. After verification the SDK strips unsigned status-driving fields before mapping so a replayed valid signature cannot forge paid/refunded/cancelled via injected slots. Practical consequences:
 
 - Auth-only callbacks (`is_auth` + not `is_capture`) stay `authorized` even if the payload injects `is_captured` / `captured_amount`. Use **transaction inquiry** for multi-partial capture totals on the webhook path.
-- `is_refunded: true` maps to `refund_completed` (incomplete money snapshot) — not full `refunded` / `partially_refunded`. `refunded_amount_cents` is **unsigned** and is stripped after HMAC verify, so it cannot choose partial vs full completeness on webhooks. Inquire for refund totals.
+- Signed `is_capture` + success **without** a trusted cumulative `captured_amount` maps to `processing` (not `paid` / not `capture.completed`). Webhooks strip unsigned `captured_amount`, so partial capture cannot fail-open as full paid + order `amount_cents`. Inquire for cumulative captured amount before fulfillment.
+- Signed `is_refunded: true` **and** HMAC-aliased `is_refund` + success both map to `refund_completed` (incomplete money snapshot) — not full `refunded` / `partially_refunded`. `refunded_amount_cents` is **unsigned** and is stripped after HMAC verify, so it cannot choose partial vs full completeness on webhooks. Inquire for refund totals before treating an order as fully reversed.
 - Refund domain webhooks omit `amount` when no trusted refunded total is available so dual-write consumers do not book order `amount_cents` as the refund amount.
 - Amount-only refunds without a signed refund flag are ignored.
 - `is_refund` / `is_void` are trusted only when they are the HMAC source (the corresponding `is_refunded` / `is_voided` field is absent). When both are present, only the signed current-state flag is used.
-- Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs.
+- Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs and can map full/partial `refunded` / `partially_captured` when amounts are present.
 - **`capturePayment` fail-closed:** success without a positive cumulative captured total maps to `processing` (not `paid` / not `isPaidOutcome`). When the provider omits `captured_amount`, the SDK estimates cumulative as inquiry prior + this request amount — it does **not** treat response `amount_cents` as this-op (that field may be the order total).
 
 > **Phase 7 dual-write:** Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid. Redirect callbacks remain demoted to `payment.processing`.

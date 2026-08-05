@@ -1132,13 +1132,23 @@ export class PaymobGateway extends BaseGateway {
     // PAYMOB-1: HMAC does not cover merchant_order_id / payment_key_claims.extra /
     // creation_extras.paymentId. Never copy those into event.paymentId after
     // verify — a valid signed body can be rewritten to a victim order id.
-    // Correlate via signed gatewayPaymentId (obj.id) server-side.
+    // Correlate via signed gatewayPaymentId (obj.id) and signed order.id.
+    //
+    // PAYMOB-5: child refund/capture transactions emit a distinct obj.id. Keep
+    // gatewayPaymentId as the emitting transaction id (refund/capture target)
+    // and dual-write signed order.id onto gatewayObjectId when it differs so
+    // ledgers can bind parent order ↔ child money ops without unsigned fields.
+    const txnId = String(obj.id);
+    const signedOrderId = this.readSignedPaymobOrderId(normalized.rawObj);
     const legacy: WebhookEvent = {
-      id: String(obj.id),
+      id: txnId,
       type: normalized.type,
       gateway: "paymob",
       paymentId: undefined,
-      gatewayPaymentId: String(obj.id),
+      gatewayPaymentId: txnId,
+      ...(signedOrderId !== undefined && signedOrderId !== txnId
+        ? { gatewayObjectId: signedOrderId }
+        : {}),
       status,
       ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
@@ -1151,6 +1161,26 @@ export class PaymobGateway extends BaseGateway {
       computePayloadHash: true,
       mapContext: this.paymobMapContextFromTransaction(statusSource),
     });
+  }
+
+  /**
+   * HMAC-covered order.id (and aliases used by redirect callbacks).
+   * Never reads merchant_order_id / extras (unsigned).
+   */
+  private readSignedPaymobOrderId(
+    rawObj: Record<string, unknown>,
+  ): string | undefined {
+    const order = this.recordOrUndefined(rawObj.order);
+    const value =
+      rawObj["order.id"] ?? order?.id ?? rawObj.order_id ?? rawObj.order;
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    if (typeof value === "object") {
+      return undefined;
+    }
+    const s = String(value).trim();
+    return s.length > 0 ? s : undefined;
   }
 
   private parseCardTokenWebhookEvent(payload: PaymobCardTokenWebhookPayload): WebhookEvent {
@@ -1233,8 +1263,10 @@ export class PaymobGateway extends BaseGateway {
    * signed current-state flag is trusted.
    *
    * refunded_amount_cents is never HMAC-covered — always strip it on the webhook
-   * path. Signed `is_refunded` alone maps to incomplete `refund_completed`;
-   * partial vs full completeness requires transaction inquiry (PAYMOB-2).
+   * path. Signed `is_refunded` / HMAC-aliased `is_refund` without a trusted
+   * refunded total map to incomplete `refund_completed`; partial vs full
+   * completeness requires transaction inquiry (PAYMOB-2). Signed `is_capture`
+   * without `captured_amount` maps to `processing`, not `paid` (PAYMOB-1).
    *
    * @see https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac
    */
@@ -1642,9 +1674,20 @@ export class PaymobGateway extends BaseGateway {
 
   /**
    * Map Paymob transaction response to unified PaymentStatus.
-   * Order: pending → void → refund (flags or amounts) → capture amounts → auth-only → paid/failed.
+   * Order: pending → void → refund (flags or amounts) → capture amounts →
+   * incomplete capture action → auth-only → paid/failed.
    * Capture amounts are evaluated before the is_auth early return so a partially captured
    * auth transaction maps to partially_captured, not authorized.
+   *
+   * **Fail-closed money completeness (PAYMOB-1 / PAYMOB-2):**
+   * - Full `refunded` / `partially_refunded` require a positive trusted
+   *   `refunded_amount_cents` (API/inquiry). Webhooks strip that field; signed
+   *   `is_refund` / `is_refunded` alone → incomplete `refund_completed`.
+   * - Full `paid` from a capture action requires positive `captured_amount`.
+   *   Signed `is_capture` + success without that total → `processing` (inquire),
+   *   never fail-open to `paid` + full `amount_cents` (partial capture risk).
+   * - Plain sale `success` (not capture/auth action) still maps `paid` — charge
+   *   amount is HMAC-covered `amount_cents`.
    */
   private mapTransactionStatus(data: {
     success?: boolean;
@@ -1672,26 +1715,24 @@ export class PaymobGateway extends BaseGateway {
       (data.success === true && data.is_refund === true) ||
       (data.refunded_amount_cents !== undefined && data.refunded_amount_cents > 0)
     ) {
+      const refundedAmountCents = data.refunded_amount_cents;
+      const hasPositiveRefundedAmount =
+        refundedAmountCents !== undefined && refundedAmountCents > 0;
       const refundBaseline =
         data.captured_amount !== undefined && data.captured_amount > 0
           ? data.captured_amount
           : data.amount_cents;
       if (
         refundBaseline !== undefined &&
-        data.refunded_amount_cents !== undefined &&
-        data.refunded_amount_cents > 0 &&
-        data.refunded_amount_cents < refundBaseline
+        hasPositiveRefundedAmount &&
+        refundedAmountCents < refundBaseline
       ) {
         return "partially_refunded";
       }
-      // PAYMOB-6: is_refunded current-state without a positive refund amount is an
-      // incomplete money snapshot — do not fail-open as full `refunded`.
-      // is_refund action + success remains `refunded` (action outcome; amount_cents is HMAC-covered).
-      if (
-        data.is_refunded === true &&
-        !(data.success === true && data.is_refund === true) &&
-        !(data.refunded_amount_cents !== undefined && data.refunded_amount_cents > 0)
-      ) {
+      // Completeness requires a positive refunded total vs baseline (API/inquiry).
+      // Signed is_refund action and is_refunded current-state are both incomplete
+      // without that total — never fail-open as full `refunded` (PAYMOB-2).
+      if (!hasPositiveRefundedAmount) {
         return "refund_completed";
       }
       return "refunded";
@@ -1707,6 +1748,13 @@ export class PaymobGateway extends BaseGateway {
         return "partially_captured";
       }
       return "paid";
+    }
+
+    // PAYMOB-1: signed is_capture + success without a trusted cumulative captured
+    // total cannot distinguish partial vs full capture. Fail-closed to processing
+    // (not paid + full amount_cents). Prefer transaction inquiry for money truth.
+    if (data.success === true && data.is_capture === true) {
+      return "processing";
     }
 
     // Auth-only: authorized when still uncaptured (no capture flags and no captured_amount).

@@ -777,7 +777,9 @@ function refundStatusFromPaymentStatus(
       return "pending";
     case "refund_failed":
       return "failed";
+    // PAYMOB-3: incomplete money snapshot — entity is not terminal completed.
     case "refund_completed":
+      return "pending";
     case "refunded":
     case "partially_refunded":
       return "completed";

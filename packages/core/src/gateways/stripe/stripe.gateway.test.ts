@@ -1205,6 +1205,28 @@ describe("StripeGateway", () => {
       expect(event.gatewayPaymentId).toBe("sub_trialing");
     });
 
+    it("should map active subscription status to processing not paid (STRIPE-1)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_sub_active",
+        type: "customer.subscription.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "sub_active",
+            object: "subscription",
+            status: "active",
+            currency: "usd",
+            metadata: { paymentId: "internal_active_sub" },
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.gatewayPaymentId).toBe("sub_active");
+    });
+
     it("should map incomplete_expired subscription status to cancelled", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_sub_incomplete_expired",

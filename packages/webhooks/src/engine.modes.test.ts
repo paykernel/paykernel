@@ -137,7 +137,11 @@ describe("modes: inline vs durable_retry (A6)", () => {
 
     expect(outcome.outcome).toBe("invalid_webhook");
     if (outcome.outcome === "invalid_webhook") {
-      expect(outcome.reason).toMatch(/envelope is required for ackAfterClaim/i);
+      // WEBHOOKS-1: durable_retry refuses claim without materializable payload
+      // (covers ackAfterClaim park and inline durable handler paths).
+      expect(outcome.reason).toMatch(
+        /envelope or event is required for durable_retry|envelope is required for ackAfterClaim/i,
+      );
     }
     expect(store.size).toBe(0);
   });
@@ -314,7 +318,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.payloadRef).toContain("payment.succeeded");
   });
 
-  it("durable_retry without envelope/event dead-letters retryable failure (no stub redrive)", async () => {
+  it("durable_retry without envelope/event refuses claim (WEBHOOKS-1 no permanent block)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -326,19 +330,19 @@ describe("modes: inline vs durable_retry (A6)", () => {
       gateway: "stripe",
       providerEventId: "evt_no_payload",
       payloadHash: "h",
-      // no envelope, no event → no payloadRef
+      // no envelope, no event → no payloadRef — refuse before claim so provider
+      // redelivery of paid events is not permanent-blocked by dead_letter.
       handler: async () => {
         throw new Error("transient");
       },
     });
 
-    expect(outcome).toEqual({
-      outcome: "handler_failed",
-      retryable: false,
-    });
-    const rec = await store.get("stripe:evt_no_payload");
-    expect(rec?.status).toBe("dead_letter");
-    expect(rec?.lastError).toMatch(/missing payloadRef/i);
+    expect(outcome.outcome).toBe("invalid_webhook");
+    if (outcome.outcome === "invalid_webhook") {
+      expect(outcome.reason).toMatch(/payloadRef|envelope or event/i);
+    }
+    // No claim row — redelivery can retry with a materializable payload.
+    expect(await store.get("stripe:evt_no_payload")).toBeUndefined();
   });
 
   it("processRetryable dead-letters rows with missing payloadRef (never stubs event)", async () => {

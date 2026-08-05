@@ -662,7 +662,7 @@ describe('PayPalGateway', () => {
             expect(event.gatewayPaymentId).toBe('capture-from-supplementary');
         });
 
-        it('should prefer the last capture when multiple captures are present on an order webhook', () => {
+        it('should aggregate multi-capture amounts on ORDER.COMPLETED webhooks (PAYPAL-5)', () => {
             const payload = {
                 id: 'WH-multi-capture',
                 event_type: 'CHECKOUT.ORDER.COMPLETED',
@@ -704,12 +704,19 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
+            // Latest capture id for refund target; amount is sum (not last-slice 60).
             expect(event.gatewayPaymentId).toBe('CAPTURE-LAST');
-            expect(event.amount).toBe(60);
+            expect(event.amount).toBe(100);
             expect(event.status).toBe('paid');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-multi',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(true);
         });
 
-        it('should prefer the capture with the latest create_time/update_time over array order', () => {
+        it('should prefer the capture with the latest create_time/update_time for id; still aggregate amount', () => {
             const payload = {
                 id: 'WH-multi-capture-times',
                 event_type: 'CHECKOUT.ORDER.COMPLETED',
@@ -756,8 +763,67 @@ describe('PayPalGateway', () => {
             const event = gateway.parseWebhookEvent(payload);
 
             expect(event.gatewayPaymentId).toBe('CAPTURE-NEWER');
-            expect(event.amount).toBe(40);
+            // Aggregate 40+60, not last-by-time slice 40 alone
+            expect(event.amount).toBe(100);
             expect(event.status).toBe('paid');
+        });
+
+        it('ORDER.COMPLETED under-total multi-capture → partially_captured not paid (audit PAYPAL-2)', () => {
+            const payload = {
+                id: 'WH-order-under-total',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-under',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-PARTIAL-ONLY',
+                                        status: 'COMPLETED',
+                                        final_capture: false,
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                ],
+                                authorizations: [
+                                    {
+                                        id: 'AUTH-OPEN-WH',
+                                        status: 'PARTIALLY_CAPTURED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '100.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.gatewayPaymentId).toBe('CAPTURE-PARTIAL-ONLY');
+            expect(event.amount).toBe(40);
+            expect(event.status).toBe('partially_captured');
+            expect(event.stableType).toBe('payment.processing');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-under',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
         });
 
         it('should map CHECKOUT.ORDER.COMPLETED without a capture to approved (not paid)', () => {

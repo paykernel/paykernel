@@ -32,11 +32,19 @@ const originalFetch = globalThis.fetch;
 
 let fetchCalls: Array<{ url: string; init?: RequestInit }> = [];
 
+const DEFAULT_MUTATION_IDEMPOTENCY_KEY =
+  "a1168bd1-47a4-4b97-8a50-dd5caaccacf2";
+
 function createGateway(
   config: MoyasarConfig = CONFIG,
   hooks: PaymentHooks = {},
 ): MoyasarGateway {
-  return new MoyasarGateway(config, new HooksManager(hooks));
+  // MOYASAR-1/2: mutations require store + key; tests default to atomic in-memory store.
+  const withStore: MoyasarConfig = {
+    idempotencyStore: new InMemoryIdempotencyStore(),
+    ...config,
+  };
+  return new MoyasarGateway(withStore, new HooksManager(hooks));
 }
 
 function paymentResponse(
@@ -774,6 +782,7 @@ describe("MoyasarGateway", () => {
         gatewayPaymentId: PAYMENT_ID,
         amount: 1.234,
         currency: "KWD",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(fetchCalls[0]?.url).toBe(
@@ -787,7 +796,8 @@ describe("MoyasarGateway", () => {
         createGateway().capturePayment({
           gatewayPaymentId: PAYMENT_ID,
           amount: 1.234,
-        }),
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
@@ -798,6 +808,7 @@ describe("MoyasarGateway", () => {
 
       await createGateway().capturePayment({
         gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(lastRequestBodyOrUndefined()).toBeUndefined();
@@ -820,6 +831,7 @@ describe("MoyasarGateway", () => {
         gatewayPaymentId: PAYMENT_ID,
         amount: 1.234,
         currency: "KWD",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(lastRequestBody().amount).toBe(1234);
@@ -845,12 +857,37 @@ describe("MoyasarGateway", () => {
         gatewayPaymentId: PAYMENT_ID,
         amount: 40,
         currency: "SAR",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(result.status).toBe("completed");
       expect(result.outcome).toBe("succeeded");
       expect(result.success).toBe(true);
       expect(result.totalRefunded).toBe(40);
+    });
+
+    it("treats refund HTTP success with incomplete refunded amount as completed op without inventing total", async () => {
+      // Provider status refunded but no positive refunded amount — payment domain
+      // would be refund_completed; refund op still reports totalRefunded honestly.
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 10000,
+          refunded: 0,
+          refunded_at: "2026-05-21T10:05:00Z",
+        }),
+      );
+
+      const result = await createGateway().refundPayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.outcome).toBe("succeeded");
+      expect(result.totalRefunded).toBe(0);
+      expect(result.totalRefunded).not.toBe(100);
     });
 
     it("maps getPayment partial refund amounts to partially_refunded", async () => {
@@ -943,6 +980,7 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("refund_completed");
       expect(result.status).not.toBe("refunded");
+      expect(result.status).not.toBe("partially_refunded");
       expect(result.refundedAmount).toBe(0);
       expect(result.outcome).toBe("succeeded");
     });
@@ -963,6 +1001,27 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("refund_completed");
       expect(result.status).not.toBe("refunded");
+      expect(result.status).not.toBe("partially_refunded");
+    });
+
+    it("maps provider refunded + non-finite refunded amount to refund_completed", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 10000,
+          refunded: Number.NaN,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("refund_completed");
+      expect(result.status).not.toBe("refunded");
+      // Defensive money fields treat non-finite as 0 (status still fail-closed).
+      expect(result.refundedAmount).toBe(0);
     });
 
     it("uses authorization amount as refund baseline when captured is 0", async () => {
@@ -1026,6 +1085,7 @@ describe("MoyasarGateway", () => {
         gatewayPaymentId: PAYMENT_ID,
         amount: 30,
         currency: "SAR",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(result.status).toBe("partially_captured");
@@ -1040,7 +1100,8 @@ describe("MoyasarGateway", () => {
         createGateway().refundPayment({
           gatewayPaymentId: PAYMENT_ID,
           amount: 1.234,
-        }),
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
@@ -1051,6 +1112,7 @@ describe("MoyasarGateway", () => {
 
       await createGateway().refundPayment({
         gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(lastRequestBodyOrUndefined()).toBeUndefined();
@@ -1063,6 +1125,7 @@ describe("MoyasarGateway", () => {
 
       await createGateway().voidPayment({
         gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(lastRequestBodyOrUndefined()).toBeUndefined();
@@ -1085,7 +1148,8 @@ describe("MoyasarGateway", () => {
       await expect(
         createGateway().refundPayment({
           gatewayPaymentId: PAYMENT_ID,
-        }),
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      }),
       ).rejects.toThrow("amount: must be a positive integer");
     });
 
@@ -1104,7 +1168,8 @@ describe("MoyasarGateway", () => {
       await expect(
         createGateway().refundPayment({
           gatewayPaymentId: PAYMENT_ID,
-        }),
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
     });
 
@@ -1121,7 +1186,8 @@ describe("MoyasarGateway", () => {
       await expect(
         createGateway().refundPayment({
           gatewayPaymentId: MISSING_PAYMENT_ID,
-        }),
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      }),
       ).rejects.toBeInstanceOf(ResourceNotFoundError);
     });
 
@@ -1258,15 +1324,24 @@ describe("MoyasarGateway", () => {
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       await expect(
-        createGateway().capturePayment({ gatewayPaymentId: "pay_123" }),
+        createGateway().capturePayment({
+          gatewayPaymentId: "pay_123",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       await expect(
-        createGateway().refundPayment({ gatewayPaymentId: "pay_123" }),
+        createGateway().refundPayment({
+          gatewayPaymentId: "pay_123",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       await expect(
-        createGateway().voidPayment({ gatewayPaymentId: "pay_123" }),
+        createGateway().voidPayment({
+          gatewayPaymentId: "pay_123",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
@@ -1601,8 +1676,15 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("refund_completed");
       expect(event.status).not.toBe("refunded");
+      expect(event.status).not.toBe("partially_refunded");
       // Explicit zero refunded is honest money (not full payment total).
       expect(event.amount).toBe(0);
+      // Dual-write refund.completed is entity signal; completeness is domain status.
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      if (event.event?.type === "refund.completed") {
+        expect(event.event.refund.amount).toBe(0);
+      }
     });
 
     it("maps provider refunded + missing refunded amount on webhooks to refund_completed without inventing total", () => {
@@ -1622,7 +1704,79 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("refund_completed");
       expect(event.status).not.toBe("refunded");
+      expect(event.status).not.toBe("partially_refunded");
       // Incomplete: do not surface payment total as refund money field.
+      expect(event.amount).toBeUndefined();
+      expect(event.stableType).toBe("refund.completed");
+      if (event.event?.type === "refund.completed") {
+        expect(event.event.refund.amount).toBeUndefined();
+      }
+    });
+
+    it("maps payment_refunded + paid-like status without refund amount to refund_completed (not paid)", () => {
+      // Moyasar partial-refund path keeps payment status paid; when the
+      // refunded amount is also missing/zero the snapshot is incomplete —
+      // must not remain paid (false-fulfill / no restock gate).
+      const missing = createGateway().parseWebhookEvent({
+        id: "wh_refund_paid_missing",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+          // refunded omitted
+        },
+      });
+
+      expect(missing.status).toBe("refund_completed");
+      expect(missing.status).not.toBe("paid");
+      expect(missing.status).not.toBe("refunded");
+      expect(missing.amount).toBeUndefined();
+      expect(missing.stableType).toBe("refund.completed");
+
+      const zero = createGateway().parseWebhookEvent({
+        id: "wh_refund_paid_zero",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+          refunded: 0,
+        },
+      });
+
+      expect(zero.status).toBe("refund_completed");
+      expect(zero.status).not.toBe("paid");
+      expect(zero.amount).toBe(0);
+    });
+
+    it("maps payment_refunded + non-finite refunded amount to refund_completed without inventing total", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_refund_nan",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "refunded",
+          amount: 10000,
+          currency: "SAR",
+          refunded: Number.NaN,
+          captured: 10000,
+        },
+      });
+
+      expect(event.status).toBe("refund_completed");
+      expect(event.status).not.toBe("refunded");
+      // Non-finite is not a usable refunded minor — omit rather than invent total.
       expect(event.amount).toBeUndefined();
     });
 
@@ -2109,7 +2263,7 @@ describe("MoyasarGateway", () => {
         warnings.some(
           (w) =>
             w.includes("No idempotencyStore configured") &&
-            w.includes("double refund"),
+            (w.includes("will throw") || w.includes("double-refund")),
         ),
       ).toBe(true);
     });
@@ -2146,7 +2300,7 @@ describe("MoyasarGateway", () => {
       );
     });
 
-    it("fails closed when idempotencyKey is set without a store (MOYASAR-2)", async () => {
+    it("fails closed when no store is configured (MOYASAR-2)", async () => {
       const { logger } = captureWarnings();
       const gateway = new MoyasarGateway(CONFIG, new HooksManager(), logger);
       mockFetchJson(paymentResponse({ status: "refunded", refunded: 10000 }));
@@ -2156,9 +2310,42 @@ describe("MoyasarGateway", () => {
           gatewayPaymentId: PAYMENT_ID,
           idempotencyKey: "unguarded-key",
         }),
-      ).rejects.toThrow(/idempotencyKey but no idempotencyStore/);
+      ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
 
-      // Must not hit the network — key without store is not silently unguarded.
+      // Must not hit the network — unguarded mutations are refused.
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("fails closed when store lacks atomic reserve (MOYASAR-1)", async () => {
+      const storeWithoutReserve = {
+        get: async () => undefined,
+        set: async () => {},
+        delete: async () => {},
+      };
+      const gateway = new MoyasarGateway(
+        { ...CONFIG, idempotencyStore: storeWithoutReserve },
+        new HooksManager(),
+      );
+      mockFetchJson(paymentResponse({ status: "refunded", refunded: 10000 }));
+
+      await expect(
+        gateway.refundPayment({
+          gatewayPaymentId: PAYMENT_ID,
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
+      ).rejects.toThrow(/requires idempotencyStore\.reserve/);
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("fails closed when store is present but idempotencyKey is omitted (MOYASAR-2)", async () => {
+      const gateway = createGateway();
+      mockFetchJson(paymentResponse({ status: "refunded", refunded: 10000 }));
+
+      await expect(
+        gateway.refundPayment({
+          gatewayPaymentId: PAYMENT_ID,
+        }),
+      ).rejects.toThrow(/requires idempotencyKey/);
       expect(fetchCalls).toHaveLength(0);
     });
   });

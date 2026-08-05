@@ -465,8 +465,14 @@ function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined
   if (s === "failed") return "payment.failed";
   if (s === "authorized") return "payment.authorized";
   if (s === "cancelled" || s === "voided") return "payment.cancelled";
-  if (s === "refunded" || s === "partially_refunded" || s === "refund_completed") {
+  // Full / partial refund money completeness only.
+  if (s === "refunded" || s === "partially_refunded") {
     return "refund.completed";
+  }
+  // PAYMOB-3: incomplete refund snapshot (refund_completed) must not look done
+  // to Phase-7-only handlers — preserve incomplete marker as refund.pending.
+  if (s === "refund_completed") {
+    return "refund.pending";
   }
   if (s === "pending" || s === "processing") return "payment.processing";
   if (s === "setup_completed") return "payment_method.setup_completed";

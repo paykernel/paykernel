@@ -66,14 +66,18 @@ export function resolveStoreContext(options: DoStoreOptions): ResolvedStoreConte
         return outer.runInTransaction(fn);
       }
       if (typeof outer.transaction === "function") {
-        const result = fn();
-        if (result !== null && typeof result === "object" && "then" in result) {
-          // Sync transaction cannot wrap async multi-step work — fail closed.
-          throw new StoreUnsupportedFeatureError(
-            "withTransaction: async callbacks require executor.runInTransaction; refusing to run without multi-statement atomicity",
-          );
-        }
-        return outer.transaction(() => result as T);
+        // Run fn *inside* transactionSync so multi-statement work is atomic.
+        // (Never pre-execute then wrap the value — that pretends TX.)
+        return outer.transaction(() => {
+          const result = fn();
+          if (result !== null && typeof result === "object" && "then" in result) {
+            // Sync transaction cannot wrap async multi-step work — fail closed.
+            throw new StoreUnsupportedFeatureError(
+              "withTransaction: async callbacks require executor.runInTransaction; refusing to run without multi-statement atomicity",
+            );
+          }
+          return result as T;
+        });
       }
       throw new StoreUnsupportedFeatureError(
         "withTransaction: executor provides neither runInTransaction nor transaction; refusing silent no-op",

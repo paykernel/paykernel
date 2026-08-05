@@ -126,6 +126,10 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
     expect(classifySubmissionState({ errorKind: "validation_error" })).toBe(
       "pre_submission_failure",
     );
+    // ROUTE-1: bare invalid_request is indeterminate (may be post-accept).
+    expect(classifySubmissionState({ errorKind: "invalid_request" })).toBe(
+      "indeterminate",
+    );
     expect(
       classifySubmissionState({ errorKind: "provider_5xx_uncertain" }),
     ).toBe("provider_5xx_uncertain");

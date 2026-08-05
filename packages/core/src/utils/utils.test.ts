@@ -426,6 +426,40 @@ describe("redact", () => {
     expect(out.exportFormat).toBe("json");
     expect(out.syntaxTree).toBe(true);
   });
+
+  it("redacts cookie / passwd / pwd / otp / credentials without over-matching", () => {
+    const out = redact({
+      cookie: "session=abc",
+      setCookie: "sid=xyz",
+      passwd: "hunter2",
+      pwd: "hunter2",
+      userPwd: "hunter2",
+      otp: "123456",
+      otpValue: "654321",
+      totpCode: "999999",
+      credentials: { user: "a", pass: "b" },
+      // Must remain visible — bare patterns must not substring-match these
+      // (password already covered elsewhere; outcome/status stay diagnostic)
+      outcome: "succeeded",
+      status: "paid",
+      amount: 10.5,
+      currency: "SAR",
+    }) as Record<string, unknown>;
+
+    expect(out.cookie).toBe("[REDACTED]");
+    expect(out.setCookie).toBe("[REDACTED]");
+    expect(out.passwd).toBe("[REDACTED]");
+    expect(out.pwd).toBe("[REDACTED]");
+    expect(out.userPwd).toBe("[REDACTED]");
+    expect(out.otp).toBe("[REDACTED]");
+    expect(out.otpValue).toBe("[REDACTED]");
+    expect(out.totpCode).toBe("[REDACTED]");
+    expect(out.credentials).toBe("[REDACTED]");
+    expect(out.outcome).toBe("succeeded");
+    expect(out.status).toBe("paid");
+    expect(out.amount).toBe(10.5);
+    expect(out.currency).toBe("SAR");
+  });
 });
 
 describe("createRedactingLogger", () => {
@@ -467,15 +501,30 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.get("k")).toBeUndefined();
   });
 
-  it("caps the number of stored entries to avoid unbounded growth", () => {
-    const store = new InMemoryIdempotencyStore(60_000, 100);
-    for (let i = 0; i < 1000; i++) {
-      store.set(`k${i}`, { status: "completed", fingerprint: "fp", createdAt: Date.now() });
-    }
-    expect(store.size).toBeLessThanOrEqual(100);
-    // The most recently written key survives; the oldest are evicted first.
-    expect(store.get("k999")).toBeDefined();
-    expect(store.get("k0")).toBeUndefined();
+  it("caps growth by evicting unknown; never drops completed/in_progress (MONEY-1)", () => {
+    const store = new InMemoryIdempotencyStore(60_000, 3);
+    store.set("a", { status: "unknown", fingerprint: "a", createdAt: 1 });
+    store.set("b", { status: "completed", fingerprint: "b", createdAt: 2 });
+    store.set("c", { status: "in_progress", fingerprint: "c", createdAt: 3 });
+
+    // Unknown is unprotected and may be evicted under pressure.
+    store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 });
+    expect(store.get("a")).toBeUndefined();
+    expect(store.get("b")?.status).toBe("completed");
+    expect(store.get("c")?.status).toBe("in_progress");
+    expect(store.get("d")?.status).toBe("unknown");
+    expect(store.size).toBe(3);
+
+    // Full of protected keys → refuse new key rather than drop mutation guards.
+    const full = new InMemoryIdempotencyStore(60_000, 2);
+    full.set("p1", { status: "completed", fingerprint: "1", createdAt: 1 });
+    full.set("p2", { status: "in_progress", fingerprint: "2", createdAt: 2 });
+    expect(() =>
+      full.set("p3", { status: "completed", fingerprint: "3", createdAt: 3 }),
+    ).toThrow(/protected in_progress\/completed/);
+    expect(full.get("p1")).toBeDefined();
+    expect(full.get("p2")).toBeDefined();
+    expect(full.size).toBe(2);
   });
 
   it("clones records on get/set so callers cannot mutate the live cache", () => {
@@ -537,26 +586,27 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.get("k")?.fingerprint).toBe("fp");
   });
 
-  it("move-to-end on update so recency eviction keeps recently updated keys", () => {
+  it("move-to-end on update; unknown-only eviction keeps protected keys (MONEY-1)", () => {
     const store = new InMemoryIdempotencyStore(60_000, 3);
-    store.set("a", { status: "completed", fingerprint: "a", createdAt: 1 });
-    store.set("b", { status: "completed", fingerprint: "b", createdAt: 2 });
+    store.set("a", { status: "unknown", fingerprint: "a", createdAt: 1 });
+    store.set("b", { status: "unknown", fingerprint: "b", createdAt: 2 });
     store.set("c", { status: "completed", fingerprint: "c", createdAt: 3 });
 
-    // Refresh "a" — without recency tracking, "a" stays oldest and is evicted next.
+    // Refresh "a" — recency tracking still applies among unprotected keys.
     store.set("a", {
-      status: "completed",
+      status: "unknown",
       fingerprint: "a-updated",
       createdAt: 1,
       result: { ok: true },
     });
 
-    store.set("d", { status: "completed", fingerprint: "d", createdAt: 4 });
+    store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 });
 
     expect(store.get("a")?.fingerprint).toBe("a-updated");
     expect(store.get("a")?.result).toEqual({ ok: true });
-    expect(store.get("b")).toBeUndefined(); // least-recently-updated
-    expect(store.get("c")).toBeDefined();
+    // Least-recently-updated unknown "b" is preferred for eviction; completed "c" stays.
+    expect(store.get("b")).toBeUndefined();
+    expect(store.get("c")?.status).toBe("completed");
     expect(store.get("d")).toBeDefined();
     expect(store.size).toBe(3);
   });

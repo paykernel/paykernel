@@ -264,34 +264,27 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Moyasar's refund/capture/void endpoints have no native idempotency, so the
-   * SDK guards them with the injectable store. That guard is only race-safe with
-   * an atomic `reserve()` (Redis `SET NX`, a SQL unique constraint, etc.).
-   * A store without `reserve()` falls back to a non-atomic get-then-set, which
-   * two concurrent retries of the same mutation can both pass — risking a double
-   * refund. Warn loudly so this isn't relied on for cross-worker safety.
-   *
-   * With no store at all, capture/refund/void are completely unguarded — a
-   * multi-worker production deployment will double-apply on retry.
+   * Construction-time heads-up: capture/refund/void refuse to run without a
+   * store that implements atomic `reserve()` and an `idempotencyKey` (see
+   * {@link runIdempotentMutation}). Warn so misconfiguration is visible before
+   * the first mutation throws.
    */
   private warnIfIdempotencyStoreUnsafe(): void {
     const store = this.moyasarConfig.idempotencyStore;
     if (!store) {
       this.logger.warn(
         "[Moyasar] No idempotencyStore configured. Capture, refund, and void " +
-          "have no native Moyasar idempotency; network retries or multi-worker " +
-          "races can apply the same mutation twice (e.g. double refund). " +
-          "Configure moyasar.idempotencyStore (preferably with atomic reserve()) " +
-          "for production multi-worker safety.",
+          "will throw until moyasar.idempotencyStore (with atomic reserve()) " +
+          "and idempotencyKey are provided — Moyasar has no native mutation " +
+          "idempotency (double-refund class).",
       );
       return;
     }
     if (!store.reserve) {
       this.logger.warn(
         "[Moyasar] idempotencyStore does not implement atomic reserve(). " +
-          "Concurrent retries of the same refund/capture/void can race and apply " +
-          "the mutation twice. Provide a store with an atomic reserve() " +
-          "(e.g. Redis SET NX or a SQL unique constraint) for cross-worker safety.",
+          "Capture, refund, and void will throw until a store with atomic " +
+          "reserve() is provided (e.g. Redis SET NX or a SQL unique constraint).",
       );
     }
   }
@@ -308,7 +301,8 @@ export class MoyasarGateway extends BaseGateway {
    * completed results).
    *
    * Behavior:
-   * - No idempotencyKey or no store configured: runs once, unguarded.
+   * - Missing store, missing key, or store without atomic `reserve()`: throws
+   *   `InvalidRequestError` (fail-closed; never runs unguarded).
    * - Already completed for this key: returns the cached result (no API call).
    * - In progress / outcome unknown for this key: refuses, instead of risking
    *   a duplicate mutation.
@@ -325,32 +319,45 @@ export class MoyasarGateway extends BaseGateway {
     executor: () => Promise<R>,
   ): Promise<R> {
     const store: IdempotencyStore | undefined = this.moyasarConfig.idempotencyStore;
+    // MOYASAR-2: capture/refund/void have no native Moyasar idempotency.
+    // Require store + key so retries cannot double-apply (double refund class).
     if (!store) {
-      // MOYASAR-2: fail closed — never silently ignore an explicit idempotencyKey.
-      // Unguarded capture/refund/void under a key pretends safety while allowing
-      // double-apply on retries / multi-worker (highest risk: double refund).
-      if (idempotencyKey) {
-        throw new InvalidRequestError(
-          `Moyasar ${operation} was called with idempotencyKey but no ` +
-            "idempotencyStore is configured. Configure moyasar.idempotencyStore " +
-            "(preferably with atomic reserve()) before using idempotencyKey, or " +
-            "omit the key for a single unguarded attempt.",
-          [{ path: ["idempotencyKey"] }],
-        );
-      }
-      return executor();
+      throw new InvalidRequestError(
+        `Moyasar ${operation} requires moyasar.idempotencyStore and idempotencyKey. ` +
+          "Capture, refund, and void have no native Moyasar idempotency; unguarded " +
+          "retries or multi-worker races can double-apply the mutation. Configure " +
+          "idempotencyStore (with atomic reserve()) and pass idempotencyKey.",
+        [{ path: ["idempotencyKey"] }],
+      );
     }
     if (!idempotencyKey) {
-      return executor();
+      throw new InvalidRequestError(
+        `Moyasar ${operation} requires idempotencyKey when idempotencyStore is configured. ` +
+          "Pass a stable idempotencyKey so caller retries are deduped.",
+        [{ path: ["idempotencyKey"] }],
+      );
+    }
+
+    // MOYASAR-1: refuse non-atomic get-then-set multi-worker stores. Concurrent
+    // retries can both pass free-key check without atomic reserve().
+    if (!store.reserve) {
+      throw new InvalidRequestError(
+        `Moyasar ${operation} requires idempotencyStore.reserve() for atomic ` +
+          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
+          "get-then-set stores can double-apply refund/capture/void under concurrency.",
+        [{ path: ["idempotencyStore"] }],
+      );
     }
 
     const key = `moyasar:${operation}:${paymentId}:${idempotencyKey}`;
     const fingerprint = fingerprintParams(fingerprintInput);
     const createdAt = Date.now();
 
-    const existing = store.reserve
-      ? await store.reserve(key, { status: "in_progress", fingerprint, createdAt })
-      : await this.reserveWithoutAtomicSupport(store, key, fingerprint, createdAt);
+    const existing = await store.reserve(key, {
+      status: "in_progress",
+      fingerprint,
+      createdAt,
+    });
 
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
@@ -410,20 +417,6 @@ export class MoyasarGateway extends BaseGateway {
         { error: error instanceof Error ? error.message : String(error) },
       );
     }
-  }
-
-  private async reserveWithoutAtomicSupport(
-    store: IdempotencyStore,
-    key: string,
-    fingerprint: string,
-    createdAt: number,
-  ) {
-    const existing = await store.get(key);
-    if (existing) {
-      return existing;
-    }
-    await store.set(key, { status: "in_progress", fingerprint, createdAt });
-    return undefined;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1072,12 +1065,17 @@ export class MoyasarGateway extends BaseGateway {
     const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
 
     const eventType = this.normalizeWebhookEventType(raw.type);
-    const status = this.resolvePaymentStatus({
+    let status = this.resolvePaymentStatus({
       status: data.status,
       amount: data.amount,
       refunded: data.refunded,
       captured: data.captured,
     });
+    // payment_refunded envelope without amount-derived refund domain status is an
+    // incomplete refund snapshot (e.g. status still paid, refunded missing/zero).
+    // Fail closed — never leave domain status as paid-like for a refund event
+    // (MOYASAR-2). Aligns with provider-status refunded + missing amount path.
+    status = this.failClosedIncompleteRefundWebhookStatus(status, eventType);
     // Phase-7 money fields: use refunded/captured when the event is about those
     // money movements — never report full payment total for a partial slice
     // (MOYASAR-1). Incomplete refund snapshots may omit amount entirely.
@@ -1518,7 +1516,9 @@ export class MoyasarGateway extends BaseGateway {
    * to full `refunded`. It maps to `refund_completed` (refund entity signal
    * without proving full money reversal) so inventory/accounting cannot fully
    * reverse from an incomplete payload. Aligns with Stripe incomplete
-   * `charge.refunded` → `refund_completed`.
+   * `charge.refunded` → `refund_completed`. Webhook envelope `payment_refunded`
+   * with a non-refund domain status is refined separately via
+   * {@link failClosedIncompleteRefundWebhookStatus}.
    *
    * @param baseStatus - Optional precomputed `mapStatus` result (avoids double map/warn).
    */
@@ -1569,6 +1569,7 @@ export class MoyasarGateway extends BaseGateway {
     if (
       captured > 0 &&
       captured < amount &&
+      Number.isFinite(amount) &&
       (status === "authorized" ||
         status === "paid" ||
         payment.status === "authorized" ||
@@ -1579,6 +1580,35 @@ export class MoyasarGateway extends BaseGateway {
     }
 
     return status;
+  }
+
+  /**
+   * When the Moyasar envelope is `payment_refunded` but amount refinement left a
+   * non-refund domain status (typical: `paid` with missing/zero `refunded`),
+   * force incomplete `refund_completed` so handlers never treat the payment as
+   * still fully settled for fulfillment/restock (MOYASAR-2).
+   *
+   * Keeps failed/cancelled/etc. as-is; only demotes paid-like / open money
+   * statuses that would otherwise false-fulfill.
+   */
+  private failClosedIncompleteRefundWebhookStatus(
+    status: PaymentStatus,
+    eventType: string,
+  ): PaymentStatus {
+    if (eventType !== "payment_refunded") {
+      return status;
+    }
+    if (
+      status === "refunded" ||
+      status === "partially_refunded" ||
+      status === "refund_completed" ||
+      status === "refund_pending" ||
+      status === "failed" ||
+      status === "cancelled"
+    ) {
+      return status;
+    }
+    return "refund_completed";
   }
 
   /**

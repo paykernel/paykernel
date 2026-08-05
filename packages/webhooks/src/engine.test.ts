@@ -418,6 +418,22 @@ describe("processWithVerifier", () => {
     expect(store.size).toBe(0);
   });
 
+  it("verify infra/network throw → retryable handler_failed not invalid_webhook (WEBHOOKS-2)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const netErr = new Error("PayPal verify postback timed out");
+    netErr.name = "NetworkError";
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw netErr;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
   it("verify success → processVerified path", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
