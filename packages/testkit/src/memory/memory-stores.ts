@@ -352,9 +352,9 @@ export function createMemoryIdempotencyStore(
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
         updatedAt: iso(clock),
-        // reason is not stored on the public record by default to avoid PII;
-        // callers may put a non-secret code in result if needed.
-        result: input.reason !== undefined ? { reason: input.reason } : rec.result,
+        // TESTKIT-2: never store free-form `reason` (may carry PII/tokens).
+        // Status alone fences reserve; keep prior result if any.
+        result: rec.result,
       };
       entries.set(input.key, updated);
     },

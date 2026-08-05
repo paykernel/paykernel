@@ -1093,4 +1093,35 @@ describe("mockGateway", () => {
     });
     expect(c.gatewayId).not.toBe(a.gatewayId);
   });
+
+  it("caches non-throw indeterminate under idempotencyKey (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      createPayment: [
+        { outcome: "indeterminate" },
+        { outcome: "succeeded" }, // must not be consumed on same-key retry
+      ],
+    });
+    const params = {
+      ...baseCreate,
+      amount: 12,
+      idempotencyKey: "indeterminate-key",
+    };
+    const first = await g.createPayment(params);
+    expect(first.outcome).toBe("indeterminate");
+    expect(first.success).toBe(false);
+    expect(first.reconciliationRequired).toBe(true);
+    // Same-key retry must not mint a second gatewayId / consume next script
+    const retry = await g.createPayment(params);
+    expect(retry.gatewayId).toBe(first.gatewayId);
+    expect(retry.outcome).toBe("indeterminate");
+    expect(g.remainingOutcomes().createPayment).toBe(1);
+    // Different key still drains the next scripted outcome
+    const other = await g.createPayment({
+      ...baseCreate,
+      amount: 12,
+      idempotencyKey: "other-key",
+    });
+    expect(other.outcome).toBe("succeeded");
+    expect(other.gatewayId).not.toBe(first.gatewayId);
+  });
 });

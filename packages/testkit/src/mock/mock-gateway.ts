@@ -1172,7 +1172,11 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               }
             }
 
-            if (idemKey && finalResult.success && finalResult.gatewayId) {
+            // Cache any resolved create with a gatewayId — including non-throw
+            // indeterminate (success:false / reconciliationRequired). Skipping
+            // that arm mints a second payment on same-key retry and trains a
+            // false "safe retry after indeterminate" (TESTKIT-1).
+            if (idemKey && finalResult.gatewayId) {
               idempotencyResults.set(idemKey, { ...finalResult });
             }
             return finalResult;

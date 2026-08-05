@@ -12,6 +12,7 @@ import type {
 } from "../schema/tables";
 import {
   enforceMaxSanitizedError,
+  RecordValidationError,
   requireNonEmptyString,
   validateIdempotencyStatus,
   validateIsoTimestamp,
@@ -21,6 +22,15 @@ import {
   validateReconciliationStatus,
   validateWebhookInboxStatus,
 } from "./validation";
+
+/**
+ * Max JSON-serialized cached idempotency result size (UTF-16 code units ≈ bytes
+ * for ASCII JSON). Aligns with store-redis `MAX_RESULT_JSON_BYTES`.
+ *
+ * Fail closed on complete/codec write — never store a truncation marker as an
+ * authoritative money outcome (SQL-2 / Redis parity).
+ */
+export const MAX_RESULT_JSON_BYTES = 16_384;
 
 // ─── Contract-shaped records (mirror Phase 9; local definitions) ─────────────
 
@@ -173,9 +183,22 @@ function parseResultJson(raw: string | null | undefined): unknown {
   }
 }
 
-function serializeResultJson(result: unknown): string | null {
+/**
+ * Serialize an idempotency cached result for SQL TEXT `result_json`.
+ *
+ * Fail closed when JSON exceeds {@link MAX_RESULT_JSON_BYTES}: never store a
+ * truncated money outcome under the completed fence.
+ */
+export function serializeResultJson(result: unknown): string | null {
   if (result === undefined) return null;
-  return JSON.stringify(result);
+  const s = JSON.stringify(result);
+  if (s.length > MAX_RESULT_JSON_BYTES) {
+    throw new RecordValidationError(
+      `idempotency result JSON exceeds MAX_RESULT_JSON_BYTES (${MAX_RESULT_JSON_BYTES}); refusing to store truncated money outcome`,
+      "result",
+    );
+  }
+  return s;
 }
 
 // ─── Idempotency ─────────────────────────────────────────────────────────────

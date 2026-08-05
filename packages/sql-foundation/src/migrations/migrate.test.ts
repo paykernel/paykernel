@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { migrate } from "./migrate";
+import { migrate, MIGRATE_HAS_PORTABLE_LOCK } from "./migrate";
 import { verifySchema } from "./verify";
 import { CURRENT_SCHEMA_VERSION, MIGRATIONS } from "./metadata";
 import {
@@ -76,6 +76,17 @@ describe("migrate()", () => {
     // Foundation DDL is shared intent (TEXT + CHECK) but claim templates differ elsewhere
     expect(pg.migrations.get(1)?.name).toBe("create_payment_storage_foundation");
     expect(sq.migrations.get(1)?.name).toBe("create_payment_storage_foundation");
+  });
+
+  it("SQLFOUND-1: migrate has no portable lock and does not emit advisory lock SQL", async () => {
+    // Honesty: multi-host serialize is an ops requirement, not a package guarantee.
+    expect(MIGRATE_HAS_PORTABLE_LOCK).toBe(false);
+    const state = createFakeDbState();
+    await migrate(createFakeExecutor(state), { dialect: "postgres" });
+    const joined = state.statements.join("\n").toLowerCase();
+    expect(joined).not.toMatch(/pg_advisory_lock|advisory_lock|get_lock|lock table/);
+    // No portable transaction wrap of multi-statement body either.
+    expect(joined).not.toMatch(/\bbegin\b|\bcommit\b|\bstart transaction\b/);
   });
 });
 

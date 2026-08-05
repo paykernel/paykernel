@@ -336,6 +336,22 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(row?.leaseToken).toBeUndefined();
   });
 
+  it("SQL-2: listDue with offset input.now still soft-releases and lists due Z rows", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    await store.schedule({
+      key: "job-due-z",
+      subjectId: "pay_z",
+      reason: "timeout",
+      dueAt: "2026-01-15T11:00:00.000Z",
+    });
+    // Offset form that is the same instant as clock now (12:00Z).
+    const listed = await store.listDue({ now: "2026-01-15T17:00:00+05:00" });
+    expect(listed.find((r) => r.key === "job-due-z")).toBeDefined();
+  });
+
   it("markManualReview rejects expired lease with lease_lost", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteReconciliationStore({ executor, clock });

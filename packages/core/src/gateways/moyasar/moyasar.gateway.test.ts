@@ -1781,10 +1781,11 @@ describe("MoyasarGateway", () => {
       expect(event.status).not.toBe("partially_refunded");
       // Explicit zero refunded is honest money (not full payment total).
       expect(event.amount).toBe(0);
-      // Dual-write refund.completed is entity signal; completeness is domain status.
-      expect(event.stableType).toBe("refund.completed");
-      expect(event.event?.type).toBe("refund.completed");
-      if (event.event?.type === "refund.completed") {
+      // MOYASAR-1: incomplete refund_completed must not dual-write refund.completed
+      // (type-only handlers would over-settle). Stripe/Paymob → refund.pending.
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
+      if (event.event?.type === "refund.pending") {
         expect(event.event.refund.amount).toBe(0);
       }
     });
@@ -1809,8 +1810,10 @@ describe("MoyasarGateway", () => {
       expect(event.status).not.toBe("partially_refunded");
       // Incomplete: do not surface payment total as refund money field.
       expect(event.amount).toBeUndefined();
-      expect(event.stableType).toBe("refund.completed");
-      if (event.event?.type === "refund.completed") {
+      // MOYASAR-1: demote dual-write to refund.pending (not refund.completed).
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
+      if (event.event?.type === "refund.pending") {
         expect(event.event.refund.amount).toBeUndefined();
       }
     });
@@ -1838,7 +1841,9 @@ describe("MoyasarGateway", () => {
       expect(missing.status).not.toBe("paid");
       expect(missing.status).not.toBe("refunded");
       expect(missing.amount).toBeUndefined();
-      expect(missing.stableType).toBe("refund.completed");
+      // MOYASAR-1: incomplete dual-write is refund.pending, not completed.
+      expect(missing.stableType).toBe("refund.pending");
+      expect(missing.event?.type).toBe("refund.pending");
 
       const zero = createGateway().parseWebhookEvent({
         id: "wh_refund_paid_zero",
@@ -1858,6 +1863,8 @@ describe("MoyasarGateway", () => {
       expect(zero.status).toBe("refund_completed");
       expect(zero.status).not.toBe("paid");
       expect(zero.amount).toBe(0);
+      expect(zero.stableType).toBe("refund.pending");
+      expect(zero.event?.type).toBe("refund.pending");
     });
 
     it("maps payment_refunded + non-finite refunded amount to refund_completed without inventing total", () => {
@@ -1880,6 +1887,8 @@ describe("MoyasarGateway", () => {
       expect(event.status).not.toBe("refunded");
       // Non-finite is not a usable refunded minor — omit rather than invent total.
       expect(event.amount).toBeUndefined();
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
     });
 
     it("uses captured amount on capture webhooks (not authorization total)", () => {

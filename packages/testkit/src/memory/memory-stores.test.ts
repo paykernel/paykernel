@@ -196,7 +196,8 @@ describe("createMemoryIdempotencyStore", () => {
     await store.markIndeterminate({
       key: "ind",
       leaseToken: r.leaseToken,
-      reason: "network_timeout",
+      // Free-form / PII-looking string — must not be persisted (TESTKIT-2)
+      reason: "customer email user@example.com network_timeout",
     });
     const blocked = await store.reserve({
       key: "ind",
@@ -205,6 +206,11 @@ describe("createMemoryIdempotencyStore", () => {
       leaseMs: 5_000,
     });
     expect(blocked.kind).toBe("indeterminate");
+    const indRec = await store.get("ind");
+    expect(indRec?.status).toBe("indeterminate");
+    // Status fences; free-form reason must never land on the public record
+    expect(JSON.stringify(indRec)).not.toContain("user@example.com");
+    expect(indRec?.result).toBeUndefined();
     clock.advance(60_000);
     await store.deleteExpired({
       before: new Date(clock.nowMs() + 1).toISOString(),

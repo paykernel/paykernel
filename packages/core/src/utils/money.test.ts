@@ -170,6 +170,28 @@ describe("sign zero policies and overrides", () => {
     expect(toMinorUnits(fromMinor)).toBe(2012n);
   });
 
+  it("honors Money.exponent when exponentOverrides is empty or unrelated (MONEY-1)", () => {
+    // Audit MONEY-1: empty overrides map must not drop stored scale → ISO MGA=2.
+    const mga = money("500", "MGA", { exponent: 0 });
+    expect(mga.exponent).toBe(0);
+    expect(toMinorUnits(mga)).toBe(500n);
+    expect(toMinorUnits(mga, { exponentOverrides: {} })).toBe(500n);
+    expect(toMinorUnits(mga, { exponentOverrides: { OMR: 2 } })).toBe(500n);
+    // Explicit map entry for this currency still wins over stored exponent.
+    expect(toMinorUnits(mga, { exponentOverrides: { MGA: 2 } })).toBe(50000n);
+    // Explicit options.exponent always wins.
+    expect(toMinorUnits(mga, { exponent: 2 })).toBe(50000n);
+    expect(toMinorUnits(mga, { exponent: 0, exponentOverrides: { MGA: 2 } })).toBe(
+      500n,
+    );
+
+    const omrMerchant = money("20.12", "OMR", {
+      exponentOverrides: { OMR: 2 },
+    });
+    expect(toMinorUnits(omrMerchant, { exponentOverrides: {} })).toBe(2012n);
+    expect(toMinorUnits(omrMerchant, { allowZero: true })).toBe(2012n);
+  });
+
   it("throws on invalid override values", () => {
     expect(() =>
       toMinorUnits("1", "SAR", { exponentOverrides: { SAR: -1 } }),

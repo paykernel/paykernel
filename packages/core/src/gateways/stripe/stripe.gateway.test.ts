@@ -461,12 +461,43 @@ describe("StripeGateway", () => {
       });
 
       // $0 / free / 100% coupon Checkout: complete + no_payment_required is
-      // fulfillment-ready paid (STRIPE-1). Never setup_completed (vault only).
+      // fulfillment-ready paid. Never setup_completed (vault only).
       expect(event.status).toBe("paid");
       expect(event.status).not.toBe("setup_completed");
       expect(event.status).not.toBe("pending");
       expect(event.stableType).toBe("payment.succeeded");
       expect(event.event?.type).toBe("payment.succeeded");
+    });
+
+    it("STRIPE-2: subscription-mode no_payment_required must not complete as paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_checkout_sub_trial",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_sub_trial",
+            object: "checkout.session",
+            mode: "subscription",
+            payment_status: "no_payment_required",
+            status: "complete",
+            subscription: "sub_trial_123",
+            amount_total: 0,
+            currency: "usd",
+            metadata: { paymentId: "order_sub_trial" },
+          },
+        },
+        livemode: false,
+      });
+
+      // Unpaid trial / no-charge subscription signup — not fulfillment-ready.
+      // Aligns with customer.subscription trialing → pending.
+      expect(event.status).toBe("pending");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("setup_completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.gatewayPaymentId).toBe("sub_trial_123");
     });
 
     it("should use Subscription ID for subscription checkout completion", () => {
@@ -924,6 +955,79 @@ describe("StripeGateway", () => {
       });
 
       expect(event.status).toBe("refunded");
+      // STRIPE-3: when refunded:true and amount_refunded > 0, amount is cumulative
+      expect(event.amount).toBe(10);
+    });
+
+    it("STRIPE-1: refund.* with expanded charge amount_refunded===0 is fail-closed (not partially_refunded)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_refund_zero_agg",
+        type: "refund.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "re_zero_agg",
+            object: "refund",
+            status: "succeeded",
+            amount: 2500,
+            currency: "usd",
+            payment_intent: "pi_zero_agg",
+            charge: {
+              id: "ch_zero_agg",
+              amount: 2500,
+              amount_captured: 2500,
+              amount_refunded: 0,
+              refunded: false,
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      // Zero aggregate refunded money is not a proven partial refund.
+      expect(event.status).toBe("refund_completed");
+      // Dual-write demoted — type-only handlers must not settle as completed.
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
+      // Incomplete aggregate keeps per-refund face amount (object.amount).
+      expect(event.amount).toBe(25);
+    });
+
+    it("STRIPE-3: refund.* proven aggregate status publishes amount_refunded not per-refund face", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_refund_agg_amount",
+        type: "refund.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "re_agg_amount",
+            object: "refund",
+            status: "succeeded",
+            // This single refund is $10; charge already has $35 cumulative refunded.
+            amount: 1000,
+            currency: "usd",
+            payment_intent: "pi_agg_amount",
+            charge: {
+              id: "ch_agg_amount",
+              amount: 10000,
+              amount_captured: 10000,
+              amount_refunded: 3500,
+              refunded: false,
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_refunded");
+      // Cumulative amount_refunded (35), not this refund's face (10).
+      expect(event.amount).toBe(35);
+      expect(event.stableType).toBe("refund.completed");
+      if (event.event?.type === "refund.completed") {
+        expect(event.event.refund.amount).toBe(35);
+      }
     });
 
     it("should normalize paid subscription invoice events", () => {

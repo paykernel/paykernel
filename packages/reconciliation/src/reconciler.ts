@@ -20,6 +20,21 @@ export type ReconcileManyOptions = {
 };
 
 /**
+ * One item from {@link PaymentReconciler.reconcileMany}.
+ *
+ * RECON-1: yields always include `index` + `target` so completion-order
+ * concurrent results can be correlated to the correct input (outcomes like
+ * `provider_not_found` / `temporarily_unavailable` carry no payment identity).
+ */
+export type ReconcileManyItem = {
+  /** Index into the `targets` array passed to `reconcileMany`. */
+  index: number;
+  /** The input target at `index` (same object reference). */
+  target: ReconciliationTarget;
+  result: ReconciliationResult;
+};
+
+/**
  * High-level reconciler: safe lookup + compare against expected.
  */
 export type PaymentReconciler = {
@@ -29,13 +44,14 @@ export type PaymentReconciler = {
    */
   reconcile(target: ReconciliationTarget): Promise<ReconciliationResult>;
   /**
-   * Bounded-concurrency async generator yielding results in completion order.
-   * Empty targets → no yields. Default concurrency 5.
+   * Bounded-concurrency async generator yielding `{ index, target, result }`
+   * in **completion order** (not input order). Empty targets → no yields.
+   * Default concurrency 5.
    */
   reconcileMany(
     targets: readonly ReconciliationTarget[],
     options?: ReconcileManyOptions,
-  ): AsyncGenerator<ReconciliationResult, void, unknown>;
+  ): AsyncGenerator<ReconcileManyItem, void, unknown>;
 };
 
 /**
@@ -62,16 +78,23 @@ export function createPaymentReconciler(
     async *reconcileMany(
       targets: readonly ReconciliationTarget[],
       options: ReconcileManyOptions = {},
-    ): AsyncGenerator<ReconciliationResult, void, unknown> {
+    ): AsyncGenerator<ReconcileManyItem, void, unknown> {
       if (targets.length === 0) return;
 
       const concurrency = Math.max(1, Math.floor(options.concurrency ?? 5));
-      const reconcileOne = (target: ReconciliationTarget) =>
-        resolveProviderSnapshot(target, lookup).catch(
-          (): ReconciliationResult => ({ outcome: "temporarily_unavailable" }),
-        );
-      for await (const result of mapPool(targets, concurrency, reconcileOne)) {
-        yield result;
+      const reconcileOne = (
+        target: ReconciliationTarget,
+        index: number,
+      ): Promise<ReconcileManyItem> =>
+        resolveProviderSnapshot(target, lookup)
+          .catch(
+            (): ReconciliationResult => ({
+              outcome: "temporarily_unavailable",
+            }),
+          )
+          .then((result) => ({ index, target, result }));
+      for await (const item of mapPool(targets, concurrency, reconcileOne)) {
+        yield item;
       }
     },
   };

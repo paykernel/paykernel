@@ -1277,6 +1277,9 @@ describe('PayPalGateway', () => {
             expect(event.status).toBe('reversed');
             expect(event.paymentId).toBe('internal-payment-reversed');
             expect(event.gatewayPaymentId).toBe('CAPTURE-REVERSED');
+            // Audit PAYPAL-1: never publish original capture face as still-held after reverse.
+            expect(event.amount).toBe(0);
+            expect(event.currency).toBe('USD');
         });
 
         it('should preserve partially refunded capture webhook status', () => {
@@ -1301,6 +1304,60 @@ describe('PayPalGateway', () => {
             expect(event.status).toBe('partially_refunded');
             expect(event.paymentId).toBe('internal-payment-partially-refunded');
             expect(event.gatewayPaymentId).toBe('CAPTURE-PARTIALLY-REFUNDED');
+            // Audit PAYPAL-2: face without net remaining → omit (not 11 still held).
+            expect(event.amount).toBeUndefined();
+            expect(event.currency).toBeUndefined();
+        });
+
+        it('CAPTURE.REFUNDED fully refunded publishes 0 remaining not face (audit PAYPAL-2)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-fully-refunded',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-FULLY-REFUNDED',
+                    status: 'REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '50.00',
+                    },
+                    custom_id: 'internal-full-refund',
+                },
+            });
+
+            expect(event.status).toBe('refunded');
+            expect(event.amount).toBe(0);
+            expect(event.currency).toBe('USD');
+            expect(event.stableType).toBe('refund.completed');
+        });
+
+        it('CAPTURE.REFUNDED partial with breakdown publishes net remaining (audit PAYPAL-2)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-partial-net',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-PARTIAL-NET',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '40.00',
+                        },
+                    },
+                    custom_id: 'internal-partial-net',
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBe(60);
+            expect(event.currency).toBe('USD');
         });
 
         it('should throw error for invalid payload (missing id)', () => {
@@ -4189,6 +4246,46 @@ describe('PayPalGateway', () => {
             });
 
             expect(result.status).toBe('refunded');
+            expect(result.amount).toBeUndefined();
+            expect(result.currency).toBeUndefined();
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('capture GET after REVERSED omits face amount (audit PAYPAL-1)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-REVERSED')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-REVERSED',
+                    status: 'REVERSED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '88.00',
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-REVERSED',
+            });
+
+            expect(result.status).toBe('reversed');
+            // Full clawback: do not report original face as still-held.
             expect(result.amount).toBeUndefined();
             expect(result.currency).toBeUndefined();
             expect(isPaidOutcome(result)).toBe(false);

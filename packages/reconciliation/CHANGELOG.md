@@ -4,6 +4,8 @@
 
 ### Behavior (0.x)
 
+- **RECON-1 / `reconcileMany` correlation:** generator yields `{ index, target, result }` (`ReconcileManyItem`) in completion order so concurrent results (incl. identity-less `provider_not_found` / `temporarily_unavailable`) map to the correct input target. Breaking for consumers that treated yields as bare `ReconciliationResult`.
+- **RECON-2 / `provider_not_found` policy:** retryable not-found always returns `do_not_create_replacement` (including terminal failed/cancelled local) — never bare `retry_later` that action-only switches could treat as safe recreate.
 - **Inherited paid-like fix:** Provider status `approved` no longer drives `update_local_to_paid` (core `isPaidLikePaymentStatus` excludes buyer pre-capture approval). Only true settled `paid` upgrades local to paid.
 - **Replacement-charge safety:** `shouldForbidReplacementCharge` forbids open money locals (`authorized` / `approved` / partial / `paid` / refunded / `refund_pending` / `refund_failed` / `refund_completed` / setup) and `provider_not_found` / `temporarily_unavailable` outcomes — not only `pending`/`processing`.
 - **Sparse expected honesty:** indeterminate/sparse local + open incomplete provider (`authorized` / `approved` / `partially_captured` / refund lifecycle incl. `refund_completed` / `setup_completed` / …) yields `manual_review` instead of `mark_consistent(safe:true)`.

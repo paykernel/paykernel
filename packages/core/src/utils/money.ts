@@ -413,26 +413,73 @@ function freezeMoney(
 }
 
 /**
+ * True when `overrides` names `currency` (case-insensitive key match).
+ * Used so empty/unrelated maps do not suppress stored {@link Money.exponent}.
+ */
+function overrideMapHasCurrency(
+  overrides: CurrencyExponentOverrides,
+  currency: string,
+): boolean {
+  let code: string;
+  try {
+    code = normalizeCurrencyCode(currency);
+  } catch {
+    return false;
+  }
+  if (Object.prototype.hasOwnProperty.call(overrides, code)) {
+    return true;
+  }
+  for (const key of Object.keys(overrides)) {
+    if (key.trim().toUpperCase() === code) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * When converting a {@link Money} value, prefer explicit parse options; else
  * re-use a stored non-ISO {@link Money.exponent} so override-built values do
  * not silently re-scale under ISO defaults.
+ *
+ * **MONEY-1:** Presence of `exponentOverrides` alone must not drop
+ * `Money.exponent`. Only an explicit `options.exponent` or an override entry
+ * for this currency suppresses the stored scale. Empty `{}` or maps for other
+ * codes keep `m.exponent` so `toMinorUnits(m, { exponentOverrides: {} })`
+ * cannot 10×/100× MGA/OMR-class values.
  */
 function resolveMoneyParseOptions(
   m: Money,
   options?: MoneyParseOptions,
 ): MoneyParseOptions | undefined {
+  // Explicit per-call exponent always wins over stored scale and maps.
+  if (options?.exponent !== undefined) {
+    return options;
+  }
+
+  const stored =
+    typeof m.exponent === "number" &&
+    Number.isInteger(m.exponent) &&
+    m.exponent >= 0
+      ? m.exponent
+      : undefined;
+
+  if (stored === undefined) {
+    return options;
+  }
+
+  // Override map entry for this currency is intentional merchant/provider scale.
   if (
-    options?.exponent !== undefined ||
-    options?.exponentOverrides !== undefined
+    options?.exponentOverrides !== undefined &&
+    overrideMapHasCurrency(options.exponentOverrides, m.currency)
   ) {
     return options;
   }
-  if (typeof m.exponent === "number" && Number.isInteger(m.exponent) && m.exponent >= 0) {
-    return options !== undefined
-      ? { ...options, exponent: m.exponent }
-      : { exponent: m.exponent };
-  }
-  return options;
+
+  // Pin stored scale (including when overrides is {} or for other currencies).
+  return options !== undefined
+    ? { ...options, exponent: stored }
+    : { exponent: stored };
 }
 
 /**

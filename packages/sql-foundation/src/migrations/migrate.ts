@@ -48,6 +48,17 @@ export type MigrateResult = {
   currentVersion: number;
 };
 
+/**
+ * SQLFOUND-1 / FOUND-1 / N10: `migrate()` never acquires a portable cross-dialect
+ * advisory lock. Always `false` so callers and tests cannot assume multi-host
+ * serialization is provided by this package.
+ *
+ * Ops must serialize migrate (single migrator job / deploy lock). Adapters may
+ * wrap with dialect-specific locks (e.g. Postgres `pg_advisory_lock`) outside
+ * this helper.
+ */
+export const MIGRATE_HAS_PORTABLE_LOCK = false as const;
+
 export class MigrationError extends Error {
   readonly code = "migration_error" as const;
 
@@ -176,13 +187,15 @@ function selectDialectSql(
  *
  * **Never** call from package top-level import or production constructors by default.
  *
- * ## Concurrency / multi-host
+ * ## Concurrency / multi-host (SQLFOUND-1 / FOUND-1 / N10)
  *
- * No portable cross-dialect advisory lock (Postgres `pg_advisory_lock` is not
- * available on SQLite / D1 / generic executors). **Serialize migrate across
- * hosts** (single migrator job or deploy lock). v1 DDL is mostly
- * `IF NOT EXISTS`, but version INSERT after multi-statement DDL can race and
- * future non-idempotent migrations inherit that window.
+ * {@link MIGRATE_HAS_PORTABLE_LOCK} is **always false**. No portable cross-dialect
+ * advisory lock (Postgres `pg_advisory_lock` is not available on SQLite / D1 /
+ * generic executors). **Serialize migrate across hosts** (single migrator job or
+ * deploy lock). v1 DDL is mostly `IF NOT EXISTS`, but version INSERT after
+ * multi-statement DDL can race and future non-idempotent migrations inherit that
+ * window. This helper does **not** wrap multi-statement bodies in a portable
+ * transaction either (executor surface is execute/query only).
  */
 export async function migrate(
   executor: SqlExecutor,

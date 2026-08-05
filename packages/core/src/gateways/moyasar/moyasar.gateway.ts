@@ -1134,7 +1134,11 @@ export class MoyasarGateway extends BaseGateway {
     // Amount-derived partially_captured must not dual-write payment.succeeded /
     // capture.completed (type-only over-fulfill). Align with Stripe/PayPal demotion
     // and isPaidOutcome (partial is not paid-like).
-    return this.demotePartialCaptureWebhookDualWrite(attached);
+    // Incomplete refund_completed must not dual-write refund.completed —
+    // type-only handlers would over-settle without proven refunded amount (MOYASAR-1).
+    return this.demoteIncompleteRefundWebhookDualWrite(
+      this.demotePartialCaptureWebhookDualWrite(attached),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1705,6 +1709,41 @@ export class MoyasarGateway extends BaseGateway {
         schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
         type: "payment.processing",
         payment,
+        provider: event.provider,
+      },
+    };
+  }
+
+  /**
+   * Incomplete refund snapshots (`status === refund_completed`) must not
+   * dual-write `refund.completed` — type-only handlers would mark orders fully
+   * refunded without a proven positive `refunded` total (MOYASAR-1).
+   * Stripe/Paymob pattern: domain keeps incomplete marker; stable dual-write is
+   * `refund.pending`. Proven full/partial (`refunded` / `partially_refunded`)
+   * keep `refund.completed`.
+   */
+  private demoteIncompleteRefundWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (
+      event.status !== "refund_completed" ||
+      event.stableType !== "refund.completed" ||
+      !event.event ||
+      event.event.type !== "refund.completed" ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    const refund = event.event.refund;
+
+    return {
+      ...event,
+      stableType: "refund.pending",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "refund.pending",
+        refund,
         provider: event.provider,
       },
     };

@@ -391,8 +391,16 @@ export async function withPaymentOperation<T>(
   // definitive failed. Callers cannot attach contextPatch on a throw path;
   // for custom known-final outcomes return `{ result, contextPatch }` instead.
   if (thrown !== undefined && patch.normalizedOutcome === undefined) {
-    patch.normalizedOutcome =
-      normalizedOutcomeFromThrown(thrown) ?? "indeterminate";
+    const classified = normalizedOutcomeFromThrown(thrown);
+    patch.normalizedOutcome = classified ?? "indeterminate";
+    // OBS-4: transport-ambiguous throws that stay indeterminate require recon
+    // (NetworkError / generic Error). Definitive declined/failed do not.
+    if (
+      classified === undefined &&
+      patch.reconciliationRequired === undefined
+    ) {
+      patch.reconciliationRequired = true;
+    }
   }
 
   const finished = finalizeOperationContext(context, patch);

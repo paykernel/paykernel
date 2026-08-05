@@ -329,7 +329,11 @@ export function createPostgresReconciliationStore(
 
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(async () => {
-        const now = input.now ?? clockNowIso(ctx.clock);
+        // SQL-2: TEXT lexical due_at/lease compares require canonical Z now.
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processDue/claimDue can
         // rediscover them after worker crash (attempts kept; lease cleared).

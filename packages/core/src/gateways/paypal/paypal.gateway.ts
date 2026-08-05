@@ -249,8 +249,13 @@ const PAYPAL_WEBHOOK_HEADER_LIMITS = {
   transmissionTime: 100,
 } as const;
 const PAYPAL_WEBHOOK_ID_PATTERN = /^[A-Za-z0-9]+$/;
+/** Events that never carry amount, or may intentionally omit remaining-held. */
 const PAYPAL_WEBHOOK_EVENTS_WITHOUT_AMOUNT = new Set([
   "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
+  // May omit amount when PARTIALLY_REFUNDED lacks net remaining (fail-closed).
+  "PAYMENT.CAPTURE.REFUNDED",
+  // Publishes 0 remaining when face present; omit is still valid if no money data.
+  "PAYMENT.CAPTURE.REVERSED",
 ]);
 const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_ID = new Set([
   "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
@@ -2431,9 +2436,9 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Net still-held major units on a capture resource after refunds.
-   * PAYPAL-3: never treat original face as held when status is refunded /
-   * partially_refunded without a proven remaining balance.
+   * Net still-held major units on a capture resource after refunds/reversals.
+   * PAYPAL-3 / audit PAYPAL-1: never treat original face as held when status is
+   * refunded / partially_refunded / reversed without a proven remaining balance.
    */
   private captureRemainingHeldAmount(
     data: PayPalPaymentResource,
@@ -2442,6 +2447,11 @@ export class PayPalGateway extends BaseGateway {
   ): { amount: number; currency: string } | undefined {
     const face = this.tryParsePayPalMoney(data.amount, operation);
     if (!face) {
+      return undefined;
+    }
+
+    // Full chargeback/reversal: no still-held funds (do not publish face).
+    if (status === "reversed") {
       return undefined;
     }
 
@@ -2519,8 +2529,137 @@ export class PayPalGateway extends BaseGateway {
       return undefined;
     }
 
+    // Single-resource capture after refund/reversal: never publish original face
+    // as still-held (audit PAYPAL-1 / PAYPAL-2). Align with getPayment remaining-held.
+    // Refund *resources* (PAYMENT.REFUND.*) keep their own op amount below.
+    const singleCaptureHeld = this.extractSingleCaptureWebhookHeldAmount(raw);
+    if (singleCaptureHeld !== undefined) {
+      return singleCaptureHeld === null ? undefined : singleCaptureHeld;
+    }
+
     return raw.resource.amount ??
       raw.resource.purchase_units?.[0]?.amount;
+  }
+
+  /**
+   * Single-resource CAPTURE.REFUNDED / CAPTURE.REVERSED / capture status
+   * refunded|partially_refunded|reversed: publish remaining held (or 0 / omit),
+   * never original capture face.
+   *
+   * @returns money object when rewritten; `null` when amount must be omitted;
+   *   `undefined` when this path does not apply (fall through to face amount).
+   */
+  private extractSingleCaptureWebhookHeldAmount(
+    raw: PayPalWebhookPayload,
+  ):
+    | { currency_code: string; value: string }
+    | null
+    | undefined {
+    // Refund resources publish this-op refund amount — not capture face rewriting.
+    if (
+      raw.resource_type === "refund" ||
+      raw.event_type.startsWith("PAYMENT.REFUND.")
+    ) {
+      return undefined;
+    }
+
+    const isCaptureEvent =
+      raw.resource_type === "capture" ||
+      raw.event_type === "PAYMENT.CAPTURE.REFUNDED" ||
+      raw.event_type === "PAYMENT.CAPTURE.REVERSED";
+    if (!isCaptureEvent) {
+      return undefined;
+    }
+
+    const faceMoney =
+      raw.resource.amount ?? raw.resource.purchase_units?.[0]?.amount;
+    if (!faceMoney) {
+      return undefined;
+    }
+
+    const resourceMapped = raw.resource.status
+      ? this.mapResourceStatus(raw.resource.status)
+      : undefined;
+    // CAPTURE.REFUNDED without resource status defaults to full refunded
+    // (see mapWebhookStatus). CAPTURE.REVERSED → reversed.
+    const effectiveStatus: PaymentStatus | undefined =
+      resourceMapped ??
+      (raw.event_type === "PAYMENT.CAPTURE.REFUNDED"
+        ? "refunded"
+        : raw.event_type === "PAYMENT.CAPTURE.REVERSED"
+          ? "reversed"
+          : undefined);
+
+    if (
+      effectiveStatus !== "partially_refunded" &&
+      effectiveStatus !== "refunded" &&
+      effectiveStatus !== "reversed"
+    ) {
+      return undefined;
+    }
+
+    const resourceExtra = raw.resource as {
+      seller_receivable_breakdown?: PayPalPaymentResource["seller_receivable_breakdown"];
+    };
+    // Prefer provider status string; fall back to PayPal API labels (not domain
+    // PaymentStatus) when the event type implies refund/reverse without status.
+    const apiStatus =
+      raw.resource.status ??
+      (effectiveStatus === "reversed"
+        ? "REVERSED"
+        : effectiveStatus === "partially_refunded"
+          ? "PARTIALLY_REFUNDED"
+          : "REFUNDED");
+    const resourceLike: PayPalPaymentResource = {
+      id: raw.resource.id ?? "webhook-capture",
+      status: apiStatus,
+      amount: faceMoney,
+      ...(resourceExtra.seller_receivable_breakdown !== undefined
+        ? {
+            seller_receivable_breakdown:
+              resourceExtra.seller_receivable_breakdown,
+          }
+        : {}),
+    };
+
+    const held = this.captureRemainingHeldAmount(
+      resourceLike,
+      effectiveStatus,
+      "webhook",
+    );
+    if (held) {
+      // formatAmount throws on bad currency/scale — omit amount (fail-closed).
+      try {
+        return {
+          currency_code: held.currency,
+          value: this.formatAmount(held.amount, held.currency, {
+            allowZero: true,
+          }),
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    // Fully refunded/reversed with known currency → 0 remaining (multi-capture parity).
+    if (
+      (effectiveStatus === "refunded" || effectiveStatus === "reversed") &&
+      faceMoney.currency_code
+    ) {
+      try {
+        return {
+          currency_code: faceMoney.currency_code,
+          value: this.formatAmount(0, faceMoney.currency_code, {
+            allowZero: true,
+          }),
+        };
+      } catch {
+        return null;
+      }
+    }
+
+    // PARTIALLY_REFUNDED without proven net remaining → omit (fail-closed).
+    return null;
   }
 
   /**

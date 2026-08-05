@@ -1538,6 +1538,8 @@ describe("PaymobGateway", () => {
       expect(result.gatewayId).toBe("123456789");
       // refunded_amount_cents takes priority over captured_amount for status mapping
       expect(result.status).toBe("partially_refunded");
+      // PAYMOB-3: currency accompanies major-unit amount fields (no naked majors)
+      expect(result.currency).toBe("SAR");
       expect(result.amount).toBe(100);
       expect(result.capturedAmount).toBe(40);
       expect(result.refundedAmount).toBe(10);

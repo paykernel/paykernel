@@ -450,6 +450,28 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(soft).toBeDefined();
   });
 
+  it("SQL-2: listDue canonicalizes offset input.now for TEXT lexical compares", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const offsetNow = "2026-01-15T17:00:00+05:00";
+    const canonicalNow = "2026-01-15T12:00:00.000Z";
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ changes: 0 }),
+      onQuery: () => [],
+    });
+    const store = createD1ReconciliationStore({ executor, clock });
+    await store.listDue({ now: offsetNow, limit: 10 });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(canonicalNow);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("SELECT") && c.sql.includes("due_at <="),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(canonicalNow);
+  });
+
   it("markManualReview requires active lease (expired → lease_lost)", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();

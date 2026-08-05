@@ -66,6 +66,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "reconciliationRecordToRow",
   "migrationRowToRecord",
   "migrationRecordToRow",
+  "serializeResultJson",
+  "MAX_RESULT_JSON_BYTES",
   // migrations
   "MIGRATIONS",
   "MIGRATION_001",
@@ -81,6 +83,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "migrate",
   "splitSqlStatements",
   "MigrationError",
+  "MIGRATE_HAS_PORTABLE_LOCK",
   "verifySchema",
   // claims
   "DIALECTS",

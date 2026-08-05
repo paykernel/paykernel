@@ -334,8 +334,10 @@ returns `refund_completed` so handlers that key only on `status === 'refunded'` 
 fully reverse inventory/accounting from a thin payload. The same fail-closed path applies
 to `payment_refunded` webhooks whose payment object still shows a paid-like status with
 missing/zero `refunded` — domain status becomes `refund_completed`, not `paid`. Prefer
-re-fetching with `getPayment` when amounts are missing. Phase-7 dual-write may still be
-`refund.completed` (refund *entity* signal); completeness is always domain `status`.
+re-fetching with `getPayment` when amounts are missing. On webhooks, Phase-7 dual-write
+also demotes incomplete `refund_completed` from `refund.completed` → `refund.pending`
+so type-only handlers cannot over-settle; proven full/partial (`refunded` /
+`partially_refunded`) still dual-write `refund.completed`.
 
 Partial refunds take precedence over partial capture when both amount fields apply.
 
@@ -495,7 +497,10 @@ payment total. For `payment_captured` / `partially_captured`, amount prefers
 `event.stableType` / `event.event.type` are demoted to `payment.processing` even if
 the Moyasar envelope was `payment_paid` or `payment_captured` (those would otherwise
 map to `payment.succeeded` / `capture.completed`). Provider-native `event.type` is
-unchanged. Full capture still dual-writes settled types.
+unchanged. Full capture still dual-writes settled types. Incomplete refund snapshots
+(`status === refund_completed`, missing/zero/non-finite `refunded`) demote dual-write
+from `refund.completed` → `refund.pending`; proven full/partial refunds keep
+`refund.completed`.
 
 ### Unsupported: card authentication webhooks
 

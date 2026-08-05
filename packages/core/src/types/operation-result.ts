@@ -292,11 +292,19 @@ export function inferOperationOutcome(
     }
 
     if (result.outcome !== undefined) {
-        return result.outcome;
+        // CORE-3: do not trust explicit outcome over gateway status — same
+        // fail-closed family as coerceRefundOutcomeToGatewayStatus.
+        return coercePaymentOutcomeToGatewayStatus(result.outcome, result);
     }
 
     if (result.decline !== undefined) {
         return "declined";
+    }
+
+    // CORE-4: paid-like / settled statuses win over residual nextAction so a
+    // leftover action blob cannot under-fulfill a already-paid snapshot.
+    if (result.success && isSettledSuccessStatus(result.status)) {
+        return "succeeded";
     }
 
     const hasAction =
@@ -321,13 +329,7 @@ export function inferOperationOutcome(
     }
 
     // success: true (API call completed — not necessarily paid)
-    if (
-        result.status === "paid" ||
-        result.status === "authorized" ||
-        result.status === "partially_captured" ||
-        result.status === "refunded" ||
-        result.status === "partially_refunded"
-    ) {
+    if (isSettledSuccessStatus(result.status)) {
         return "succeeded";
     }
 
@@ -348,6 +350,56 @@ export function inferOperationOutcome(
 
     // cancelled / unknown — not a successful payment capture
     return "failed";
+}
+
+/** Statuses where API success implies operation outcome `succeeded`. */
+function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean {
+    return (
+        status === "paid" ||
+        status === "authorized" ||
+        status === "partially_captured" ||
+        status === "refunded" ||
+        status === "partially_refunded"
+    );
+}
+
+/**
+ * CORE-3: keep Phase-6 payment outcome arms consistent with gateway status.
+ * Explicit `outcome: succeeded` must not invent a paid/settled op when status
+ * is still pending/failed/cancelled (refund-style coerce parity).
+ */
+function coercePaymentOutcomeToGatewayStatus(
+    outcome: PaymentOperationOutcome,
+    result: GatewayPaymentResult,
+): PaymentOperationOutcome {
+    if (outcome === "indeterminate") {
+        return "indeterminate";
+    }
+    if (outcome === "succeeded") {
+        if (result.decline !== undefined || result.status === "failed") {
+            return "declined";
+        }
+        if (result.status === "cancelled") {
+            return "failed";
+        }
+        if (
+            result.status === "pending" ||
+            result.status === "processing" ||
+            result.status === "approved"
+        ) {
+            return "requires_action";
+        }
+        // residual nextAction on paid-like status: keep succeeded (CORE-4)
+        return "succeeded";
+    }
+    if (outcome === "requires_action") {
+        // CORE-4: explicit requires_action must not under-fulfill settled money.
+        if (result.success && isSettledSuccessStatus(result.status)) {
+            return "succeeded";
+        }
+        return outcome;
+    }
+    return outcome;
 }
 
 function hasRawIndeterminateMarker(raw: unknown): boolean {

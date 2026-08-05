@@ -12,6 +12,7 @@ export { createPaymentReconciler } from "./reconciler";
 export type {
   CreatePaymentReconcilerOptions,
   PaymentReconciler,
+  ReconcileManyItem,
   ReconcileManyOptions,
 } from "./reconciler";
 

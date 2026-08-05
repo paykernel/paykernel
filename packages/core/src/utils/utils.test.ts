@@ -610,7 +610,7 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.reserve("k", record)).toEqual(record);
   });
 
-  it("expires unknown entries after the TTL; pins in_progress/completed (MONEY-2)", () => {
+  it("pins unknown/in_progress/completed past TTL (MONEY-2); explicit delete clears", () => {
     const store = new InMemoryIdempotencyStore(1);
     store.set("u", { status: "unknown", fingerprint: "u", createdAt: Date.now() });
     store.set("c", { status: "completed", fingerprint: "c", createdAt: Date.now() });
@@ -621,27 +621,30 @@ describe("InMemoryIdempotencyStore", () => {
     // Wait past the 1ms TTL.
     const start = Date.now();
     while (Date.now() - start < 5) { /* busy wait */ }
-    // Unknown may TTL-evict; mutation fences must not (MONEY-2).
-    expect(store.get("u")).toBeUndefined();
+    // MONEY-2: indeterminate `unknown` fences pin like completed/in_progress.
+    expect(store.get("u")?.status).toBe("unknown");
     expect(store.get("c")?.status).toBe("completed");
     expect(store.get("p")?.status).toBe("in_progress");
     // Explicit delete still clears protected fences.
     store.delete("c");
     expect(store.get("c")).toBeUndefined();
+    store.delete("u");
+    expect(store.get("u")).toBeUndefined();
   });
 
-  it("caps growth by evicting unknown; never drops completed/in_progress (MONEY-1)", () => {
+  it("refuses new keys when full of protected fences including unknown (MONEY-2)", () => {
     const store = new InMemoryIdempotencyStore(60_000, 3);
     store.set("a", { status: "unknown", fingerprint: "a", createdAt: 1 });
     store.set("b", { status: "completed", fingerprint: "b", createdAt: 2 });
     store.set("c", { status: "in_progress", fingerprint: "c", createdAt: 3 });
 
-    // Unknown is unprotected and may be evicted under pressure.
-    store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 });
-    expect(store.get("a")).toBeUndefined();
+    // All three are protected — refuse rather than evict unknown under pressure.
+    expect(() =>
+      store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 }),
+    ).toThrow(/protected fence keys/);
+    expect(store.get("a")?.status).toBe("unknown");
     expect(store.get("b")?.status).toBe("completed");
     expect(store.get("c")?.status).toBe("in_progress");
-    expect(store.get("d")?.status).toBe("unknown");
     expect(store.size).toBe(3);
 
     // Full of protected keys → refuse new key rather than drop mutation guards.
@@ -650,10 +653,21 @@ describe("InMemoryIdempotencyStore", () => {
     full.set("p2", { status: "in_progress", fingerprint: "2", createdAt: 2 });
     expect(() =>
       full.set("p3", { status: "completed", fingerprint: "3", createdAt: 3 }),
-    ).toThrow(/protected in_progress\/completed/);
+    ).toThrow(/protected fence keys/);
     expect(full.get("p1")).toBeDefined();
     expect(full.get("p2")).toBeDefined();
     expect(full.size).toBe(2);
+
+    // unknown-only capacity is also protected (indeterminate mutation fences).
+    const unknowns = new InMemoryIdempotencyStore(60_000, 2);
+    unknowns.set("u1", { status: "unknown", fingerprint: "1", createdAt: 1 });
+    unknowns.set("u2", { status: "unknown", fingerprint: "2", createdAt: 2 });
+    expect(() =>
+      unknowns.set("u3", { status: "unknown", fingerprint: "3", createdAt: 3 }),
+    ).toThrow(/protected fence keys/);
+    expect(unknowns.get("u1")?.status).toBe("unknown");
+    expect(unknowns.get("u2")?.status).toBe("unknown");
+    expect(unknowns.size).toBe(2);
   });
 
   it("clones records on get/set so callers cannot mutate the live cache", () => {
@@ -715,13 +729,13 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.get("k")?.fingerprint).toBe("fp");
   });
 
-  it("move-to-end on update; unknown-only eviction keeps protected keys (MONEY-1)", () => {
+  it("move-to-end on update of protected fences; capacity still refuses (MONEY-2)", () => {
     const store = new InMemoryIdempotencyStore(60_000, 3);
     store.set("a", { status: "unknown", fingerprint: "a", createdAt: 1 });
     store.set("b", { status: "unknown", fingerprint: "b", createdAt: 2 });
     store.set("c", { status: "completed", fingerprint: "c", createdAt: 3 });
 
-    // Refresh "a" — recency tracking still applies among unprotected keys.
+    // Refresh "a" in place (update does not grow size).
     store.set("a", {
       status: "unknown",
       fingerprint: "a-updated",
@@ -729,14 +743,16 @@ describe("InMemoryIdempotencyStore", () => {
       result: { ok: true },
     });
 
-    store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 });
-
     expect(store.get("a")?.fingerprint).toBe("a-updated");
     expect(store.get("a")?.result).toEqual({ ok: true });
-    // Least-recently-updated unknown "b" is preferred for eviction; completed "c" stays.
-    expect(store.get("b")).toBeUndefined();
+    expect(store.get("b")?.status).toBe("unknown");
     expect(store.get("c")?.status).toBe("completed");
-    expect(store.get("d")).toBeDefined();
+    expect(store.size).toBe(3);
+
+    // New key still refused — unknowns are protected fences.
+    expect(() =>
+      store.set("d", { status: "unknown", fingerprint: "d", createdAt: 4 }),
+    ).toThrow(/protected fence keys/);
     expect(store.size).toBe(3);
   });
 });

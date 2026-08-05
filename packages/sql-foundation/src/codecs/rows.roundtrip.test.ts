@@ -6,6 +6,8 @@ import {
   migrationRowToRecord,
   reconciliationRecordToRow,
   reconciliationRowToRecord,
+  serializeResultJson,
+  MAX_RESULT_JSON_BYTES,
   webhookInboxRecordToRow,
   webhookInboxRowToRecord,
 } from "./rows";
@@ -14,7 +16,7 @@ import {
   sampleReconciliationRecord,
   sampleWebhookRecord,
 } from "../fixtures/migration-fixtures";
-import { MAX_SANITIZED_ERROR_LENGTH } from "./validation";
+import { MAX_SANITIZED_ERROR_LENGTH, RecordValidationError } from "./validation";
 
 describe("codec round-trips", () => {
   it("idempotency record ↔ row", () => {
@@ -32,6 +34,22 @@ describe("codec round-trips", () => {
     expect(back.generation).toBe(original.generation);
     expect(back.result).toEqual({ ok: true, id: "pay_1" });
     expect(back.tenantId).toBe("t1");
+  });
+
+  it("SQL-2: serializeResultJson fails closed on oversized money outcome (no truncation)", () => {
+    const ok = { ok: true, id: "pay_1" };
+    expect(JSON.parse(serializeResultJson(ok)!)).toEqual(ok);
+    expect(serializeResultJson(undefined)).toBeNull();
+    const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
+    expect(() => serializeResultJson(huge)).toThrow(RecordValidationError);
+    expect(() =>
+      idempotencyRecordToRow(
+        sampleIdempotencyRecord({
+          result: huge,
+          status: "completed",
+        }),
+      ),
+    ).toThrow(RecordValidationError);
   });
 
   it("webhook inbox record ↔ row", () => {

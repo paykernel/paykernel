@@ -97,28 +97,90 @@ const MOYASAR_MAX_METADATA_VALUE_LENGTH = 500;
 
 /**
  * 0.x dual-accept amount: deprecated major-unit `number` or Money-shaped
- * `{ amount: string, currency: string }`. Deep decimal/scale validation happens
- * in shared money helpers (`money` / `toMinorUnits`), not in Zod.
+ * `{ amount: string, currency: string }`.
+ *
+ * CORE-2: Money arm enforces decimal form + sign at the Zod boundary so
+ * adapters that trust schemas alone cannot pass garbage/negative Money into
+ * conversion. Full scale/exponent checks remain in shared money helpers.
  */
-const MoneyAmountSchema = z.object({
+const MoneyAmountBaseSchema = z.object({
     amount: z.string().min(1, "Money.amount must be a non-empty decimal string"),
     currency: z.string().min(1, "Money.currency must be a non-empty string"),
 });
 
+/** Decimal major-unit string: optional leading sign, digits, optional fraction. */
+const MONEY_DECIMAL_FORM = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+function moneyAmountNumericValue(amount: string): number | undefined {
+    const trimmed = amount.trim();
+    if (!MONEY_DECIMAL_FORM.test(trimmed)) return undefined;
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return undefined;
+    return n;
+}
+
+/**
+ * Shared Money.amount Zod refine: finite decimal form, then a sign/zero check.
+ * Keeps Positive / Nonnegative / Moyasar-split arms DRY.
+ */
+function refineMoneyAmountValue(
+    val: { amount: string },
+    ctx: z.RefinementCtx,
+    isInvalid: (n: number) => boolean,
+    invalidMessage: string,
+): void {
+    const n = moneyAmountNumericValue(val.amount);
+    if (n === undefined) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Money.amount must be a finite decimal string",
+            path: ["amount"],
+        });
+        return;
+    }
+    if (isInvalid(n)) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: invalidMessage,
+            path: ["amount"],
+        });
+    }
+}
+
+/** Positive Money shape (create/capture/refund amounts). */
+const PositiveMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ctx) => {
+    refineMoneyAmountValue(
+        val,
+        ctx,
+        (n) => n <= 0,
+        "Money.amount must be a positive finite decimal",
+    );
+});
+
+/** Non-negative Money shape (e.g. free-trial $0 line items). */
+const NonnegativeMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ctx) => {
+    refineMoneyAmountValue(
+        val,
+        ctx,
+        (n) => n < 0,
+        "Money.amount must be a non-negative finite decimal",
+    );
+});
+
 const PositiveAmountInputSchema = z.union([
     z.number().finite().positive("Amount must be a positive finite number"),
-    MoneyAmountSchema,
+    PositiveMoneyAmountSchema,
 ]);
 
 const OptionalPositiveAmountInputSchema = PositiveAmountInputSchema.optional();
 
 /**
  * Dual-accept major-unit amount that allows zero (e.g. Stripe checkout free-trial
- * line items). Deep scale/sign checks stay in shared money helpers.
+ * line items). Deep scale checks stay in shared money helpers.
  */
 const NonnegativeAmountInputSchema = z.union([
     z.number().finite().nonnegative("Amount must be a non-negative finite number"),
-    MoneyAmountSchema,
+    NonnegativeMoneyAmountSchema,
 ]);
 
 /**
@@ -155,12 +217,22 @@ function refineMoneyCurrencyMatch(
 }
 
 /** Split amounts are major currency units (same as createPayment amount); converted to minor units by the gateway. */
+const MoyasarSplitMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ctx) => {
+    // Splits may be signed adjustments; only zero is rejected (parity with number arm).
+    refineMoneyAmountValue(
+        val,
+        ctx,
+        (n) => n === 0,
+        "Moyasar split amount cannot be zero",
+    );
+});
+
 const MoyasarPaymentSplitSchema = z.object({
     amount: z.union([
         z.number().finite().refine((amount) => amount !== 0, {
             message: "Moyasar split amount cannot be zero",
         }),
-        MoneyAmountSchema,
+        MoyasarSplitMoneyAmountSchema,
     ]),
     recipient_id: z.string().uuid("Moyasar split recipient_id must be a UUID"),
     reference: z.string().max(255).optional(),

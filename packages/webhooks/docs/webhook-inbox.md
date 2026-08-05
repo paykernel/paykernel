@@ -308,7 +308,7 @@ Adapters **may** add first-class columns later without breaking this lean contra
 - Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
 - Unsanitized exception messages that may embed secrets
 
-**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **JSON string** envelopes that parse as object/array are also redacted then re-stringified; opaque non-JSON strings are stored as-is. On `durable_retry`, if `envelope` is omitted a redacted snapshot of `event` is stored so redrive has payment fields. Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
+**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **JSON string** envelopes that parse as object/array are also redacted then re-stringified; opaque non-JSON strings have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store — plain opaque refs without secret shapes pass through. On `durable_retry`, if `envelope` is omitted a redacted snapshot of `event` is stored so redrive has payment fields. Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
 
 Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). **Missing `payloadRef` never stubs** `{ key, payloadHash }` — workers dead-letter with `handler_failed { retryable: false }`. Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
 
@@ -398,7 +398,14 @@ type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
+  | {
+      outcome: "scheduled_for_retry";
+      reason: ScheduledForRetryReason;
+      /** When the row becomes claimable again (ISO), when known (WEBHOOKS-5). */
+      availableAt?: string;
+      /** ms until `availableAt` from engine clock, when computable. */
+      retryAfterMs?: number;
+    }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -409,9 +416,9 @@ type WebhookProcessingOutcome =
 | `processed` | Handler ran; inbox completed | 200 |
 | `duplicate_completed` | Already terminal success; handler not re-run | 200 |
 | `already_processing` | Another worker holds lease; optional `retryAfterMs` | 503 / 409 + Retry-After |
-| `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work | **200 only if a worker runs `processRetryable`** |
-| `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff | **200** if durable worker will re-drive; else **5xx** |
-| `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran | **5xx** (provider redelivery) unless a durable scheduler owns the row |
+| `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work; optional timing fields | **200 only if a worker runs `processRetryable`** |
+| `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff; includes `availableAt` / `retryAfterMs` when known | **200** if durable worker will re-drive; else **5xx** |
+| `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran; exposes `availableAt` / `retryAfterMs` | **5xx** (provider redelivery) unless a durable scheduler owns the row |
 | `handler_failed` `retryable: true` | Handler failed; may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail | 200 or 4xx per policy (do not infinite-retry forever) |
 | `payload_conflict` | Same key, different payload hash | 400 / 409 |
@@ -438,7 +445,7 @@ Store claim kind mapping:
 | `in_progress` | `already_processing` (+ `retryAfterMs` when lease expiry known) |
 | `payload_hash_conflict` | `payload_conflict` |
 | `duplicate_failed` | `handler_failed { retryable: false }` |
-| `not_available` | `scheduled_for_retry` `{ reason: "not_available" }` (backoff before `availableAt`; no attempt++) |
+| `not_available` | `scheduled_for_retry` `{ reason: "not_available", availableAt?, retryAfterMs? }` (backoff before `availableAt`; no attempt++) |
 
 ### Illustrative adapter (not part of this package)
 

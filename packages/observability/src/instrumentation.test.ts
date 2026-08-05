@@ -323,6 +323,10 @@ describe("withPaymentOperation", () => {
     expect(metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations]).toBe(
       1,
     );
+    // OBS-4: transport-ambiguous throw must flag recon work for drift counter
+    expect(
+      metrics.snapshot().counters[METRIC_NAMES.reconciliationDrift],
+    ).toBe(1);
   });
 
   it("classifies CardDeclinedError throw as declined not indeterminate (OBS-2)", async () => {
@@ -358,6 +362,10 @@ describe("withPaymentOperation", () => {
     // Definitive decline must not increment indeterminate counter
     expect(
       metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations] ?? 0,
+    ).toBe(0);
+    // Definitive decline is not recon work
+    expect(
+      metrics.snapshot().counters[METRIC_NAMES.reconciliationDrift] ?? 0,
     ).toBe(0);
   });
 

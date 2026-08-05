@@ -537,7 +537,7 @@ describe("processRetryable default envelope unwrap", () => {
       gateway: "stripe",
       providerEventId: "evt_n2_opaque",
       payloadHash: "hash_n2_opaque",
-      // string envelope stored as-is (not JSON object)
+      // plain opaque non-JSON envelope (no secret patterns) passes through
       envelope: "opaque-ref-token",
     });
 

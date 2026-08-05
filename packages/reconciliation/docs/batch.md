@@ -14,6 +14,7 @@ import {
   decideReconciliationPolicy,
   type ReconciliationTarget,
   type ProviderLookupPort,
+  type ReconcileManyItem,
 } from "@paykernel/reconciliation";
 
 declare const lookup: ProviderLookupPort;
@@ -21,11 +22,17 @@ declare const targets: readonly ReconciliationTarget[];
 
 const reconciler = createPaymentReconciler({ lookup });
 
-for await (const result of reconciler.reconcileMany(targets, {
+for await (const item of reconciler.reconcileMany(targets, {
   concurrency: 5, // default 5; must be >= 1
 })) {
   // Completion order — not input order
+  // RECON-1: each yield is { index, target, result } so not-found /
+  // unavailable outcomes still map to the correct target.
+  const { index, target, result } = item satisfies ReconcileManyItem;
   // Persist result / alert / apply policy in YOUR application
+  void index;
+  void target;
+  void result;
 }
 ```
 
@@ -35,6 +42,7 @@ for await (const result of reconciler.reconcileMany(targets, {
 
 - Empty `targets` → async generator yields nothing.
 - Each item runs `reconcile` (safe lookup + compare).
+- Yields **`ReconcileManyItem`**: `{ index, target, result }` — completion order, with stable input correlation (RECON-1).
 - Business outcomes are **result discriminants**; unexpected throws map to `temporarily_unavailable`.
 
 ---
@@ -63,11 +71,13 @@ const byGateway = groupBy(targets, (t) => t.gateway);
 
 for (const [gateway, group] of byGateway) {
   const limit = perProviderLimit[gateway] ?? 3;
-  for await (const result of reconciler.reconcileMany(group, {
-    concurrency: limit,
-  })) {
-    await auditStore.insert(result);
-    const decision = decideReconciliationPolicy(result, /* matching target */);
+  for await (const { index, target, result } of reconciler.reconcileMany(
+    group,
+    { concurrency: limit },
+  )) {
+    await auditStore.insert({ index, target, result });
+    // Always use item.target — never zip by completion position.
+    const decision = decideReconciliationPolicy(result, target);
     if (decision.action === "update_local_to_paid" && decision.safe) {
       await payments.markPaid(decision.provider);
     } else if (
@@ -76,9 +86,11 @@ for (const [gateway, group] of byGateway) {
       decision.action === "apply_drift_review"
     ) {
       await alerts.notify(decision);
+      // do_not_create_replacement may still schedule a later *lookup* —
+      // never createPayment for the same intent.
     } else if (decision.action === "retry_later") {
       await scheduler.schedule({
-        target: /* … */,
+        target,
         runAt: new Date(Date.now() + (decision.retryAfterMs ?? 60_000)).toISOString(),
         reason: "retry_after_unavailable",
       });
@@ -87,7 +99,7 @@ for (const [gateway, group] of byGateway) {
 }
 ```
 
-Keep target↔result correlation in application code if you need it (generator yields results only; pair with a mapPool in app if you need indices).
+**Do not zip completion-order yields to input order.** Use `item.index` / `item.target` (RECON-1). Outcomes like `provider_not_found` and `temporarily_unavailable` carry no payment identity on the result alone.
 
 ---
 
@@ -125,13 +137,13 @@ const reconciler = createPaymentReconciler({
   },
 });
 
-for await (const r of reconciler.reconcileMany(
+for await (const item of reconciler.reconcileMany(
   [{ gateway: "stripe", gatewayPaymentId: "pi_1" }],
   { concurrency: 2 },
 )) {
-  results.push(r);
+  results.push(item);
 }
-// expect provider_not_found retryable, etc.
+// item.index === 0; item.result.outcome === "provider_not_found", etc.
 ```
 
 Inject a fake `ProviderLookupPort`; no network required. For durable schedule tests, inject testkit `createMemoryReconciliationStore` from test code only.

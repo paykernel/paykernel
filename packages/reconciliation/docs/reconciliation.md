@@ -197,9 +197,9 @@ switch (decision.action) {
 | `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound) |
 | `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
-| `retry_later` | `false` | Temporarily unavailable / retryable not-found on terminal non-open locals (when not forbidding replacement via primary action) |
+| `retry_later` | `false` | Temporarily unavailable (reschedule lookup; never invent failed) |
 | `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work) |
-| `do_not_create_replacement` | `false` | Not-found while local is indeterminate **or open money** (incl. `refund_pending` / `refund_failed` / `refund_completed`) |
+| `do_not_create_replacement` | `false` | **All** retryable `provider_not_found` (incl. terminal failed/cancelled local — RECON-2); never recreate while original may still settle |
 
 ### Replacement charge rule
 

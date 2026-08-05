@@ -111,7 +111,15 @@ import { resolveInboxPayloadHash } from "@paykernel/webhooks";
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   verifyAndNormalize: async (raw) => {
-    const event = await client.handleWebhook("stripe", raw.body, raw.headers["stripe-signature"]);
+    // Let infrastructure/transport throws propagate (network, timeout, 5xx
+    // verify postbacks). processWithVerifier classifies those →
+    // handler_failed { retryable: true } (map to HTTP 5xx so providers redeliver).
+    // Only signature/forgery failures should return ok:false → invalid_webhook.
+    const event = await client.handleWebhook(
+      "stripe",
+      raw.body,
+      raw.headers["stripe-signature"],
+    );
     return {
       ok: true,
       gateway: "stripe",
@@ -161,7 +169,14 @@ type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
+  | {
+      outcome: "scheduled_for_retry";
+      reason: ScheduledForRetryReason;
+      /** When the row becomes claimable again (ISO), when known (WEBHOOKS-5). */
+      availableAt?: string;
+      /** ms until `availableAt` from engine clock, when computable. */
+      retryAfterMs?: number;
+    }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -170,12 +185,12 @@ type WebhookProcessingOutcome =
 Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
-- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available" }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process (WEBHOOKS-3).
+- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
 - `scheduled_for_retry { reason: "parked" }` is safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
-- **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts` (WEBHOOKS-1).
+- **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts`.
 - Durable redrive never materializes stub events: missing `payloadRef` → dead-letter / `handler_failed { retryable: false }`.
-- Terminal claim outcomes (`already_completed` / `duplicate_failed`) take precedence over `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done (WEBHOOKS-4).
+- Terminal claim outcomes (`already_completed` / `duplicate_failed`) take precedence over `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done (WEBHOOKS-1).
 
 ## Event key
 
@@ -212,7 +227,7 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
 
-**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes are stored as-is. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive.
+**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store; plain opaque refs without secret shapes pass through. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive.
 
 Durable adapters must pass testkit `runWebhookInboxStoreConformanceSuite`.
 

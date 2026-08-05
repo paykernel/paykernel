@@ -82,6 +82,8 @@ export {
   reconciliationRecordToRow,
   migrationRowToRecord,
   migrationRecordToRow,
+  serializeResultJson,
+  MAX_RESULT_JSON_BYTES,
 } from "./codecs/rows";
 export type {
   IdempotencyRecordShape,
@@ -111,7 +113,12 @@ export {
   FOUNDATION_SQL_SQLITE,
   FOUNDATION_SQL_PORTABLE,
 } from "./migrations/definitions";
-export { migrate, splitSqlStatements, MigrationError } from "./migrations/migrate";
+export {
+  migrate,
+  splitSqlStatements,
+  MigrationError,
+  MIGRATE_HAS_PORTABLE_LOCK,
+} from "./migrations/migrate";
 export type { SqlExecutor, MigrateOptions, MigrateResult } from "./migrations/migrate";
 export { verifySchema } from "./migrations/verify";
 export type { VerifySchemaOptions, VerifySchemaResult } from "./migrations/verify";

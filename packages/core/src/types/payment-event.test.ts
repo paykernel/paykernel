@@ -391,6 +391,26 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("refund.completed");
     });
 
+    it.each([
+      ["refund.updated", undefined],
+      ["refund.updated", ""],
+      ["refund.updated", "mystery_status"],
+      ["refund.updated", "refund_completed"],
+      ["charge.refund.updated", undefined],
+      ["charge.refund.updated", "unknown"],
+    ] as const)(
+      "CORE-1: stripe %s status=%s → refund.pending (not completed)",
+      (providerEventType, status) => {
+        expect(
+          mapProviderEventTypeToStable(
+            "stripe",
+            providerEventType,
+            status === undefined ? undefined : { status },
+          ),
+        ).toBe("refund.pending");
+      },
+    );
+
     it("payment_intent.succeeded + partially_captured → payment.processing", () => {
       expect(
         mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {

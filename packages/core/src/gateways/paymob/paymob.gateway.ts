@@ -1620,11 +1620,19 @@ export class PaymobGateway extends BaseGateway {
           pending: this.parseBoolean(transaction.pending) === true,
         });
 
+        // PAYMOB-3: always dual-write currency with major-unit money fields so
+        // Phase-6 snapshots / inventory do not drop naked majors.
+        const hasMoney =
+          transaction.amount_cents !== undefined ||
+          transaction.captured_amount !== undefined ||
+          transaction.refunded_amount_cents !== undefined;
+
         return applyOutcomeToGatewayResult(
           {
             gatewayId: String(transaction.id ?? gatewayPaymentId),
             status,
             rawResponse: data,
+            ...(hasMoney ? { currency: moneyCurrency.toUpperCase() } : {}),
             ...(transaction.amount_cents !== undefined
               ? {
                   amount: this.fromMinorUnits(

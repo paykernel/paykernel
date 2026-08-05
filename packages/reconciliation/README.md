@@ -85,8 +85,14 @@ Inject any `ReconciliationStore` (testkit `createMemoryReconciliationStore` in t
 ### 3. Batch with concurrency limit
 
 ```typescript
-for await (const result of reconciler.reconcileMany(targets, { concurrency: 5 })) {
+for await (const { index, target, result } of reconciler.reconcileMany(targets, {
+  concurrency: 5,
+})) {
+  // Completion order; use index/target to correlate (RECON-1).
   // Persist or alert in application code — package does not auto-mutate.
+  void index;
+  void target;
+  void result;
 }
 ```
 

@@ -444,9 +444,9 @@ function stripeSubscriptionStatus(status: string): PaymentStatus {
       // relationship) until invoice/PI money events confirm collection.
       return "processing";
     case "trialing":
-      // Trial has not collected payment yet — keep pending. Note: Checkout
-      // `payment_status: paid` for a $0 trial session may still normalize as
-      // `paid` via the checkout.session.completed path.
+      // Trial has not collected payment yet — keep pending. Checkout
+      // subscription-mode `no_payment_required` also maps to pending (STRIPE-2).
+      // `payment_status: paid` on a paid first invoice remains paid via checkout.
       return "pending";
     case "past_due":
     case "incomplete":
@@ -749,11 +749,15 @@ function mapStripeRefundWebhookStatus(
           ? charge.amount_captured
           : charge.amount;
 
+      // STRIPE-1: amount_refunded must be > 0 to prove aggregate money moved.
+      // Zero (or missing) with expanded charge must not map to partially_refunded
+      // — that dual-writes refund.completed while refunded money is unproven.
       if (
         typeof chargeAmountRefunded === "number" &&
         typeof capturedBase === "number" &&
         Number.isFinite(chargeAmountRefunded) &&
-        Number.isFinite(capturedBase)
+        Number.isFinite(capturedBase) &&
+        chargeAmountRefunded > 0
       ) {
         return chargeAmountRefunded >= capturedBase && capturedBase > 0
           ? "refunded"
@@ -761,6 +765,9 @@ function mapStripeRefundWebhookStatus(
       }
     }
 
+    // Incomplete charge-aggregate snapshot (no expanded charge, zero
+    // amount_refunded, or unusable totals): domain incomplete marker.
+    // Dual-write demoted to refund.pending via demoteIncompleteRefundWebhookDualWrite.
     return "refund_completed";
   }
   if (status === "failed" || status === "canceled") {
@@ -1930,13 +1937,19 @@ export class StripeGateway extends BaseGateway {
           session.payment_status === "no_payment_required" &&
           session.status === "complete"
         ) {
-          // setup_completed only for true setup flows — not payment-mode
-          // $0 / free / coupon sessions (those are fulfillment-ready paid).
+          // setup_completed only for true setup flows.
+          // payment-mode $0 / free / coupon → fulfillment-ready paid.
+          // subscription-mode no_payment_required (trials, $0 first invoice)
+          // is NOT paid — align with subscription lifecycle trialing→pending
+          // so type-only handlers do not unlock fulfillment before collection
+          // (STRIPE-2). Dual-write stays provider.unmapped (not payment.succeeded).
           if (
             session.mode === "setup" ||
             expandableId(session.setup_intent) !== undefined
           ) {
             status = "setup_completed";
+          } else if (session.mode === "subscription") {
+            status = "pending";
           } else {
             status = "paid";
           }
@@ -2005,9 +2018,33 @@ export class StripeGateway extends BaseGateway {
       }
       case "refund.created":
       case "refund.updated":
-      case "charge.refund.updated":
+      case "charge.refund.updated": {
         status = mapStripeRefundWebhookStatus(object.status, object);
+        // STRIPE-3: refund.* object.amount is per-refund, but status may be
+        // charge-aggregate (refunded / partially_refunded from expanded charge).
+        // When aggregate totals prove the state, publish cumulative
+        // amount_refunded so event.amount / dual-write Refund.amount match
+        // charge-level money moved (same as charge.refunded rewrite). Incomplete
+        // aggregates keep the per-refund face amount.
+        if (status === "refunded" || status === "partially_refunded") {
+          const charge = (object as { charge?: unknown }).charge;
+          if (
+            typeof charge === "object" &&
+            charge !== null &&
+            typeof (charge as { amount_refunded?: unknown }).amount_refunded ===
+              "number" &&
+            Number.isFinite(
+              (charge as { amount_refunded: number }).amount_refunded,
+            ) &&
+            (charge as { amount_refunded: number }).amount_refunded > 0
+          ) {
+            amount = convertMinor(
+              (charge as { amount_refunded: number }).amount_refunded,
+            );
+          }
+        }
         break;
+      }
       case "refund.failed":
         status = "failed";
         break;

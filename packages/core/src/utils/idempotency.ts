@@ -91,16 +91,16 @@ function cloneUnknown(value: unknown): unknown {
  * Suitable for a single long-lived process; provide a shared store (Redis/SQL)
  * for multi-worker or serverless deployments.
  *
- * Memory is capped at `maxEntries`. Expired **unprotected** (`unknown`)
- * entries are evicted lazily on read, and when the store reaches capacity a
- * write first prunes expired unknowns and then, if still full, may evict an
- * unprotected entry. **MONEY-2:** `in_progress` and `completed` fences are
- * never TTL-evicted (and never LRU-evicted under pressure) — they pin until
- * status becomes `unknown` or the key is explicitly `delete`d. New keys are
- * refused (throw) when the store is full of protected entries, so
- * double-refund/capture guards cannot silently disappear. Records returned
- * from `get`/`reserve` and stored by `set` are cloned so callers cannot
- * mutate the live cache.
+ * Memory is capped at `maxEntries`. **MONEY-2:** every {@link IdempotencyStatus}
+ * (`in_progress`, `completed`, and `unknown` after indeterminate mutations) is a
+ * protected fence — never TTL-evicted and never dropped under capacity pressure.
+ * Expired fences stay readable until explicit `delete`. When the store is full,
+ * new keys are refused (throw) so double-refund/capture guards cannot silently
+ * disappear. Records from `get`/`reserve` and stored by `set` are cloned so
+ * callers cannot mutate the live cache.
+ *
+ * Prefer a shared store (Redis/SQL) for multi-worker or high-cardinality keys;
+ * this in-memory store prioritizes fence integrity over automatic reclamation.
  */
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly entries = new Map<
@@ -118,35 +118,23 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     if (!entry) {
       return undefined;
     }
-    if (entry.expiresAt <= Date.now()) {
-      // MONEY-2: pin in_progress/completed — TTL must not drop mutation fences.
-      if (isProtectedFenceStatus(entry.record.status)) {
-        return cloneIdempotencyRecord(entry.record);
-      }
-      this.entries.delete(key);
-      return undefined;
-    }
+    // MONEY-2: all statuses are protected fences — return past TTL until delete.
     return cloneIdempotencyRecord(entry.record);
   }
 
   set(key: string, record: IdempotencyRecord): void {
     const isUpdate = this.entries.has(key);
 
-    // Only do the O(n) prune/evict work when at capacity for a new key, so the
-    // common path (updating an existing key or writing below the cap) stays O(1).
+    // Capacity only applies to new keys; updates replace in place.
     if (!isUpdate && this.entries.size >= this.maxEntries) {
-      this.pruneExpired();
-      if (this.entries.size >= this.maxEntries) {
-        if (!this.evictUnprotected()) {
-          throw new Error(
-            "InMemoryIdempotencyStore at capacity with protected in_progress/completed keys; " +
-              "refusing new key to preserve mutation guards (raise maxEntries or use a shared store)",
-          );
-        }
-      }
+      throw new Error(
+        "InMemoryIdempotencyStore at capacity with protected fence keys " +
+          "(in_progress/completed/unknown); refusing new key to preserve " +
+          "mutation guards (raise maxEntries or use a shared store)",
+      );
     }
 
-    // Move-to-end on update so recency tracks last write (LRU-style eviction of unknowns).
+    // Re-insert on update so Map iteration order reflects last write.
     if (isUpdate) {
       this.entries.delete(key);
     }
@@ -154,6 +142,7 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     const stored = Object.freeze(cloneIdempotencyRecord(record));
     this.entries.set(key, {
       record: stored,
+      // retained for diagnostics / future non-fence statuses; not used for eviction
       expiresAt: Date.now() + this.ttlMs,
     });
   }
@@ -171,43 +160,10 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     return undefined;
   }
 
-  /** Number of live (not yet evicted) entries. Exposed for diagnostics/tests. */
+  /** Number of live entries. Exposed for diagnostics/tests. */
   get size(): number {
     return this.entries.size;
   }
-
-  private pruneExpired(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.entries) {
-      // MONEY-2: never prune protected fences on TTL alone.
-      if (
-        entry.expiresAt <= now &&
-        !isProtectedFenceStatus(entry.record.status)
-      ) {
-        this.entries.delete(key);
-      }
-    }
-  }
-
-  /**
-   * Evict the least-recently-updated **unprotected** entry (`unknown` only).
-   * Never drops `in_progress` / `completed` (MONEY-2 capacity fence).
-   * @returns true if an entry was removed
-   */
-  private evictUnprotected(): boolean {
-    for (const [key, entry] of this.entries) {
-      if (entry.record.status === "unknown") {
-        this.entries.delete(key);
-        return true;
-      }
-    }
-    return false;
-  }
-}
-
-/** True when the record must survive TTL and capacity eviction (MONEY-2). */
-function isProtectedFenceStatus(status: IdempotencyStatus): boolean {
-  return status === "in_progress" || status === "completed";
 }
 
 /**

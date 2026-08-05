@@ -189,10 +189,10 @@ function maySafeUpgradeToPaid(
  *   (apply_drift_review) — capture totals / final_capture may still be incomplete
  * - gatewayPaymentId mismatch (target vs provider) → never safe paid/failed upgrade
  * - ambiguous_match → manual_review
- * - temporarily_unavailable / provider_not_found retryable → retry_later
- * - ALWAYS surface do_not_create_replacement when indeterminate or ambiguous
- *   (returned as primary decision for ambiguous / indeterminate-not-found paths
- *   where replacement would risk duplicate charges; otherwise callers can use
+ * - temporarily_unavailable → retry_later
+ * - provider_not_found retryable → do_not_create_replacement (always; RECON-2)
+ * - ALWAYS surface do_not_create_replacement for provider_not_found / ambiguous
+ *   (action-only switches must not recreate; callers can still use
  *   {@link shouldForbidReplacementCharge}).
  */
 export function decideReconciliationPolicy(
@@ -308,24 +308,18 @@ export function decideReconciliationPolicy(
 
     case "provider_not_found":
       if (result.retryable) {
-        // RECON-3: shouldForbidReplacementCharge is always true for
-        // provider_not_found. Surface do_not_create_replacement for open-money
-        // and indeterminate locals so sample loops that only switch on policy
-        // action cannot treat this as a pure reschedule-then-recreate path.
-        // Terminal non-open locals still get retry_later (reschedule lookup);
-        // callers must still consult shouldForbidReplacementCharge.
-        if (
-          isIndeterminateLocal(target.expected) ||
-          isOpenMoneyLocal(target.expected)
-        ) {
-          return {
-            action: "do_not_create_replacement",
-            safe: false,
-            reason:
-              "Provider payment not found yet and local money state is open or indeterminate — do not create replacement",
-          };
-        }
-        return { action: "retry_later", safe: false };
+        // RECON-2: shouldForbidReplacementCharge is always true for
+        // provider_not_found. Always surface do_not_create_replacement as the
+        // primary decision — including terminal failed/cancelled locals — so
+        // action-only switches cannot treat this as pure retry_later then
+        // createPayment (duplicate-charge footgun). Apps may still reschedule
+        // a later lookup; they must not create a replacement charge.
+        return {
+          action: "do_not_create_replacement",
+          safe: false,
+          reason:
+            "Provider payment not found — do not create replacement (original may still settle or exist); reschedule lookup if needed",
+        };
       }
       return {
         action: "manual_review",

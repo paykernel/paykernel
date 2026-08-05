@@ -405,32 +405,35 @@ describe("shouldForbidReplacementCharge", () => {
     ).toBe(true);
   });
 
-  it("RECON-3: provider_not_found + open money local surfaces do_not_create_replacement", () => {
+  it("RECON-2: provider_not_found always surfaces do_not_create_replacement", () => {
     const result: ReconciliationResult = {
       outcome: "provider_not_found",
       retryable: true,
     };
-    for (const status of ["paid", "authorized", "refund_pending"] as const) {
+    for (const status of [
+      "paid",
+      "authorized",
+      "refund_pending",
+      "pending",
+      "failed",
+      "cancelled",
+    ] as const) {
       const d = decideReconciliationPolicy(result, {
         gateway: "stripe",
         expected: { status },
       });
+      // RECON-2: never bare retry_later — action-only switches must not recreate.
       expect(d.action).toBe("do_not_create_replacement");
-      expect(shouldForbidReplacementCharge(result, { gateway: "s", expected: { status } })).toBe(
-        true,
-      );
+      expect(d.safe).toBe(false);
+      expect(
+        shouldForbidReplacementCharge(result, {
+          gateway: "s",
+          expected: { status },
+        }),
+      ).toBe(true);
     }
-    // Terminal non-open local: policy may retry_later, but forbid helper still true.
-    const failedLocal = decideReconciliationPolicy(result, {
-      gateway: "stripe",
-      expected: { status: "failed" },
-    });
-    expect(failedLocal.action).toBe("retry_later");
-    expect(
-      shouldForbidReplacementCharge(result, {
-        gateway: "s",
-        expected: { status: "failed" },
-      }),
-    ).toBe(true);
+    // Sparse expected (no local status) also forbids replacement.
+    const sparse = decideReconciliationPolicy(result, { gateway: "stripe" });
+    expect(sparse.action).toBe("do_not_create_replacement");
   });
 });

@@ -188,16 +188,20 @@ function mapStripeEventType(
       status === "succeeded" ||
       status === "completed" ||
       status === "refunded" ||
-      status === "partially_refunded" ||
-      status === "refund_completed"
+      status === "partially_refunded"
     ) {
       return "refund.completed";
     }
-    // refund.created without status context → pending (creation is not settlement)
-    if (providerEventType === "refund.created") {
+    // Incomplete domain marker: dual-write stays pending until amount proves
+    // full/partial (gateway demotion path). Do not type-only settle.
+    if (status === "refund_completed") {
       return "refund.pending";
     }
-    return "refund.completed";
+    // CORE-1: empty / unknown status must not fail-open to refund.completed.
+    // refund.created without status is creation (not settlement); refund.updated
+    // / charge.refund.updated with missing or unrecognized status are incomplete
+    // snapshots — type-only handlers must not mark refunds settled.
+    return "refund.pending";
   }
 
   const direct = STRIPE_EVENT_TYPE_MAP[providerEventType];
