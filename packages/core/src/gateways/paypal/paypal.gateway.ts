@@ -146,6 +146,16 @@ interface PayPalRefundResponse {
     currency_code: string;
     value: string;
   };
+  /**
+   * Present on representation responses after refund.
+   * `total_refunded_amount` is capture-wide cumulative (not this-op only).
+   */
+  seller_payable_breakdown?: {
+    total_refunded_amount?: PayPalMoney;
+    gross_amount?: PayPalMoney;
+    net_amount?: PayPalMoney;
+    paypal_fee?: PayPalMoney;
+  };
   message?: string;
   name?: string;
   details?: Array<{
@@ -164,6 +174,16 @@ type PayPalPaymentResource = {
   status: string;
   amount: PayPalMoney;
   final_capture?: boolean;
+  /**
+   * Capture activity breakdown. `total_refunded_amount` is cumulative refunded
+   * on this capture when present (used for remaining-held + totalRefunded).
+   */
+  seller_receivable_breakdown?: {
+    gross_amount?: PayPalMoney;
+    net_amount?: PayPalMoney;
+    paypal_fee?: PayPalMoney;
+    total_refunded_amount?: PayPalMoney;
+  };
   supplementary_data?: {
     related_ids?: {
       order_id?: string;
@@ -379,14 +399,20 @@ export class PayPalGateway extends BaseGateway {
         );
         // When captures exist, do not fall back to a single capture's face amount if
         // the aggregate is empty (e.g. all REFUNDED / PARTIALLY_REFUNDED without net).
-        const singleAmount =
-          capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
+        const singleMoney = (() => {
+          if (captures && captures.length > 0) {
+            return undefined;
+          }
+          const singleAmount =
+            capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
+          return singleAmount
+            ? this.tryParsePayPalMoney(singleAmount, "get payment")
+            : undefined;
+        })();
         const amountMajor =
-          captures && captures.length > 0
-            ? aggregatedCaptured
-            : singleAmount
-              ? this.parseAmount(singleAmount, "get payment")
-              : undefined;
+          aggregatedCaptured?.amount ?? singleMoney?.amount;
+        const moneyCurrency =
+          aggregatedCaptured?.currency ?? singleMoney?.currency;
         return this.mapPayPalPaymentResult({
           gatewayId: data.id,
           orderId: data.id,
@@ -402,8 +428,9 @@ export class PayPalGateway extends BaseGateway {
             : {}),
           ...(amountMajor !== undefined ? { amount: amountMajor } : {}),
           ...(aggregatedCaptured !== undefined
-            ? { capturedAmount: aggregatedCaptured }
+            ? { capturedAmount: aggregatedCaptured.amount }
             : {}),
+          ...(moneyCurrency !== undefined ? { currency: moneyCurrency } : {}),
         });
       }, isRetryableError);
     }, GetPaymentParamsSchema);
@@ -660,11 +687,16 @@ export class PayPalGateway extends BaseGateway {
           );
         }
 
+        const captureMoney = this.parsePayPalMoney(
+          capture.amount,
+          "capture payment",
+        );
         return this.mapPayPalPaymentResult({
           gatewayId: capture.id,
           captureId: capture.id,
           status,
-          amount: this.parseAmount(capture.amount, "capture payment"),
+          amount: captureMoney.amount,
+          currency: captureMoney.currency,
           // Include capture ID for downstream refund use
           rawResponse: {
             ...data,
@@ -753,25 +785,17 @@ export class PayPalGateway extends BaseGateway {
             : status === "failed"
               ? "failed"
               : "pending";
-        // PAYPAL-4: map refund amount when PayPal returns it (Prefer representation)
-        // or when the caller supplied a partial amount. This is this-op amount; PayPal
-        // does not return capture-wide cumulative refunded on the refund resource alone.
+        // PAYPAL-2: totalRefunded is capture-wide cumulative (prior + this op),
+        // matching JSDoc / Stripe / Moyasar. Never publish this-op alone as total.
+        // Prefer seller_payable_breakdown.total_refunded_amount, else capture GET.
+        // Only publish on completed refunds (pending must not book ledgers).
         let totalRefunded: number | undefined;
-        if (data.amount) {
-          try {
-            totalRefunded = this.parseAmount(data.amount, "refund");
-          } catch {
-            totalRefunded = undefined;
-          }
-        } else if (p.amount !== undefined && p.currency) {
-          // AmountInput is number | Money — normalize to major units for totalRefunded.
-          try {
-            totalRefunded = moneyToMajorNumber(
-              normalizeAmountInput(p.amount, p.currency),
-            );
-          } catch {
-            totalRefunded = undefined;
-          }
+        if (status === "completed") {
+          totalRefunded = await this.resolveCaptureTotalRefunded(
+            p.gatewayPaymentId,
+            data,
+            extractAbortSignal(p),
+          );
         }
         // Terminal failed/cancelled refunds → outcome failed → success false.
         return applyOutcomeToGatewayRefundResult(
@@ -785,6 +809,62 @@ export class PayPalGateway extends BaseGateway {
         );
       }, isRetryableError);
     }, RefundParamsSchema);
+  }
+
+  /**
+   * Capture-wide cumulative refunded major units after a successful refund.
+   * PAYPAL-2: never invent this-op amount as totalRefunded.
+   */
+  private async resolveCaptureTotalRefunded(
+    captureId: string,
+    refund: PayPalRefundResponse,
+    callerSignal?: AbortSignal,
+  ): Promise<number | undefined> {
+    const fromRefund = this.tryParsePayPalMoney(
+      refund.seller_payable_breakdown?.total_refunded_amount,
+      "refund total_refunded_amount",
+    );
+    if (fromRefund) {
+      return fromRefund.amount;
+    }
+
+    // Capture GET often carries seller_receivable_breakdown.total_refunded_amount.
+    try {
+      const response = await this.fetchWithAccessToken(
+        `${this.baseUrl}/v2/payments/captures/${captureId}`,
+        (token) => ({
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }),
+        callerSignal,
+      );
+      const capture = await this.parseJsonResponse<PayPalPaymentResource>(response);
+      if (!response.ok) {
+        return undefined;
+      }
+
+      const fromCapture = this.tryParsePayPalMoney(
+        capture.seller_receivable_breakdown?.total_refunded_amount,
+        "capture total_refunded_amount",
+      );
+      if (fromCapture) {
+        return fromCapture.amount;
+      }
+
+      // Fully refunded capture without breakdown → face amount is the cumulative total.
+      const mapped = this.mapResourceStatus(capture.status);
+      if (mapped === "refunded") {
+        const face = this.tryParsePayPalMoney(capture.amount, "capture face");
+        return face?.amount;
+      }
+    } catch {
+      // Secondary capture GET is best-effort; omit total rather than this-op lie.
+    }
+
+    return undefined;
   }
 
   /**
@@ -869,13 +949,18 @@ export class PayPalGateway extends BaseGateway {
         this.assertPaymentResource(authorization, "authorize payment");
 
         const status = this.mapResourceStatus(authorization.status);
+        const authMoney = this.parsePayPalMoney(
+          authorization.amount,
+          "authorize payment",
+        );
         return this.mapPayPalPaymentResult({
           // Match capturePayment: terminal failed statuses are not successful outcomes.
           gatewayId: authorization.id,
           orderId: data.id,
           authorizationId: authorization.id,
           status,
-          amount: this.parseAmount(authorization.amount, "authorize payment"),
+          amount: authMoney.amount,
+          currency: authMoney.currency,
           providerNativeStatus: authorization.status,
           rawResponse: {
             ...data,
@@ -1358,12 +1443,21 @@ export class PayPalGateway extends BaseGateway {
       );
     }
 
+    // PAYPAL-3: PARTIALLY_REFUNDED/REFUNDED must not publish original face as held.
+    const held = this.captureRemainingHeldAmount(
+      data,
+      status,
+      `get ${resourceType}`,
+    );
+
     const relatedIds = data.supplementary_data?.related_ids;
     return this.mapPayPalPaymentResult({
       gatewayId: data.id,
       captureId: data.id,
       status,
-      amount: this.parseAmount(data.amount, `get ${resourceType}`),
+      ...(held !== undefined
+        ? { amount: held.amount, currency: held.currency }
+        : {}),
       rawResponse: data,
       providerNativeStatus: data.status,
       ...(relatedIds?.order_id !== undefined
@@ -1399,12 +1493,14 @@ export class PayPalGateway extends BaseGateway {
 
     this.assertPaymentResource(data, "get authorization");
     const relatedIds = data.supplementary_data?.related_ids;
+    const authMoney = this.parsePayPalMoney(data.amount, "get authorization");
 
     return this.mapPayPalPaymentResult({
       gatewayId: data.id,
       authorizationId: data.id,
       status: this.mapResourceStatus(data.status),
-      amount: this.parseAmount(data.amount, "get authorization"),
+      amount: authMoney.amount,
+      currency: authMoney.currency,
       rawResponse: data,
       providerNativeStatus: data.status,
       ...(relatedIds?.order_id !== undefined
@@ -1419,6 +1515,7 @@ export class PayPalGateway extends BaseGateway {
   /**
    * Build GatewayPaymentResult with Phase 6 outcome + ProviderReferences.
    * Dual-writes legacy orderId/captureId/authorizationId for 0.x callers.
+   * PAYPAL-1: always publish `currency` whenever major-unit amount fields are set.
    */
   private mapPayPalPaymentResult(input: {
     gatewayId: string;
@@ -1428,6 +1525,8 @@ export class PayPalGateway extends BaseGateway {
     captureId?: string | undefined;
     authorizationId?: string | undefined;
     amount?: number | undefined;
+    /** ISO 4217 — required whenever amount/capturedAmount are published. */
+    currency?: string | undefined;
     capturedAmount?: number | undefined;
     redirectUrl?: string | undefined;
     providerNativeStatus?: string | undefined;
@@ -1435,6 +1534,18 @@ export class PayPalGateway extends BaseGateway {
   }): GatewayPaymentResult {
     const outcome =
       input.forceOutcome ?? this.mapPayPalOutcome(input.status, input.redirectUrl);
+
+    // Fail-closed: never publish naked major-unit amounts without currency.
+    const hasMoney =
+      input.amount !== undefined || input.capturedAmount !== undefined;
+    const currency =
+      typeof input.currency === "string" && input.currency.length === 3
+        ? this.normalizeCurrencyCode(input.currency)
+        : undefined;
+    const amount =
+      hasMoney && currency !== undefined ? input.amount : undefined;
+    const capturedAmount =
+      hasMoney && currency !== undefined ? input.capturedAmount : undefined;
 
     return applyOutcomeToGatewayResult(
       {
@@ -1449,10 +1560,9 @@ export class PayPalGateway extends BaseGateway {
         ...(input.authorizationId !== undefined
           ? { authorizationId: input.authorizationId }
           : {}),
-        ...(input.amount !== undefined ? { amount: input.amount } : {}),
-        ...(input.capturedAmount !== undefined
-          ? { capturedAmount: input.capturedAmount }
-          : {}),
+        ...(amount !== undefined ? { amount } : {}),
+        ...(capturedAmount !== undefined ? { capturedAmount } : {}),
+        ...(currency !== undefined && hasMoney ? { currency } : {}),
         ...(input.providerNativeStatus !== undefined
           ? { providerNativeStatus: input.providerNativeStatus }
           : {}),
@@ -2210,14 +2320,19 @@ export class PayPalGateway extends BaseGateway {
     return getCurrencyExponent(code);
   }
 
-  private formatAmount(amount: AmountInput, currency: string): string {
+  private formatAmount(
+    amount: AmountInput,
+    currency: string,
+    options?: { allowZero?: boolean },
+  ): string {
     const normalizedCurrency = this.normalizeCurrencyCode(currency);
     // PayPal zero-decimal set (HUF/JPY/TWD) is the exponent source — not ISO.
     const scale = this.getCurrencyScale(normalizedCurrency);
+    const allowZero = options?.allowZero === true;
     const parseOpts = {
       rounding: "reject" as const,
       exponent: scale,
-      allowZero: false,
+      allowZero,
       allowNegative: false,
     };
 
@@ -2240,7 +2355,14 @@ export class PayPalGateway extends BaseGateway {
     }
   }
 
-  private parseAmount(amount: unknown, operation: string): number {
+  /**
+   * Parse PayPal Money object into major units + ISO currency (PAYPAL-1).
+   * Always returns currency together with the major amount.
+   */
+  private parsePayPalMoney(
+    amount: unknown,
+    operation: string,
+  ): { amount: number; currency: string } {
     if (!amount || typeof amount !== "object") {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing amount`,
@@ -2273,17 +2395,80 @@ export class PayPalGateway extends BaseGateway {
         allowZero: true,
         allowNegative: true,
       });
-      return moneyToMajorNumber(parsed, {
-        exponent: scale,
-        allowZero: true,
-        allowNegative: true,
-      });
+      return {
+        amount: moneyToMajorNumber(parsed, {
+          exponent: scale,
+          allowZero: true,
+          allowNegative: true,
+        }),
+        currency: code,
+      };
     } catch {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: invalid amount value`,
         amount,
       );
     }
+  }
+
+  /** Major-unit only convenience; prefer {@link parsePayPalMoney} when currency is needed. */
+  private parseAmount(amount: unknown, operation: string): number {
+    return this.parsePayPalMoney(amount, operation).amount;
+  }
+
+  /**
+   * Try parse optional PayPal Money without throwing (for breakdown fields).
+   */
+  private tryParsePayPalMoney(
+    amount: unknown,
+    operation: string,
+  ): { amount: number; currency: string } | undefined {
+    try {
+      return this.parsePayPalMoney(amount, operation);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Net still-held major units on a capture resource after refunds.
+   * PAYPAL-3: never treat original face as held when status is refunded /
+   * partially_refunded without a proven remaining balance.
+   */
+  private captureRemainingHeldAmount(
+    data: PayPalPaymentResource,
+    status: PaymentStatus,
+    operation: string,
+  ): { amount: number; currency: string } | undefined {
+    const face = this.tryParsePayPalMoney(data.amount, operation);
+    if (!face) {
+      return undefined;
+    }
+
+    if (status !== "partially_refunded" && status !== "refunded") {
+      return face;
+    }
+
+    const totalRefundedMoney =
+      data.seller_receivable_breakdown?.total_refunded_amount;
+    const totalRefunded = totalRefundedMoney
+      ? this.tryParsePayPalMoney(totalRefundedMoney, `${operation} total refunded`)
+      : undefined;
+
+    if (totalRefunded && totalRefunded.currency === face.currency) {
+      const remaining = face.amount - totalRefunded.amount;
+      if (!Number.isFinite(remaining) || remaining < 0) {
+        return undefined;
+      }
+      // Fully refunded (or over-refund report) → no still-held funds.
+      if (status === "refunded" || remaining === 0) {
+        return undefined;
+      }
+      return { amount: remaining, currency: face.currency };
+    }
+
+    // No cumulative refund breakdown: fail-closed — omit face as still-held.
+    return undefined;
   }
 
   private extractWebhookAmount(raw: PayPalWebhookPayload): {
@@ -2298,13 +2483,15 @@ export class PayPalGateway extends BaseGateway {
         orderCaptures,
         "webhook",
       );
-      const currencyCode = orderCaptures.find((c) => c.amount?.currency_code)
-        ?.amount?.currency_code;
+      const currencyCode =
+        aggregated?.currency ??
+        orderCaptures.find((c) => c.amount?.currency_code)?.amount
+          ?.currency_code;
       if (aggregated !== undefined && currencyCode) {
         try {
           return {
             currency_code: currencyCode,
-            value: this.formatAmount(aggregated, currencyCode),
+            value: this.formatAmount(aggregated.amount, currencyCode),
           };
         } catch {
           // Incomplete aggregate format — omit amount rather than last-slice face.
@@ -2312,7 +2499,8 @@ export class PayPalGateway extends BaseGateway {
         }
       }
       // Captures present but none still held: do not fall back to REFUNDED face
-      // amounts or order total (PAYPAL-2). Fully refunded/reversed → 0 remaining.
+      // amounts or order total. Fully refunded/reversed → 0 remaining (PAYPAL-5:
+      // allowZero so formatAmount(0) is live, not dead catch→undefined).
       // PARTIALLY_REFUNDED without net → omit (fail-closed incomplete snapshot).
       const refundAgg = this.aggregateCaptureRefundStatus(orderCaptures);
       if (
@@ -2322,7 +2510,7 @@ export class PayPalGateway extends BaseGateway {
         try {
           return {
             currency_code: currencyCode,
-            value: this.formatAmount(0, currencyCode),
+            value: this.formatAmount(0, currencyCode, { allowZero: true }),
           };
         } catch {
           return undefined;
@@ -2751,7 +2939,7 @@ export class PayPalGateway extends BaseGateway {
     }
     try {
       const total = this.parseAmount(totalMoney, "get payment aggregate");
-      return capturedSum < total;
+      return capturedSum.amount < total;
     } catch {
       return false;
     }
@@ -2760,14 +2948,15 @@ export class PayPalGateway extends BaseGateway {
   /**
    * Sum amounts of captures that still hold funds (COMPLETED / non-final partial).
    *
-   * PAYPAL-2: exclude fully REFUNDED face amounts (they are not held).
+   * Exclude fully REFUNDED face amounts (they are not held).
    * PARTIALLY_REFUNDED face amounts overstate remaining without refund breakdown —
    * fail-closed: omit them from the sum (status is partially_refunded separately).
+   * Returns currency together with major amount (PAYPAL-1).
    */
   private sumSuccessfulCaptureAmounts(
     captures: Array<PayPalEmbeddedCapture> | undefined,
     operation: string,
-  ): number | undefined {
+  ): { amount: number; currency: string } | undefined {
     if (!captures || captures.length === 0) {
       return undefined;
     }
@@ -2840,19 +3029,22 @@ export class PayPalGateway extends BaseGateway {
       return undefined;
     }
 
-    return moneyToMajorNumber(
-      sharedFromMinorUnits(totalMinor, currency, {
-        rounding: "reject",
-        exponent: scale,
-        allowZero: true,
-        allowNegative: false,
-      }),
-      {
-        exponent: scale,
-        allowZero: true,
-        allowNegative: false,
-      },
-    );
+    return {
+      amount: moneyToMajorNumber(
+        sharedFromMinorUnits(totalMinor, currency, {
+          rounding: "reject",
+          exponent: scale,
+          allowZero: true,
+          allowNegative: false,
+        }),
+        {
+          exponent: scale,
+          allowZero: true,
+          allowNegative: false,
+        },
+      ),
+      currency,
+    };
   }
 
   private readResourceFinalCapture(

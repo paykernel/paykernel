@@ -367,7 +367,96 @@ describe("reconciliation store unit", () => {
         !c.sql.includes("status = 'claimed'"),
     );
     expect(repair).toBeDefined();
-    expect(repair!.params).toEqual(["job-lex", dueZ, null]);
+    // SQL-1: free-lease fence + now bind (key, dueAt, leaseExpiresAt, now)
+    expect(repair!.sql).toContain("status = 'scheduled'");
+    expect(repair!.sql).toMatch(/lease_expires_at IS NULL/i);
+    expect(repair!.sql).toMatch(/lease_expires_at\s*<=/i);
+    expect(repair!.params).toEqual(["job-lex", dueZ, null, now]);
+  });
+
+  it("SQL-1: timestamp repair free-lease fence does not steal active winner lease", async () => {
+    // Race: first claim miss → classify claimable from free snapshot; concurrent
+    // winner claims; repair must be free-lease fenced (0 rows); reselect → in_progress.
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const dueOffset = "2026-01-15T14:00:00+05:00";
+    const dueZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    const winnerLease = new Date(clock.nowMs() + 60_000).toISOString();
+    let selectN = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("UPDATE") && sql.includes("status = 'claimed'")) {
+          // Both claim attempts lose (winner already holds / still holds).
+          return [];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          selectN += 1;
+          if (selectN === 1) {
+            // Stale free snapshot that classifies as claimable.
+            return [
+              {
+                key: "job-race",
+                status: "scheduled",
+                subject_id: "pay_1",
+                reason: "timeout",
+                due_at: dueOffset,
+                lease_owner: null,
+                lease_token: null,
+                lease_expires_at: null,
+                attempts: 0,
+                generation: 0,
+                last_error_sanitized: null,
+                tenant_id: null,
+                created_at: dueZ,
+                updated_at: dueZ,
+                completed_at: null,
+              },
+            ];
+          }
+          // After fenced repair (0 rows), winner is active.
+          return [
+            {
+              key: "job-race",
+              status: "claimed",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: dueZ,
+              lease_owner: "winner",
+              lease_token: "lt_winner",
+              lease_expires_at: winnerLease,
+              attempts: 1,
+              generation: 1,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: dueZ,
+              updated_at: now,
+              completed_at: null,
+            },
+          ];
+        }
+        return [];
+      },
+      // Fenced repair matches 0 rows when lease is no longer free.
+      onExecute: () => ({ rowCount: 0 }),
+    });
+    const store = createPostgresReconciliationStore({ executor, clock });
+    const r = await store.claim({ key: "job-race", owner: "loser", leaseMs: 1000 });
+    expect(r.kind).toBe("in_progress");
+    if (r.kind === "in_progress") {
+      expect(r.record.leaseToken).toBe("lt_winner");
+      expect(r.record.leaseExpiresAt).toBe(winnerLease);
+    }
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("due_at") &&
+        !c.sql.includes("status = 'claimed'"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.sql).toContain("status = 'scheduled'");
+    expect(repair!.sql).toMatch(/lease_expires_at\s*<=/i);
+    // Stale null lease must not be written without free-lease fence (params include now).
+    expect(repair!.params).toEqual(["job-race", dueZ, null, now]);
   });
 
   it("SQL-1: schedule stores canonical Z dueAt", async () => {

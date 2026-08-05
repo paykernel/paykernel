@@ -75,11 +75,9 @@ local m = hgetall_map(rec)
 local status = m['status'] or ''
 local ph = m['payload_hash'] or ''
 
-if ph ~= payloadHash then
-  local p = pack(m)
-  return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
-end
-
+-- WEBHOOKS-1: terminal outcomes before payload_hash_conflict (contract WEBHOOKS-4).
+-- Completed/dead-letter redelivery with mismatched hash must ACK as already done,
+-- not permanent payload_conflict (rawBody vs object-hash footgun).
 if status == 'completed' then
   local p = pack(m)
   return {'already_completed', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
@@ -88,6 +86,11 @@ end
 if status == 'dead_letter' or status == 'failed' then
   local p = pack(m)
   return {'duplicate_failed', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+end
+
+if ph ~= payloadHash then
+  local p = pack(m)
+  return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 end
 
 if status == 'claimed' then

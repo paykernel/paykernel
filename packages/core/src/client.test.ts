@@ -272,23 +272,29 @@ class CapabilityTestGateway extends BaseGateway {
     }
 
     async createPayment(params: CreatePaymentParams): Promise<GatewayPaymentResult> {
-        return mockCapPaymentResult(`${this.name}_pay`, { amount: params.amount });
+        return this.executeWithHooks('createPayment', params, async (p) =>
+            mockCapPaymentResult(`${this.name}_pay`, { amount: p.amount }),
+        );
     }
 
     async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
-        return mockCapPaymentResult(`${this.name}_cap`, {
-            amount: params.amount,
-        });
+        // Route through executeWithHooks so beforeCapture / CORE-1 post-before
+        // guards run (capability re-assert after amount injection).
+        return this.executeWithHooks('capturePayment', params, async (p) =>
+            mockCapPaymentResult(`${this.name}_cap`, {
+                amount: p.amount,
+            }),
+        );
     }
 
     async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
-        return {
+        return this.executeWithHooks('refundPayment', params, async (p) => ({
             success: true,
             gatewayRefundId: `${this.name}_ref`,
-            status: 'completed',
+            status: 'completed' as const,
             rawResponse: {},
-            amount: params.amount,
-        };
+            amount: p.amount,
+        }));
     }
 
     verifyWebhook(): boolean {
@@ -516,6 +522,66 @@ describe('PaymentClient capability enforcement (Phase 3)', () => {
             expect(err.capability).toBe('partialCapture');
             expect(err.claimedSupport).toBe(false);
             expect(err.operation).toBe('capturePayment');
+        }
+    });
+
+    it('CORE-1: beforeCapture amount injection cannot bypass partialCapture:false', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                fullcap: capabilityAdapter('fullcap', {
+                    payments: true,
+                    authorization: true,
+                    partialCapture: false,
+                }),
+            },
+            defaultGateway: 'fullcap',
+            hooks: {
+                beforeCapture: async (ctx) => ({
+                    proceed: true,
+                    params: { ...ctx.params, amount: 7 },
+                }),
+            },
+        });
+
+        // Entry params have no amount (would pass the client entry gate), but
+        // beforeCapture injects amount — post-before guard must re-assert.
+        try {
+            await client.capturePayment({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('hook-injected partial capture should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('partialCapture');
+            expect(err.claimedSupport).toBe(false);
+        }
+    });
+
+    it('CORE-1: beforeRefund amount injection cannot bypass partialRefunds:false', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                fullonly: capabilityAdapter('fullonly', {
+                    payments: true,
+                    refunds: true,
+                    partialRefunds: false,
+                }),
+            },
+            defaultGateway: 'fullonly',
+            hooks: {
+                beforeRefund: async (ctx) => ({
+                    proceed: true,
+                    params: { ...ctx.params, amount: 2 },
+                }),
+            },
+        });
+
+        try {
+            await client.refundPayment({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('hook-injected partial refund should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('partialRefunds');
+            expect(err.claimedSupport).toBe(false);
         }
     });
 

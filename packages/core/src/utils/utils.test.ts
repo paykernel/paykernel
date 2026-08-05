@@ -436,7 +436,7 @@ describe("redact", () => {
     expect(out.syntaxTree).toBe(true);
   });
 
-  it("redacts cookie / passwd / pwd / otp / credentials without over-matching", () => {
+  it("redacts cookie / passwd / pwd / otp / credentials / credential without over-matching", () => {
     const out = redact({
       cookie: "session=abc",
       setCookie: "sid=xyz",
@@ -447,6 +447,9 @@ describe("redact", () => {
       otpValue: "654321",
       totpCode: "999999",
       credentials: { user: "a", pass: "b" },
+      // MONEY-6: singular credential form
+      credential: "secret-cred",
+      userCredential: "user-secret",
       // Must remain visible — bare patterns must not substring-match these
       // (password already covered elsewhere; outcome/status stay diagnostic)
       outcome: "succeeded",
@@ -464,6 +467,8 @@ describe("redact", () => {
     expect(out.otpValue).toBe("[REDACTED]");
     expect(out.totpCode).toBe("[REDACTED]");
     expect(out.credentials).toBe("[REDACTED]");
+    expect(out.credential).toBe("[REDACTED]");
+    expect(out.userCredential).toBe("[REDACTED]");
     expect(out.outcome).toBe("succeeded");
     expect(out.status).toBe("paid");
     expect(out.amount).toBe(10.5);
@@ -605,15 +610,24 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.reserve("k", record)).toEqual(record);
   });
 
-  it("expires entries after the TTL", () => {
+  it("expires unknown entries after the TTL; pins in_progress/completed (MONEY-2)", () => {
     const store = new InMemoryIdempotencyStore(1);
-    store.set("k", { status: "completed", fingerprint: "fp", createdAt: Date.now() });
-    const before = store.get("k");
-    expect(before).toBeDefined();
+    store.set("u", { status: "unknown", fingerprint: "u", createdAt: Date.now() });
+    store.set("c", { status: "completed", fingerprint: "c", createdAt: Date.now() });
+    store.set("p", { status: "in_progress", fingerprint: "p", createdAt: Date.now() });
+    expect(store.get("u")).toBeDefined();
+    expect(store.get("c")).toBeDefined();
+    expect(store.get("p")).toBeDefined();
     // Wait past the 1ms TTL.
     const start = Date.now();
     while (Date.now() - start < 5) { /* busy wait */ }
-    expect(store.get("k")).toBeUndefined();
+    // Unknown may TTL-evict; mutation fences must not (MONEY-2).
+    expect(store.get("u")).toBeUndefined();
+    expect(store.get("c")?.status).toBe("completed");
+    expect(store.get("p")?.status).toBe("in_progress");
+    // Explicit delete still clears protected fences.
+    store.delete("c");
+    expect(store.get("c")).toBeUndefined();
   });
 
   it("caps growth by evicting unknown; never drops completed/in_progress (MONEY-1)", () => {
@@ -861,6 +875,30 @@ describe("fingerprintParams", () => {
     expect(fingerprintParams(d)).not.toBe(fingerprintParams({}));
     expect(fingerprintParams({ at: d })).toBe(
       fingerprintParams({ at: new Date("2026-01-15T12:00:00.000Z") }),
+    );
+  });
+
+  it("includes Money.exponent so scale overrides do not false-match (MONEY-1)", () => {
+    // money(10, USD, {exponent:0}) → 10 minors; amount:10 currency:USD → 1000 minors
+    const override = money(10, "USD", { exponent: 0 });
+    expect(override.exponent).toBe(0);
+    expect(override.amount).toBe("10");
+
+    const fpOverride = fingerprintParams({ amount: override, currency: "USD" });
+    const fpPlain = fingerprintParams({ amount: 10, currency: "USD" });
+    expect(fpOverride).not.toBe(fpPlain);
+
+    // Pure Money with stored exponent also differs from ISO-scale equivalent.
+    expect(fingerprintParams(override)).not.toBe(
+      fingerprintParams(money(10, "USD")),
+    );
+    expect(fingerprintParams(override)).not.toBe(
+      fingerprintParams({ amount: "10.00", currency: "USD" }),
+    );
+
+    // Economically identical ISO forms still match.
+    expect(fingerprintParams(money("10.00", "USD"))).toBe(
+      fingerprintParams({ amount: 10, currency: "USD" }),
     );
   });
 });

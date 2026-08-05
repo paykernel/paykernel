@@ -145,25 +145,71 @@ describe("engine + testkit memory store integration", () => {
     expect(runs).toBe(1);
   });
 
-  it("payload hash conflict surfaces as payload_conflict outcome", async () => {
+  it("WEBHOOKS-1: completed redelivery with different hash is duplicate_completed not payload_conflict", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
 
+    // First delivery completes — terminal row.
     await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_conflict",
       payloadHash: "h1",
       handler: async () => {},
     });
+    expect((await store.get("stripe:evt_conflict"))?.status).toBe("completed");
 
-    const conflict = await engine.processVerified({
+    // WEBHOOKS-1 / contract WEBHOOKS-4: terminal before payload_hash_conflict.
+    // Mismatched hash on a completed paid event must still ACK as done
+    // (handler not re-run) — not permanent payload_conflict.
+    let runs = 0;
+    const redelivery = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_conflict",
       payloadHash: "h2-different",
       handler: async () => {
+        runs++;
+        throw new Error("must not run on terminal redelivery");
+      },
+    });
+    expect(redelivery).toEqual({ outcome: "duplicate_completed" });
+    expect(runs).toBe(0);
+  });
+
+  it("non-terminal payload hash conflict surfaces as payload_conflict outcome", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
+
+    // Handler throw under durable_retry leaves a non-terminal pending row.
+    const first = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_pending_conflict",
+      payloadHash: "h1",
+      event: { type: "payment.succeeded" },
+      handler: async () => {
+        throw new Error("leave pending");
+      },
+    });
+    expect(first.outcome).toBe("scheduled_for_retry");
+    expect((await store.get("stripe:evt_pending_conflict"))?.status).toBe(
+      "pending",
+    );
+
+    // Same key, different hash on non-terminal row → payload_conflict.
+    let secondRuns = 0;
+    const conflict = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_pending_conflict",
+      payloadHash: "h2-different",
+      handler: async () => {
+        secondRuns++;
         throw new Error("must not run on payload_conflict");
       },
     });
     expect(conflict).toEqual({ outcome: "payload_conflict" });
+    expect(secondRuns).toBe(0);
   });
 });

@@ -222,6 +222,62 @@ describe("webhookEventToPaymentEvent", () => {
     );
     expect(payment.rawResponse).toBeUndefined();
   });
+
+  it("omits amount without currency on paymentFromWebhookEvent (CORE-3)", () => {
+    const incomplete = paymentFromWebhookEvent(
+      baseWebhook({ amount: 12.5, currency: undefined }),
+    );
+    expect(incomplete.amount).toBeUndefined();
+    expect(incomplete.currency).toBeUndefined();
+
+    const complete = paymentFromWebhookEvent(
+      baseWebhook({ amount: 12.5, currency: "usd" }),
+    );
+    expect(complete.amount).toBe(12.5);
+    expect(complete.currency).toBe("USD");
+
+    const currencyOnly = paymentFromWebhookEvent(
+      baseWebhook({ amount: undefined, currency: "SAR" }),
+    );
+    expect(currencyOnly.amount).toBeUndefined();
+    expect(currencyOnly.currency).toBe("SAR");
+  });
+
+  it("capture dual-write uses partially_completed for partials (CORE-4)", () => {
+    const partial = webhookEventToPaymentEvent(
+      baseWebhook({
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "partially_captured",
+        amount: 5,
+        currency: "EGP",
+      }),
+      {
+        mapContext: {
+          status: "partially_captured",
+          flags: { success: true, isCapture: true },
+        },
+      },
+    );
+    expect(partial.type).toBe("capture.completed");
+    if (partial.type !== "capture.completed") throw new Error("narrow");
+    expect(partial.capture.status).toBe("partially_completed");
+    expect(partial.capture.amount).toBe(5);
+    expect(partial.capture.currency).toBe("EGP");
+
+    const full = webhookEventToPaymentEvent(
+      baseWebhook({
+        type: "payment_captured",
+        gateway: "moyasar",
+        status: "paid",
+        amount: 10,
+        currency: "USD",
+      }),
+    );
+    expect(full.type).toBe("capture.completed");
+    if (full.type !== "capture.completed") throw new Error("narrow");
+    expect(full.capture.status).toBe("completed");
+  });
 });
 
 describe("attachPaymentEvent dual-write", () => {

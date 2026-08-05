@@ -387,6 +387,72 @@ WHERE key = ?
   };
 }
 
+/**
+ * Timestamp canonicalize repair after {@link classifyReconciliationClaimMiss} === `claimable`.
+ *
+ * **SQL-1 fence:** only mutates free/expired-lease rows (same free-lease predicate as claim).
+ * Never overwrite an active winner's `lease_expires_at` when a concurrent claim won between
+ * SELECT and this repair. Adapters bind canonical due/lease + now; then retry claim once.
+ */
+export function reconciliationTimestampRepairTemplates(
+  namespace?: ResolvedSchemaNamespace,
+): ClaimTemplateSet {
+  const t = table(LOGICAL_TABLES.reconciliationJobs, namespace);
+  const intent =
+    "SQL-1: canonicalize due_at/lease_expires_at only when lease free/expired " +
+    "(or status scheduled); never clobber active claim lease.";
+
+  // params: key, dueAt, leaseExpiresAt, now
+  const postgresSql = `
+UPDATE ${t} SET
+  due_at = $2,
+  lease_expires_at = $3
+WHERE key = $1
+  AND status NOT IN ('completed', 'failed', 'manual_review')
+  AND (
+    status = 'scheduled'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= $4
+  )
+`.trim();
+
+  // params: dueAt, leaseExpiresAt, key, now
+  const sqliteSql = `
+UPDATE ${t} SET
+  due_at = ?,
+  lease_expires_at = ?
+WHERE key = ?
+  AND status NOT IN ('completed', 'failed', 'manual_review')
+  AND (
+    status = 'scheduled'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= ?
+  )
+`.trim();
+
+  return {
+    intent,
+    postgres: {
+      dialect: "postgres",
+      sql: postgresSql,
+      params: ["key", "dueAt", "leaseExpiresAt", "now"],
+      intent,
+    },
+    sqlite: {
+      dialect: "sqlite",
+      sql: sqliteSql,
+      params: ["dueAt", "leaseExpiresAt", "key", "now"],
+      intent,
+    },
+    generic: {
+      dialect: "generic",
+      sql: `-- Portable recon timestamp repair (SQL-1 free-lease fence; see reconciliationTimestampRepairTemplates).`,
+      params: ["key", "dueAt", "leaseExpiresAt", "now"],
+      intent,
+    },
+  };
+}
+
 /** Select template fragment for a dialect. */
 export function pickClaimTemplate(set: ClaimTemplateSet, dialect: DialectId): SqlFragment {
   if (dialect === "postgres") return set.postgres;

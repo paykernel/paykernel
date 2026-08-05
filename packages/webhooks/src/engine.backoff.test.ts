@@ -29,7 +29,7 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
       payloadHash: "h",
       envelope: { id: "evt_b3" },
     });
-    expect(park).toEqual({
+    expect(park).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "parked",
     });
@@ -49,10 +49,10 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
     for (let i = 1; i <= 2; i++) {
       const result = await engine.processRetryable({ handler: failHandler });
       expect(result.items).toHaveLength(1);
-      expect(result.items[0]?.outcome).toEqual({
-        outcome: "scheduled_for_retry",
-        reason: "handler_retry",
-      });
+      expect(result.items[0]?.outcome).toMatchObject({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
       const rec = await store.get("stripe:evt_b3");
       expect(rec?.status).toBe("pending");
       expect(rec?.attempts).toBe(i);
@@ -109,10 +109,10 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
         event,
         handler: failHandler,
       });
-      expect(o).toEqual({
-        outcome: "scheduled_for_retry",
-        reason: "handler_retry",
-      });
+      expect(o).toMatchObject({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
     }
     const third = await engine.processVerified({
       gateway: "stripe",
@@ -208,7 +208,7 @@ describe("B4: claim respects availableAt (true backoff)", () => {
         throw new Error("transient");
       },
     });
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });
@@ -227,10 +227,10 @@ describe("B4: claim respects availableAt (true backoff)", () => {
           throw new Error("should not run");
         },
       });
-      expect(o).toEqual({
-        outcome: "scheduled_for_retry",
-        reason: "not_available",
-      });
+      expect(o).toMatchObject({
+      outcome: "scheduled_for_retry",
+      reason: "not_available",
+    });
     }
     expect(handlerRuns).toBe(1);
     expect((await store.get("stripe:evt_b4_engine"))?.attempts).toBe(1);

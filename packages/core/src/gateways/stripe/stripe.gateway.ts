@@ -1100,10 +1100,17 @@ export class StripeGateway extends BaseGateway {
         const settledMinor = resolveStripeCapturedMinor(response);
         const amountMinor =
           settledMinor !== undefined ? settledMinor : response.amount;
+        // STRIPE-1: always publish currency with major-unit amount fields.
+        const normalizedCurrency = stripeCurrencyCode(currencyCode);
 
         return this.mapPaymentIntentResult(response, {
           ...(status !== undefined ? { status } : {}),
-          amount: fromStripeAmount(amountMinor, currencyCode),
+          ...(normalizedCurrency !== undefined
+            ? {
+                amount: fromStripeAmount(amountMinor, normalizedCurrency),
+                currency: normalizedCurrency.toUpperCase(),
+              }
+            : {}),
         });
       },
       StripeCreatePaymentParamsSchema,
@@ -1157,8 +1164,12 @@ export class StripeGateway extends BaseGateway {
 
         return this.mapPaymentIntentResult(response, {
           status,
+          // STRIPE-1: currency accompanies major-unit amount (never naked amount).
           ...(amountMinor !== undefined && currency !== undefined
-            ? { amount: fromStripeAmount(amountMinor, currency) }
+            ? {
+                amount: fromStripeAmount(amountMinor, currency),
+                currency: currency.toUpperCase(),
+              }
             : {}),
           // Capture paths historically omit redirectUrl (undefined).
           omitRedirectUrl: true,
@@ -1297,8 +1308,12 @@ export class StripeGateway extends BaseGateway {
         const currency = stripeCurrencyCode(response.currency);
         const amountMinor = finiteStripeMinor(response.amount);
         return this.mapPaymentIntentResult(response, {
+          // STRIPE-1: currency accompanies major-unit amount (never naked amount).
           ...(amountMinor !== undefined && currency !== undefined
-            ? { amount: fromStripeAmount(amountMinor, currency) }
+            ? {
+                amount: fromStripeAmount(amountMinor, currency),
+                currency: currency.toUpperCase(),
+              }
             : {}),
           omitRedirectUrl: true,
           // Void completed successfully even when status is cancelled.
@@ -1436,15 +1451,26 @@ export class StripeGateway extends BaseGateway {
           typeof paymentIntent.latest_charge === "string"
             ? paymentIntent.latest_charge
             : latestCharge?.id;
+        // STRIPE-1: never pass major-unit money without currency (mapper also
+        // fail-closes, but callers should not construct incomplete options).
+        const moneyCurrency =
+          currency !== undefined ? currency.toUpperCase() : undefined;
+        const hasMoney =
+          moneyCurrency !== undefined &&
+          ((typeof amountMinor === "number" && Number.isFinite(amountMinor)) ||
+            refundedAmount !== undefined);
         return this.mapPaymentIntentResult(paymentIntent, {
           status,
-          ...(typeof amountMinor === "number" &&
-          Number.isFinite(amountMinor) &&
-          currency !== undefined
-            ? { amount: fromStripeAmount(amountMinor, currency) }
+          ...(hasMoney
+            ? {
+                currency: moneyCurrency,
+                ...(typeof amountMinor === "number" && Number.isFinite(amountMinor)
+                  ? { amount: fromStripeAmount(amountMinor, currency!) }
+                  : {}),
+                ...(refundedAmount !== undefined ? { refundedAmount } : {}),
+              }
             : {}),
           omitRedirectUrl: true,
-          ...(refundedAmount !== undefined ? { refundedAmount } : {}),
           ...(chargeId !== undefined ? { chargeId } : {}),
         });
       },
@@ -1743,13 +1769,12 @@ export class StripeGateway extends BaseGateway {
       return false;
     }
 
-    // Prevent replay attacks: only reject aged timestamps (>5 minutes old).
-    // Do not reject future timestamps via Math.abs — clock skew ahead of Stripe
-    // is accepted (matches stripe-node tolerance direction for aged events).
+    // Prevent replay / pre-signed attacks: bidirectional tolerance (stripe-node
+    // parity). Reject when |now - eventTime| > 300s (aged or far-future).
     const eventTime = parseInt(timestamp, 10);
     const now = Math.floor(this.clock.nowMs() / 1000);
-    if (!Number.isFinite(eventTime) || now - eventTime > 300) {
-      this.logger.warn("[Stripe] Webhook signature timestamp too old");
+    if (!Number.isFinite(eventTime) || Math.abs(now - eventTime) > 300) {
+      this.logger.warn("[Stripe] Webhook signature timestamp outside tolerance");
       return false;
     }
 
@@ -1932,19 +1957,10 @@ export class StripeGateway extends BaseGateway {
         break;
       case "charge.refunded": {
         const charge = object as any;
-        // event.amount is the payment/captured total, not cumulative refunded.
-        // (WebhookEvent has no refundedAmount field.)
-        const paymentMinor =
-          typeof charge.amount_captured === "number" &&
-          Number.isFinite(charge.amount_captured)
-            ? charge.amount_captured
-            : typeof charge.amount === "number"
-              ? charge.amount
-              : undefined;
-        if (paymentMinor !== undefined) {
-          amount = convertMinor(paymentMinor);
-        }
-
+        // STRIPE-3: event.amount is cumulative amount_refunded (refund money moved),
+        // not charge/captured total. Dual-write Refund.amount must not over-credit
+        // wallets on partial refunds. Omit amount when refund money is incomplete.
+        // (WebhookEvent has no separate refundedAmount field.)
         if (charge.refunded === true) {
           status = "refunded";
         } else if (
@@ -1969,7 +1985,21 @@ export class StripeGateway extends BaseGateway {
         } else {
           // Incomplete snapshot (missing or zero amount_refunded without
           // refunded:true): do not fail-open to full `refunded` or invent partial.
+          // Domain stays refund_completed; dual-write demoted to refund.pending
+          // (STRIPE-2 / Paymob pattern).
           status = "refund_completed";
+        }
+
+        // Prefer proven amount_refunded; clear any charge-total default from above.
+        if (
+          typeof charge.amount_refunded === "number" &&
+          Number.isFinite(charge.amount_refunded) &&
+          charge.amount_refunded > 0
+        ) {
+          amount = convertMinor(charge.amount_refunded);
+        } else {
+          // Incomplete refund money — omit rather than publish charge total.
+          amount = undefined;
         }
         break;
       }
@@ -2067,7 +2097,11 @@ export class StripeGateway extends BaseGateway {
     });
     // Incomplete settled money (status processing) must not dual-write
     // payment.succeeded — type-only handlers would over-fulfill (STRIPE-1).
-    return this.demoteIncompleteSettledWebhookDualWrite(attached);
+    // Incomplete refund snapshots (status refund_completed) must not dual-write
+    // refund.completed — type-only handlers would over-settle (STRIPE-2).
+    return this.demoteIncompleteRefundWebhookDualWrite(
+      this.demoteIncompleteSettledWebhookDualWrite(attached),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2246,6 +2280,8 @@ export class StripeGateway extends BaseGateway {
     options: {
       status?: PaymentStatus | undefined;
       amount?: number | undefined;
+      /** ISO currency for major-unit money fields; required whenever amount/refundedAmount set (STRIPE-1). */
+      currency?: string | undefined;
       refundedAmount?: number | undefined;
       chargeId?: string | undefined;
       omitRedirectUrl?: boolean | undefined;
@@ -2274,16 +2310,29 @@ export class StripeGateway extends BaseGateway {
       options.forceOutcome ??
       this.mapStripeOutcome(intent.status, status, nextAction);
 
+    // STRIPE-1: never publish naked major-unit money without currency.
+    // Fail closed — drop amount-like fields when currency is missing.
+    const hasMoneyField =
+      options.amount !== undefined || options.refundedAmount !== undefined;
+    const currency =
+      options.currency !== undefined && options.currency.trim().length > 0
+        ? options.currency.trim().toUpperCase()
+        : undefined;
+    const publishMoney = hasMoneyField && currency !== undefined;
+
     return applyOutcomeToGatewayResult(
       {
         gatewayId: intent.id,
         status,
         rawResponse: intent,
         ...(redirectUrl !== undefined ? { redirectUrl } : {}),
-        ...(options.amount !== undefined ? { amount: options.amount } : {}),
-        ...(options.refundedAmount !== undefined
+        ...(publishMoney && options.amount !== undefined
+          ? { amount: options.amount }
+          : {}),
+        ...(publishMoney && options.refundedAmount !== undefined
           ? { refundedAmount: options.refundedAmount }
           : {}),
+        ...(publishMoney ? { currency } : {}),
         ...(intent.client_secret
           ? { clientSecret: intent.client_secret }
           : {}),
@@ -2371,6 +2420,41 @@ export class StripeGateway extends BaseGateway {
         schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
         type: "payment.processing",
         payment,
+        provider: event.provider,
+      },
+    };
+  }
+
+  /**
+   * Incomplete refund snapshots (`status === refund_completed`) must not
+   * dual-write `refund.completed` — type-only handlers would mark orders fully
+   * refunded without proven `amount_refunded` / `refunded:true` (STRIPE-2).
+   * Paymob pattern: domain keeps incomplete marker; stable dual-write is
+   * `refund.pending`. Proven full/partial (`refunded` / `partially_refunded`)
+   * keep `refund.completed`.
+   */
+  private demoteIncompleteRefundWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (
+      event.status !== "refund_completed" ||
+      event.stableType !== "refund.completed" ||
+      !event.event ||
+      event.event.type !== "refund.completed" ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    const refund = event.event.refund;
+
+    return {
+      ...event,
+      stableType: "refund.pending",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "refund.pending",
+        refund,
         provider: event.provider,
       },
     };

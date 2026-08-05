@@ -11,7 +11,7 @@ Portable **payment metrics**, **span instrumentation**, and an **optional OpenTe
 | Guarantee | Detail |
 | --- | --- |
 | **Core has no mandatory OTEL** | `@paykernel/core` never depends on `@opentelemetry/*` or this package |
-| **Structured telemetry redacted by default** | `withPaymentOperation` / `createRedactingTelemetrySink` scrub bags via core `redact()`; **metric labels and span attributes are not auto-redacted** — set non-sensitive primitives only |
+| **Structured telemetry redacted by default** | `withPaymentOperation` / `createRedactingTelemetrySink` scrub bags via core `redact()`; **in-package metric registry + OTEL bridge also auto-redact labels/span attrs** via `redactAttributeBag` (defense-in-depth). Still set only non-sensitive primitives — custom tracers/backends may not scrub |
 | **Exceptions sanitized on spans** | `recordException` exports name (+ optional code) only — never raw `Error.message` / stack |
 | **Failed/indeterminate spans end error** | Non-throw `failed` / `declined` / `indeterminate` outcomes end span `code: "error"` (not OK) so OTEL error rates track payment failures |
 | **`providerRequestId` for debugging** | Allow-listed and visible on `OperationContext` / redacted telemetry (A1) |

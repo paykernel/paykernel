@@ -90,14 +90,15 @@ export function createPostgresWebhookInboxStore(
         if (!existing) {
           throw new StoreUnavailableError("webhook claim: no row after claim attempt");
         }
-        if (existing.payloadHash !== input.payloadHash) {
-          return { kind: "payload_hash_conflict", record: existing };
-        }
+        // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
         if (existing.status === "completed") {
           return { kind: "already_completed", record: existing };
         }
         if (existing.status === "failed" || existing.status === "dead_letter") {
           return { kind: "duplicate_failed", record: existing };
+        }
+        if (existing.payloadHash !== input.payloadHash) {
+          return { kind: "payload_hash_conflict", record: existing };
         }
         // pending + failed claim SQL = available_at gate (do not burn attempts)
         if (existing.status === "pending") {

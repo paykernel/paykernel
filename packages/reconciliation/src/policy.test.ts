@@ -192,6 +192,8 @@ describe("decideReconciliationPolicy", () => {
       "partially_refunded",
       "refund_pending",
       "refund_failed",
+      "refund_completed",
+      "setup_completed",
       "reversed",
     ] as const) {
       const provider = buildProviderPaymentSnapshot({
@@ -215,8 +217,13 @@ describe("decideReconciliationPolicy", () => {
     }
   });
 
-  it("RECON-2: indeterminate local + provider refund_pending is not mark_consistent safe", () => {
-    for (const status of ["refund_pending", "refund_failed"] as const) {
+  it("RECON-2: indeterminate local + provider refund lifecycle is not mark_consistent safe", () => {
+    for (const status of [
+      "refund_pending",
+      "refund_failed",
+      "refund_completed",
+      "setup_completed",
+    ] as const) {
       const provider = buildProviderPaymentSnapshot({
         gatewayPaymentId: "pi_refund_inflight",
         status,
@@ -320,6 +327,9 @@ describe("shouldForbidReplacementCharge", () => {
       "paid",
       "refunded",
       "refund_pending",
+      "refund_failed",
+      "refund_completed",
+      "setup_completed",
       "reversed",
     ] as const) {
       expect(
@@ -351,6 +361,22 @@ describe("shouldForbidReplacementCharge", () => {
         { gateway: "s", expected: { status: "failed" } },
       ),
     ).toBe(false);
+  });
+
+  it("RECON-1: refund_failed / refund_completed local forbids replacement charge", () => {
+    // manual_review_required + refund_failed local must not allow a second charge
+    // (original charge may still hold funds after a failed refund).
+    for (const status of ["refund_failed", "refund_completed"] as const) {
+      const result: ReconciliationResult = {
+        outcome: "manual_review_required",
+        reason: "incomplete snapshot",
+      };
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        expected: { status },
+      };
+      expect(shouldForbidReplacementCharge(result, target)).toBe(true);
+    }
   });
 
   it("RECON-1: consistent local+provider refund_pending forbids replacement charge", () => {

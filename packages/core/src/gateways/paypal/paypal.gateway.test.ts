@@ -829,6 +829,54 @@ describe('PayPalGateway', () => {
             })).toBe(false);
         });
 
+        it('ORDER multi-capture all REFUNDED → amount 0 remaining with currency (PAYPAL-5)', () => {
+            const payload = {
+                id: 'WH-multi-all-refunded',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-all-refunded',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAP-R1',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAP-R2',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '60.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('refunded');
+            // Live zero remaining path (not dead formatAmount(0) catch).
+            expect(event.amount).toBe(0);
+            expect(event.currency).toBe('USD');
+        });
+
         it('ORDER.COMPLETED under-total multi-capture → partially_captured not paid (audit PAYPAL-2)', () => {
             const payload = {
                 id: 'WH-order-under-total',
@@ -2317,6 +2365,8 @@ describe('PayPalGateway', () => {
             expect(result.captureId).toBe('CAPTURE-XYZ');
             expect(result.status).toBe('paid');
             expect(result.amount).toBe(150);
+            // PAYPAL-1: currency published with major-unit amount
+            expect(result.currency).toBe('USD');
             expect((result.rawResponse as any).captureId).toBe('CAPTURE-XYZ');
             expect((result.rawResponse as any).orderId).toBe('ORDER-789');
             expect(result.outcome).toBe('succeeded');
@@ -2884,14 +2934,32 @@ describe('PayPalGateway', () => {
                     });
                 }
 
+                // Capture GET after refund (cumulative totalRefunded recovery)
+                if (url.includes('/v2/payments/captures/CAPTURE-123') && !url.includes('/refund')) {
+                    return createMockResponse({
+                        id: 'CAPTURE-123',
+                        status: 'PARTIALLY_REFUNDED',
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        seller_receivable_breakdown: {
+                            total_refunded_amount: {
+                                currency_code: 'USD',
+                                value: '25.50',
+                            },
+                        },
+                    });
+                }
+
                 capturedHeaders = init?.headers as Record<string, string>;
                 return createMockResponse({
-                id: 'REFUND-ABC',
-                status: 'COMPLETED',
-                amount: {
-                    currency_code: 'USD',
-                    value: '25.50',
-                },
+                    id: 'REFUND-ABC',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '25.50',
+                    },
                 });
             }) as unknown as typeof fetch;
 
@@ -2907,16 +2975,21 @@ describe('PayPalGateway', () => {
             expect(result.outcome).toBe('succeeded');
             expect(result.gatewayRefundId).toBe('REFUND-ABC');
             expect(result.status).toBe('completed');
-            // PAYPAL-4: map refund amount from representation body
+            // PAYPAL-2: capture-wide cumulative (from capture GET), not this-op alone
             expect(result.totalRefunded).toBe(25.5);
             expect(capturedHeaders!['PayPal-Request-Id']).toBe('refund-idem-1');
             expect(capturedHeaders!.Prefer).toBe('return=representation');
         });
 
-        it('should map totalRefunded from request amount when body omits amount (PAYPAL-4)', async () => {
+        it('omits totalRefunded when only this-op amount is known (PAYPAL-2 fail-closed)', async () => {
+            // No seller_payable_breakdown and capture GET has no cumulative → omit.
             globalThis.fetch = createMockFetch({
-                id: 'REFUND-NO-BODY-AMOUNT',
+                id: 'REFUND-NO-CUMULATIVE',
                 status: 'COMPLETED',
+                amount: {
+                    currency_code: 'USD',
+                    value: '12.34',
+                },
             });
 
             const result = await gateway.refundPayment({
@@ -2925,8 +2998,83 @@ describe('PayPalGateway', () => {
                 currency: 'USD',
             });
 
-            expect(result.totalRefunded).toBe(12.34);
+            // Must not publish this-op as totalRefunded (would under-count priors).
+            expect(result.totalRefunded).toBeUndefined();
             expect(result.status).toBe('completed');
+        });
+
+        it('maps cumulative totalRefunded from seller_payable_breakdown (PAYPAL-2)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'REFUND-CUMULATIVE',
+                status: 'COMPLETED',
+                amount: {
+                    currency_code: 'USD',
+                    value: '10.00',
+                },
+                seller_payable_breakdown: {
+                    total_refunded_amount: {
+                        currency_code: 'USD',
+                        value: '30.00',
+                    },
+                },
+            });
+
+            const result = await gateway.refundPayment({
+                gatewayPaymentId: 'CAPTURE-123',
+                amount: 10,
+                currency: 'USD',
+            });
+
+            // Prior 20 + this op 10 = 30 (not this-op 10).
+            expect(result.totalRefunded).toBe(30);
+            expect(result.status).toBe('completed');
+        });
+
+        it('maps cumulative totalRefunded from capture GET when refund body omits breakdown (PAYPAL-2)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/payments/captures/CAP-PRIOR') && !url.includes('/refund')) {
+                    return createMockResponse({
+                        id: 'CAP-PRIOR',
+                        status: 'PARTIALLY_REFUNDED',
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        seller_receivable_breakdown: {
+                            total_refunded_amount: {
+                                currency_code: 'USD',
+                                value: '45.00',
+                            },
+                        },
+                    });
+                }
+
+                return createMockResponse({
+                    id: 'REFUND-SECOND',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '15.00',
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.refundPayment({
+                gatewayPaymentId: 'CAP-PRIOR',
+                amount: 15,
+                currency: 'USD',
+            });
+
+            expect(result.totalRefunded).toBe(45);
         });
 
         it('should reject malformed successful refund responses', async () => {
@@ -3019,21 +3167,35 @@ describe('PayPalGateway', () => {
                     });
                 }
 
-                capturedBody = init?.body;
+                // Capture refund POST only (follow-up capture GET has no body).
+                if (url.includes('/refund')) {
+                    capturedBody = init?.body;
+                    return createMockResponse({
+                        id: 'REFUND-FULL',
+                        status: 'COMPLETED',
+                    });
+                }
 
+                // Capture GET for cumulative totalRefunded recovery.
                 return createMockResponse({
-                    id: 'REFUND-FULL',
-                    status: 'COMPLETED',
+                    id: 'CAPTURE-456',
+                    status: 'REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
                 });
             }) as unknown as typeof fetch;
 
-            await gateway.refundPayment({
+            const result = await gateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-456',
                 // No amount = full refund
             });
 
             // Full refund should send an empty JSON payload per PayPal docs
             expect(capturedBody).toBe('{}');
+            // Fully REFUNDED capture face is the capture-wide total.
+            expect(result.totalRefunded).toBe(100);
         });
 
         it('should allow longer Payments v2 idempotency keys for refunds', async () => {
@@ -3050,10 +3212,21 @@ describe('PayPalGateway', () => {
                     });
                 }
 
-                capturedHeaders = init?.headers as Record<string, string>;
+                if (url.includes('/refund')) {
+                    capturedHeaders = init?.headers as Record<string, string>;
+                    return createMockResponse({
+                        id: 'REFUND-LONG-IDEMPOTENCY',
+                        status: 'COMPLETED',
+                    });
+                }
+
                 return createMockResponse({
-                    id: 'REFUND-LONG-IDEMPOTENCY',
-                    status: 'COMPLETED',
+                    id: 'CAPTURE-456',
+                    status: 'REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '50.00',
+                    },
                 });
             }) as unknown as typeof fetch;
 
@@ -3440,6 +3613,9 @@ describe('PayPalGateway', () => {
             expect(result.captureId).toBe('CAP-001');
             expect(result.status).toBe('paid');
             expect(result.amount).toBe(200);
+            // PAYPAL-1: currency dual-written with major-unit amount
+            expect(result.currency).toBe('USD');
+            expect(result.capturedAmount).toBe(200);
             expect(result.outcome).toBe('succeeded');
             expect(isPaidOutcome(result)).toBe(true);
         });
@@ -3884,7 +4060,138 @@ describe('PayPalGateway', () => {
             expect(result.authorizationId).toBe('AUTH-FOR-CAPTURE');
             expect(result.status).toBe('paid');
             expect(result.amount).toBe(44);
+            expect(result.currency).toBe('USD');
             expect(requestedUrls.some((url) => url.includes('/v2/payments/captures/CAP-LOOKUP-123'))).toBe(true);
+        });
+
+        it('capture GET after PARTIALLY_REFUNDED omits face amount without net remaining (PAYPAL-3)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-PARTIAL-REF')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-PARTIAL-REF',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-PARTIAL-REF',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            // Face without net remaining → omit (do not claim 100 still held).
+            expect(result.amount).toBeUndefined();
+            expect(result.currency).toBeUndefined();
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('capture GET after PARTIALLY_REFUNDED publishes net remaining when breakdown present (PAYPAL-3)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-PARTIAL-NET')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-PARTIAL-NET',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '30.00',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-PARTIAL-NET',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            expect(result.amount).toBe(70);
+            expect(result.currency).toBe('USD');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('capture GET after REFUNDED omits face amount (PAYPAL-3)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-FULL-REF')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-FULL-REF',
+                    status: 'REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-FULL-REF',
+            });
+
+            expect(result.status).toBe('refunded');
+            expect(result.amount).toBeUndefined();
+            expect(result.currency).toBeUndefined();
+            expect(isPaidOutcome(result)).toBe(false);
         });
 
         it('getPayment by capture ID with final_capture false → partially_captured not paid (PAYPAL-1 audit)', async () => {
@@ -3938,6 +4245,7 @@ describe('PayPalGateway', () => {
             expect(result.authorizationId).toBe('AUTH-OPEN');
             expect(result.status).toBe('partially_captured');
             expect(result.amount).toBe(20);
+            expect(result.currency).toBe('USD');
             expect(result.outcome).toBe('succeeded');
             expect(isPaidOutcome(result)).toBe(false);
         });

@@ -224,6 +224,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
         ? createRedactingLogger(options.logger)
         : noopLogger;
       this.hooksManager = new HooksManager(options.hooks, this.logger);
+      this.installPartialMoneyCapabilityGuards();
       this.initFromPlugin(options);
       return;
     }
@@ -236,6 +237,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       : noopLogger;
     // Pass redacting logger so after-hook isolation (proceed:false / throws) is observable
     this.hooksManager = new HooksManager(config.hooks, this.logger);
+    this.installPartialMoneyCapabilityGuards();
 
     PaymentClient.assertGatewayCredentials(config);
 
@@ -799,6 +801,35 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
         claimedSupport: false,
       });
     }
+  }
+
+  /**
+   * CORE-1: re-assert partialCapture / partialRefunds after before-hooks mutate
+   * params so hook-injected `amount` cannot bypass capability:false.
+   * Runs as a post-before guard (always after every before-hook chain).
+   */
+  private installPartialMoneyCapabilityGuards(): void {
+    this.hooksManager.registerPostBeforeGuard((ctx) => {
+      if (ctx.operation !== "capturePayment" && ctx.operation !== "refundPayment") {
+        return;
+      }
+      const params = ctx.params as { amount?: unknown } | undefined;
+      if (params === undefined || params === null || typeof params !== "object") {
+        return;
+      }
+      if (params.amount === undefined) {
+        return;
+      }
+      const gw = this.gateways.get(String(ctx.gateway));
+      if (!gw) {
+        return;
+      }
+      if (ctx.operation === "capturePayment") {
+        this.assertCapability(gw, "partialCapture", "capturePayment");
+      } else {
+        this.assertCapability(gw, "partialRefunds", "refundPayment");
+      }
+    });
   }
 
   /**

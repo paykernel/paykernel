@@ -1238,8 +1238,14 @@ export class MoyasarGateway extends BaseGateway {
       options.forceOutcome ??
       this.mapMoyasarOutcome(status, nextAction, redirectUrl);
 
-    // Defensive: treat missing/non-finite fee/captured/refunded as 0 so incomplete
-    // snapshots never throw while converting money fields (status still fails closed).
+    // Defensive: treat missing/non-finite amount/fee/captured/refunded as 0 so
+    // incomplete 2xx snapshots never throw while converting money fields
+    // (status still fails closed). Malformed amount after create would otherwise
+    // throw and encourage retries without given_id → double-create (MOYASAR-2).
+    const amountMinor =
+      typeof payment.amount === "number" && Number.isFinite(payment.amount)
+        ? payment.amount
+        : 0;
     const feeMinor =
       typeof payment.fee === "number" && Number.isFinite(payment.fee)
         ? payment.fee
@@ -1252,6 +1258,13 @@ export class MoyasarGateway extends BaseGateway {
       typeof payment.refunded === "number" && Number.isFinite(payment.refunded)
         ? payment.refunded
         : 0;
+    // MOYASAR-1: always publish currency with major-unit money fields so
+    // paymentFromGatewayResult keeps amount/fee/captured/refunded and docs
+    // post-3DS checks (`payment.currency === expectedCurrency`) work.
+    const currency =
+      typeof payment.currency === "string" && payment.currency.trim().length > 0
+        ? payment.currency.trim().toUpperCase()
+        : undefined;
 
     return applyOutcomeToGatewayResult(
       {
@@ -1260,10 +1273,19 @@ export class MoyasarGateway extends BaseGateway {
         rawResponse: payment,
         ...(redirectUrl !== undefined ? { redirectUrl } : {}),
         ...(nextAction !== undefined ? { nextAction } : {}),
-        amount: this.fromMinorUnits(payment.amount, payment.currency),
-        fee: this.fromMinorUnits(feeMinor, payment.currency),
-        capturedAmount: this.fromMinorUnits(capturedMinor, payment.currency),
-        refundedAmount: this.fromMinorUnits(refundedMinor, payment.currency),
+        // Currency is required for a complete money snapshot; conversion still
+        // needs a code — fall back only when provider omitted it (should not
+        // happen on real Moyasar 2xx bodies). Prefer omitting major units if we
+        // ever lack a currency (fail-closed via paymentFromGatewayResult).
+        ...(currency !== undefined
+          ? {
+              amount: this.fromMinorUnits(amountMinor, currency),
+              fee: this.fromMinorUnits(feeMinor, currency),
+              capturedAmount: this.fromMinorUnits(capturedMinor, currency),
+              refundedAmount: this.fromMinorUnits(refundedMinor, currency),
+              currency,
+            }
+          : {}),
         providerNativeStatus: payment.status,
         gateway: "moyasar",
       },

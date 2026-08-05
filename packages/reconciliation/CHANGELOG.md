@@ -5,8 +5,8 @@
 ### Behavior (0.x)
 
 - **Inherited paid-like fix:** Provider status `approved` no longer drives `update_local_to_paid` (core `isPaidLikePaymentStatus` excludes buyer pre-capture approval). Only true settled `paid` upgrades local to paid.
-- **Replacement-charge safety:** `shouldForbidReplacementCharge` forbids open money locals (`authorized` / `approved` / partial / `paid` / refunded) and `provider_not_found` / `temporarily_unavailable` outcomes — not only `pending`/`processing`.
-- **Sparse expected honesty:** indeterminate/sparse local + open incomplete provider (`authorized` / `approved` / `partially_captured` / …) yields `manual_review` instead of `mark_consistent(safe:true)`.
+- **Replacement-charge safety:** `shouldForbidReplacementCharge` forbids open money locals (`authorized` / `approved` / partial / `paid` / refunded / `refund_pending` / `refund_failed` / `refund_completed` / setup) and `provider_not_found` / `temporarily_unavailable` outcomes — not only `pending`/`processing`.
+- **Sparse expected honesty:** indeterminate/sparse local + open incomplete provider (`authorized` / `approved` / `partially_captured` / refund lifecycle incl. `refund_completed` / `setup_completed` / …) yields `manual_review` instead of `mark_consistent(safe:true)`.
 - **Identity-bound secondary keys:** wrong-payment secondary-key hits bind to `target.gatewayPaymentId` and never safe-upgrade local to paid.
 - **processDue dispositions:** jobs complete only on explicit `{ disposition: "complete" }`; void/retry_later reschedule (fail-closed).
 - **moneyEquals currency case:** ISO alphabetic currency codes compare case-insensitively (`usd` ≡ `USD`).

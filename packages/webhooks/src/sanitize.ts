@@ -72,6 +72,20 @@ function redactObjectForSanitize(value: unknown, depth = 0): unknown {
 }
 
 /**
+ * Redact known secret/signature patterns from an opaque string (WEBHOOKS-6).
+ * Used when persisting non-JSON `payloadRef` / envelope strings so raw tokens
+ * do not land unredacted. Non-secret opaque refs pass through unchanged.
+ */
+export function redactOpaquePayloadRefString(value: string): string {
+  let out = value;
+  for (const re of SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, "[REDACTED]");
+  }
+  return out;
+}
+
+/**
  * Produce a safe string for `lastError` / logs from an unknown throw.
  *
  * - Extracts Error.message when available

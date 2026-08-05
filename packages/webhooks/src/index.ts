@@ -21,6 +21,7 @@ export { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";
 // Sanitize
 export {
   sanitizeWebhookError,
+  redactOpaquePayloadRefString,
   DEFAULT_SANITIZE_MAX_LENGTH,
 } from "./sanitize";
 export type { SanitizeWebhookErrorOptions } from "./sanitize";

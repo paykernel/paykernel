@@ -30,12 +30,17 @@ const STRIPE_EXPONENT_OVERRIDES: Readonly<Record<string, number>> = {
 
 /**
  * PayPal zero-decimal currency list (HUF/JPY/TWD).
- * Other currencies use scale 2 on PayPal (even if ISO says 3).
+ * Other currencies use ISO 4217 scale (including KWD/OMR = 3) — matches
+ * production `paypal.gateway.ts` getCurrencyScale (MONEY-5).
  */
 const PAYPAL_ZERO_DECIMAL = new Set(["HUF", "JPY", "TWD"]);
 
 function paypalScale(currency: string): number {
-  return PAYPAL_ZERO_DECIMAL.has(currency.toUpperCase()) ? 0 : 2;
+  const code = currency.toUpperCase();
+  if (PAYPAL_ZERO_DECIMAL.has(code)) {
+    return 0;
+  }
+  return getCurrencyExponent(code);
 }
 
 describe("ISO baseline shared by Moyasar / default Paymob", () => {
@@ -135,7 +140,7 @@ describe("Stripe provider exponent profile (explicit overrides)", () => {
 });
 
 describe("PayPal provider scale profile (explicit exponent)", () => {
-  it("HUF / JPY / TWD are zero-decimal; others scale 2 (including ISO-3 codes)", () => {
+  it("HUF / JPY / TWD are zero-decimal; KWD/OMR use ISO-3 (MONEY-5)", () => {
     for (const code of ["HUF", "JPY", "TWD"] as const) {
       expect(paypalScale(code)).toBe(0);
       expect(toMinorUnits("100", code, { exponent: 0 })).toBe(100n);
@@ -144,15 +149,17 @@ describe("PayPal provider scale profile (explicit exponent)", () => {
       );
     }
 
-    // PayPal does not use ISO 3 for KWD/OMR — scale stays 2 when using PayPal profile
-    expect(paypalScale("KWD")).toBe(2);
+    // Production PayPal gateway uses ISO exponents for GCC 3-decimal currencies
+    // (see paypal.gateway getCurrencyScale) — not a forced scale-2 profile.
+    expect(paypalScale("KWD")).toBe(3);
+    expect(paypalScale("OMR")).toBe(3);
     expect(getCurrencyExponent("KWD")).toBe(3);
-    expect(toMinorUnits("1.23", "KWD", { exponent: paypalScale("KWD") })).toBe(
-      123n,
+    expect(toMinorUnits("1.234", "KWD", { exponent: paypalScale("KWD") })).toBe(
+      1234n,
     );
-    expect(() =>
-      toMinorUnits("1.234", "KWD", { exponent: paypalScale("KWD") }),
-    ).toThrow(InvalidRequestError);
+    expect(toMinorUnits("1.23", "KWD", { exponent: paypalScale("KWD") })).toBe(
+      1230n,
+    );
   });
 
   it("format-style major string from fromMinorUnits is PayPal value-ready", () => {

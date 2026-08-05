@@ -12,6 +12,7 @@ import {
 import { createMemoryWebhookInboxStore } from "./memory-store";
 import { isStoreLeaseLostError } from "./store";
 import { createTestClock } from "./test-clock";
+import { NonRetryableHandlerError } from "./types";
 
 describe("processVerified happy path", () => {
   it("handler success → processed; store status completed", async () => {
@@ -176,6 +177,166 @@ describe("WEBHOOKS-4 terminal before payload_hash_conflict", () => {
       },
     });
     expect(o).toEqual({ outcome: "handler_failed", retryable: false });
+  });
+});
+
+describe("WEBHOOKS-2 processVerified envelope materialization", () => {
+  it("envelope-only durable_retry inline path materializes ctx.event from envelope", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
+    const paymentEvent = {
+      schemaVersion: "1",
+      type: "payment.succeeded",
+      provider: {
+        gateway: "stripe",
+        eventId: "evt_env_only",
+        eventType: "payment_intent.succeeded",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+    };
+    const envelope = {
+      schemaVersion: "1",
+      event: paymentEvent,
+      payloadHash: "hash_env_only",
+      storedAt: "2026-01-01T00:00:00.000Z",
+    };
+
+    let seen: unknown;
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_env_only",
+      payloadHash: "hash_env_only",
+      // no event — only envelope (dual-write persistence shape)
+      envelope,
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: "processed" });
+    expect(seen).toEqual(paymentEvent);
+    expect(seen).not.toBeUndefined();
+  });
+
+  it("plain object envelope becomes handler event when event omitted", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+    });
+    const plain = { id: "evt_plain_env", type: "payment.succeeded" };
+    let seen: unknown;
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_plain_env",
+      payloadHash: "h",
+      envelope: plain,
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+    expect(outcome).toEqual({ outcome: "processed" });
+    expect(seen).toEqual(plain);
+  });
+});
+
+describe("WEBHOOKS-3 fail lease_lost preserves non-retryable intent", () => {
+  it("NonRetryableHandlerError after lease expiry → handler_failed non-retryable + dead_letter", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultLeaseMs: 1_000,
+      clock,
+      defaultRetryAfterMs: 0,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_lease_lost_dl",
+      payloadHash: "h",
+      event: { id: "evt_lease_lost_dl" },
+      handler: async () => {
+        // Expire lease before handler returns so fail() soft-releases → lease_lost
+        clock.advance(2_000);
+        throw new NonRetryableHandlerError("poison forever");
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: false });
+    const rec = await store.get("stripe:evt_lease_lost_dl");
+    // Best-effort re-claim + dead_letter should terminal the row.
+    expect(rec?.status).toBe("dead_letter");
+  });
+});
+
+describe("WEBHOOKS-5 scheduled_for_retry exposes timing", () => {
+  it("not_available includes availableAt and retryAfterMs", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 60_000,
+      clock,
+    });
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_timing",
+      payloadHash: "h",
+      event: { id: "evt_timing" },
+      handler: async () => {
+        throw new Error("transient");
+      },
+    });
+
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_timing",
+      payloadHash: "h",
+      event: { id: "evt_timing" },
+      handler: async () => {
+        throw new Error("should not run");
+      },
+    });
+
+    expect(o.outcome).toBe("scheduled_for_retry");
+    if (o.outcome === "scheduled_for_retry") {
+      expect(o.reason).toBe("not_available");
+      expect(typeof o.availableAt).toBe("string");
+      expect(o.retryAfterMs).toBeGreaterThan(0);
+      expect(o.retryAfterMs).toBeLessThanOrEqual(60_000);
+    }
+  });
+});
+
+describe("WEBHOOKS-6 opaque string envelope redaction", () => {
+  it("redacts known secret patterns in opaque non-JSON envelope payloadRef", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_opaque_secret",
+      payloadHash: "h",
+      envelope: "Bearer sk_live_supersecrettoken123 and more",
+    });
+
+    const rec = await store.get("stripe:evt_opaque_secret");
+    expect(rec?.payloadRef).toBeDefined();
+    expect(rec?.payloadRef).not.toContain("sk_live_supersecrettoken123");
+    expect(rec?.payloadRef).toContain("[REDACTED]");
   });
 });
 

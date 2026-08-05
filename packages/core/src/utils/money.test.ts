@@ -198,6 +198,15 @@ describe("safe number boundaries", () => {
     expect(moneyToMajorNumber(money("10", "JPY"))).toBe(10);
   });
 
+  it("moneyToMajorNumber rejects IEEE-inexact large fractional majors (MONEY-4)", () => {
+    // Minor units beyond MAX_SAFE_INTEGER cannot round-trip via JS number.
+    const huge = fromMinorUnits(
+      BigInt(Number.MAX_SAFE_INTEGER) + 1n,
+      "JPY",
+    );
+    expect(() => moneyToMajorNumber(huge)).toThrow(MoneyAmountError);
+  });
+
   it("rejects unsafe integer number inputs on the deprecated path", () => {
     expect(() => money(Number.MAX_SAFE_INTEGER + 1, "JPY")).toThrow(
       MoneyAmountError,

@@ -35,7 +35,7 @@ Core MUST NOT depend on this package (boundary inversion forbidden).
 | Portable | `paymentsSdk.portable: true` — no `node:`, `bun:`, or `cloudflare:` in production sources; no `node:perf_hooks` |
 | Optional peer | `@opentelemetry/api` is **optional**; root `import "@paykernel/opentelemetry"` works without it |
 | Composition | Webhooks / reconciliation stay free of a hard observability dependency — apps inject metrics/tracer/sink at the composition root |
-| Secrets | Structured telemetry bags are redacted by default (`createRedactingTelemetrySink`). Metric labels and span attributes are **not** auto-redacted — callers must set non-sensitive primitives only. Span exceptions are sanitized to name/code (no raw message/stack). |
+| Secrets | Structured telemetry bags are redacted by default (`createRedactingTelemetrySink`). **In-package** metric registry (`createInMemoryPaymentMetrics`) and OTEL bridge auto-redact metric labels / span attributes via `redactAttributeBag` (OBS-1 honesty). Callers should still set only non-sensitive primitives — a hand-rolled `PaymentMetrics` / `PaymentTracer` may not scrub. Span exceptions are sanitized to name/code (no raw message/stack). |
 
 See monorepo policy: [`docs/workspace-boundaries.md`](../../../docs/workspace-boundaries.md).
 

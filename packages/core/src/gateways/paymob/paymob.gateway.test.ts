@@ -838,7 +838,13 @@ describe("PaymobGateway", () => {
       expect(result.outcome).toBe("requires_action");
       expect(result.success).toBe(true);
       expect(isPaidOutcome(result)).toBe(false);
-      expect(result.references?.providerObjectId).toBe("123");
+      // PAYMOB-2: gatewayId is the parent payment/txn id (not child capture response id).
+      expect(result.gatewayId).toBe("123456789");
+      expect(result.references?.providerObjectId).toBe("123456789");
+      // Distinct child capture txn id is dual-written on captureId only.
+      expect(result.captureId).toBe("123");
+      expect(result.references?.relatedIds?.captureId).toBe("123");
+      expect(result.currency).toBe("SAR");
       expect(captureBody.auth_token).toBeUndefined();
     });
 
@@ -988,6 +994,37 @@ describe("PaymobGateway", () => {
       expect(result.success).toBe(true);
       expect(result.outcome).toBe("pending");
       expect(result.status).toBe("pending");
+      // PAYMOB-1: pending must not invent totalRefunded (do not over-book ledger).
+      expect(result.totalRefunded).toBeUndefined();
+    });
+
+    it("omits totalRefunded on pending refund even when body/prior would invent a total (PAYMOB-1)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        // Prior refunded 20; this request 30 — old bug would invent totalRefunded=50 while pending.
+        jsonResponse({ id: 123, amount_cents: 10000, refunded_amount_cents: 2000, currency: "SAR" }),
+        jsonResponse({
+          id: 999002,
+          success: true,
+          pending: true,
+          // Body may even claim a cumulative — still must not ledger while pending.
+          refunded_amount_cents: 5000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 30,
+        currency: "SAR",
+      });
+
+      expect(result.outcome).toBe("pending");
+      expect(result.status).toBe("pending");
+      expect(result.success).toBe(true);
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.gatewayRefundId).toBe("999002");
     });
 
     it("estimates totalRefunded when refund body omits refunded_amount_cents (PAYMOB-3)", async () => {
@@ -1685,8 +1722,34 @@ describe("PaymobGateway", () => {
 
       expect(result.status).toBe("partially_captured");
       expect(result.capturedAmount).toBe(40);
+      expect(result.currency).toBe("SAR");
       expect(result.outcome).toBe("requires_action");
       expect(isPaidOutcome(result)).toBe(false);
+      // PAYMOB-2: parent gatewayId preferred over child capture response id.
+      expect(result.gatewayId).toBe("123456789");
+      expect(result.captureId).toBe("123");
+    });
+
+    it("prefers parent gatewayId over child capture txn id (PAYMOB-2)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123456789, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        // Capture response id is a distinct child capture transaction.
+        jsonResponse({ id: 888001, success: true, captured_amount: 10000, currency: "SAR" }),
+      );
+
+      const result = await actionGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 100,
+        currency: "SAR",
+      });
+
+      expect(result.gatewayId).toBe("123456789");
+      expect(result.gatewayId).not.toBe("888001");
+      expect(result.captureId).toBe("888001");
+      expect(result.references?.providerObjectId).toBe("123456789");
+      expect(result.references?.relatedIds?.captureId).toBe("888001");
     });
 
     it("reports cumulative capturedAmount when capture response omits captured_amount after prior partial", async () => {
@@ -2648,6 +2711,28 @@ describe("PaymobGateway", () => {
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("forces TRANSACTION_RESPONSE even when redirect supplies type=TRANSACTION (PAYMOB-3)", () => {
+      // type is not HMAC-bound on browser callbacks; trusting it would skip demotion.
+      const payload = {
+        id: "123456789",
+        type: "TRANSACTION",
+        pending: "false",
+        success: "true",
+        amount_cents: "10000",
+        currency: "SAR",
+        created_at: "2024-12-31T12:00:00Z",
+      };
+
+      const event = gateway.parseWebhookEvent(payload);
+
+      expect(event.type).toBe("TRANSACTION_RESPONSE");
+      expect(event.type).not.toBe("TRANSACTION");
+      // Settlement arms must stay demoted — never look fulfillment-ready on redirect.
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.processing");
     });
 
     it("rejects Paymob callbacks with invalid timestamps instead of using the current time", () => {

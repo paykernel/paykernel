@@ -91,14 +91,16 @@ function cloneUnknown(value: unknown): unknown {
  * Suitable for a single long-lived process; provide a shared store (Redis/SQL)
  * for multi-worker or serverless deployments.
  *
- * Memory is capped at `maxEntries`. Expired entries are evicted lazily on
- * read, and when the store reaches capacity a write first prunes expired
- * entries and then, if still full, may evict an unprotected entry (status
- * `unknown` only). **MONEY-1:** `in_progress` and `completed` records are
- * never LRU-evicted under pressure — new keys are refused (throw) when the
- * store is full of protected entries, so double-refund/capture guards cannot
- * silently disappear. Records returned from `get`/`reserve` and stored by
- * `set` are cloned so callers cannot mutate the live cache.
+ * Memory is capped at `maxEntries`. Expired **unprotected** (`unknown`)
+ * entries are evicted lazily on read, and when the store reaches capacity a
+ * write first prunes expired unknowns and then, if still full, may evict an
+ * unprotected entry. **MONEY-2:** `in_progress` and `completed` fences are
+ * never TTL-evicted (and never LRU-evicted under pressure) — they pin until
+ * status becomes `unknown` or the key is explicitly `delete`d. New keys are
+ * refused (throw) when the store is full of protected entries, so
+ * double-refund/capture guards cannot silently disappear. Records returned
+ * from `get`/`reserve` and stored by `set` are cloned so callers cannot
+ * mutate the live cache.
  */
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly entries = new Map<
@@ -117,6 +119,10 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
       return undefined;
     }
     if (entry.expiresAt <= Date.now()) {
+      // MONEY-2: pin in_progress/completed — TTL must not drop mutation fences.
+      if (isProtectedFenceStatus(entry.record.status)) {
+        return cloneIdempotencyRecord(entry.record);
+      }
       this.entries.delete(key);
       return undefined;
     }
@@ -173,7 +179,11 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
   private pruneExpired(): void {
     const now = Date.now();
     for (const [key, entry] of this.entries) {
-      if (entry.expiresAt <= now) {
+      // MONEY-2: never prune protected fences on TTL alone.
+      if (
+        entry.expiresAt <= now &&
+        !isProtectedFenceStatus(entry.record.status)
+      ) {
         this.entries.delete(key);
       }
     }
@@ -181,7 +191,7 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
 
   /**
    * Evict the least-recently-updated **unprotected** entry (`unknown` only).
-   * Never drops `in_progress` / `completed` (MONEY-1).
+   * Never drops `in_progress` / `completed` (MONEY-2 capacity fence).
    * @returns true if an entry was removed
    */
   private evictUnprotected(): boolean {
@@ -193,6 +203,11 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     }
     return false;
   }
+}
+
+/** True when the record must survive TTL and capacity eviction (MONEY-2). */
+function isProtectedFenceStatus(status: IdempotencyStatus): boolean {
+  return status === "in_progress" || status === "completed";
 }
 
 /**
@@ -234,16 +249,64 @@ const FINGERPRINT_MONEY_OPTS = {
 } as const;
 
 /**
- * True when `value` has only `amount` and/or `currency` own keys (pure Money).
- * Bags with extra siblings must not be reduced to amount+currency alone.
+ * True when `value` has only Money-shaped own keys (`amount` / `currency` /
+ * optional `exponent`). Bags with extra siblings must not be reduced to
+ * amount+currency alone.
  */
 function isPureMoneyKeys(value: object): boolean {
   for (const key of Object.keys(value)) {
-    if (key !== "amount" && key !== "currency") {
+    if (key !== "amount" && key !== "currency" && key !== "exponent") {
       return false;
     }
   }
   return true;
+}
+
+/**
+ * Fingerprint parse options for a nested/top-level {@link Money}, preserving
+ * stored {@link Money.exponent} so scale overrides cannot false-match ISO
+ * re-parses (MONEY-1).
+ */
+function fingerprintOptsForMoney(m: {
+  exponent?: number;
+}): typeof FINGERPRINT_MONEY_OPTS & { exponent?: number } {
+  if (typeof m.exponent === "number" && Number.isInteger(m.exponent) && m.exponent >= 0) {
+    return { ...FINGERPRINT_MONEY_OPTS, exponent: m.exponent };
+  }
+  return FINGERPRINT_MONEY_OPTS;
+}
+
+/**
+ * Canonical fingerprint shape for a Money value (includes `exponent` when the
+ * resolved scale is non-ISO so economically different scales never collide).
+ */
+function canonicalMoneyFingerprintShape(m: {
+  amount: string;
+  currency: string;
+  exponent?: number;
+}): { amount: string; currency: string; exponent?: number } {
+  if (typeof m.exponent === "number") {
+    return { amount: m.amount, currency: m.currency, exponent: m.exponent };
+  }
+  return { amount: m.amount, currency: m.currency };
+}
+
+/**
+ * Terminal encode for a canonical Money fingerprint shape.
+ * Must not re-enter {@link stableStringify} as a whole object — that would
+ * recurse through the pure-Money path and stack-overflow (caught → fallthrough
+ * that drops `exponent`).
+ */
+function encodeCanonicalMoneyFingerprint(m: {
+  amount: string;
+  currency: string;
+  exponent?: number;
+}): string {
+  const shape = canonicalMoneyFingerprintShape(m);
+  const keys = Object.keys(shape).sort() as Array<keyof typeof shape>;
+  return `{${keys
+    .map((key) => `${JSON.stringify(key)}:${JSON.stringify(shape[key])}`)
+    .join(",")}}`;
 }
 
 /**
@@ -252,29 +315,33 @@ function isPureMoneyKeys(value: object): boolean {
  * to structural encoding).
  *
  * - `number` / decimal `string` amounts use the sibling `currency`.
- * - Nested {@link Money} under `amount` is re-validated via its own currency;
- *   only when the sibling currency matches (case-insensitive) do we collapse to
- *   `{ amount: "10.50", currency: "SAR" }` so
- *   `{ amount: money("10.50","SAR"), currency: "SAR" }` matches
- *   `{ amount: 10.5, currency: "SAR" }`.
+ * - Nested {@link Money} under `amount` is re-validated via its own currency
+ *   **and stored `exponent`** (MONEY-1) so
+ *   `money(10,"USD",{exponent:0})` (10 minors) does not collide with
+ *   `{ amount: 10, currency: "USD" }` (1000 minors).
+ * - Only when the sibling currency matches (case-insensitive) do we collapse.
  * - On currency mismatch, returns undefined so structural encoding keeps the
  *   nested Money currency distinct from the sibling.
  */
 function tryCanonicalAmountCurrency(
   amount: unknown,
   currency: string,
-): { amount: string; currency: string } | undefined {
+): { amount: string; currency: string; exponent?: number } | undefined {
   try {
     if (typeof amount === "number" || typeof amount === "string") {
       const m = money(amount, currency, FINGERPRINT_MONEY_OPTS);
-      return { amount: m.amount, currency: m.currency };
+      return canonicalMoneyFingerprintShape(m);
     }
     if (isMoney(amount)) {
-      const m = money(amount.amount, amount.currency, FINGERPRINT_MONEY_OPTS);
+      const m = money(
+        amount.amount,
+        amount.currency,
+        fingerprintOptsForMoney(amount),
+      );
       const sibling = currency.trim().toUpperCase();
       // Matching sibling (case-insensitive): fully canonical pair.
       if (sibling === m.currency) {
-        return { amount: m.amount, currency: m.currency };
+        return canonicalMoneyFingerprintShape(m);
       }
       // Mismatched sibling: do not overwrite nested Money.currency.
       return undefined;
@@ -318,12 +385,17 @@ function stableStringify(value: unknown): string {
     return JSON.stringify(value.toISOString());
   }
 
-  // Pure Money only (no extra siblings) — canonicalize amount+currency.
+  // Pure Money only (no extra siblings) — canonicalize amount+currency,
+  // preserving Money.exponent so scale overrides fingerprint distinctly (MONEY-1).
   // Bags like `{ amount, currency, orderId }` fall through so siblings survive.
   if (isMoney(value) && isPureMoneyKeys(value)) {
     try {
-      const m = money(value.amount, value.currency, FINGERPRINT_MONEY_OPTS);
-      return stableStringify({ amount: m.amount, currency: m.currency });
+      const m = money(
+        value.amount,
+        value.currency,
+        fingerprintOptsForMoney(value),
+      );
+      return encodeCanonicalMoneyFingerprint(m);
     } catch {
       // Fall through to structural encoding of the raw object.
     }
@@ -353,6 +425,15 @@ function stableStringify(value: unknown): string {
         amount: canonical.amount,
         currency: canonical.currency,
       };
+      // MONEY-1: surface non-ISO exponent on the bag so nested Money scale
+      // overrides remain part of the fingerprint (and drop stale exponent when
+      // the canonical form is ISO-default).
+      if (canonical.exponent !== undefined) {
+        source = { ...source, exponent: canonical.exponent };
+      } else if (Object.prototype.hasOwnProperty.call(source, "exponent")) {
+        const { exponent: _drop, ...rest } = source;
+        source = rest;
+      }
     }
   }
 

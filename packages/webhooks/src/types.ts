@@ -57,7 +57,17 @@ export type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
+  | {
+      outcome: "scheduled_for_retry";
+      reason: ScheduledForRetryReason;
+      /**
+       * When the inbox row becomes claimable again (ISO), when known
+       * (WEBHOOKS-5). Adapters may map this to Retry-After / worker sleep.
+       */
+      availableAt?: string;
+      /** Milliseconds until `availableAt` from engine clock, when computable. */
+      retryAfterMs?: number;
+    }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -143,11 +153,16 @@ export type ProcessVerifiedInput = {
   /**
    * Optional sanitized envelope snapshot for durable retry (JSON string or
    * serializable object → JSON). NEVER pass raw signatures/secrets.
-   * Stored only as `payloadRef` on claim (object envelopes are force-redacted).
+   * Stored only as `payloadRef` on claim (object envelopes are force-redacted;
+   * opaque string envelopes have known secret patterns redacted — WEBHOOKS-6).
    *
    * **durable_retry:** when omitted, a redacted snapshot of `event` is stored
    * as `payloadRef` so `processRetryable` can redrive. `ackAfterClaim` still
    * requires a non-empty envelope (or event-derived payloadRef).
+   *
+   * **Handler event (WEBHOOKS-2):** when `event` is omitted but `envelope` is
+   * present, `processVerified` materializes `ctx.event` from the envelope /
+   * payloadRef the same way as `processRetryable`.
    */
   envelope?: unknown;
   /** Override default lease duration for this claim. */

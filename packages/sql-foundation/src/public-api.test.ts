@@ -99,6 +99,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "idempotencyReserveTemplates",
   "webhookClaimTemplates",
   "reconciliationClaimTemplates",
+  "reconciliationTimestampRepairTemplates",
   "idempotencyCompleteTemplates",
   "webhookCompleteTemplates",
   "webhookFailTemplates",

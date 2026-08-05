@@ -157,31 +157,33 @@ Core `PaymentClient.handleWebhook` **does not** claim the inbox. Deduplication a
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   verifyAndNormalize: async (raw) => {
-    try {
-      const event = await client.handleWebhook(
-        "stripe",
-        raw.body,
-        raw.headers["stripe-signature"],
-      );
-      return {
-        ok: true,
-        gateway: "stripe",
-        providerEventId: event.id,
-        payloadHash: resolveInboxPayloadHash({
-          eventPayloadHash: event.payloadHash,
-          payloadForHash: event.rawPayload ?? event.event ?? event,
-        }),
-        event: event.event ?? event,
-      };
-    } catch {
-      return { ok: false, reason: "verification_failed" };
-    }
+    // Let infrastructure/transport throws propagate (network, timeout, 5xx
+    // verify postbacks). processWithVerifier classifies those via
+    // isRetryableVerifyInfrastructureError → handler_failed { retryable: true }
+    // (map to HTTP 5xx so providers redeliver). Only signature/forgery
+    // failures should return ok:false → invalid_webhook (typically 400).
+    const event = await client.handleWebhook(
+      "stripe",
+      raw.body,
+      raw.headers["stripe-signature"],
+    );
+    return {
+      ok: true,
+      gateway: "stripe",
+      providerEventId: event.id,
+      payloadHash: resolveInboxPayloadHash({
+        eventPayloadHash: event.payloadHash,
+        payloadForHash: event.rawPayload ?? event.event ?? event,
+      }),
+      event: event.event ?? event,
+    };
   },
   handler: async (ctx) => {
     await fulfill(ctx.event);
   },
 });
-// Verify failure → { outcome: "invalid_webhook" } — never claims
+// Signature forgery / ok:false → { outcome: "invalid_webhook" } — never claims
+// Verify infrastructure throw → { outcome: "handler_failed", retryable: true }
 ```
 
 ### Gateway-only verify

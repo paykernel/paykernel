@@ -487,14 +487,15 @@ export function createMemoryWebhookInboxStore(
       const existing = entries.get(input.key);
       if (existing) {
         const rec = releaseExpiredLease(input.key, existing);
-        if (rec.payloadHash !== input.payloadHash) {
-          return { kind: "payload_hash_conflict", record: rec };
-        }
+        // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
         if (rec.status === "completed") {
           return { kind: "already_completed", record: rec };
         }
         if (rec.status === "dead_letter" || rec.status === "failed") {
           return { kind: "duplicate_failed", record: rec };
+        }
+        if (rec.payloadHash !== input.payloadHash) {
+          return { kind: "payload_hash_conflict", record: rec };
         }
         if (rec.status === "claimed" && isLeaseActive(rec, clock)) {
           return { kind: "in_progress", record: rec };

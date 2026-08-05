@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   sanitizeWebhookError,
+  redactOpaquePayloadRefString,
   DEFAULT_SANITIZE_MAX_LENGTH,
 } from "./sanitize";
 
@@ -84,6 +85,19 @@ describe("sanitizeWebhookError", () => {
     for (const secret of forbidden) {
       expect(out).not.toContain(secret);
     }
+    expect(out).toContain("[REDACTED]");
+  });
+});
+
+describe("redactOpaquePayloadRefString (WEBHOOKS-6)", () => {
+  it("redacts known secret patterns; passes plain opaque refs through", () => {
+    expect(redactOpaquePayloadRefString("opaque-ref-token")).toBe(
+      "opaque-ref-token",
+    );
+    const out = redactOpaquePayloadRefString(
+      "Bearer sk_live_abc123xyz payload",
+    );
+    expect(out).not.toContain("sk_live_abc123xyz");
     expect(out).toContain("[REDACTED]");
   });
 });

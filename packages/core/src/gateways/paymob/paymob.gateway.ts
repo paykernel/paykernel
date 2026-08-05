@@ -780,25 +780,39 @@ export class PaymobGateway extends BaseGateway {
           transactionAmountCents: resolvedAmount.transactionAmountCents,
           cumulativeCapturedAmountCents,
         });
-        const gatewayId = String(data.id ?? p.gatewayPaymentId);
+        // PAYMOB-2: prefer parent payment/txn id for gatewayId so later
+        // parent-targeted ops (refund/void/get) keep working. Child capture
+        // txn id (when distinct from the parent) is dual-written on captureId.
+        const gatewayId = p.gatewayPaymentId;
+        const childCaptureId =
+          data.id !== undefined && data.id !== null
+            ? String(data.id)
+            : undefined;
+        const captureId =
+          childCaptureId !== undefined && childCaptureId !== gatewayId
+            ? childCaptureId
+            : undefined;
         const outcome = this.mapPaymobOutcome(status, success);
 
         return applyOutcomeToGatewayResult(
           {
             gatewayId,
+            ...(captureId !== undefined ? { captureId } : {}),
             status,
             rawResponse: data,
             // Ledger/inventory: publish cumulative only when positive; zero is
             // honest for provider-reported 0 but never implies paid (PAYMOB-1).
+            // Always dual-write currency with major-unit money fields.
             ...(cumulativeCapturedAmountCents > 0
               ? {
                   capturedAmount: this.fromMinorUnits(
                     cumulativeCapturedAmountCents,
                     currency,
                   ),
+                  currency,
                 }
               : cumulativeCapturedAmountCents === 0
-                ? { capturedAmount: 0 }
+                ? { capturedAmount: 0, currency }
                 : {}),
             providerNativeStatus: success ? "success" : "failed",
             gateway: "paymob",
@@ -972,14 +986,16 @@ export class PaymobGateway extends BaseGateway {
           );
         }
 
-        // PAYMOB-3: when body omits cumulative refunded_amount_cents, estimate from
-        // inquiry prior + this request (symmetric with capture cumulative estimate)
-        // for non-failed outcomes only — never invent a refund total on failure.
+        // PAYMOB-1: never invent/ledger totalRefunded while status is pending.
+        // Align with operation-results.md + Stripe: pending refunds are not
+        // counted until settled. Only set totalRefunded for completed refunds
+        // (body cumulative when present; else inquiry prior + this request).
+        // Failed outcomes also omit — never invent a refund total on failure.
         const totalRefundedCents =
-          typeof data.refunded_amount_cents === "number"
-            ? data.refunded_amount_cents
-            : status === "failed"
-              ? undefined
+          status === "pending" || status === "failed"
+            ? undefined
+            : typeof data.refunded_amount_cents === "number"
+              ? data.refunded_amount_cents
               : (resolvedAmount.refundedAmountCents ?? 0) +
                 resolvedAmount.amountCents;
 
@@ -1254,13 +1270,14 @@ export class PaymobGateway extends BaseGateway {
       statusSource.refunded_amount_cents,
     );
 
-    // type defaults to TRANSACTION_RESPONSE so callers can distinguish redirect/response
-    // callbacks from processed TRANSACTION webhooks. Dual-write demotes settlement arms
-    // to payment.processing — never fulfill on redirect-only events.
+    // PAYMOB-3: redirect `type` is not HMAC-bound. Always force TRANSACTION_RESPONSE
+    // so dual-write demotes settlement arms to payment.processing — never fulfill
+    // on redirect-only events. Trusting payload.type would let type=TRANSACTION
+    // skip demotion and look fulfillment-ready.
     // PAYMOB-1: merchant_order_id is not HMAC-bound — omit paymentId on redirect too.
     const legacy: WebhookEvent = {
       id: String(payload.id),
-      type: this.stringOrUndefined(payload.type) ?? "TRANSACTION_RESPONSE",
+      type: "TRANSACTION_RESPONSE",
       gateway: "paymob",
       paymentId: undefined,
       gatewayPaymentId: String(payload.id),

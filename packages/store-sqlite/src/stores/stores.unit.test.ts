@@ -244,6 +244,68 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     }
   });
 
+  it("SQL-1: free-lease fenced repair never overwrites active winner lease_expires_at", async () => {
+    // Prove the repair WHERE fence itself refuses to mutate an active claim
+    // (the race the unfenced UPDATE used to win under multi-host SQL).
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const dueOffset = "2026-01-15T14:00:00+05:00"; // due by Date.parse, non-Z
+    const created = "2026-01-15T08:00:00.000Z";
+    const winnerLease = "2026-01-15T12:05:00.000Z"; // active at now=12:00Z
+    const now = new Date(clock.nowMs()).toISOString();
+    executor.run(
+      `INSERT INTO payment_reconciliation_jobs (
+         key, status, subject_id, reason, due_at,
+         lease_owner, lease_token, lease_expires_at,
+         attempts, generation, created_at, updated_at
+       ) VALUES (?, 'claimed', ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+      [
+        "job-active",
+        "pay_act",
+        "timeout",
+        dueOffset,
+        "winner",
+        "lt_winner",
+        winnerLease,
+        created,
+        created,
+      ],
+    );
+
+    // Directly apply the fenced repair the claim path uses (stale null lease snapshot).
+    const { reconciliationTimestampRepairTemplates } = await import(
+      "@paykernel/sql-foundation"
+    );
+    const repairTpl = reconciliationTimestampRepairTemplates().sqlite;
+    const repaired = executor.run(repairTpl.sql, [
+      "2026-01-15T09:00:00.000Z",
+      null,
+      "job-active",
+      now,
+    ]);
+    expect(repaired.changes).toBe(0);
+
+    const c = await store.claim({
+      key: "job-active",
+      owner: "loser",
+      leaseMs: 5_000,
+    });
+    // Active foreign lease → in_progress (not stolen).
+    expect(c.kind).toBe("in_progress");
+    const row = executor.query<Record<string, unknown>>(
+      `SELECT lease_token, lease_expires_at, lease_owner, status, due_at
+       FROM payment_reconciliation_jobs WHERE key = ?`,
+      ["job-active"],
+    )[0];
+    expect(row?.lease_token).toBe("lt_winner");
+    expect(row?.lease_expires_at).toBe(winnerLease);
+    expect(row?.lease_owner).toBe("winner");
+    expect(row?.status).toBe("claimed");
+    expect(row?.due_at).toBe(dueOffset);
+  });
+
   it("listDue rediscovers abandoned expired claims without prior get", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteReconciliationStore({ executor, clock });

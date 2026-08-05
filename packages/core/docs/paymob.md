@@ -139,6 +139,8 @@ If `amount` is omitted, the SDK first retrieves the Paymob transaction and sends
 
 When an explicit `amount` is provided, the SDK still retrieves the transaction first to verify the requested currency matches Paymob's transaction currency and that the requested amount does not exceed the remaining capturable balance.
 
+**Capture ids (PAYMOB-2):** `result.gatewayId` is always the **parent** payment/transaction id you passed in (`gatewayPaymentId`), so later refund/void/get stay parent-targeted. When Paymob returns a distinct child capture transaction id, it is dual-written on `captureId` / `references.relatedIds.captureId` only.
+
 ## Void Payment
 
 Use this to void a card transaction before settlement, usually on the same business day.
@@ -164,6 +166,8 @@ const result = await client.refundPayment({
 If `amount` is omitted, the SDK first retrieves the Paymob transaction and sends the remaining refundable amount. For auth/capture payments, the SDK uses `captured_amount` when Paymob includes it, so partially captured payments are not refunded above the captured total. If you pass `amount` without `currency`, the SDK retrieves the transaction first and uses Paymob's transaction currency for minor-unit conversion.
 
 When an explicit `amount` is provided, the SDK validates it against Paymob's remaining refundable balance before calling the refund endpoint.
+
+**Pending refunds (PAYMOB-1):** when Paymob returns `pending: true`, the result has `status`/`outcome` `pending` and **omits `totalRefunded`**. Do not treat a pending refund as settled or ledger the request amount until a completed refund response or inquiry shows a settled cumulative. Completed refunds set `totalRefunded` from body `refunded_amount_cents` when present, otherwise estimate inquiry prior + this request.
 
 ## Legacy Iframe Checkout
 
@@ -202,7 +206,7 @@ app.post('/webhooks/paymob', async (req) => {
 
 The SDK verifies transaction processed callbacks, saved-card token callbacks, and query-style transaction response callbacks with their separate Paymob HMAC field shapes.
 
-> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks parse with `event.type === 'TRANSACTION_RESPONSE'` (unless Paymob supplies another `type`). Phase 7 dual-write maps redirect success/paid/capture signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
+> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks always parse with `event.type === 'TRANSACTION_RESPONSE'` — Paymob's query `type` is **not** HMAC-bound, so the SDK forces this value and never trusts a client-supplied `type=TRANSACTION` (which would otherwise skip redirect demotion). Phase 7 dual-write maps redirect success/paid/capture signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
 
 Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). **HMAC-covered status only.** Paymob's transaction HMAC covers `is_auth`, `is_capture`, `is_refunded`, `is_voided`, `success`, `pending`, and `amount_cents` — **not** `is_captured`, `captured_amount`, `refunded_amount_cents`, `is_refund`, or `is_void`. After verification the SDK strips unsigned status-driving fields before mapping so a replayed valid signature cannot forge paid/refunded/cancelled via injected slots. Practical consequences:
 

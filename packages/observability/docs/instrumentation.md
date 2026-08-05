@@ -108,7 +108,10 @@ await withPaymentOperation({ context: started }, async () => ({
 On throw:
 
 - Span ends with `code: "error"`; `recordException` receives a **sanitized** object (name + optional code only — never raw `Error.message` / stack).
-- Finalize sets `normalizedOutcome: "indeterminate"` if the patch did not already set an outcome (throws are transport-ambiguous; do not invent definitive `failed`). Override via `contextPatch` when the failure is known-final.
+- Finalize classifies the throw (OBS-2):
+  - **Known definitive** `@paykernel/core` error names → concrete outcome (`CardDeclinedError` / `InsufficientFundsError` → `declined`; `InvalidRequestError` / `OperationNotSupportedError` / `AuthenticationError` / … → `failed`).
+  - **Transport-ambiguous** throws (`NetworkError`, generic `Error`, `GatewayApiError`, rate limits, …) → `indeterminate` (never invent definitive `failed` from a bare network blip).
+  - **You cannot attach `contextPatch` on a throw path** — the callback did not return. For custom known-final outcomes without a core error class, **return** `{ result, contextPatch: { normalizedOutcome } }` instead of throwing.
 - Metrics record the outcome label; latency still recorded. Indeterminate also increments `indeterminateOperations`.
 - Telemetry may include `errorName` only (not `error.message` — may contain secrets).
 - Error is **rethrown** after instrumentation.

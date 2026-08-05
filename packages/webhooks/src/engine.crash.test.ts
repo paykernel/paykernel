@@ -289,7 +289,7 @@ describe("crash boundaries (10.6)", () => {
         throw new Error("transient after crashes");
       },
     });
-    expect(firstFail).toEqual({
+    expect(firstFail).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });
@@ -310,10 +310,10 @@ describe("crash boundaries (10.6)", () => {
         },
       });
       if (i < maxAttempts) {
-        expect(o).toEqual({
-          outcome: "scheduled_for_retry",
-          reason: "handler_retry",
-        });
+        expect(o).toMatchObject({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
       } else {
         expect(o).toEqual({ outcome: "handler_failed", retryable: false });
       }

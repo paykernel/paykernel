@@ -65,9 +65,10 @@ const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
  * fulfillment work, or funds left the merchant via refund/chargeback — never
  * treat sparse local + these as safe mark_consistent (false recovery completion).
  *
- * RECON-2: includes in-flight / failed refund lifecycle (`refund_pending`,
- * `refund_failed`) so recovery cannot complete as mark_consistent while money
- * state is still incomplete.
+ * RECON-2: includes refund lifecycle (`refund_pending` / `refund_failed` /
+ * `refund_completed` / `refunded`) and `setup_completed` so recovery cannot
+ * complete as mark_consistent while money state is still incomplete or
+ * setup-only (no capture settled).
  */
 const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "authorized",
@@ -79,6 +80,8 @@ const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "refunded",
   "refund_pending",
   "refund_failed",
+  "refund_completed",
+  "setup_completed",
   "reversed",
 ]);
 
@@ -86,8 +89,10 @@ const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
  * Local statuses where a second createPayment would risk duplicate money
  * movement (open auth/settlement, already settled/refunded, or chargeback).
  *
- * RECON-1: includes `refund_pending` so shouldForbidReplacementCharge stays
- * true while a refund is still in flight (second createPayment would double-move).
+ * RECON-1: includes `refund_pending` / `refund_failed` / `refund_completed` so
+ * shouldForbidReplacementCharge stays true while a refund is in flight, failed
+ * (original charge may still hold funds), or completed under the alternate
+ * lifecycle name (same risk class as `refunded`).
  */
 const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "pending",
@@ -99,6 +104,8 @@ const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "paid",
   "refunded",
   "refund_pending",
+  "refund_failed",
+  "refund_completed",
   "reversed",
   "setup_completed",
 ]);
@@ -364,7 +371,7 @@ export const decideReconciliationAction = decideReconciliationPolicy;
  * - result is `temporarily_unavailable` (unknown provider state)
  * - local expected is missing/indeterminate **or** any open money state
  *   (`authorized` / `approved` / partial / `paid` / refunded /
- *   `refund_pending` / setup, etc.)
+ *   `refund_pending` / `refund_failed` / `refund_completed` / setup, etc.)
  *
  * Only terminal failed/cancelled locals without ambiguous/not-found outcomes
  * leave room for an application-level re-attempt after review.

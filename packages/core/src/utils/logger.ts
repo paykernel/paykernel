@@ -59,7 +59,8 @@ const SENSITIVE_KEY_PATTERNS = [
   "given_id",
   // Session / auth material not covered by password/token alone
   "cookie",
-  "credentials",
+  // Substring match: "credential" also covers "credentials" / userCredential.
+  "credential",
   "otp",
   // Banking / government identifiers
   "iban",

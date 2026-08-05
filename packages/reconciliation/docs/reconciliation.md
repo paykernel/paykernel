@@ -198,8 +198,8 @@ switch (decision.action) {
 | `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
 | `retry_later` | `false` | Temporarily unavailable / retryable not-found on terminal non-open locals (when not forbidding replacement via primary action) |
-| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed` — surface capture/refund work) |
-| `do_not_create_replacement` | `false` | Not-found while local is indeterminate **or open money** (incl. `refund_pending`) |
+| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work) |
+| `do_not_create_replacement` | `false` | Not-found while local is indeterminate **or open money** (incl. `refund_pending` / `refund_failed` / `refund_completed`) |
 
 ### Replacement charge rule
 
@@ -216,7 +216,7 @@ Returns `true` when:
 - `result.outcome === "temporarily_unavailable"`, or
 - local expected is missing/indeterminate **or** any open money state
   (`pending` / `processing` / `authorized` / `approved` / partial / `paid` /
-  `refunded` / `refund_pending` / setup)
+  `refunded` / `refund_pending` / `refund_failed` / `refund_completed` / setup)
 
 **Never** convert `temporarily_unavailable` or retryable `provider_not_found` into local `failed` without a definitive provider response.
 

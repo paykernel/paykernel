@@ -38,7 +38,10 @@ import {
   redactWebhookPayloadSecrets,
 } from "@paykernel/core";
 import { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";
-import { sanitizeWebhookError } from "./sanitize";
+import {
+  redactOpaquePayloadRefString,
+  sanitizeWebhookError,
+} from "./sanitize";
 import {
   isStoreLeaseLostError,
   StoreLeaseLostError,
@@ -135,8 +138,48 @@ function outcomeAlreadyProcessing(
 
 function outcomeScheduledForRetry(
   reason: ScheduledForRetryReason,
+  timing?: { availableAt?: string; retryAfterMs?: number },
 ): WebhookProcessingOutcome {
-  return { outcome: "scheduled_for_retry", reason };
+  const out: {
+    outcome: "scheduled_for_retry";
+    reason: ScheduledForRetryReason;
+    availableAt?: string;
+    retryAfterMs?: number;
+  } = { outcome: "scheduled_for_retry", reason };
+  if (timing?.availableAt !== undefined && timing.availableAt.length > 0) {
+    out.availableAt = timing.availableAt;
+  }
+  if (
+    timing?.retryAfterMs !== undefined &&
+    Number.isFinite(timing.retryAfterMs) &&
+    timing.retryAfterMs >= 0
+  ) {
+    out.retryAfterMs = timing.retryAfterMs;
+  }
+  return out;
+}
+
+/** Build timing fields for scheduled_for_retry from an absolute availableAt. */
+function timingFromAvailableAt(
+  availableAt: string,
+  nowMs: number,
+): { availableAt: string; retryAfterMs: number } {
+  const at = Date.parse(availableAt);
+  const retryAfterMs =
+    Number.isFinite(at) && at > nowMs ? Math.max(0, at - nowMs) : 0;
+  return { availableAt, retryAfterMs };
+}
+
+/** Build timing fields for scheduled_for_retry from a relative delay. */
+function timingFromRetryAfterMs(
+  retryAfterMs: number,
+  nowMs: number,
+): { availableAt: string; retryAfterMs: number } {
+  const ms = Number.isFinite(retryAfterMs) && retryAfterMs >= 0 ? retryAfterMs : 0;
+  return {
+    availableAt: new Date(nowMs + ms).toISOString(),
+    retryAfterMs: ms,
+  };
 }
 
 function outcomeHandlerFailed(retryable: boolean): WebhookProcessingOutcome {
@@ -280,7 +323,9 @@ export function resolveInboxPayloadHash(
  *   passing `toPersistedPaymentEventEnvelope` so raw signatures never enter.
  * - **JSON strings:** parse → redact object/array values → re-stringify when
  *   parse succeeds as object/array (defense-in-depth for pre-serialized
- *   envelopes). Opaque non-JSON / non-object JSON strings stored as-is.
+ *   envelopes).
+ * - **Opaque non-JSON strings:** secret/signature patterns redacted
+ *   (WEBHOOKS-6); plain opaque refs pass through.
  * - Never stores undefined / empty string.
  */
 function envelopeToPayloadRef(envelope: unknown): string | undefined {
@@ -296,7 +341,9 @@ function envelopeToPayloadRef(envelope: unknown): string | undefined {
     } catch {
       // opaque non-JSON ref
     }
-    return envelope;
+    // WEBHOOKS-6: redact known secret/signature patterns on opaque strings so
+    // raw body text / tokens are not persisted unredacted in payloadRef.
+    return redactOpaquePayloadRefString(envelope);
   }
   try {
     return JSON.stringify(redactWebhookPayloadSecrets(envelope));
@@ -478,6 +525,8 @@ export function createWebhookInboxEngine(
     handler: WebhookHandler;
     /** Default lease extension for ctx.renew() when caller omits ms. */
     leaseMs: number;
+    /** Claim owner — used to re-claim after fail lease_lost (WEBHOOKS-3). */
+    owner: string;
   }): Promise<WebhookProcessingOutcome> {
     let currentToken = args.leaseToken;
     let currentRecord = args.record;
@@ -563,6 +612,22 @@ export function createWebhookInboxEngine(
         await store.fail(failInput);
       } catch (failErr) {
         if (isStoreLeaseLostError(failErr)) {
+          // WEBHOOKS-3: preserve non-retryable / dead-letter intent when fail
+          // loses the lease (soft-release cleared the token after expiry).
+          // Returning retryable:true forever spins poison paid webhooks under
+          // provider redelivery / processRetryable.
+          if (deadLetter || nonRetry) {
+            await bestEffortDeadLetterAfterLeaseLost({
+              key: args.key,
+              payloadHash: currentRecord.payloadHash,
+              payloadRef: currentRecord.payloadRef,
+              owner: args.owner,
+              leaseMs: args.leaseMs,
+              error: sanitize(err),
+              forceDeadLetter: deadLetter,
+            });
+            return outcomeHandlerFailed(false);
+          }
           return outcomeHandlerFailed(true);
         }
         throw failErr;
@@ -572,7 +637,10 @@ export function createWebhookInboxEngine(
         return outcomeHandlerFailed(false);
       }
       if (mode === "durable_retry") {
-        return outcomeScheduledForRetry("handler_retry");
+        return outcomeScheduledForRetry(
+          "handler_retry",
+          timingFromRetryAfterMs(defaultRetryAfterMs, clock.nowMs()),
+        );
       }
       return outcomeHandlerFailed(true);
     }
@@ -590,6 +658,66 @@ export function createWebhookInboxEngine(
         return outcomeHandlerFailed(true);
       }
       throw completeErr;
+    }
+  }
+
+  /**
+   * WEBHOOKS-3: after fail() lease_lost with dead-letter / non-retry intent,
+   * soft-release left the row pending. Best-effort re-claim + fail(deadLetter)
+   * so poison rows reach a terminal state instead of spinning forever.
+   */
+  async function bestEffortDeadLetterAfterLeaseLost(args: {
+    key: WebhookEventKey;
+    payloadHash: string;
+    payloadRef?: string | undefined;
+    owner: string;
+    leaseMs: number;
+    error: string;
+    forceDeadLetter: boolean;
+  }): Promise<void> {
+    try {
+      const claimInput: {
+        key: string;
+        payloadHash: string;
+        owner: string;
+        leaseMs: number;
+        payloadRef?: string;
+      } = {
+        key: args.key,
+        payloadHash: args.payloadHash,
+        owner: args.owner,
+        leaseMs: args.leaseMs,
+      };
+      if (args.payloadRef !== undefined) {
+        claimInput.payloadRef = args.payloadRef;
+      }
+      const reclaim = await store.claim(claimInput);
+      if (reclaim.kind === "already_completed" || reclaim.kind === "duplicate_failed") {
+        return;
+      }
+      if (reclaim.kind !== "acquired") {
+        return;
+      }
+      const failInput: {
+        key: WebhookEventKey;
+        leaseToken: LeaseToken;
+        error: string;
+        deadLetter?: boolean;
+      } = {
+        key: args.key,
+        leaseToken: reclaim.leaseToken,
+        error: args.error,
+      };
+      // Prefer terminal dead_letter when original intent was dead-letter;
+      // for non-retry without deadLetter, still leave pending but surface
+      // non-retryable to the caller (HTTP ACK). forceDeadLetter covers both
+      // NonRetryableHandlerError default and maxAttempts exhaustion.
+      if (args.forceDeadLetter) {
+        failInput.deadLetter = true;
+      }
+      await store.fail(failInput);
+    } catch {
+      // Best-effort only — outcome already non-retryable to the adapter.
     }
   }
 
@@ -699,7 +827,11 @@ export function createWebhookInboxEngine(
       case "not_available":
         // Backoff: provider redelivery during availableAt window must not burn attempts.
         // Distinct reason so adapters can 5xx (provider redelivery) instead of silent 200.
-        return outcomeScheduledForRetry("not_available");
+        // WEBHOOKS-5: expose availableAt / retryAfterMs for honest Retry-After.
+        return outcomeScheduledForRetry(
+          "not_available",
+          timingFromAvailableAt(claim.availableAt, clock.nowMs()),
+        );
       case "acquired":
         break;
       default: {
@@ -728,11 +860,17 @@ export function createWebhookInboxEngine(
           // Token dead before restoreAttempt applied (clock/lease skew): claim
           // already persisted; may leave parking attempt burned. No safe
           // tokenless restore — return scheduled_for_retry, not business failure.
-          return outcomeScheduledForRetry("parked");
+          return outcomeScheduledForRetry(
+            "parked",
+            timingFromRetryAfterMs(0, clock.nowMs()),
+          );
         }
         throw err;
       }
-      return outcomeScheduledForRetry("parked");
+      return outcomeScheduledForRetry(
+        "parked",
+        timingFromRetryAfterMs(0, clock.nowMs()),
+      );
     }
 
     // Unreachable under normal control flow: missing handler is rejected before
@@ -744,15 +882,25 @@ export function createWebhookInboxEngine(
       );
     }
 
+    // WEBHOOKS-2: materialize handler event from envelope/payloadRef when
+    // input.event is missing (envelope-only durable_retry dual-write shape).
+    // Matches processRetryable so first-delivery inline path is not left with
+    // ctx.event === undefined while paid data sits unused in payloadRef.
+    let handlerEvent = input.event;
+    if (handlerEvent === undefined && payloadRef !== undefined) {
+      handlerEvent = materializeEventFromPayloadRef(payloadRef);
+    }
+
     return runHandlerUnderLease({
       key,
       leaseToken: claim.leaseToken,
       record: claim.record,
       gateway,
       providerEventId,
-      event: input.event,
+      event: handlerEvent,
       handler,
       leaseMs,
+      owner,
     });
   }
 
@@ -850,7 +998,11 @@ export function createWebhookInboxEngine(
       });
 
       if (claim.kind !== "acquired") {
-        const outcome = mapClaimKindToOutcome(claim, retryAfterFromRecord);
+        const outcome = mapClaimKindToOutcome(
+          claim,
+          retryAfterFromRecord,
+          clock.nowMs(),
+        );
         items.push({ key: rec.key, outcome });
         continue;
       }
@@ -867,9 +1019,20 @@ export function createWebhookInboxEngine(
           });
         } catch (failErr) {
           if (isStoreLeaseLostError(failErr)) {
+            // WEBHOOKS-3: dead-letter intent must not become forever-retryable.
+            await bestEffortDeadLetterAfterLeaseLost({
+              key: rec.key,
+              payloadHash,
+              payloadRef: rec.payloadRef,
+              owner,
+              leaseMs,
+              error:
+                "missing payloadRef: cannot redrive durable webhook without stored envelope/event",
+              forceDeadLetter: true,
+            });
             items.push({
               key: rec.key,
-              outcome: outcomeHandlerFailed(true),
+              outcome: outcomeHandlerFailed(false),
             });
             continue;
           }
@@ -891,6 +1054,7 @@ export function createWebhookInboxEngine(
         event,
         handler: input.handler,
         leaseMs,
+        owner,
       });
       items.push({ key: rec.key, outcome });
     }
@@ -930,6 +1094,7 @@ function mapClaimKindToOutcome(
     { kind: "acquired" }
   >,
   retryAfterFromRecord: (r: WebhookInboxRecord) => number | undefined,
+  nowMs: number,
 ): WebhookProcessingOutcome {
   switch (claim.kind) {
     case "already_completed":
@@ -941,7 +1106,11 @@ function mapClaimKindToOutcome(
     case "duplicate_failed":
       return outcomeHandlerFailed(false);
     case "not_available":
-      return outcomeScheduledForRetry("not_available");
+      // WEBHOOKS-5: expose availableAt / retryAfterMs for honest Retry-After.
+      return outcomeScheduledForRetry(
+        "not_available",
+        timingFromAvailableAt(claim.availableAt, nowMs),
+      );
     default: {
       const _e: never = claim;
       return outcomeInvalidWebhook(String(_e));

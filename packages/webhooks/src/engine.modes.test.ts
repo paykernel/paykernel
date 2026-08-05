@@ -62,7 +62,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });
@@ -109,7 +109,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "parked",
     });
@@ -165,7 +165,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "parked",
     });
@@ -214,7 +214,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "parked",
     });
@@ -310,7 +310,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
         throw new Error("x");
       },
     });
-    expect(o2).toEqual({
+    expect(o2).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });
@@ -572,7 +572,7 @@ describe("processRetryable default envelope unwrap", () => {
       }),
     });
 
-    expect(outcome).toEqual({
+    expect(outcome).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "parked",
     });
@@ -609,7 +609,7 @@ describe("processRetryable default envelope unwrap", () => {
         throw new Error("transient");
       },
     });
-    expect(failOnce).toEqual({
+    expect(failOnce).toMatchObject({
       outcome: "scheduled_for_retry",
       reason: "handler_retry",
     });

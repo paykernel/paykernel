@@ -325,6 +325,75 @@ describe("withPaymentOperation", () => {
     );
   });
 
+  it("classifies CardDeclinedError throw as declined not indeterminate (OBS-2)", async () => {
+    const metrics = createInMemoryPaymentMetrics();
+    const { tracer, spans } = recordingTracer();
+    const ctx = createOperationContext({
+      operationId: "op_decline",
+      gateway: "stripe",
+      operationType: "payment.create",
+    });
+
+    class CardDeclinedError extends Error {
+      constructor() {
+        super("card declined");
+        this.name = "CardDeclinedError";
+      }
+    }
+
+    await expect(
+      withPaymentOperation(
+        { context: ctx, metrics, tracer, clock: fakeClock([0, 4]) },
+        async () => {
+          throw new CardDeclinedError();
+        },
+      ),
+    ).rejects.toThrow(/card declined/);
+
+    expect(spans[0]!.status?.code).toBe("error");
+    const outcomes = metrics.snapshot().samples.filter(
+      (s) => s.name === METRIC_NAMES.operationOutcomes,
+    );
+    expect(outcomes[0]!.attributes?.outcome).toBe("declined");
+    // Definitive decline must not increment indeterminate counter
+    expect(
+      metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations] ?? 0,
+    ).toBe(0);
+  });
+
+  it("classifies InvalidRequestError throw as failed (OBS-2)", async () => {
+    const metrics = createInMemoryPaymentMetrics();
+    const ctx = createOperationContext({
+      operationId: "op_invalid",
+      gateway: "mock",
+      operationType: "payment.capture",
+    });
+
+    class InvalidRequestError extends Error {
+      constructor() {
+        super("over-capture");
+        this.name = "InvalidRequestError";
+      }
+    }
+
+    await expect(
+      withPaymentOperation(
+        { context: ctx, metrics, clock: fakeClock([0, 2]) },
+        async () => {
+          throw new InvalidRequestError();
+        },
+      ),
+    ).rejects.toThrow(/over-capture/);
+
+    const outcomes = metrics.snapshot().samples.filter(
+      (s) => s.name === METRIC_NAMES.operationOutcomes,
+    );
+    expect(outcomes[0]!.attributes?.outcome).toBe("failed");
+    expect(
+      metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations] ?? 0,
+    ).toBe(0);
+  });
+
   it("sanitizes recordException — name only, no secret message (OBS-1)", async () => {
     const exceptions: unknown[] = [];
     const tracer: PaymentTracer = {

@@ -236,7 +236,7 @@ if (result.status === 'cancelled' || result.outcome === 'succeeded') {
 
 Retrieve the current status and details of a PayPal order, capture, or authorization.
 
-> **Capture ID polling**: After `capturePayment`, `result.gatewayId` is the **capture ID**. Looking that ID up via `getPayment` hits `/v2/payments/captures/{id}` when the order path 404s. If the capture is non-final (`final_capture: false`), status is **`partially_captured`** (not `paid`) and **`isPaidOutcome` is false** — same rule as `capturePayment` and webhooks. Multi-capture order lookups keep the **latest** capture id for refunds but **aggregate** successful capture amounts and demote status when auth is still `PARTIALLY_CAPTURED` or totals are under the order/auth amount.
+> **Capture ID polling**: After `capturePayment`, `result.gatewayId` is the **capture ID**. Looking that ID up via `getPayment` hits `/v2/payments/captures/{id}` when the order path 404s. If the capture is non-final (`final_capture: false`), status is **`partially_captured`** (not `paid`) and **`isPaidOutcome` is false** — same rule as `capturePayment` and webhooks. Multi-capture order lookups **omit** `captureId` unless exactly one refundable capture remains (never dual-write the latest id as a full-order refund target). They **aggregate** still-held capture amounts and demote status when auth is still `PARTIALLY_CAPTURED` or totals are under the order/auth amount. Capture-resource GET after `PARTIALLY_REFUNDED`/`REFUNDED` omits face amount unless net remaining can be proven from `seller_receivable_breakdown.total_refunded_amount`.
 
 ```typescript
 const payment = await client.getPayment({

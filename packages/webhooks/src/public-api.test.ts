@@ -13,6 +13,7 @@ describe("public API runtime surface", () => {
       ["deriveWebhookEventKey", webhooks.deriveWebhookEventKey],
       ["parseWebhookEventKey", webhooks.parseWebhookEventKey],
       ["sanitizeWebhookError", webhooks.sanitizeWebhookError],
+      ["redactOpaquePayloadRefString", webhooks.redactOpaquePayloadRefString],
       ["DEFAULT_SANITIZE_MAX_LENGTH", webhooks.DEFAULT_SANITIZE_MAX_LENGTH],
       ["StoreLeaseLostError", webhooks.StoreLeaseLostError],
       ["isStoreLeaseLostError", webhooks.isStoreLeaseLostError],

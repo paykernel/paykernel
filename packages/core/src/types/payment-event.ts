@@ -734,13 +734,29 @@ function referencesFromWebhookEvent(
   });
 }
 
+/**
+ * Money snapshot from webhook fields (CORE-3 / fail-closed).
+ *
+ * Mirrors {@link import("./operation-result").paymentFromGatewayResult}: major-unit
+ * `amount` is published only when `currency` is a non-empty string. Currency alone
+ * (no amount) is still copied when present. Naked major units without currency are
+ * omitted rather than dual-written incomplete.
+ */
 function moneyFieldsFromWebhook(event: WebhookEvent): {
   amount?: number;
   currency?: string;
 } {
   const out: { amount?: number; currency?: string } = {};
-  if (event.amount !== undefined) out.amount = event.amount;
-  if (event.currency !== undefined) out.currency = event.currency;
+  const currency =
+    typeof event.currency === "string" && event.currency.trim().length > 0
+      ? event.currency.trim().toUpperCase()
+      : undefined;
+  if (currency !== undefined) {
+    out.currency = currency;
+    if (event.amount !== undefined) {
+      out.amount = event.amount;
+    }
+  }
   return out;
 }
 
@@ -799,9 +815,43 @@ function refundStatusFromPaymentStatus(
   }
 }
 
+/**
+ * Capture dual-write status from webhook domain status (CORE-4).
+ *
+ * Partials must not look fully settled: `partially_captured` → entity
+ * `partially_completed`; pending/processing-style statuses stay non-terminal;
+ * only paid/approved-style full captures map to `completed`.
+ */
+function captureStatusFromWebhookEvent(
+  status: PaymentStatus | string,
+): Capture["status"] {
+  switch (status) {
+    case "partially_captured":
+      return "partially_completed";
+    case "pending":
+    case "processing":
+    case "authorized":
+    case "requires_action":
+    case "approved":
+      return "processing";
+    case "failed":
+    case "cancelled":
+    case "voided":
+    case "expired":
+      return "failed";
+    case "paid":
+    case "captured":
+      return "completed";
+    default:
+      // Unknown / provider-specific: fail closed to processing rather than
+      // claiming completed settlement.
+      return "processing";
+  }
+}
+
 function captureFromWebhookEvent(event: WebhookEvent): Capture {
   return {
-    status: "completed",
+    status: captureStatusFromWebhookEvent(event.status),
     references: referencesFromWebhookEvent(event, {
       ...(event.gatewayObjectId !== undefined
         ? { captureId: event.gatewayObjectId }

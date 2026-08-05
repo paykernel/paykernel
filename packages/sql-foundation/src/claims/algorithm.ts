@@ -213,14 +213,18 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
     return acquired;
   }
 
-  if (existing.payloadHash !== input.payloadHash) {
-    return { kind: "payload_hash_conflict" };
-  }
+  // WEBHOOKS-4 / WEBHOOKS-1: terminal outcomes win before payload_hash_conflict so a
+  // completed/dead-lettered row redelivered with a mismatched hash (e.g. rawBody vs
+  // object hash footgun) still ACKs as already done / failed rather than permanent
+  // payload_conflict that never re-runs a terminal idempotent path.
   if (existing.status === "completed") {
     return { kind: "already_completed" };
   }
   if (existing.status === "dead_letter" || existing.status === "failed") {
     return { kind: "duplicate_failed" };
+  }
+  if (existing.payloadHash !== input.payloadHash) {
+    return { kind: "payload_hash_conflict" };
   }
   if (existing.status === "claimed" && isLeaseActive(existing.leaseExpiresAt, clock.nowMs)) {
     return { kind: "in_progress" };
@@ -344,6 +348,11 @@ export function decideReconciliationClaim(
  * map the miss to `in_progress` — that freezes free due work forever under
  * lexical TEXT timestamp mismatch (SQL-1/SQL-2). Prefer canonicalize+retry
  * or a retryable error so pollers can reclaim.
+ *
+ * **SQL-1:** timestamp-repair UPDATE after `claimable` MUST be free-lease fenced
+ * (`status = scheduled` OR `lease_expires_at` null/expired). Never overwrite an
+ * active winner's `lease_expires_at` from a stale SELECT snapshot. Use
+ * `reconciliationTimestampRepairTemplates` (or equivalent WHERE).
  */
 export type ReconciliationClaimMissKind =
   | "not_found"

@@ -141,14 +141,15 @@ export function createSqliteWebhookInboxStore(
               "webhook claim: no row after claim attempt",
             );
           }
-          if (existing.payloadHash !== input.payloadHash) {
-            return { kind: "payload_hash_conflict" as const, record: existing };
-          }
+          // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
           if (existing.status === "completed") {
             return { kind: "already_completed" as const, record: existing };
           }
           if (existing.status === "failed" || existing.status === "dead_letter") {
             return { kind: "duplicate_failed" as const, record: existing };
+          }
+          if (existing.payloadHash !== input.payloadHash) {
+            return { kind: "payload_hash_conflict" as const, record: existing };
           }
           // pending + failed claim SQL = available_at gate (do not burn attempts)
           if (existing.status === "pending") {

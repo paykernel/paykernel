@@ -651,7 +651,20 @@ export function moneyToMajorNumber(
   }
   // Re-validate scale / options (e.g. overrides) via conversion.
   // Money.exponent is honored when options omit scale (MONEY-1).
-  void toMinorUnits(m, options);
+  const parseOpts = resolveMoneyParseOptions(m, options);
+  const minor = toMinorUnits(m, parseOpts);
+
+  // MONEY-4: minor units must fit IEEE safe integers so major-unit `number`
+  // interop cannot silently lose low-order digits on large fractional majors.
+  if (
+    minor > BigInt(Number.MAX_SAFE_INTEGER) ||
+    minor < BigInt(Number.MIN_SAFE_INTEGER)
+  ) {
+    throwInvalidAmount(
+      "Money minor-unit magnitude exceeds Number.MAX_SAFE_INTEGER (major number would be IEEE-inexact)",
+      "unsafe_range",
+    );
+  }
 
   const n = Number(m.amount);
   if (!Number.isFinite(n)) {
@@ -661,11 +674,27 @@ export function moneyToMajorNumber(
     );
   }
 
-  // Integer major component safety (fractional majors still need safe magnitude).
+  // Integer major component safety.
   const abs = Math.abs(n);
   if (abs > Number.MAX_SAFE_INTEGER) {
     throwInvalidAmount(
       "Money major-unit magnitude exceeds Number.MAX_SAFE_INTEGER",
+      "unsafe_range",
+    );
+  }
+
+  // Round-trip: IEEE major re-parsed under the same scale must yield the same
+  // minor units. Catches large fractional majors that pass magnitude checks
+  // but are not exactly representable as a JS number (MONEY-4).
+  // money() / toMinorUnits may throw MoneyAmountError — let it propagate.
+  const roundTrip = money(n, m.currency, {
+    ...(parseOpts ?? {}),
+    allowZero: true,
+    allowNegative: true,
+  });
+  if (toMinorUnits(roundTrip, parseOpts) !== minor) {
+    throwInvalidAmount(
+      "Money major-unit number is IEEE-inexact for this amount/scale",
       "unsafe_range",
     );
   }

@@ -434,6 +434,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
    * (await on latency always yields a microtask even when delay is 0).
    */
   const idempotencyInflight = new Map<string, Promise<GatewayPaymentResult>>();
+  /**
+   * Per-payment serialization chain for capture / refund / void ledger mutations.
+   * Without this, concurrent Promise.all partial captures/refunds race on
+   * remaining/refunded minors and can over-capture or over-refund (TESTKIT-1).
+   */
+  const paymentLedgerChains = new Map<string, Promise<unknown>>();
   let seq = 0;
   let lastProviderSideSuccess: GatewayPaymentResult | undefined;
   const honorIdempotencyKey = options.honorIdempotencyKey !== false;
@@ -443,6 +449,27 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
   function nextId(prefix: string): string {
     seq += 1;
     return `${prefix}_${name}_${seq}`;
+  }
+
+  /**
+   * Serialize money-mutating ops for one gateway payment id (capture/refund/void).
+   * Chains settle independently of success/failure so a rejected op never
+   * deadlocks subsequent work on the same payment.
+   */
+  function withPaymentLedgerLock<T>(
+    paymentId: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prev = paymentLedgerChains.get(paymentId) ?? Promise.resolve();
+    const run = prev.then(fn, fn);
+    paymentLedgerChains.set(
+      paymentId,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
   }
 
   function takePaymentStep(
@@ -752,10 +779,15 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         );
       case "provider_ok_client_timeout":
       case "provider_success_client_timeout": {
-        // Provider ledger: paid + outcome succeeded; client still times out.
-        const paidBase = { ...fallback(), status: "paid" as PaymentStatus };
+        // Provider ledger settles success; client still times out.
+        // Auth-only creates (fallback status authorized) stay authorized —
+        // do not force a full paid capture (TESTKIT-2).
+        const fb = fallback();
+        const providerStatus: PaymentStatus =
+          fb.status === "authorized" ? "authorized" : "paid";
+        const providerBase = { ...fb, status: providerStatus };
         const providerResult = applyResultOverrides(
-          withPhase6Outcome(paidBase, "succeeded"),
+          withPhase6Outcome(providerBase, "succeeded"),
           outcome,
         );
         lastProviderSideSuccess = providerResult;
@@ -1095,18 +1127,20 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 dualProviderResult = withId;
                 const dualMajor = withId.amount ?? major;
                 const dualMinor = majorToMinor(dualMajor, params.currency);
-                const dualCapturedMajor =
-                  withId.capturedAmount ?? withId.amount ?? major;
+                // Auth-only provider success: 0 capture + authorized (TESTKIT-2)
+                const authOnly = withId.status === "authorized";
+                const dualCapturedMajor = authOnly
+                  ? 0
+                  : (withId.capturedAmount ?? withId.amount ?? major);
                 payments.set(pid, {
                   amountMinor: dualMinor,
                   currency: params.currency,
-                  status: withId.status ?? "paid",
-                  capturedAmountMinor: majorToMinor(
-                    dualCapturedMajor,
-                    params.currency,
-                  ),
+                  status: withId.status ?? (authOnly ? "authorized" : "paid"),
+                  capturedAmountMinor: authOnly
+                    ? 0
+                    : majorToMinor(dualCapturedMajor, params.currency),
                   refundedAmountMinor: 0,
-                  authorized: false,
+                  authorized: authOnly,
                 });
                 // Cache before throw so retries never double-charge
                 if (idemKey && withId.gatewayId) {
@@ -1163,96 +1197,103 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     },
 
     async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
-      return track("capturePayment", params, async () => {
-        const outcome = takePaymentStep("capturePayment");
-        const signal = getSignal(params);
-        const state = payments.get(params.gatewayPaymentId);
-        // Defer ledger mutation until the resolved outcome is money-settling.
-        // Scripted failed/indeterminate/requires_action must not change balances.
-        let applyLedger: (() => void) | undefined;
+      return track("capturePayment", params, () =>
+        // Serialize per payment so concurrent captures re-check remaining (TESTKIT-1).
+        withPaymentLedgerLock(params.gatewayPaymentId, async () => {
+          const outcome = takePaymentStep("capturePayment");
+          const signal = getSignal(params);
+          const state = payments.get(params.gatewayPaymentId);
+          // Defer ledger mutation until the resolved outcome is money-settling.
+          // Scripted failed/indeterminate/requires_action must not change balances.
+          let applyLedger: (() => void) | undefined;
 
-        const result = await resolvePaymentOutcome(
-          outcome,
-          () => {
-            if (!state) {
-              throw new GatewayApiError(
-                `Payment ${params.gatewayPaymentId} not found (mock)`,
-                name,
+          const result = await resolvePaymentOutcome(
+            outcome,
+            () => {
+              if (!state) {
+                throw new GatewayApiError(
+                  `Payment ${params.gatewayPaymentId} not found (mock)`,
+                  name,
+                );
+              }
+              const remainingMinor =
+                state.amountMinor - state.capturedAmountMinor;
+              if (remainingMinor <= 0) {
+                throw new InvalidRequestError(
+                  `Payment ${params.gatewayPaymentId} has no capturable amount remaining (mock)`,
+                );
+              }
+              const currency = params.currency ?? state.currency;
+              const captureMinor =
+                params.amount !== undefined
+                  ? resolveChargeAmount(params.amount, currency).minor
+                  : remainingMinor;
+              if (captureMinor <= 0) {
+                throw new InvalidRequestError(
+                  `Capture amount must be positive (got ${minorToMajor(captureMinor, currency)}) (mock)`,
+                );
+              }
+              if (captureMinor > remainingMinor) {
+                throw new InvalidRequestError(
+                  `Over-capture: requested ${minorToMajor(captureMinor, currency)}, remaining capturable ${minorToMajor(remainingMinor, currency)} (mock)`,
+                );
+              }
+              if (
+                params.amount !== undefined &&
+                captureMinor < remainingMinor &&
+                !capabilities.partialCapture
+              ) {
+                throw new OperationNotSupportedError(name, "partialCapture", {
+                  capability: "partialCapture",
+                  claimedSupport: false,
+                });
+              }
+              const nextCapturedMinor =
+                state.capturedAmountMinor + captureMinor;
+              const fullyCaptured = nextCapturedMinor >= state.amountMinor;
+              const finalCapturedMinor = fullyCaptured
+                ? state.amountMinor
+                : nextCapturedMinor;
+              const nextStatus: PaymentStatus = fullyCaptured
+                ? "paid"
+                : "partially_captured";
+              const amountMajor = minorToMajor(
+                state.amountMinor,
+                state.currency,
               );
-            }
-            const remainingMinor =
-              state.amountMinor - state.capturedAmountMinor;
-            if (remainingMinor <= 0) {
-              throw new InvalidRequestError(
-                `Payment ${params.gatewayPaymentId} has no capturable amount remaining (mock)`,
+              const capturedMajor = minorToMajor(
+                finalCapturedMinor,
+                state.currency,
               );
-            }
-            const currency = params.currency ?? state.currency;
-            const captureMinor =
-              params.amount !== undefined
-                ? resolveChargeAmount(params.amount, currency).minor
-                : remainingMinor;
-            if (captureMinor <= 0) {
-              throw new InvalidRequestError(
-                `Capture amount must be positive (got ${minorToMajor(captureMinor, currency)}) (mock)`,
-              );
-            }
-            if (captureMinor > remainingMinor) {
-              throw new InvalidRequestError(
-                `Over-capture: requested ${minorToMajor(captureMinor, currency)}, remaining capturable ${minorToMajor(remainingMinor, currency)} (mock)`,
-              );
-            }
-            if (
-              params.amount !== undefined &&
-              captureMinor < remainingMinor &&
-              !capabilities.partialCapture
-            ) {
-              throw new OperationNotSupportedError(name, "partialCapture", {
-                capability: "partialCapture",
-                claimedSupport: false,
-              });
-            }
-            const nextCapturedMinor = state.capturedAmountMinor + captureMinor;
-            const fullyCaptured = nextCapturedMinor >= state.amountMinor;
-            const finalCapturedMinor = fullyCaptured
-              ? state.amountMinor
-              : nextCapturedMinor;
-            const nextStatus: PaymentStatus = fullyCaptured
-              ? "paid"
-              : "partially_captured";
-            const amountMajor = minorToMajor(state.amountMinor, state.currency);
-            const capturedMajor = minorToMajor(
-              finalCapturedMinor,
-              state.currency,
-            );
-            applyLedger = () => {
-              state.capturedAmountMinor = finalCapturedMinor;
-              state.authorized = false;
-              state.status = nextStatus;
-            };
-            return {
-              ...defaultPaymentResult(
-                params.gatewayPaymentId,
-                nextStatus,
-                amountMajor,
-                name,
-              ),
-              capturedAmount: capturedMajor,
-              amount: amountMajor,
-            };
-          },
-          signal,
-          // Dual-timeout: provider-side success must settle even though client throws.
-          () => {
-            applyLedger?.();
-          },
-        );
+              applyLedger = () => {
+                state.capturedAmountMinor = finalCapturedMinor;
+                state.authorized = false;
+                state.status = nextStatus;
+              };
+              return {
+                ...defaultPaymentResult(
+                  params.gatewayPaymentId,
+                  nextStatus,
+                  amountMajor,
+                  name,
+                ),
+                capturedAmount: capturedMajor,
+                amount: amountMajor,
+              };
+            },
+            signal,
+            // Dual-timeout: provider-side success must settle even though client throws.
+            () => {
+              applyLedger?.();
+            },
+          );
 
-        if (applyLedger && isLedgerSettlingResult(result)) {
-          applyLedger();
-        }
-        return result;
-      });
+          if (applyLedger && isLedgerSettlingResult(result)) {
+            applyLedger();
+          }
+          return result;
+        }),
+      );
     },
 
     async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
@@ -1263,126 +1304,130 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
-        const outcome = takeRefundStep();
-        const signal = getSignal(params);
-        await applyLatency(outcome, signal);
+        // Serialize per payment so concurrent refunds re-check remaining (TESTKIT-1).
+        return withPaymentLedgerLock(params.gatewayPaymentId, async () => {
+          const outcome = takeRefundStep();
+          const signal = getSignal(params);
+          await applyLatency(outcome, signal);
 
-        if (outcome && isThrowStep(outcome)) {
-          handleThrowStep(outcome);
-        }
+          if (outcome && isThrowStep(outcome)) {
+            handleThrowStep(outcome);
+          }
 
-        if (outcome?.outcome === "custom") {
-          if (outcome.error) throw outcome.error;
-          if (outcome.result) return outcome.result;
-        }
-        if (
-          outcome?.outcome === "network_error" ||
-          outcome?.outcome === "timeout"
-        ) {
-          throw new NetworkError(outcome.message ?? "Network error (mock)");
-        }
-        if (outcome?.outcome === "gateway_api_error") {
-          throw new GatewayApiError(
-            outcome.message ?? "Gateway API error (mock)",
-            name,
-          );
-        }
-        if (outcome?.outcome === "indeterminate") {
-          return applyOutcomeToGatewayRefundResult(
-            {
-              gatewayRefundId: nextId("ref"),
-              status: "pending",
-              rawResponse: {
-                mock: true,
-                error: { code: "INDETERMINATE" },
-                reconciliationRequired: true,
+          if (outcome?.outcome === "custom") {
+            if (outcome.error) throw outcome.error;
+            if (outcome.result) return outcome.result;
+          }
+          if (
+            outcome?.outcome === "network_error" ||
+            outcome?.outcome === "timeout"
+          ) {
+            throw new NetworkError(outcome.message ?? "Network error (mock)");
+          }
+          if (outcome?.outcome === "gateway_api_error") {
+            throw new GatewayApiError(
+              outcome.message ?? "Gateway API error (mock)",
+              name,
+            );
+          }
+          if (outcome?.outcome === "indeterminate") {
+            return applyOutcomeToGatewayRefundResult(
+              {
+                gatewayRefundId: nextId("ref"),
+                status: "pending",
+                rawResponse: {
+                  mock: true,
+                  error: { code: "INDETERMINATE" },
+                  reconciliationRequired: true,
+                },
               },
-            },
-            "indeterminate",
-          );
-        }
-        if (outcome?.outcome === "failed") {
-          return applyOutcomeToGatewayRefundResult(
-            {
-              gatewayRefundId: nextId("ref"),
-              status: "failed",
-              rawResponse: { mock: true, status: "failed" },
-            },
-            "failed",
-          );
-        }
+              "indeterminate",
+            );
+          }
+          if (outcome?.outcome === "failed") {
+            return applyOutcomeToGatewayRefundResult(
+              {
+                gatewayRefundId: nextId("ref"),
+                status: "failed",
+                rawResponse: { mock: true, status: "failed" },
+              },
+              "failed",
+            );
+          }
 
-        const state = payments.get(params.gatewayPaymentId);
-        if (!state) {
-          throw new GatewayApiError(
-            `Payment ${params.gatewayPaymentId} not found (mock)`,
-            name,
-          );
-        }
-        const remainingMinor =
-          state.capturedAmountMinor - state.refundedAmountMinor;
-        if (remainingMinor <= 0) {
-          throw new InvalidRequestError(
-            `Payment ${params.gatewayPaymentId} has no refundable amount remaining (mock)`,
-          );
-        }
-        const currency = params.currency ?? state.currency;
-        const refundMinor =
-          params.amount !== undefined
-            ? resolveChargeAmount(params.amount, currency).minor
-            : remainingMinor;
-        if (refundMinor <= 0) {
-          throw new InvalidRequestError(
-            `Refund amount must be positive (got ${minorToMajor(refundMinor, currency)}) (mock)`,
-          );
-        }
-        if (refundMinor > remainingMinor) {
-          throw new InvalidRequestError(
-            `Over-refund: requested ${minorToMajor(refundMinor, currency)}, remaining refundable ${minorToMajor(remainingMinor, currency)} (mock)`,
-          );
-        }
-        if (
-          params.amount !== undefined &&
-          refundMinor < remainingMinor &&
-          !capabilities.partialRefunds
-        ) {
-          throw new OperationNotSupportedError(name, "partialRefund", {
-            capability: "partialRefunds",
-            claimedSupport: false,
-          });
-        }
+          const state = payments.get(params.gatewayPaymentId);
+          if (!state) {
+            throw new GatewayApiError(
+              `Payment ${params.gatewayPaymentId} not found (mock)`,
+              name,
+            );
+          }
+          const remainingMinor =
+            state.capturedAmountMinor - state.refundedAmountMinor;
+          if (remainingMinor <= 0) {
+            throw new InvalidRequestError(
+              `Payment ${params.gatewayPaymentId} has no refundable amount remaining (mock)`,
+            );
+          }
+          const currency = params.currency ?? state.currency;
+          const refundMinor =
+            params.amount !== undefined
+              ? resolveChargeAmount(params.amount, currency).minor
+              : remainingMinor;
+          if (refundMinor <= 0) {
+            throw new InvalidRequestError(
+              `Refund amount must be positive (got ${minorToMajor(refundMinor, currency)}) (mock)`,
+            );
+          }
+          if (refundMinor > remainingMinor) {
+            throw new InvalidRequestError(
+              `Over-refund: requested ${minorToMajor(refundMinor, currency)}, remaining refundable ${minorToMajor(remainingMinor, currency)} (mock)`,
+            );
+          }
+          if (
+            params.amount !== undefined &&
+            refundMinor < remainingMinor &&
+            !capabilities.partialRefunds
+          ) {
+            throw new OperationNotSupportedError(name, "partialRefund", {
+              capability: "partialRefunds",
+              claimedSupport: false,
+            });
+          }
 
-        state.refundedAmountMinor += refundMinor;
-        if (state.refundedAmountMinor >= state.capturedAmountMinor) {
-          state.status = "refunded";
-          state.refundedAmountMinor = state.capturedAmountMinor;
-        } else {
-          state.status = "partially_refunded";
-        }
+          state.refundedAmountMinor += refundMinor;
+          if (state.refundedAmountMinor >= state.capturedAmountMinor) {
+            state.status = "refunded";
+            state.refundedAmountMinor = state.capturedAmountMinor;
+          } else {
+            state.status = "partially_refunded";
+          }
 
-        const refundId = nextId("ref");
-        // Ledger-derived totals are authoritative (TESTKIT-3). Scripted
-        // `result` may add metadata but must not override reported money
-        // fields after the ledger has already been mutated.
-        const base = defaultRefundResult(
-          refundId,
-          "completed",
-          minorToMajor(state.refundedAmountMinor, state.currency),
-        );
-        if (outcome?.outcome === "partial_refund" || outcome?.result) {
-          const override = (outcome.result ?? {}) as Partial<GatewayRefundResult>;
-          return {
-            ...base,
-            ...override,
-            // Re-assert ledger-derived money identity after spread
-            status: base.status,
-            totalRefunded: base.totalRefunded,
-            success: base.success,
-            outcome: base.outcome,
-            gatewayRefundId: override.gatewayRefundId ?? base.gatewayRefundId,
-          };
-        }
-        return base;
+          const refundId = nextId("ref");
+          // Ledger-derived totals are authoritative (TESTKIT-3). Scripted
+          // `result` may add metadata but must not override reported money
+          // fields after the ledger has already been mutated.
+          const base = defaultRefundResult(
+            refundId,
+            "completed",
+            minorToMajor(state.refundedAmountMinor, state.currency),
+          );
+          if (outcome?.outcome === "partial_refund" || outcome?.result) {
+            const override = (outcome.result ??
+              {}) as Partial<GatewayRefundResult>;
+            return {
+              ...base,
+              ...override,
+              // Re-assert ledger-derived money identity after spread
+              status: base.status,
+              totalRefunded: base.totalRefunded,
+              success: base.success,
+              outcome: base.outcome,
+              gatewayRefundId: override.gatewayRefundId ?? base.gatewayRefundId,
+            };
+          }
+          return base;
+        });
       });
     },
 
@@ -1394,48 +1439,51 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
-        const outcome = takePaymentStep("voidPayment");
-        const signal = getSignal(params);
-        const state = payments.get(params.gatewayPaymentId);
-        // Defer cancel mutation until outcome is money-settling (void success).
-        let applyLedger: (() => void) | undefined;
+        // Serialize with capture/refund so void cannot race capture (TESTKIT-1).
+        return withPaymentLedgerLock(params.gatewayPaymentId, async () => {
+          const outcome = takePaymentStep("voidPayment");
+          const signal = getSignal(params);
+          const state = payments.get(params.gatewayPaymentId);
+          // Defer cancel mutation until outcome is money-settling (void success).
+          let applyLedger: (() => void) | undefined;
 
-        const result = await resolvePaymentOutcome(
-          outcome,
-          () => {
-            // TESTKIT-3: fail closed for unknown payment IDs (match capture/refund/get).
-            if (!state) {
-              throw new GatewayApiError(
-                `Payment ${params.gatewayPaymentId} not found (mock)`,
+          const result = await resolvePaymentOutcome(
+            outcome,
+            () => {
+              // TESTKIT-3: fail closed for unknown payment IDs (match capture/refund/get).
+              if (!state) {
+                throw new GatewayApiError(
+                  `Payment ${params.gatewayPaymentId} not found (mock)`,
+                  name,
+                );
+              }
+              if (state.capturedAmountMinor > 0) {
+                throw new InvalidRequestError(
+                  `Cannot void payment ${params.gatewayPaymentId} after capture (mock)`,
+                );
+              }
+              applyLedger = () => {
+                state.status = "cancelled";
+                state.authorized = false;
+              };
+              return defaultPaymentResult(
+                params.gatewayPaymentId,
+                "cancelled",
+                undefined,
                 name,
               );
-            }
-            if (state.capturedAmountMinor > 0) {
-              throw new InvalidRequestError(
-                `Cannot void payment ${params.gatewayPaymentId} after capture (mock)`,
-              );
-            }
-            applyLedger = () => {
-              state.status = "cancelled";
-              state.authorized = false;
-            };
-            return defaultPaymentResult(
-              params.gatewayPaymentId,
-              "cancelled",
-              undefined,
-              name,
-            );
-          },
-          signal,
-          () => {
-            applyLedger?.();
-          },
-        );
+            },
+            signal,
+            () => {
+              applyLedger?.();
+            },
+          );
 
-        if (applyLedger && isLedgerSettlingResult(result)) {
-          applyLedger();
-        }
-        return result;
+          if (applyLedger && isLedgerSettlingResult(result)) {
+            applyLedger();
+          }
+          return result;
+        });
       });
     },
 

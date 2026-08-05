@@ -331,7 +331,7 @@ describe("trySelectFallbackGateway", () => {
     ).toThrow(UnsafeFallbackDeniedError);
   });
 
-  it("ROUTE-1: forged eligibility.allowed is rejected without expertOverride", () => {
+  it("forged eligibility.allowed is rejected without expertOverride", () => {
     for (const submissionState of UNSAFE) {
       const forged = {
         allowed: true,
@@ -349,7 +349,40 @@ describe("trySelectFallbackGateway", () => {
     }
   });
 
-  it("ROUTE-1: expertOverride on eligibility still allows unsafe select", () => {
+  it("ROUTE-2: forged expertOverride:true without expert_override reason is rejected", () => {
+    for (const submissionState of UNSAFE) {
+      const forged = {
+        allowed: true,
+        reason: "forged",
+        submissionState,
+        expertOverride: true as const,
+      };
+      expect(() =>
+        trySelectFallbackGateway(
+          router,
+          { currency: "USD" },
+          forged,
+          { attemptedGateways: ["stripe"] },
+        ),
+      ).toThrow(UnsafeFallbackDeniedError);
+    }
+    // Empty suffix after prefix also rejected
+    expect(() =>
+      trySelectFallbackGateway(
+        router,
+        { currency: "USD" },
+        {
+          allowed: true,
+          reason: "expert_override:",
+          submissionState: "timeout",
+          expertOverride: true,
+        },
+        { attemptedGateways: ["stripe"] },
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+  });
+
+  it("genuine evaluateFallback expertOverride still allows unsafe select", () => {
     const eligibility = evaluateFallback({
       submissionState: "timeout",
       expertOverride: {
@@ -359,6 +392,7 @@ describe("trySelectFallbackGateway", () => {
     });
     expect(eligibility.allowed).toBe(true);
     expect(eligibility.expertOverride).toBe(true);
+    expect(eligibility.reason.startsWith("expert_override:")).toBe(true);
     const decision = trySelectFallbackGateway(
       router,
       { currency: "USD" },

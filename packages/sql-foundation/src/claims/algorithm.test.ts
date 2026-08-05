@@ -13,6 +13,7 @@ import {
   idempotencyReserveTemplates,
   pickClaimTemplate,
   reconciliationClaimTemplates,
+  reconciliationTimestampRepairTemplates,
   webhookClaimTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,
@@ -203,6 +204,66 @@ describe("decideWebhookClaim", () => {
       },
     });
     expect(conflict.kind).toBe("payload_hash_conflict");
+  });
+
+  it("WEBHOOKS-1: terminal completed/dead_letter/failed before payload_hash_conflict", () => {
+    const base = {
+      payloadHash: "h1",
+      generation: 1,
+      attempts: 1,
+      createdAt: "2026-01-15T11:00:00.000Z",
+      availableAt: "2026-01-15T11:00:00.000Z",
+    };
+
+    // Mismatched hash on completed → already_completed (not payload_hash_conflict)
+    expect(
+      decideWebhookClaim({
+        key: "e",
+        payloadHash: "h2-different",
+        owner: "w",
+        leaseMs: 1000,
+        newLeaseToken: "t",
+        clock: { nowMs },
+        existing: { ...base, status: "completed" },
+      }).kind,
+    ).toBe("already_completed");
+
+    expect(
+      decideWebhookClaim({
+        key: "e",
+        payloadHash: "h2-different",
+        owner: "w",
+        leaseMs: 1000,
+        newLeaseToken: "t",
+        clock: { nowMs },
+        existing: { ...base, status: "dead_letter" },
+      }).kind,
+    ).toBe("duplicate_failed");
+
+    expect(
+      decideWebhookClaim({
+        key: "e",
+        payloadHash: "h2-different",
+        owner: "w",
+        leaseMs: 1000,
+        newLeaseToken: "t",
+        clock: { nowMs },
+        existing: { ...base, status: "failed" },
+      }).kind,
+    ).toBe("duplicate_failed");
+
+    // Non-terminal still conflicts on hash mismatch
+    expect(
+      decideWebhookClaim({
+        key: "e",
+        payloadHash: "h2-different",
+        owner: "w",
+        leaseMs: 1000,
+        newLeaseToken: "t",
+        clock: { nowMs },
+        existing: { ...base, status: "pending" },
+      }).kind,
+    ).toBe("payload_hash_conflict");
   });
 
   it("covers pending reclaim, completed, dead_letter, failed, in_progress, expired claim", () => {
@@ -719,6 +780,23 @@ describe("dialect claim templates", () => {
     expect(rec.postgres.sql).toContain("UPDATE");
     expect(rec.sqlite.sql).toContain("UPDATE");
     expect(rec.postgres.params).not.toEqual(rec.sqlite.params);
+
+    // SQL-1: timestamp repair free-lease fence (never overwrite active winner lease).
+    const repair = reconciliationTimestampRepairTemplates(ns);
+    for (const frag of [repair.postgres, repair.sqlite]) {
+      expect(frag.sql).toContain("due_at");
+      expect(frag.sql).toContain("lease_expires_at");
+      expect(frag.sql).toContain("status = 'scheduled'");
+      expect(frag.sql).toMatch(/lease_expires_at IS NULL/i);
+      expect(frag.sql).toMatch(/lease_expires_at\s*<=/i);
+      expect(frag.sql).toContain("NOT IN ('completed', 'failed', 'manual_review')");
+      // Must not be an unfenced key-only repair.
+      expect(frag.sql).not.toMatch(
+        /WHERE key = \S+\s+AND status NOT IN \('completed', 'failed', 'manual_review'\)\s*$/i,
+      );
+    }
+    expect(repair.postgres.params).toEqual(["key", "dueAt", "leaseExpiresAt", "now"]);
+    expect(repair.sqlite.params).toEqual(["dueAt", "leaseExpiresAt", "key", "now"]);
   });
 
   it("never leaves unvalidated table placeholders like raw user input", () => {

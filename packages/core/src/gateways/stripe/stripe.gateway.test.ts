@@ -128,10 +128,18 @@ describe("StripeGateway", () => {
       expect(gateway.verifyWebhook(payload, signature)).toBe(false);
     });
 
-    it("should accept future timestamps (only aged timestamps older than 300s are rejected)", () => {
+    it("should reject far-future timestamps outside bidirectional 300s tolerance (STRIPE-4)", () => {
       const payload = JSON.stringify({ id: "evt_future" });
-      // 4 minutes in the future — aged check is now - eventTime, so this passes
-      const timestamp = Math.floor(Date.now() / 1000) + 240;
+      // 10 minutes in the future — |now - t| > 300 is rejected (stripe-node parity)
+      const timestamp = Math.floor(Date.now() / 1000) + 600;
+      const signature = createStripeSignature(payload, timestamp);
+
+      expect(gateway.verifyWebhook(payload, signature)).toBe(false);
+    });
+
+    it("should accept near-future timestamps within bidirectional 300s tolerance", () => {
+      const payload = JSON.stringify({ id: "evt_near_future" });
+      const timestamp = Math.floor(Date.now() / 1000) + 60;
       const signature = createStripeSignature(payload, timestamp);
 
       expect(gateway.verifyWebhook(payload, signature)).toBe(true);
@@ -616,7 +624,12 @@ describe("StripeGateway", () => {
       expect(event.status).not.toBe("refunded");
       expect(event.gatewayPaymentId).toBe("pi_from_charge");
       expect(event.gatewayObjectId).toBe("ch_123");
-      expect(event.amount).toBe(25);
+      // STRIPE-3: omit amount when amount_refunded is incomplete (do not publish charge total)
+      expect(event.amount).toBeUndefined();
+      // STRIPE-2: incomplete must not dual-write refund.completed
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
+      expect(event.stableType).not.toBe("refund.completed");
     });
 
     it("should mark charge.refunded partial refunds as partially_refunded", () => {
@@ -641,11 +654,19 @@ describe("StripeGateway", () => {
 
       expect(event.status).toBe("partially_refunded");
       expect(event.gatewayPaymentId).toBe("pi_partial_refund");
-      // amount is the payment/captured total, not cumulative amount_refunded
-      expect(event.amount).toBe(25);
+      // STRIPE-3: amount is cumulative amount_refunded, not payment/captured total
+      expect(event.amount).toBe(12);
+      expect(event.amount).not.toBe(25);
+      // Proven partial dual-writes refund.completed
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      if (event.event?.type === "refund.completed") {
+        // Dual-write Refund.amount must match amount_refunded (not charge total)
+        expect(event.event.refund.amount).toBe(12);
+      }
     });
 
-    it("should treat charge.refunded===true as full refund and prefer amount_captured for amount", () => {
+    it("should treat charge.refunded===true as full refund and use amount_refunded for amount", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_charge_refunded_flag",
         type: "charge.refunded",
@@ -668,8 +689,10 @@ describe("StripeGateway", () => {
       });
 
       expect(event.status).toBe("refunded");
+      // STRIPE-3: amount from amount_refunded (equals captured on full refund of partial capture)
       expect(event.amount).toBe(60);
       expect(event.gatewayPaymentId).toBe("pi_flag_full");
+      expect(event.stableType).toBe("refund.completed");
     });
 
     it("should fail closed on charge.refunded when amount_refunded is 0 (not partially_refunded)", () => {
@@ -694,11 +717,15 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      // STRIPE-4: zero amount_refunded is not a proven partial refund.
+      // Zero amount_refunded is not a proven partial refund.
       expect(event.status).toBe("refund_completed");
       expect(event.status).not.toBe("partially_refunded");
       expect(event.status).not.toBe("refunded");
-      expect(event.amount).toBe(25);
+      // STRIPE-3: omit amount on incomplete refund money
+      expect(event.amount).toBeUndefined();
+      // STRIPE-2: incomplete dual-write is refund.pending, not refund.completed
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
     });
 
     it("should compare charge.refunded amount_refunded to amount_captured when present", () => {
@@ -724,7 +751,9 @@ describe("StripeGateway", () => {
       });
 
       expect(event.status).toBe("partially_refunded");
-      expect(event.amount).toBe(60);
+      // STRIPE-3: amount is amount_refunded (30), not captured total (60)
+      expect(event.amount).toBe(30);
+      expect(event.amount).not.toBe(60);
     });
 
     it("should use related PaymentIntent for legacy refund update events", () => {
@@ -750,6 +779,9 @@ describe("StripeGateway", () => {
       expect(event.gatewayPaymentId).toBe("pi_from_refund");
       expect(event.gatewayObjectId).toBe("re_123");
       expect(event.amount).toBe(12);
+      // STRIPE-2: incomplete aggregate → dual-write refund.pending (not completed)
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
     });
 
     it("should not guess full or partial refund status without expanded charge totals", () => {
@@ -774,6 +806,9 @@ describe("StripeGateway", () => {
       expect(event.status).toBe("refund_completed");
       expect(event.gatewayPaymentId).toBe("pi_modern_refund");
       expect(event.amount).toBe(12);
+      // STRIPE-2: incomplete aggregate dual-write is pending, not completed
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
     });
 
     it("should mark refund.created succeeded as completed when aggregate payment state is unknown", () => {
@@ -799,6 +834,9 @@ describe("StripeGateway", () => {
       expect(event.gatewayPaymentId).toBe("pi_created_refund");
       expect(event.gatewayObjectId).toBe("re_created");
       expect(event.amount).toBe(25);
+      // STRIPE-2: incomplete aggregate dual-write is pending, not completed
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
     });
 
     it("should mark refund events as fully refunded when expanded charge totals prove it", () => {
@@ -1825,6 +1863,28 @@ describe("StripeGateway", () => {
 
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("129");
       expect(result.amount).toBe(1.29);
+      // STRIPE-1: currency published with major-unit amount
+      expect(result.currency).toBe("USD");
+    });
+
+    it("STRIPE-1: createPayment publishes currency with major-unit amount", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_currency",
+          status: "requires_payment_method",
+          amount: 5000,
+          currency: "usd",
+          client_secret: "cs_test",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(result.amount).toBe(50);
+      expect(result.currency).toBe("USD");
     });
 
     it("should fail closed on createPayment when PI succeeded but settled amount missing", async () => {
@@ -1942,6 +2002,8 @@ describe("StripeGateway", () => {
       });
       expect(result.status).toBe("paid");
       expect(result.amount).toBe(100);
+      // STRIPE-1: currency accompanies amount
+      expect(result.currency).toBe("USD");
       expect(new URLSearchParams(capturedBody).toString()).toBe("");
       expect(result.outcome).toBe("succeeded");
       expect(result.success).toBe(true);
@@ -3092,6 +3154,8 @@ describe("StripeGateway", () => {
       });
 
       expect(result.amount).toBe(5000);
+      // STRIPE-1: currency with major-unit amount
+      expect(result.currency).toBe("JPY");
       expect(result.clientSecret).toBe("pi_get_jpy_secret");
     });
 
@@ -3120,6 +3184,8 @@ describe("StripeGateway", () => {
 
       expect(requestedUrl).toContain("expand[]=latest_charge");
       expect(result.refundedAmount).toBe(100);
+      // STRIPE-1: currency accompanies refundedAmount / amount
+      expect(result.currency).toBe("USD");
       expect(result.status).toBe("refunded");
     });
 
@@ -3147,6 +3213,7 @@ describe("StripeGateway", () => {
       expect(result.status).toBe("refunded");
       expect(result.amount).toBe(50);
       expect(result.refundedAmount).toBe(50);
+      expect(result.currency).toBe("USD");
     });
 
     it("should mark partial refunds as partially_refunded", async () => {

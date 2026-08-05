@@ -119,13 +119,20 @@ Maps core `PaymentOperationOutcome` conservatively:
 
 #### `classifySubmissionState(input)`
 
-Priority:
+Priority (money-moving / uncertain signals win over pre-submit-only kinds):
 
 1. Explicit `submissionState` if provided
-2. Known `errorKind` strings (`timeout`, `ECONNRESET`, `validation_error`, `not_submitted`, `aborted_before_submit`, …)
-3. Error object shape (name/code/message/statusCode patterns — no secrets required)
-4. `outcome` / result `outcome` field / core `isIndeterminateOutcome`
-5. Default: **`indeterminate`** (fail-closed for fallback)
+2. Known **transport / uncertain** `errorKind` strings (`timeout`, `ECONNRESET`, `provider_5xx_uncertain`, abort shapes, …) — **not** deferred
+3. Matching **transport / uncertain** error object shape (name/code/message/statusCode)
+4. `outcome` / result `outcome` field / core `isIndeterminateOutcome` (e.g. succeeded / declined / indeterminate)
+5. Only then: deferred **pre-submission-only** classifications from `errorKind` / error
+   (`validation_error`, `configuration_error`, explicit `not_submitted` / `aborted_before_submit`)
+6. Default: **`indeterminate`** (fail-closed for fallback)
+
+**Why step 5 is last:** a validation-looking error kind must not classify as
+`pre_submission_failure` (multi-gateway safe) when an operation outcome already
+indicates the request was accepted or money state is unknown. Docs that put
+`validation_error` ahead of outcome would teach unsafe post-accept fallback.
 
 ```typescript
 classifyFromOperationOutcome("indeterminate"); // → "indeterminate"

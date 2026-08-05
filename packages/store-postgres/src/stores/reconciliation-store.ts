@@ -7,6 +7,7 @@ import {
   canonicalizeOptionalIsoTimestamp,
   classifyReconciliationClaimMiss,
   reconciliationClaimTemplates,
+  reconciliationTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -50,6 +51,7 @@ export function createPostgresReconciliationStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = reconciliationClaimTemplates(ctx.namespace).postgres;
+  const repairTpl = reconciliationTimestampRepairTemplates(ctx.namespace).postgres;
 
   async function selectByKey(
     key: string,
@@ -132,21 +134,17 @@ export function createPostgresReconciliationStore(
           return claimMissToResult(miss, existing);
         }
 
-        // SQL-2: free due work but claim WHERE missed (typically lexical TEXT
-        // timestamp mismatch). Canonicalize due_at/lease_expires_at and retry once.
+        // SQL-1/SQL-2: free due work but claim WHERE missed (typically lexical
+        // TEXT timestamp mismatch). Canonicalize due_at/lease_expires_at and
+        // retry once. Repair is free-lease fenced so concurrent winners' active
+        // lease_expires_at cannot be wiped by a stale SELECT snapshot.
         // Never report free due work as in_progress (stuck pollers).
         const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
         const leaseZ =
           canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
           null;
-        await exec.execute(
-          `UPDATE ${table} SET
-             due_at = $2,
-             lease_expires_at = $3
-           WHERE key = $1
-             AND status NOT IN ('completed', 'failed', 'manual_review')`,
-          [input.key, dueAtZ, leaseZ],
-        );
+        // params: key, dueAt, leaseExpiresAt, now
+        await exec.execute(repairTpl.sql, [input.key, dueAtZ, leaseZ, now]);
 
         const retried = await exec.query<Record<string, unknown>>(
           claimTpl.sql,

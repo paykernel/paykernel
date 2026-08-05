@@ -264,6 +264,26 @@ describe("createMemoryWebhookInboxStore", () => {
     expect(c.kind).toBe("payload_hash_conflict");
   });
 
+  it("WEBHOOKS-1: completed terminal wins before payload_hash_conflict", async () => {
+    const store = createMemoryWebhookInboxStore({ clock: createFakeClock() });
+    const a = await store.claim({
+      key: "e_term",
+      payloadHash: "a",
+      owner: "w",
+      leaseMs: 5000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") throw new Error("expected acquired");
+    await store.complete({ key: "e_term", leaseToken: a.leaseToken });
+    const again = await store.claim({
+      key: "e_term",
+      payloadHash: "b-different",
+      owner: "w2",
+      leaseMs: 5000,
+    });
+    expect(again.kind).toBe("already_completed");
+  });
+
   it("withTransaction rollback on claim", async () => {
     const store = createMemoryWebhookInboxStore({ clock: createFakeClock() });
     await expect(

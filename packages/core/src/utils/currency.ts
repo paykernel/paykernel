@@ -216,9 +216,31 @@ export function getCurrencyExponent(
       ("overrides" in overridesOrOptions ||
         "allowUnknown" in overridesOrOptions)
     ) {
-      const opts = overridesOrOptions as GetCurrencyExponentOptions;
-      overrides = opts.overrides;
+      // MONEY-3: options bag may mix `allowUnknown` with currency-code keys
+      // (`{ OMR: 2, allowUnknown: true }`). Prefer explicit `overrides`, else
+      // treat remaining non-option keys as the overrides map so scale is not
+      // silently dropped.
+      const opts = overridesOrOptions as GetCurrencyExponentOptions &
+        Record<string, unknown>;
       allowUnknown = opts.allowUnknown === true;
+      if (opts.overrides !== undefined) {
+        overrides = opts.overrides;
+      } else {
+        const rest: Record<string, number> = {};
+        let hasRest = false;
+        for (const [key, value] of Object.entries(opts)) {
+          if (key === "overrides" || key === "allowUnknown") {
+            continue;
+          }
+          if (typeof value === "number") {
+            rest[key] = value;
+            hasRest = true;
+          }
+        }
+        if (hasRest) {
+          overrides = rest;
+        }
+      }
     } else {
       overrides = overridesOrOptions as CurrencyExponentOverrides;
     }

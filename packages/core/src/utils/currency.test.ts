@@ -94,4 +94,19 @@ describe("getCurrencyExponent", () => {
     expect(getCurrencyExponent("JPY", { OMR: 2 })).toBe(0);
     expect(getCurrencyExponent("KWD", {})).toBe(3);
   });
+
+  it("honors map overrides mixed with allowUnknown (MONEY-3)", () => {
+    // Classic dual-overload footgun: { OMR: 2, allowUnknown: true } must not
+    // drop the OMR override and fall back to ISO exponent 3.
+    expect(
+      getCurrencyExponent("OMR", { OMR: 2, allowUnknown: true }),
+    ).toBe(2);
+    expect(
+      getCurrencyExponent("XXX", { OMR: 2, allowUnknown: true }),
+    ).toBe(2);
+    // Explicit options form still works
+    expect(
+      getCurrencyExponent("OMR", { overrides: { OMR: 2 }, allowUnknown: true }),
+    ).toBe(2);
+  });
 });

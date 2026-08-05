@@ -28,7 +28,8 @@ import {
  *
  * - `timeout` / `network_error` → {@link NetworkError} (transport-level; reconcile)
  * - `provider_ok_client_timeout` / `provider_success_client_timeout` →
- *   provider ledger updated as `outcome: 'succeeded'`; client sees NetworkError
+ *   provider ledger updated as `outcome: 'succeeded'` (auth-only when
+ *   create used `capture: false`; otherwise paid + full capture); client sees NetworkError
  * - `indeterminate` → result with `outcome: 'indeterminate'`, `success: false`,
  *   status processing, `reconciliationRequired: true` (never a definitive decline)
  * - `requires_action` → `outcome: 'requires_action'`, `success: true`, pending + redirect

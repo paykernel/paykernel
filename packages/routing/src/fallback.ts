@@ -411,11 +411,13 @@ function classifyErrorObject(
 /**
  * Select an alternate gateway only when eligibility is safe.
  *
- * **ROUTE-1:** does not trust `eligibility.allowed` alone. Re-validates
+ * Does not trust `eligibility.allowed` alone. Re-validates
  * {@link isSafeFallbackEligible} on `eligibility.submissionState`. Forged
  * `{ allowed: true, submissionState: "timeout" | "submitted" | … }` is denied
- * unless `eligibility.expertOverride === true` (loud opt-in from
- * {@link evaluateFallback}).
+ * unless eligibility carries a genuine expert override from
+ * {@link evaluateFallback} (`expertOverride: true` **and**
+ * `reason` starting with `expert_override:` — bare `expertOverride: true`
+ * without that reason prefix is rejected).
  *
  * Excludes already-attempted gateways from candidates.
  *
@@ -440,9 +442,16 @@ export function trySelectFallbackGateway(
     );
   }
 
-  // ROUTE-1: re-validate submission safety — never trust forged allowed:true.
+  // Re-validate submission safety — never trust forged allowed:true.
+  // Defense-in-depth: expert override requires both the flag AND the
+  // evaluateFallback reason prefix (forged { expertOverride: true } alone is denied).
   const state = eligibility.submissionState;
-  if (!isSafeFallbackEligible(state) && eligibility.expertOverride !== true) {
+  const genuineExpertOverride =
+    eligibility.expertOverride === true &&
+    typeof eligibility.reason === "string" &&
+    eligibility.reason.startsWith("expert_override:") &&
+    eligibility.reason.length > "expert_override:".length;
+  if (!isSafeFallbackEligible(state) && !genuineExpertOverride) {
     throw new UnsafeFallbackDeniedError(
       `Post-attempt fallback denied: submission state is not safe for multi-gateway retry (${state})`,
       {

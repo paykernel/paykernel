@@ -382,6 +382,69 @@ describe("HooksManager webhook hook composition", () => {
     expect(order).toEqual(["a:pay_x", "b:pay_x"]);
   });
 
+  it("clones event per onWebhookVerified handler so first cannot poison second (CORE-2)", async () => {
+    const seen: Array<{ status: string; amount?: number }> = [];
+    const manager = new HooksManager({
+      onWebhookVerified: async (e) => {
+        seen.push({ status: e.status, amount: e.amount });
+        // Mutate identity fields — must not affect the next handler.
+        e.status = "failed";
+        e.amount = 0.01;
+        (e as { stableType?: string }).stableType = "payment.failed";
+      },
+    });
+    manager.register("onWebhookVerified", async (e) => {
+      seen.push({ status: e.status, amount: e.amount });
+    });
+
+    await manager.runWebhookVerified({
+      id: "evt_clone",
+      gateway: "stripe",
+      type: "payment_intent.succeeded",
+      paymentId: "pi_1",
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: 25,
+      currency: "USD",
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      rawPayload: {},
+      stableType: "payment.succeeded",
+    } as WebhookEvent);
+
+    expect(seen).toEqual([
+      { status: "paid", amount: 25 },
+      { status: "paid", amount: 25 },
+    ]);
+  });
+
+  it("post-before guards see hook-injected amount (CORE-1 support)", async () => {
+    const seenAmounts: unknown[] = [];
+    const manager = new HooksManager({
+      beforeCapture: async (ctx) => ({
+        proceed: true,
+        params: { ...ctx.params, amount: 42 },
+      }),
+    });
+    manager.registerPostBeforeGuard((ctx) => {
+      if (ctx.operation === "capturePayment") {
+        seenAmounts.push((ctx.params as { amount?: unknown }).amount);
+      }
+    });
+
+    const result = await manager.runBefore(
+      baseCtx({
+        params: { gatewayPaymentId: "pi_1" },
+        operation: "capturePayment",
+      }),
+    );
+
+    expect(result.proceed).toBe(true);
+    expect(result.params).toEqual(
+      expect.objectContaining({ amount: 42, gatewayPaymentId: "pi_1" }),
+    );
+    expect(seenAmounts).toEqual([42]);
+  });
+
   it("runs both onWebhookFailed handlers and rethrows the first error after both complete", async () => {
     const order: string[] = [];
     const manager = new HooksManager({

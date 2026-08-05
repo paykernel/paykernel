@@ -133,7 +133,7 @@ Only set non-sensitive primitives. Instrumentation (`withPaymentOperation`) sets
 - optional: `tenant`, `namespace`, `internalReference`, `providerObjectId`, `providerRequestId`, `attemptNumber`, `inboxEventKey`
 - on end: `normalizedOutcome`, `durationMs`, and updated provider ids
 
-**Never** set card data, tokens, raw payloads, full error messages with secrets, or auth headers as attributes. Structured bags still go through [redaction](./redaction.md); attributes are caller-owned discipline.
+**Never** set card data, tokens, raw payloads, full error messages with secrets, or auth headers as attributes. Structured bags still go through [redaction](./redaction.md). The OTEL bridge auto-redacts attributes via `redactAttributeBag` (defense-in-depth); still treat attributes as caller-owned discipline for custom tracers.
 
 ## With instrumentation
 

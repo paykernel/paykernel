@@ -110,6 +110,8 @@ metrics.reset();
 
 Prefer allow-listed diagnostic keys aligned with `OperationContext` (see [redaction.md](./redaction.md)). Spans use the same discipline.
 
+> **OBS-1 redaction honesty:** `createInMemoryPaymentMetrics` auto-redacts attribute keys via `redactAttributeBag` (defense-in-depth). A custom `PaymentMetrics` bridge may not — treat labels as caller-owned discipline either way.
+
 ## Instrumentation helpers
 
 `withPaymentOperation` / `recordPaymentOperation` ([instrumentation.md](./instrumentation.md)) automatically:

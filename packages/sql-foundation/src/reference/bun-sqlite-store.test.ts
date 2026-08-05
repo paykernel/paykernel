@@ -444,17 +444,18 @@ export function createBunSqliteRelationalStore(
           );
         } catch {
           const peer = selectWh.get(input.key) as WebhookRow | null;
-          if (peer && peer.payload_hash !== input.payloadHash) {
-            return { kind: "payload_hash_conflict" as const };
-          }
-          if (peer?.status === "claimed") {
-            return { kind: "in_progress" as const };
-          }
+          // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
           if (peer?.status === "completed") {
             return { kind: "already_completed" as const };
           }
           if (peer?.status === "failed" || peer?.status === "dead_letter") {
             return { kind: "duplicate_failed" as const };
+          }
+          if (peer && peer.payload_hash !== input.payloadHash) {
+            return { kind: "payload_hash_conflict" as const };
+          }
+          if (peer?.status === "claimed") {
+            return { kind: "in_progress" as const };
           }
           throw new Error("claimWebhook: insert failed without recoverable peer row");
         }

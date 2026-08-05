@@ -353,6 +353,162 @@ describe("mockGateway", () => {
     ).rejects.toBeInstanceOf(InvalidRequestError);
   });
 
+  it("concurrent partial captures serialize and reject over-capture (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      defaultLatencyMs: 1,
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: true,
+        partialCapture: true,
+        refunds: true,
+        partialRefunds: true,
+        voids: true,
+      }),
+    });
+    const pay = await g.createPayment({
+      amount: 100,
+      currency: "USD",
+      callbackUrl: "https://ex.test/cb",
+      capture: false,
+    });
+    // Two concurrent captures for the full remaining amount: only one may settle.
+    const results = await Promise.allSettled([
+      g.capturePayment({
+        gatewayPaymentId: pay.gatewayId,
+        amount: 100,
+        currency: "USD",
+      }),
+      g.capturePayment({
+        gatewayPaymentId: pay.gatewayId,
+        amount: 100,
+        currency: "USD",
+      }),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      InvalidRequestError,
+    );
+    const state = g.getPaymentState(pay.gatewayId)!;
+    expect(state.capturedAmount).toBe(100);
+    expect(state.status).toBe("paid");
+  });
+
+  it("concurrent partial captures that fit remaining both settle without over-capture (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      defaultLatencyMs: 1,
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: true,
+        partialCapture: true,
+        refunds: true,
+        partialRefunds: true,
+        voids: true,
+      }),
+    });
+    const pay = await g.createPayment({
+      amount: 100,
+      currency: "USD",
+      callbackUrl: "https://ex.test/cb",
+      capture: false,
+    });
+    const [a, b] = await Promise.all([
+      g.capturePayment({
+        gatewayPaymentId: pay.gatewayId,
+        amount: 40,
+        currency: "USD",
+      }),
+      g.capturePayment({
+        gatewayPaymentId: pay.gatewayId,
+        amount: 60,
+        currency: "USD",
+      }),
+    ]);
+    expect(a.success).toBe(true);
+    expect(b.success).toBe(true);
+    const state = g.getPaymentState(pay.gatewayId)!;
+    expect(state.capturedAmount).toBe(100);
+    expect(state.status).toBe("paid");
+  });
+
+  it("concurrent partial refunds serialize and reject over-refund (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      defaultLatencyMs: 1,
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: true,
+        partialCapture: true,
+        refunds: true,
+        partialRefunds: true,
+        voids: true,
+      }),
+    });
+    const paid = await g.createPayment({
+      amount: 50,
+      currency: "USD",
+      callbackUrl: "https://ex.test/cb",
+      capture: true,
+    });
+    const results = await Promise.allSettled([
+      g.refundPayment({
+        gatewayPaymentId: paid.gatewayId,
+        amount: 50,
+        currency: "USD",
+      }),
+      g.refundPayment({
+        gatewayPaymentId: paid.gatewayId,
+        amount: 50,
+        currency: "USD",
+      }),
+    ]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+      InvalidRequestError,
+    );
+    const state = g.getPaymentState(paid.gatewayId)!;
+    expect(state.refundedAmount).toBe(50);
+    expect(state.status).toBe("refunded");
+  });
+
+  it("provider_ok_client_timeout preserves auth-only provider success (TESTKIT-2)", async () => {
+    const g = mockGateway({
+      createPayment: [{ outcome: "provider_ok_client_timeout" }],
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: true,
+        partialCapture: true,
+        refunds: true,
+        partialRefunds: true,
+        voids: true,
+      }),
+    });
+    await expect(
+      g.createPayment({
+        amount: 30,
+        currency: "USD",
+        callbackUrl: "https://ex.test/cb",
+        capture: false,
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+    const side = g.getLastProviderSideSuccess();
+    expect(side?.status).toBe("authorized");
+    expect(side?.outcome).toBe("succeeded");
+    expect(isPaidOutcome(side!)).toBe(false);
+    const state = g.getPaymentState(side!.gatewayId)!;
+    expect(state.status).toBe("authorized");
+    expect(state.capturedAmount).toBe(0);
+    expect(state.authorized).toBe(true);
+  });
+
   it("amount conversion minor units in rawResponse", async () => {
     const g = mockGateway();
     const r = await g.createPayment({

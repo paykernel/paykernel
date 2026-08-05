@@ -77,6 +77,37 @@ function isIndeterminateOutcome(outcome: string | undefined): boolean {
 }
 
 /**
+ * Classify known definitive `@paykernel/core` payment errors thrown from the
+ * instrumented callback (OBS-2). Transport-ambiguous errors (NetworkError,
+ * generic Error, etc.) return undefined so the default stays indeterminate.
+ *
+ * Uses `error.name` (not `instanceof`) so duplicate package copies still match.
+ */
+function normalizedOutcomeFromThrown(
+  error: unknown,
+): string | undefined {
+  if (!(error instanceof Error) || typeof error.name !== "string") {
+    return undefined;
+  }
+  switch (error.name) {
+    case "CardDeclinedError":
+    case "InsufficientFundsError":
+      return "declined";
+    case "InvalidRequestError":
+    case "OperationNotSupportedError":
+    case "GatewayNotConfiguredError":
+    case "ResourceNotFoundError":
+    case "AuthenticationError":
+    case "InvalidWebhookError":
+      return "failed";
+    // NetworkError / PaymentAbortedError / RateLimitError / GatewayApiError /
+    // unknown → transport or provider-ambiguous; keep indeterminate default.
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Non-throw outcomes that should end the span as error (OBS-1).
  * Failed / declined / error / indeterminate money results must not report
  * span status OK — OTEL error rates would undercount payment failures.
@@ -354,11 +385,14 @@ export async function withPaymentOperation<T>(
       }
     }
   }
-  // Thrown errors are ambiguous at the transport boundary (timeout after submit,
-  // network drop mid-flight). Default to indeterminate — never invent definitive
-  // failed. Callers may override via contextPatch when the failure is known-final.
+  // Thrown errors: classify known definitive payment errors (CardDeclinedError →
+  // declined, InvalidRequestError → failed, …). Transport-ambiguous throws
+  // (NetworkError, generic Error) default to indeterminate — never invent
+  // definitive failed. Callers cannot attach contextPatch on a throw path;
+  // for custom known-final outcomes return `{ result, contextPatch }` instead.
   if (thrown !== undefined && patch.normalizedOutcome === undefined) {
-    patch.normalizedOutcome = "indeterminate";
+    patch.normalizedOutcome =
+      normalizedOutcomeFromThrown(thrown) ?? "indeterminate";
   }
 
   const finished = finalizeOperationContext(context, patch);

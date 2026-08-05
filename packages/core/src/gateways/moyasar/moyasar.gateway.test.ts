@@ -458,6 +458,35 @@ describe("MoyasarGateway", () => {
       expect(result.amount).toBe(1.234);
       expect(result.fee).toBe(0.012);
       expect(result.capturedAmount).toBe(1.234);
+      // MOYASAR-1: currency travels with major-unit money fields
+      expect(result.currency).toBe("KWD");
+    });
+
+    it("defensively maps non-finite amount after 2xx without throwing (MOYASAR-2)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          amount: Number.NaN,
+          fee: 250,
+          captured: Number.NaN,
+          refunded: 0,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      // Incomplete amount must not throw post-create (retry could double-charge).
+      expect(result.amount).toBe(0);
+      expect(result.capturedAmount).toBe(0);
+      expect(result.fee).toBe(2.5);
+      expect(result.currency).toBe("SAR");
     });
 
     it("accepts Money amount input for createPayment (bigint minor conversion)", async () => {
@@ -1090,9 +1119,34 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("partially_captured");
       expect(result.capturedAmount).toBe(30);
+      // MOYASAR-1: currency accompanies major-unit amounts on capture path
+      expect(result.currency).toBe("SAR");
+      expect(result.amount).toBe(100);
       // Open money story: not operation-succeeded (MOYASAR-5); still not paid-like.
       expect(result.outcome).toBe("requires_action");
       expect(result.outcome).not.toBe("succeeded");
+    });
+
+    it("publishes currency with amounts on full capture (MOYASAR-1)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "captured",
+          amount: 10000,
+          captured: 10000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await createGateway().capturePayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(result.amount).toBe(100);
+      expect(result.capturedAmount).toBe(100);
+      expect(result.currency).toBe("SAR");
+      expect(result.fee).toBe(2.5);
+      expect(result.refundedAmount).toBe(0);
     });
 
     it("requires currency for partial refunds instead of defaulting to SAR", async () => {
@@ -1310,6 +1364,54 @@ describe("MoyasarGateway", () => {
   });
 
   describe("getPayment", () => {
+    it("publishes currency with major-unit amounts (MOYASAR-1)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 1234,
+          fee: 12,
+          captured: 1234,
+          refunded: 0,
+          currency: "KWD",
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.amount).toBe(1.234);
+      expect(result.fee).toBe(0.012);
+      expect(result.capturedAmount).toBe(1.234);
+      expect(result.refundedAmount).toBe(0);
+      expect(result.currency).toBe("KWD");
+      // Docs post-3DS check: status + amount + currency must all be present
+      expect(result.status).toBe("paid");
+      expect(
+        result.status === "paid" &&
+          result.amount === 1.234 &&
+          result.currency === "KWD",
+      ).toBe(true);
+    });
+
+    it("uppercases provider currency on getPayment money snapshot", async () => {
+      mockFetchJson(
+        paymentResponse({
+          amount: 5000,
+          captured: 5000,
+          currency: "sar",
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.currency).toBe("SAR");
+      expect(result.amount).toBe(50);
+      expect(result.capturedAmount).toBe(50);
+    });
+
     it("validates gatewayPaymentId before fetching", async () => {
       await expect(
         createGateway().getPayment({ gatewayPaymentId: "" }),

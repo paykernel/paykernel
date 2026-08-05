@@ -8,6 +8,7 @@ import {
   canonicalizeIsoTimestamp,
   canonicalizeOptionalIsoTimestamp,
   classifyReconciliationClaimMiss,
+  reconciliationTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -82,6 +83,7 @@ export function createD1ReconciliationStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = claimSql(table);
+  const repairTpl = reconciliationTimestampRepairTemplates(ctx.namespace).sqlite;
 
   async function selectByKey(
     key: string,
@@ -158,19 +160,15 @@ export function createD1ReconciliationStore(
           return claimMissToResult(miss, existing);
         }
 
-        // SQL-2: free due work; repair non-canonical TEXT timestamps and retry once.
+        // SQL-1/SQL-2: free due work; repair non-canonical TEXT timestamps and
+        // retry once. Free-lease fence so concurrent winners' active
+        // lease_expires_at cannot be wiped by a stale SELECT snapshot.
         const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
         const leaseZ =
           canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
           null;
-        await exec.execute(
-          `UPDATE ${table} SET
-             due_at = ?,
-             lease_expires_at = ?
-           WHERE key = ?
-             AND status NOT IN ('completed', 'failed', 'manual_review')`,
-          [dueAtZ, leaseZ, input.key],
-        );
+        // params: dueAt, leaseExpiresAt, key, now
+        await exec.execute(repairTpl.sql, [dueAtZ, leaseZ, input.key, now]);
 
         const retried = await exec.query<Record<string, unknown>>(
           claimTpl,

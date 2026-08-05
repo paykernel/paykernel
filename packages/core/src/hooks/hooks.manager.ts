@@ -18,11 +18,50 @@ import type { GatewayId } from '../types/payment.types';
 import { noopLogger, type Logger } from '../utils/logger';
 
 /**
+ * Deep-clone a verified webhook event for a single `onWebhookVerified` handler
+ * (CORE-2). Prevents the first composed handler from mutating status/amount/
+ * stableType/nested dual-write for subsequent handlers.
+ */
+function cloneWebhookEventForHandler(event: WebhookEvent): WebhookEvent {
+    try {
+        return structuredClone(event);
+    } catch {
+        // Fallback when rawPayload (or nested dual-write) is non-cloneable.
+        // Shallow-copy identity fields; share uncloneable nested refs only as last resort.
+        const cloneNested = <T>(value: T): T => {
+            try {
+                return structuredClone(value);
+            } catch {
+                return value;
+            }
+        };
+        return {
+            ...event,
+            timestamp: new Date(event.timestamp.getTime()),
+            ...(event.event !== undefined
+                ? { event: cloneNested(event.event) }
+                : {}),
+            ...(event.provider !== undefined
+                ? { provider: cloneNested(event.provider) }
+                : {}),
+        };
+    }
+}
+
+/**
  * Manages registration and execution of lifecycle hooks
  */
 export class HooksManager {
     private hooks: PaymentHooks;
     private readonly logger: Logger;
+    /**
+     * Guards run after all before-hooks apply param mods and before the
+     * executor (CORE-1). Used by PaymentClient to re-assert partialCapture /
+     * partialRefunds so hook-injected amounts cannot bypass capability:false.
+     */
+    private readonly postBeforeGuards: Array<
+        (ctx: HookContext) => void | Promise<void>
+    > = [];
 
     /**
      * @param hooks - Optional hook handlers (shallow-copied so later mutation
@@ -241,9 +280,11 @@ export class HooksManager {
             // Fail-fast: if the first handler throws, do not run the next.
             // Avoids double fulfillment when a primary handler fails mid-way
             // (caller gets 5xx / provider retry; secondary must not also fulfill).
+            // CORE-2: each handler receives its own deep clone so the first cannot
+            // poison status/amount/stableType/nested event for the second.
             const composed: WebhookVerifiedHook = async (event) => {
-                await prev(event);
-                await nxt(event);
+                await prev(cloneWebhookEventForHandler(event));
+                await nxt(cloneWebhookEventForHandler(event));
             };
             return composed as PaymentHooks[K];
         }
@@ -301,8 +342,14 @@ export class HooksManager {
             }
             // Apply any param modifications
             if (result.params !== undefined) {
-                return { proceed: true, params: result.params };
+                ctx.params = result.params;
             }
+        }
+
+        // CORE-1: post-before guards see final params (including hook-injected
+        // amount) and may throw to block capability:false partial money ops.
+        for (const guard of this.postBeforeGuards) {
+            await guard(ctx as HookContext);
         }
 
         return { proceed: true, params: ctx.params };
@@ -437,6 +484,18 @@ export class HooksManager {
         if (this.hooks.onWebhookFailed) {
             await this.hooks.onWebhookFailed(payload, error);
         }
+    }
+
+    /**
+     * Register a guard that runs after all before-hooks (global + operation-specific)
+     * have applied param modifications, immediately before the executor.
+     * Used by PaymentClient to re-assert partialCapture/partialRefunds (CORE-1).
+     * Guards may throw (e.g. OperationNotSupportedError); throws abort the operation.
+     */
+    registerPostBeforeGuard(
+        guard: (ctx: HookContext) => void | Promise<void>,
+    ): void {
+        this.postBeforeGuards.push(guard);
     }
 
     /**

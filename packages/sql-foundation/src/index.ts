@@ -154,6 +154,7 @@ export {
   idempotencyReserveTemplates,
   webhookClaimTemplates,
   reconciliationClaimTemplates,
+  reconciliationTimestampRepairTemplates,
   idempotencyCompleteTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,

@@ -136,6 +136,70 @@ export async function runWebhookInboxStoreConformanceSuite(
   );
 
   results.push(
+    await runCase(
+      "WEBHOOKS-1 terminal completed before payload_hash_conflict",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_term_hash",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 30_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        await store.complete({
+          key: "evt_term_hash",
+          leaseToken: a.leaseToken,
+        });
+        const b = await store.claim({
+          key: "evt_term_hash",
+          payloadHash: "h2-different",
+          owner: "w2",
+          leaseMs: 30_000,
+        });
+        assert(
+          b.kind === "already_completed",
+          `terminal must win before hash conflict, got ${b.kind}`,
+        );
+      },
+    ),
+  );
+
+  results.push(
+    await runCase(
+      "WEBHOOKS-1 terminal dead_letter before payload_hash_conflict",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_dl_hash",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 30_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        await store.fail({
+          key: "evt_dl_hash",
+          leaseToken: a.leaseToken,
+          error: "poison",
+          deadLetter: true,
+        });
+        const b = await store.claim({
+          key: "evt_dl_hash",
+          payloadHash: "h2-different",
+          owner: "w2",
+          leaseMs: 30_000,
+        });
+        assert(
+          b.kind === "duplicate_failed",
+          `dead_letter must win before hash conflict, got ${b.kind}`,
+        );
+      },
+    ),
+  );
+
+  results.push(
     await runCase("stale lease token cannot complete", async () => {
       const clock = createClock();
       const store = await options.createStore({ clock });
