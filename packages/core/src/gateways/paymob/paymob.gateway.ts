@@ -36,6 +36,8 @@ import type {
   PaymobWebhookPayload,
 } from "../../types/webhook.types";
 import { attachPaymentEvent } from "../../types/payment-event";
+import type { PaymentEvent } from "../../types/payment-event";
+import type { ProviderReferences } from "../../types/provider-refs";
 import type { ProviderEventMapContext } from "../../types/webhook-event-map";
 import type { PaymobConfig, PaymobRegion } from "../../types/config.types";
 import type { HooksManager } from "../../hooks/hooks.manager";
@@ -960,14 +962,39 @@ export class PaymobGateway extends BaseGateway {
               ? "failed"
               : "pending";
 
+        // PAYMOB-4: never alias the parent payment/txn id as gatewayRefundId.
+        // Prefer the refund transaction id from the response body.
+        if (data.id === undefined || data.id === null) {
+          throw new GatewayApiError(
+            "Paymob Refund API response is missing refund transaction id",
+            "paymob",
+            { response: data },
+          );
+        }
+
+        // PAYMOB-3: when body omits cumulative refunded_amount_cents, estimate from
+        // inquiry prior + this request (symmetric with capture cumulative estimate)
+        // for non-failed outcomes only — never invent a refund total on failure.
+        const totalRefundedCents =
+          typeof data.refunded_amount_cents === "number"
+            ? data.refunded_amount_cents
+            : status === "failed"
+              ? undefined
+              : (resolvedAmount.refundedAmountCents ?? 0) +
+                resolvedAmount.amountCents;
+
         return applyOutcomeToGatewayRefundResult(
           {
-            gatewayRefundId: String(data.id ?? p.gatewayPaymentId),
+            gatewayRefundId: String(data.id),
             status,
-            totalRefunded:
-              data.refunded_amount_cents !== undefined
-                ? this.fromMinorUnits(data.refunded_amount_cents, currency)
-                : undefined,
+            ...(totalRefundedCents !== undefined
+              ? {
+                  totalRefunded: this.fromMinorUnits(
+                    totalRefundedCents,
+                    currency,
+                  ),
+                }
+              : {}),
             rawResponse: data,
           },
           outcome,
@@ -1134,10 +1161,11 @@ export class PaymobGateway extends BaseGateway {
     // verify — a valid signed body can be rewritten to a victim order id.
     // Correlate via signed gatewayPaymentId (obj.id) and signed order.id.
     //
-    // PAYMOB-5: child refund/capture transactions emit a distinct obj.id. Keep
-    // gatewayPaymentId as the emitting transaction id (refund/capture target)
-    // and dual-write signed order.id onto gatewayObjectId when it differs so
-    // ledgers can bind parent order ↔ child money ops without unsigned fields.
+    // PAYMOB-2: child refund/capture transactions emit a distinct obj.id. Keep
+    // gatewayPaymentId as the emitting transaction id (true refund/capture resource).
+    // Do **not** dual-write order.id onto gatewayObjectId — Phase-7 maps that field
+    // to relatedIds.refundId / captureId. Parent order correlation is applied to
+    // references.parentId (+ relatedIds.orderId) only after attachPaymentEvent.
     const txnId = String(obj.id);
     const signedOrderId = this.readSignedPaymobOrderId(normalized.rawObj);
     const legacy: WebhookEvent = {
@@ -1146,9 +1174,6 @@ export class PaymobGateway extends BaseGateway {
       gateway: "paymob",
       paymentId: undefined,
       gatewayPaymentId: txnId,
-      ...(signedOrderId !== undefined && signedOrderId !== txnId
-        ? { gatewayObjectId: signedOrderId }
-        : {}),
       status,
       ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
@@ -1157,10 +1182,11 @@ export class PaymobGateway extends BaseGateway {
       rawPayload: raw,
     };
 
-    return attachPaymentEvent(legacy, {
+    const dualWritten = attachPaymentEvent(legacy, {
       computePayloadHash: true,
       mapContext: this.paymobMapContextFromTransaction(statusSource),
     });
+    return this.withPaymobSignedOrderParent(dualWritten, signedOrderId);
   }
 
   /**
@@ -1292,11 +1318,15 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Money on WebhookEvent for dual-write / refund snapshots.
+   * Money on WebhookEvent for dual-write / refund / incomplete-capture snapshots.
    * Charge statuses use signed amount_cents. Refund domain statuses must not
    * publish order total as the refund amount (PAYMOB-3) — only a positive
    * trusted refunded total (API path; webhooks strip unsigned cents) qualifies.
    * Incomplete refunds omit amount so consumers inquire rather than book order total.
+   *
+   * PAYMOB-1: incomplete capture (`processing` from success+is_capture without a
+   * trusted `captured_amount`) must not publish full order `amount_cents` either —
+   * symmetric with incomplete refunds. Callers inquire for cumulative captured.
    */
   private resolveWebhookEventAmount(
     status: PaymentStatus,
@@ -1311,15 +1341,142 @@ export class PaymobGateway extends BaseGateway {
       status === "refund_pending" ||
       status === "refund_failed";
 
-    if (!isRefundDomain) {
-      return this.fromMinorUnits(amountCents, currency);
+    if (isRefundDomain) {
+      if (refundedAmountCents !== undefined && refundedAmountCents > 0) {
+        return this.fromMinorUnits(refundedAmountCents, currency);
+      }
+      return undefined;
     }
 
-    if (refundedAmountCents !== undefined && refundedAmountCents > 0) {
-      return this.fromMinorUnits(refundedAmountCents, currency);
+    // Incomplete capture money snapshot — do not book full order amount_cents.
+    if (status === "processing") {
+      return undefined;
     }
 
-    return undefined;
+    return this.fromMinorUnits(amountCents, currency);
+  }
+
+  /**
+   * Bind HMAC-covered `order.id` onto Phase-7 `parentId` / `relatedIds.orderId` only.
+   *
+   * PAYMOB-2: never put order.id on `gatewayObjectId` (Phase-7 promotes that field
+   * to `refundId` / `captureId`). True refund/capture resource id is the emitting
+   * transaction (`gatewayPaymentId` / `obj.id`).
+   */
+  private withPaymobSignedOrderParent(
+    event: WebhookEvent,
+    signedOrderId: string | undefined,
+  ): WebhookEvent {
+    if (
+      signedOrderId === undefined ||
+      signedOrderId === event.gatewayPaymentId ||
+      event.event === undefined
+    ) {
+      return event;
+    }
+
+    const txnId = event.gatewayPaymentId;
+    const patchRefs = (refs: ProviderReferences): ProviderReferences => {
+      const relatedIds: NonNullable<ProviderReferences["relatedIds"]> = {
+        ...(refs.relatedIds ?? {}),
+        orderId: signedOrderId,
+      };
+      // Never leave order.id labeled as the refund/capture resource.
+      if (relatedIds.refundId === signedOrderId) {
+        relatedIds.refundId = txnId;
+      }
+      if (relatedIds.captureId === signedOrderId) {
+        relatedIds.captureId = txnId;
+      }
+      if (relatedIds.objectId === signedOrderId) {
+        delete relatedIds.objectId;
+      }
+      return {
+        ...refs,
+        parentId: signedOrderId,
+        relatedIds,
+      };
+    };
+
+    const pe = event.event;
+    let next: PaymentEvent = pe;
+
+    switch (pe.type) {
+      case "payment.created":
+      case "payment.processing":
+      case "payment.authorized":
+      case "payment.succeeded":
+      case "payment.failed":
+      case "payment.cancelled":
+        next = {
+          ...pe,
+          payment: {
+            ...pe.payment,
+            references: patchRefs(pe.payment.references),
+          },
+        };
+        break;
+      case "capture.completed":
+        next = {
+          ...pe,
+          capture: {
+            ...pe.capture,
+            references: (() => {
+              const refs = patchRefs(pe.capture.references);
+              const relatedIds = {
+                ...(refs.relatedIds ?? {}),
+                captureId: refs.relatedIds?.captureId ?? txnId,
+              };
+              return { ...refs, relatedIds };
+            })(),
+          },
+          ...(pe.payment !== undefined
+            ? {
+                payment: {
+                  ...pe.payment,
+                  references: patchRefs(pe.payment.references),
+                },
+              }
+            : {}),
+        };
+        break;
+      case "refund.pending":
+      case "refund.completed":
+      case "refund.failed":
+        next = {
+          ...pe,
+          refund: {
+            ...pe.refund,
+            references: (() => {
+              const refs = patchRefs(pe.refund.references);
+              const relatedIds = {
+                ...(refs.relatedIds ?? {}),
+                refundId: refs.relatedIds?.refundId ?? txnId,
+              };
+              return { ...refs, relatedIds };
+            })(),
+          },
+        };
+        break;
+      case "provider.unmapped":
+        if (pe.payment !== undefined) {
+          next = {
+            ...pe,
+            payment: {
+              ...pe.payment,
+              references: patchRefs(pe.payment.references),
+            },
+          };
+        }
+        break;
+      default:
+        break;
+    }
+
+    return {
+      ...event,
+      event: next,
+    };
   }
 
   /**

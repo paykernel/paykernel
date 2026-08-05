@@ -3,6 +3,9 @@
  */
 
 import {
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyReconciliationClaimMiss,
   reconciliationClaimTemplates,
   resolveTableName,
   LOGICAL_TABLES,
@@ -31,6 +34,16 @@ import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { PostgresStoreOptions } from "../types";
 import { mapReconciliationRow, newLeaseToken, resolveStoreContext } from "./shared";
 
+function claimMissToResult(
+  kind: Exclude<ReturnType<typeof classifyReconciliationClaimMiss>, "claimable">,
+  existing: ReconciliationRecord | undefined,
+): ClaimResult {
+  if (kind === "not_found" || existing === undefined) {
+    return { kind: "not_found" };
+  }
+  return { kind, record: existing };
+}
+
 export function createPostgresReconciliationStore(
   options: PostgresStoreOptions,
 ): ReconciliationStore {
@@ -58,6 +71,8 @@ export function createPostgresReconciliationStore(
     async schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult> {
       return withMappedErrors(async () => {
         const now = clockNowIso(ctx.clock);
+        // Canonical Z form so TEXT lexical due_at compares match Date.parse (SQL-1).
+        const dueAt = canonicalizeIsoTimestamp(input.dueAt, "dueAt");
         // Insert-if-absent; RETURNING only on insert.
         const inserted = await ctx.getExecutor().query<Record<string, unknown>>(
           `INSERT INTO ${table} (
@@ -71,7 +86,7 @@ export function createPostgresReconciliationStore(
            RETURNING key, status, subject_id, reason, due_at,
                      lease_owner, lease_token, lease_expires_at, attempts, generation,
                      last_error_sanitized, tenant_id, created_at, updated_at, completed_at`,
-          [input.key, input.subjectId, input.reason, input.dueAt, now],
+          [input.key, input.subjectId, input.reason, dueAt, now],
         );
 
         if (inserted.length > 0) {
@@ -94,9 +109,10 @@ export function createPostgresReconciliationStore(
         const leaseToken = newLeaseToken();
         const now = clockNowIso(ctx.clock);
         const leaseExpiresAt = clockAddMsIso(ctx.clock, input.leaseMs);
+        const exec = ctx.getExecutor();
 
         // params: key, owner, leaseToken, leaseExpiresAt, now
-        const claimed = await ctx.getExecutor().query<Record<string, unknown>>(
+        const claimed = await exec.query<Record<string, unknown>>(
           claimTpl.sql,
           [input.key, input.owner, leaseToken, leaseExpiresAt, now],
         );
@@ -111,26 +127,48 @@ export function createPostgresReconciliationStore(
         }
 
         const existing = await selectByKey(input.key);
-        if (!existing) return { kind: "not_found" };
-        if (
-          existing.status === "completed" ||
-          existing.status === "failed" ||
-          existing.status === "manual_review"
-        ) {
-          return { kind: "already_terminal", record: existing };
+        const miss = classifyReconciliationClaimMiss(existing, ctx.clock.nowMs());
+        if (miss !== "claimable") {
+          return claimMissToResult(miss, existing);
         }
-        if (
-          existing.status === "claimed" &&
-          existing.leaseExpiresAt !== undefined &&
-          Date.parse(existing.leaseExpiresAt) > ctx.clock.nowMs()
-        ) {
-          return { kind: "in_progress", record: existing };
+
+        // SQL-2: free due work but claim WHERE missed (typically lexical TEXT
+        // timestamp mismatch). Canonicalize due_at/lease_expires_at and retry once.
+        // Never report free due work as in_progress (stuck pollers).
+        const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
+        const leaseZ =
+          canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
+          null;
+        await exec.execute(
+          `UPDATE ${table} SET
+             due_at = $2,
+             lease_expires_at = $3
+           WHERE key = $1
+             AND status NOT IN ('completed', 'failed', 'manual_review')`,
+          [input.key, dueAtZ, leaseZ],
+        );
+
+        const retried = await exec.query<Record<string, unknown>>(
+          claimTpl.sql,
+          [input.key, input.owner, leaseToken, leaseExpiresAt, now],
+        );
+        if (retried.length > 0) {
+          const record = mapReconciliationRow(retried[0]!);
+          return {
+            kind: "acquired",
+            record,
+            leaseToken: record.leaseToken ?? leaseToken,
+          };
         }
-        if (Date.parse(existing.dueAt) > ctx.clock.nowMs()) {
-          return { kind: "not_due", record: existing };
+
+        const after = await selectByKey(input.key);
+        const miss2 = classifyReconciliationClaimMiss(after, ctx.clock.nowMs());
+        if (miss2 === "claimable") {
+          throw new StoreUnavailableError(
+            "reconciliation claim: free due work failed after timestamp canonicalize; retry",
+          );
         }
-        // Lease expired but claim WHERE failed for another reason → in_progress-ish
-        return { kind: "in_progress", record: existing };
+        return claimMissToResult(miss2, after);
       });
     },
 
@@ -208,6 +246,7 @@ export function createPostgresReconciliationStore(
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
         if (input.retryAt !== undefined) {
+          const retryAt = canonicalizeIsoTimestamp(input.retryAt, "retryAt");
           const rows = await ctx.getExecutor().query<Record<string, unknown>>(
             `UPDATE ${table} SET
                status = 'scheduled',
@@ -223,7 +262,7 @@ export function createPostgresReconciliationStore(
                AND lease_expires_at IS NOT NULL
                AND lease_expires_at > $5
              RETURNING key, status, generation`,
-            [input.key, input.leaseToken, input.retryAt, lastError, now],
+            [input.key, input.leaseToken, retryAt, lastError, now],
           );
           if (rows.length === 0) {
             throw new StoreLeaseLostError("fail: lease token rejected or key not found");

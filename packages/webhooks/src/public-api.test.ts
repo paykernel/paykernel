@@ -9,6 +9,7 @@ describe("public API runtime surface", () => {
     const runtimeExports: Array<[string, unknown]> = [
       ["createWebhookInboxEngine", webhooks.createWebhookInboxEngine],
       ["computePayloadHash", webhooks.computePayloadHash],
+      ["resolveInboxPayloadHash", webhooks.resolveInboxPayloadHash],
       ["deriveWebhookEventKey", webhooks.deriveWebhookEventKey],
       ["parseWebhookEventKey", webhooks.parseWebhookEventKey],
       ["sanitizeWebhookError", webhooks.sanitizeWebhookError],
@@ -18,9 +19,14 @@ describe("public API runtime surface", () => {
       ["NonRetryableHandlerError", webhooks.NonRetryableHandlerError],
     ];
 
+    const functionExports = new Set([
+      "createWebhookInboxEngine",
+      "computePayloadHash",
+      "resolveInboxPayloadHash",
+    ]);
     for (const [name, value] of runtimeExports) {
       expect(value, `missing export: ${name}`).toBeDefined();
-      if (name === "createWebhookInboxEngine" || name === "computePayloadHash") {
+      if (functionExports.has(name)) {
         expect(typeof value).toBe("function");
       }
     }

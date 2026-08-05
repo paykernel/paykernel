@@ -35,6 +35,25 @@ describe("createInMemoryPaymentMetrics", () => {
     }
   });
 
+  it("auto-redacts sensitive metric labels (OBS-2) without breaking safe labels", () => {
+    const m = createInMemoryPaymentMetrics();
+    m.operationOutcomes.add(1, {
+      gateway: "stripe",
+      operationType: "payment.create",
+      outcome: "succeeded",
+      token: "tok_should_redact",
+      authorized: true,
+    });
+    const snap = m.snapshot();
+    const sample = snap.samples.find(
+      (s) => s.name === METRIC_NAMES.operationOutcomes,
+    );
+    expect(sample?.attributes?.gateway).toBe("stripe");
+    expect(sample?.attributes?.outcome).toBe("succeeded");
+    expect(sample?.attributes?.authorized).toBe(true);
+    expect(sample?.attributes?.token).toBe("[REDACTED]");
+  });
+
   it("records counters and histograms; snapshot aggregates", () => {
     const m = createInMemoryPaymentMetrics();
 

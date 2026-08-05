@@ -286,6 +286,7 @@ export type {
 export type {
   CurrencyCode,
   CurrencyExponentOverrides,
+  GetCurrencyExponentOptions,
 } from "./utils/currency";
 export {
   money,
@@ -301,6 +302,7 @@ export {
 } from "./utils/money";
 export {
   getCurrencyExponent,
+  isKnownCurrencyCode,
   normalizeCurrencyCode,
 } from "./utils/currency";
 

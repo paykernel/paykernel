@@ -56,10 +56,20 @@ export type MinorAmount = bigint;
 /**
  * JSON-serializable major-unit money value.
  * `amount` is a clean decimal string (no scientific notation).
+ *
+ * When built with a non-ISO exponent (`exponent` / `exponentOverrides` that
+ * differ from bare {@link getCurrencyExponent}), {@link exponent} is stored so
+ * {@link toMinorUnits} can re-resolve without silently using the ISO default
+ * (MONEY-1 — OMR/MGA-class profile overrides).
  */
 export type Money<TCurrency extends string = string> = {
   readonly amount: DecimalString;
   readonly currency: TCurrency;
+  /**
+   * Resolved minor-unit exponent used to canonicalize `amount`.
+   * Present only when the scale differs from bare ISO lookup for `currency`.
+   */
+  readonly exponent?: number;
 };
 
 /**
@@ -375,6 +385,57 @@ function decimalStringToMinor(
 }
 
 /**
+ * Build a frozen {@link Money}, attaching `exponent` when the resolved scale
+ * differs from bare ISO lookup so later `toMinorUnits(money)` re-resolves
+ * correctly without re-passing overrides (MONEY-1).
+ */
+function freezeMoney(
+  amount: DecimalString,
+  currency: string,
+  resolvedExponent: number,
+): Money {
+  // Bare ISO default (no overrides). Unknown codes throw — treat as non-ISO so
+  // Money.exponent is stored when the caller supplied an explicit scale.
+  let isoDefault: number | undefined;
+  try {
+    isoDefault = getCurrencyExponent(currency);
+  } catch (err) {
+    if (!(err instanceof InvalidRequestError)) {
+      throw err;
+    }
+    isoDefault = undefined;
+  }
+
+  if (isoDefault !== undefined && resolvedExponent === isoDefault) {
+    return Object.freeze({ amount, currency });
+  }
+  return Object.freeze({ amount, currency, exponent: resolvedExponent });
+}
+
+/**
+ * When converting a {@link Money} value, prefer explicit parse options; else
+ * re-use a stored non-ISO {@link Money.exponent} so override-built values do
+ * not silently re-scale under ISO defaults.
+ */
+function resolveMoneyParseOptions(
+  m: Money,
+  options?: MoneyParseOptions,
+): MoneyParseOptions | undefined {
+  if (
+    options?.exponent !== undefined ||
+    options?.exponentOverrides !== undefined
+  ) {
+    return options;
+  }
+  if (typeof m.exponent === "number" && Number.isInteger(m.exponent) && m.exponent >= 0) {
+    return options !== undefined
+      ? { ...options, exponent: m.exponent }
+      : { exponent: m.exponent };
+  }
+  return options;
+}
+
+/**
  * Create a {@link Money} value from a major-unit amount.
  *
  * Prefer **string** inputs (`money("10.50", "SAR")`). `number` is accepted for
@@ -383,6 +444,10 @@ function decimalStringToMinor(
  *
  * Canonical `amount` is minor-aligned: exactly `exponent` fractional digits
  * (e.g. `"10.50"` for SAR), or no decimal point for zero-decimal currencies.
+ *
+ * When `options.exponent` / `exponentOverrides` resolve a non-ISO scale, the
+ * result stores {@link Money.exponent} so {@link toMinorUnits} round-trips
+ * without re-passing overrides.
  */
 export function money(
   amount: string | number | DecimalString,
@@ -403,7 +468,7 @@ export function money(
   );
 
   const canonical = formatMinorAsDecimal(minor, exponent);
-  return Object.freeze({ amount: canonical, currency: code });
+  return freezeMoney(canonical, code, exponent);
 }
 
 /**
@@ -432,6 +497,7 @@ export function isMoney(value: unknown): value is Money {
 
 /**
  * Re-validate an unknown value as {@link Money} with optional parse options.
+ * Stored {@link Money.exponent} is re-applied when options omit scale.
  */
 export function validateMoney(
   value: unknown,
@@ -440,7 +506,7 @@ export function validateMoney(
   if (!isMoney(value)) {
     throwInvalidAmount("Value is not a valid Money object", "invalid_format");
   }
-  return money(value.amount, value.currency, options);
+  return money(value.amount, value.currency, resolveMoneyParseOptions(value, options));
 }
 
 /**
@@ -471,7 +537,11 @@ export function toMinorUnits(
       typeof currencyOrOptions === "object" && currencyOrOptions !== null
         ? currencyOrOptions
         : options;
-    return decimalStringToMinor(amount.amount, amount.currency, opts).minor;
+    return decimalStringToMinor(
+      amount.amount,
+      amount.currency,
+      resolveMoneyParseOptions(amount, opts),
+    ).minor;
   }
 
   if (typeof currencyOrOptions !== "string") {
@@ -523,7 +593,7 @@ export function fromMinorUnits(
   assertSignAndZero(minorBi, options, code);
 
   const amount = formatMinorAsDecimal(minorBi, exponent);
-  return Object.freeze({ amount, currency: code });
+  return freezeMoney(amount, code, exponent);
 }
 
 /**
@@ -580,6 +650,7 @@ export function moneyToMajorNumber(
     );
   }
   // Re-validate scale / options (e.g. overrides) via conversion.
+  // Money.exponent is honored when options omit scale (MONEY-1).
   void toMinorUnits(m, options);
 
   const n = Number(m.amount);
@@ -625,7 +696,11 @@ export function normalizeAmountInput(
         "currency_mismatch",
       );
     }
-    return money(input.amount, code, options);
+    return money(
+      input.amount,
+      code,
+      resolveMoneyParseOptions(input, options),
+    );
   }
 
   if (typeof input === "number") {

@@ -88,14 +88,15 @@ import {
  * Used for:
  * - `createPayment` / `getPayment` `withRetry` predicates (safe GET always;
  *   create only when `given_id`/idempotencyKey is present).
- * - `runIdempotentMutation`: after capture/refund/void fails, decide whether to
- *   mark the store key `unknown` (indeterminate) vs clear it (definite 4xx).
  *
  * Capture/refund/void themselves are **not** auto-retried by `withRetry`.
  * Moyasar has no native mutation idempotency; a lost response after a successful
  * void/refund could double-apply if the SDK retried. Configure
  * `idempotencyStore` + pass `idempotencyKey` so **callers** can safely retry
  * after definite failures (or resolve `unknown` via `getPayment` first).
+ *
+ * Mutation fence clear/keep uses {@link isMoyasarDefiniteMutationFailure}
+ * (fail-closed: keep reservation unless Moyasar definitively rejected).
  */
 function isMoyasarRetryableError(error: unknown): boolean {
   if (error instanceof NetworkError) {
@@ -104,6 +105,29 @@ function isMoyasarRetryableError(error: unknown): boolean {
   if (error instanceof GatewayApiError) {
     const status = (error.rawError as { status?: number } | undefined)?.status;
     return typeof status === "number" && (status >= 500 || status === 429);
+  }
+  return false;
+}
+
+/**
+ * True only when Moyasar is known to have **rejected** the mutation (definite
+ * client error). Used by `runIdempotentMutation` to clear the idempotency fence.
+ *
+ * Fail-closed (MOYASAR-1): anything else — network, 5xx, 429, **post-2xx**
+ * invalid JSON (`GatewayApiError` with status 2xx), mapping/`MoneyAmountError`
+ * after a successful HTTP body, unexpected throws — is treated as indeterminate
+ * so the reservation is kept (`unknown`) and a caller retry cannot double-apply.
+ * Moyasar has no native mutation idempotency.
+ */
+function isMoyasarDefiniteMutationFailure(error: unknown): boolean {
+  if (error instanceof GatewayApiError) {
+    const status = (error.rawError as { status?: number } | undefined)?.status;
+    return (
+      typeof status === "number" &&
+      status >= 400 &&
+      status < 500 &&
+      status !== 429
+    );
   }
   return false;
 }
@@ -306,10 +330,14 @@ export class MoyasarGateway extends BaseGateway {
    * - Already completed for this key: returns the cached result (no API call).
    * - In progress / outcome unknown for this key: refuses, instead of risking
    *   a duplicate mutation.
-   * - Definite failure (4xx, validation): clears the reservation so the caller
-   *   can safely retry. Transient/indeterminate failures (network, 5xx) keep an
-   *   "unknown" marker so the operation is never silently re-applied — resolve
-   *   via `getPayment` before retrying with the same key.
+   * - Definite failure only (`GatewayApiError` with 4xx except 429 — Moyasar
+   *   rejected the mutation): clears the reservation so the caller can safely
+   *   retry.
+   * - Indeterminate failures keep an `unknown` marker (never silently re-apply):
+   *   network, 5xx, 429, **post-2xx parse/map failures** (invalid JSON or
+   *   mapping errors after HTTP may already have applied the mutation), and any
+   *   other non-definite throw. Resolve via `getPayment` before retrying with
+   *   the same key (MOYASAR-1).
    */
   private async runIdempotentMutation<R>(
     operation: "capturePayment" | "refundPayment" | "voidPayment",
@@ -319,7 +347,7 @@ export class MoyasarGateway extends BaseGateway {
     executor: () => Promise<R>,
   ): Promise<R> {
     const store: IdempotencyStore | undefined = this.moyasarConfig.idempotencyStore;
-    // MOYASAR-2: capture/refund/void have no native Moyasar idempotency.
+    // Capture/refund/void have no native Moyasar idempotency.
     // Require store + key so retries cannot double-apply (double refund class).
     if (!store) {
       throw new InvalidRequestError(
@@ -338,7 +366,7 @@ export class MoyasarGateway extends BaseGateway {
       );
     }
 
-    // MOYASAR-1: refuse non-atomic get-then-set multi-worker stores. Concurrent
+    // Refuse non-atomic get-then-set multi-worker stores. Concurrent
     // retries can both pass free-key check without atomic reserve().
     if (!store.reserve) {
       throw new InvalidRequestError(
@@ -390,15 +418,20 @@ export class MoyasarGateway extends BaseGateway {
       );
       return result;
     } catch (error) {
-      if (isMoyasarRetryableError(error)) {
-        // Outcome is indeterminate: the request may have mutated server-side.
-        // Keep a marker so a later retry refuses rather than double-applying.
-        await this.safeStoreWrite(operation, () =>
-          store.set(key, { status: "unknown", fingerprint, createdAt: Date.now() }),
-        );
-      } else {
-        // Definite failure: clear the reservation so a retry is allowed.
+      // MOYASAR-1: only clear when Moyasar definitively rejected the mutation
+      // (4xx except 429). Post-2xx parse/map failures, network, 5xx, 429, and
+      // unexpected throws are indeterminate — keep the fence so a retry cannot
+      // double-apply a mutation that may already have succeeded server-side.
+      if (isMoyasarDefiniteMutationFailure(error)) {
         await this.safeStoreWrite(operation, () => store.delete(key));
+      } else {
+        await this.safeStoreWrite(operation, () =>
+          store.set(key, {
+            status: "unknown",
+            fingerprint,
+            createdAt: Date.now(),
+          }),
+        );
       }
       throw error;
     }

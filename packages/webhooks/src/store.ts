@@ -143,9 +143,14 @@ export type WebhookInboxRecord = {
   leaseToken?: LeaseToken | undefined;
   leaseExpiresAt?: IsoTimestamp | undefined;
   /**
-   * Claim/handler attempt count. Each successful `claim` acquire increments by 1
-   * unless a subsequent `fail({ restoreAttempt: true })` undoes the parking claim
-   * (engine `ackAfterClaim` path). Engine `maxAttempts` is max **handler** attempts.
+   * Handler attempt budget counter. Each successful `claim` acquire increments by 1
+   * unless restored:
+   * - `fail({ restoreAttempt: true })` undoes parking claims (`ackAfterClaim`)
+   * - soft-release of an **expired** `claimed` lease restores the unfinished claim
+   *   so crash/deploy reclaim does not burn engine `maxAttempts` (WEBHOOKS-1)
+   *
+   * Engine `maxAttempts` is max **handler** attempts (outcomes via fail/complete),
+   * not claim/crash reclaim count.
    */
   attempts: number;
   lastError?: string | undefined;
@@ -172,10 +177,19 @@ export type ClaimWebhookInput = {
 /**
  * Result of an atomic claim attempt.
  *
+ * Precedence for an existing row (WEBHOOKS-4):
+ * 1. `completed` → `already_completed` (even if `payloadHash` differs)
+ * 2. `dead_letter` / `failed` → `duplicate_failed` (even if hash differs)
+ * 3. hash mismatch on non-terminal → `payload_hash_conflict`
+ * 4. active lease → `in_progress`
+ * 5. pending with future `availableAt` → `not_available`
+ * 6. else acquire
+ *
+ * Kinds:
  * - `acquired` — caller holds the lease; run handler or park
  * - `already_completed` / `duplicate_failed` — terminal; do not re-run
  * - `in_progress` — active lease held by another worker
- * - `payload_hash_conflict` — same key, different body hash
+ * - `payload_hash_conflict` — same key, different body hash (non-terminal only)
  * - `not_available` — pending but `availableAt` is still in the future (backoff);
  *   must **not** increment attempts; engine maps to
  *   `scheduled_for_retry { reason: "not_available" }`
@@ -254,17 +268,24 @@ export type ListRetryableInput = {
  * After lease reclaim, the old token MUST fail.
  *
  * Same event key: second claim with same payload hash while in-progress → in_progress;
- * completed → already_completed; different hash → payload_hash_conflict;
- * dead_letter/failed → duplicate_failed;
+ * completed → already_completed (before hash check); dead_letter/failed → duplicate_failed
+ * (before hash check); non-terminal different hash → payload_hash_conflict;
  * pending with `availableAt` in the future → `not_available` (no acquire, no attempt++);
  * expired lease may be re-acquired with a new fencing token (generation++).
+ * Soft-release of expired claimed rows MUST restore one attempt (floor 0) so
+ * crash reclaim does not consume the handler `maxAttempts` budget.
+ * Direct reclaim of expired `claimed` (without prior soft-release) MUST NOT
+ * increment `attempts` either — only pending (handler retry) reclaims burn budget.
  */
 export interface WebhookInboxStore extends WithTransaction {
   /**
    * Atomic claim (or re-claim after lease expiry / due availableAt).
    * Increments `generation` and issues a new unguessable `leaseToken` on acquire.
+   * Pending reclaim increments `attempts` (handler budget); expired-`claimed`
+   * reclaim keeps `attempts` unchanged (crash recovery, WEBHOOKS-1).
    * MUST NOT acquire a pending row whose `availableAt` is still in the future —
    * return `{ kind: "not_available", ... }` instead (no attempt increment).
+   * Terminal statuses are classified before `payload_hash_conflict`.
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 
@@ -295,9 +316,10 @@ export interface WebhookInboxStore extends WithTransaction {
    *
    * **Soft-release (required):** expired `claimed` rows (lease expired) MUST be
    * treated as reclaimable for poll-only recovery — either soft-release to
-   * `pending` (clear lease fields, set `availableAt` <= now) before filtering,
-   * or include them as due with equivalent semantics. Official adapters soft-release
-   * on `listRetryable` / `get` / `claim` paths. Without this, crash mid-handler after
+   * `pending` (clear lease fields, set `availableAt` <= now, **restore one attempt**
+   * so unfinished claims do not burn handler budget) before filtering, or include
+   * them as due with equivalent semantics. Official adapters soft-release on
+   * `listRetryable` / `get` / `claim` paths. Without this, crash mid-handler after
    * provider 200 can leave money webhooks stuck until a key-addressed claim path runs.
    */
   listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]>;

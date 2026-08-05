@@ -539,6 +539,59 @@ describe("StripeGateway", () => {
       expect(event.currency).toBe("JPY");
     });
 
+    it("STRIPE-2: omits amount on checkout.session when currency is missing (no usd default)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_no_currency",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_no_currency",
+            object: "checkout.session",
+            status: "complete",
+            payment_status: "paid",
+            // amount_total present but currency omitted — must not scale as USD
+            amount_total: 5000,
+            payment_intent: "pi_cs_no_currency",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.status).toBe("paid");
+      expect(event.currency).toBeUndefined();
+      expect(event.amount).toBeUndefined();
+      // Would have been 50.00 if wrongly defaulted to usd (2-decimal)
+      expect(event.amount).not.toBe(50);
+    });
+
+    it("STRIPE-2: omits amount on invoice when currency is missing (no usd default)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_inv_no_currency",
+        type: "invoice.paid",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "in_no_currency",
+            object: "invoice",
+            status: "paid",
+            amount_paid: 10000,
+            total: 10000,
+            // currency omitted — zero-decimal vs two-decimal scale risk
+            payment_intent: "pi_inv_no_currency",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.status).toBe("paid");
+      expect(event.currency).toBeUndefined();
+      expect(event.amount).toBeUndefined();
+      expect(event.amount).not.toBe(100);
+    });
+
     it("should use related PaymentIntent for charge refund events", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_charge_refunded",
@@ -2238,28 +2291,18 @@ describe("StripeGateway", () => {
       expect(capturedKey.length).toBeGreaterThan(0);
     });
 
-    it("should auto-generate an Idempotency-Key when the caller passes empty or whitespace", async () => {
-      let capturedKey = "";
-      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
-        capturedKey = new Headers(opts.headers).get("Idempotency-Key") ?? "";
-        return createMockResponse({
-          id: "cs_empty_idem",
-          object: "checkout.session",
-          url: "https://checkout.stripe.com/empty-idem",
-          status: "open",
-          payment_status: "unpaid",
-        });
-      }) as unknown as typeof fetch;
-
-      await gateway.createCheckoutSession({
-        amount: 20,
-        currency: "USD",
-        successUrl: "https://success",
-        idempotencyKey: "   ",
-      });
-
-      expect(capturedKey.length).toBeGreaterThan(0);
-      expect(capturedKey.trim().length).toBeGreaterThan(0);
+    it("should reject whitespace-only idempotencyKey at validation (omit key to auto-generate)", async () => {
+      // OptionalIdempotencyKeySchema rejects whitespace-only keys; omit the field
+      // entirely (previous test) so resolveStripeIdempotencyKey can mint an
+      // ephemeral in-process key (STRIPE-6).
+      await expect(
+        gateway.createCheckoutSession({
+          amount: 20,
+          currency: "USD",
+          successUrl: "https://success",
+          idempotencyKey: "   ",
+        }),
+      ).rejects.toThrow(/idempotencyKey|Validation failed/i);
     });
   });
 
@@ -3258,6 +3301,111 @@ describe("StripeGateway", () => {
       expect(result.status).toBe("processing");
       expect(result.status).not.toBe("paid");
       expect(result.amount).toBe(100);
+    });
+
+    it("STRIPE-1: re-fetches unexpanded string latest_charge and maps full refund", async () => {
+      const urls: string[] = [];
+      globalThis.fetch = mock(async (url) => {
+        const href = String(url);
+        urls.push(href);
+        if (href.includes("/charges/")) {
+          return createMockResponse({
+            id: "ch_unexpanded_full",
+            amount: 10000,
+            amount_captured: 10000,
+            amount_refunded: 10000,
+            currency: "usd",
+            refunded: true,
+          });
+        }
+        return createMockResponse({
+          id: "pi_unexpanded_full",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          // Stripe returned charge as unexpanded string despite expand[]
+          latest_charge: "ch_unexpanded_full",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_unexpanded_full",
+      });
+
+      expect(urls.some((u) => u.includes("expand[]=latest_charge"))).toBe(true);
+      expect(urls.some((u) => u.includes("/charges/ch_unexpanded_full"))).toBe(
+        true,
+      );
+      expect(result.status).toBe("refunded");
+      expect(result.status).not.toBe("paid");
+      expect(result.refundedAmount).toBe(100);
+      expect(result.amount).toBe(100);
+      expect(result.references?.relatedIds?.chargeId).toBe("ch_unexpanded_full");
+    });
+
+    it("STRIPE-1: re-fetches unexpanded string latest_charge and maps partial refund", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse({
+            id: "ch_unexpanded_partial",
+            amount: 10000,
+            amount_captured: 10000,
+            amount_refunded: 2500,
+            currency: "usd",
+            refunded: false,
+          });
+        }
+        return createMockResponse({
+          id: "pi_unexpanded_partial",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: "ch_unexpanded_partial",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_unexpanded_partial",
+      });
+
+      expect(result.status).toBe("partially_refunded");
+      expect(result.status).not.toBe("paid");
+      expect(result.refundedAmount).toBe(25);
+    });
+
+    it("STRIPE-1: fail-closed to processing when unexpanded charge re-fetch fails", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse(
+            { error: { message: "Charge not found", type: "invalid_request_error" } },
+            false,
+            404,
+          );
+        }
+        return createMockResponse({
+          id: "pi_unexpanded_fail",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: "ch_missing",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_unexpanded_fail",
+      });
+
+      // Must not report paid after refund when charge refund state is unobservable.
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.references?.relatedIds?.chargeId).toBe("ch_missing");
+      expect(result.refundedAmount).toBeUndefined();
     });
   });
 

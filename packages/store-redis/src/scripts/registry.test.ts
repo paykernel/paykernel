@@ -38,6 +38,20 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(REDIS_SCRIPT_REGISTRY.idempotency.reserve).toContain("'indeterminate'");
   });
 
+  it("idempotency complete never EXPIREs completed fences (REDIS-1)", () => {
+    const complete = REDIS_SCRIPT_REGISTRY.idempotency.complete;
+    // Must not call Redis EXPIRE after status=completed (re-reserve after eviction).
+    // Avoid matching field names like lease_expires_ms.
+    expect(complete).not.toMatch(/redis\.call\(\s*['"]EXPIRE['"]/i);
+    // PERSIST clears any prior TTL so the fence cannot silently re-open.
+    expect(complete).toMatch(/redis\.call\(\s*['"]PERSIST['"]/i);
+    expect(complete).toContain("'completed'");
+    // reserve still treats completed as already_completed
+    expect(REDIS_SCRIPT_REGISTRY.idempotency.reserve).toContain(
+      "'already_completed'",
+    );
+  });
+
   it("webhook fail requires unexpired lease (parity with complete)", () => {
     const fail = REDIS_SCRIPT_REGISTRY.webhookInbox.fail;
     const complete = REDIS_SCRIPT_REGISTRY.webhookInbox.complete;
@@ -55,6 +69,15 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(claim).toContain("not_available");
     expect(claim).toContain("available_ms");
     expect(claim).toContain("expired lease");
+    // WEBHOOKS-1: only pending burns attempts on reclaim
+    expect(claim).toContain("status == 'pending'");
+    expect(claim).toMatch(/if status == 'pending'/);
+  });
+
+  it("webhook get soft-release restores unfinished attempt (WEBHOOKS-1)", () => {
+    const get = REDIS_SCRIPT_REGISTRY.webhookInbox.get;
+    expect(get).toContain("attempts");
+    expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
   });
 
   it("webhook fail script encodes restoreAttempt parking decrement", () => {

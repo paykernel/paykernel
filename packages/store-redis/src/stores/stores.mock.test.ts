@@ -116,6 +116,32 @@ describe("idempotency store mock port", () => {
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
 
+  it("complete with retentionTtlMs still invokes complete script (REDIS-1 fence)", async () => {
+    // retentionTtlMs must not strip the completed fence: script ignores EXPIRE.
+    // Call-site still passes retention ARGV for parity; Lua PERSIST+no-EXPIRE is the fix.
+    let completeArgv: readonly string[] | undefined;
+    const { port } = createMockPort((call) => {
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        // ARGV follow KEYS; find result script args after numkeys
+        completeArgv = call.args;
+        return ["ok"];
+      }
+      return null;
+    });
+    const store = createRedisIdempotencyStore({
+      port,
+      retentionTtlMs: 7 * 24 * 60 * 60 * 1000,
+    });
+    await store.complete({ key: "k1", leaseToken: "lt_1", result: { paid: true } });
+    expect(completeArgv).toBeDefined();
+    // retention seconds still forwarded (call-site parity) but must be non-zero so
+    // we prove the footgun path is exercised without EXPIRE in the script body.
+    const argv = completeArgv ?? [];
+    expect(argv.some((a) => a === "604800" || a === String(7 * 24 * 60 * 60))).toBe(
+      true,
+    );
+  });
+
   it("complete fails closed on oversized result (no truncation marker)", async () => {
     let evalCount = 0;
     const { port } = createMockPort(() => {

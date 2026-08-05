@@ -39,6 +39,8 @@ export function resolveRedisStoreContext(
 ): ResolvedRedisStoreContext {
   const keys: ResolvedKeyDesign = resolveKeyDesign(options.keys ?? {});
   const clock = options.clock ?? createSystemClock();
+  // retentionTtlSec is used by webhook/recon terminal EXPIRE only.
+  // Idempotency complete intentionally ignores it (REDIS-1 — no re-acquirable empty).
   const retentionTtlMs = options.retentionTtlMs;
   const retentionTtlSec =
     retentionTtlMs !== undefined && retentionTtlMs > 0

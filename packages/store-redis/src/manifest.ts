@@ -42,6 +42,7 @@ export const REDIS_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "Injectable clock: now passed as script ARGV for FakeClock conformance.",
     "Bun binding does not support Cluster/Sentinel; rejects cluster config.",
     "Multi-key Lua (record HASH + due/retry ZSET) requires keys.clusterKeys:true on Redis Cluster so hash tags co-locate KEYS; default clusterKeys:false is standalone-only honesty — Cluster without hash tags fails CROSSSLOT.",
+    "REDIS-1: completed idempotency fences never EXPIRE (retentionTtlMs ignored for complete); PERSIST clears prior TTL. Use deleteExpired for intentional cleanup — never re-acquirable empty after silent eviction.",
     "Idempotency complete fails closed when result JSON exceeds MAX_RESULT_JSON_BYTES — never stores a truncation marker as money outcome.",
     "Invalid dueAt/retryAt ISO fails closed (StoreInvalidSchemaError); never maps to due_ms 0 (epoch / immediately claimable).",
     "Do not use Pub/Sub for webhook correctness.",

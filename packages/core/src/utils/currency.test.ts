@@ -44,8 +44,6 @@ describe("getCurrencyExponent", () => {
     ["USD", 2],
     ["EUR", 2],
     ["MGA", 2], // ISO 4217 exponent 2 (not zero-decimal)
-    // Unknown currency codes fall back to 2
-    ["XXX", 2],
     // Case-insensitive
     ["jpy", 0],
     ["isk", 0],
@@ -57,6 +55,15 @@ describe("getCurrencyExponent", () => {
     ["uyw", 4],
   ])("getCurrencyExponent(%s) returns %i", (currency, expected) => {
     expect(getCurrencyExponent(currency)).toBe(expected);
+  });
+
+  it("unknown currency codes fail closed (MONEY-4)", () => {
+    expect(() => getCurrencyExponent("XXX")).toThrow(InvalidRequestError);
+    expect(() => getCurrencyExponent("ZZZ")).toThrow(InvalidRequestError);
+    // Typo of JPY must not silently use exponent 2
+    expect(() => getCurrencyExponent("JYP")).toThrow(InvalidRequestError);
+    expect(getCurrencyExponent("XXX", { allowUnknown: true })).toBe(2);
+    expect(getCurrencyExponent("JYP", { allowUnknown: true })).toBe(2);
   });
 
   it("applies overrides when provided (override wins over ISO)", () => {

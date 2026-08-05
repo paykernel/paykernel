@@ -2,8 +2,12 @@
  * Phase 20.3 — portable payment metrics (counters + histograms).
  *
  * Attribute values must be non-sensitive primitives only. Never pass secrets,
- * card data, tokens, raw payloads, or PII as metric labels.
+ * card data, tokens, raw payloads, or PII as metric labels. In-memory registry
+ * still auto-redacts attribute keys (OBS-2) so accidental sensitive labels are
+ * scrubbed without changing safe operational labels.
  */
+
+import { redactAttributeBag } from "./redaction";
 
 /** Safe metric label bag — string | number | boolean only. */
 export type MetricAttributes = Record<string, string | number | boolean>;
@@ -110,8 +114,8 @@ export type InMemoryPaymentMetrics = PaymentMetrics & {
 function cloneAttributes(
   attributes?: MetricAttributes,
 ): MetricAttributes | undefined {
-  if (attributes === undefined) return undefined;
-  return { ...attributes };
+  // OBS-2: auto-redact labels; operational keys like `authorized` preserved.
+  return redactAttributeBag(attributes);
 }
 
 function createNoopCounter(): Counter {

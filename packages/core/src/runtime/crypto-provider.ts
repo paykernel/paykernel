@@ -35,12 +35,10 @@ export function uuidV4FromGetRandomValues(
 /**
  * Resolve a portable CryptoProvider from `globalThis.crypto` when available.
  *
- * When Web Crypto is absent, falls back to a `Math.random`-based
- * `getRandomValues` polyfill (**not cryptographically strong**). That path is
- * for tests and constrained sandboxes only. On production edge runtimes that
- * lack `globalThis.crypto`, inject a real {@link CryptoProvider} via
- * `createPaymentRuntime({ crypto })` / client `runtime.crypto` rather than
- * relying on this fallback.
+ * **CORE-3:** Does **not** fall back to `Math.random`. Auto idempotency keys and
+ * runtime UUIDs must be cryptographically strong. When Web Crypto is absent,
+ * this function **throws** — inject a real {@link CryptoProvider} via
+ * `createPaymentRuntime({ crypto })` / client `runtime.crypto`.
  */
 export function resolveDefaultCrypto(): CryptoProvider {
   const g =
@@ -68,22 +66,10 @@ export function resolveDefaultCrypto(): CryptoProvider {
     return provider;
   }
 
-  // Last-resort portable polyfill (not cryptographically strong). Prefer
-  // injecting a real CryptoProvider in production when Web Crypto is absent.
-  const getRandomValues: CryptoProvider["getRandomValues"] = (array) => {
-    const view = new Uint8Array(
-      array.buffer,
-      array.byteOffset,
-      array.byteLength,
-    );
-    for (let i = 0; i < view.length; i++) {
-      view[i] = Math.floor(Math.random() * 256);
-    }
-    return array;
-  };
-
-  return {
-    randomUUID: () => uuidV4FromGetRandomValues(getRandomValues),
-    getRandomValues,
-  };
+  throw new Error(
+    "Web Crypto API is unavailable (globalThis.crypto.getRandomValues). " +
+      "Inject a CryptoProvider via createPaymentRuntime({ crypto }) or " +
+      "createPaymentClient({ runtime: { crypto } }). " +
+      "Math.random is not used for UUIDs or auto idempotency keys.",
+  );
 }

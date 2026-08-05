@@ -135,6 +135,33 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
     ).toBe("provider_5xx_uncertain");
   });
 
+  it("ROUTE-2: validation_error does not override indeterminate/succeeded outcomes", () => {
+    expect(
+      classifySubmissionState({
+        errorKind: "validation_error",
+        outcome: "indeterminate",
+      }),
+    ).toBe("indeterminate");
+    expect(
+      classifySubmissionState({
+        errorKind: "validation_error",
+        outcome: "succeeded",
+      }),
+    ).toBe("submitted");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          errorKind: "validation_error",
+          outcome: "indeterminate",
+        }),
+      }).allowed,
+    ).toBe(false);
+    // Bare validation_error (no outcome) remains pre_submission_failure.
+    expect(classifySubmissionState({ errorKind: "validation_error" })).toBe(
+      "pre_submission_failure",
+    );
+  });
+
   it("explicit submissionState wins", () => {
     expect(
       classifySubmissionState({
@@ -302,5 +329,42 @@ describe("trySelectFallbackGateway", () => {
         { attemptedGateways: ["stripe", "paypal"] },
       ),
     ).toThrow(UnsafeFallbackDeniedError);
+  });
+
+  it("ROUTE-1: forged eligibility.allowed is rejected without expertOverride", () => {
+    for (const submissionState of UNSAFE) {
+      const forged = {
+        allowed: true,
+        reason: "forged",
+        submissionState,
+      };
+      expect(() =>
+        trySelectFallbackGateway(
+          router,
+          { currency: "USD" },
+          forged,
+          { attemptedGateways: ["stripe"] },
+        ),
+      ).toThrow(UnsafeFallbackDeniedError);
+    }
+  });
+
+  it("ROUTE-1: expertOverride on eligibility still allows unsafe select", () => {
+    const eligibility = evaluateFallback({
+      submissionState: "timeout",
+      expertOverride: {
+        confirmUnsafeFallback: true,
+        reason: "ops confirmed no charge at primary",
+      },
+    });
+    expect(eligibility.allowed).toBe(true);
+    expect(eligibility.expertOverride).toBe(true);
+    const decision = trySelectFallbackGateway(
+      router,
+      { currency: "USD" },
+      eligibility,
+      { attemptedGateways: ["stripe"] },
+    );
+    expect(decision.gateway).toBe("paypal");
   });
 });

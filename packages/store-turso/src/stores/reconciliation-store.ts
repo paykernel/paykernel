@@ -5,6 +5,9 @@
  */
 
 import {
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyReconciliationClaimMiss,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -36,6 +39,16 @@ import {
   newLeaseToken,
   resolveStoreContext,
 } from "./shared";
+
+function claimMissToResult(
+  kind: Exclude<ReturnType<typeof classifyReconciliationClaimMiss>, "claimable">,
+  existing: ReconciliationRecord | undefined,
+): ClaimResult {
+  if (kind === "not_found" || existing === undefined) {
+    return { kind: "not_found" };
+  }
+  return { kind, record: existing };
+}
 
 /**
  * Single-statement claim UPDATE + RETURNING.
@@ -88,6 +101,7 @@ export function createTursoReconciliationStore(
     async schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult> {
       return withMappedErrors(async () => {
         const now = clockNowIso(ctx.clock);
+        const dueAt = canonicalizeIsoTimestamp(input.dueAt, "dueAt");
         // Insert-if-absent; RETURNING only on insert.
         const inserted = await ctx.getExecutor().query<Record<string, unknown>>(
           `INSERT INTO ${table} (
@@ -99,7 +113,7 @@ export function createTursoReconciliationStore(
            )
            ON CONFLICT (key) DO NOTHING
            RETURNING ${RECON_SELECT_COLS}`,
-          [input.key, input.subjectId, input.reason, input.dueAt, now, now],
+          [input.key, input.subjectId, input.reason, dueAt, now, now],
         );
 
         if (inserted.length > 0) {
@@ -122,8 +136,9 @@ export function createTursoReconciliationStore(
         const leaseToken = newLeaseToken();
         const now = clockNowIso(ctx.clock);
         const leaseExpiresAt = clockAddMsIso(ctx.clock, input.leaseMs);
+        const exec = ctx.getExecutor();
 
-        const claimed = await ctx.getExecutor().query<Record<string, unknown>>(
+        const claimed = await exec.query<Record<string, unknown>>(
           claimTpl,
           [input.owner, leaseToken, leaseExpiresAt, now, input.key, now, now],
         );
@@ -138,25 +153,46 @@ export function createTursoReconciliationStore(
         }
 
         const existing = await selectByKey(input.key);
-        if (!existing) return { kind: "not_found" };
-        if (
-          existing.status === "completed" ||
-          existing.status === "failed" ||
-          existing.status === "manual_review"
-        ) {
-          return { kind: "already_terminal", record: existing };
+        const miss = classifyReconciliationClaimMiss(existing, ctx.clock.nowMs());
+        if (miss !== "claimable") {
+          return claimMissToResult(miss, existing);
         }
-        if (
-          existing.status === "claimed" &&
-          existing.leaseExpiresAt !== undefined &&
-          Date.parse(existing.leaseExpiresAt) > ctx.clock.nowMs()
-        ) {
-          return { kind: "in_progress", record: existing };
+
+        // SQL-2: free due work; repair non-canonical TEXT timestamps and retry once.
+        const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
+        const leaseZ =
+          canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
+          null;
+        await exec.execute(
+          `UPDATE ${table} SET
+             due_at = ?,
+             lease_expires_at = ?
+           WHERE key = ?
+             AND status NOT IN ('completed', 'failed', 'manual_review')`,
+          [dueAtZ, leaseZ, input.key],
+        );
+
+        const retried = await exec.query<Record<string, unknown>>(
+          claimTpl,
+          [input.owner, leaseToken, leaseExpiresAt, now, input.key, now, now],
+        );
+        if (retried.length > 0) {
+          const record = mapReconciliationRow(retried[0]!);
+          return {
+            kind: "acquired",
+            record,
+            leaseToken: record.leaseToken ?? leaseToken,
+          };
         }
-        if (Date.parse(existing.dueAt) > ctx.clock.nowMs()) {
-          return { kind: "not_due", record: existing };
+
+        const after = await selectByKey(input.key);
+        const miss2 = classifyReconciliationClaimMiss(after, ctx.clock.nowMs());
+        if (miss2 === "claimable") {
+          throw new StoreUnavailableError(
+            "reconciliation claim: free due work failed after timestamp canonicalize; retry",
+          );
         }
-        return { kind: "in_progress", record: existing };
+        return claimMissToResult(miss2, after);
       });
     },
 
@@ -234,6 +270,7 @@ export function createTursoReconciliationStore(
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
         if (input.retryAt !== undefined) {
+          const retryAt = canonicalizeIsoTimestamp(input.retryAt, "retryAt");
           const rows = await ctx.getExecutor().query<Record<string, unknown>>(
             `UPDATE ${table} SET
                status = 'scheduled',
@@ -249,7 +286,7 @@ export function createTursoReconciliationStore(
                AND lease_expires_at IS NOT NULL
                AND lease_expires_at > ?
              RETURNING key, status, generation`,
-            [input.retryAt, lastError, now, input.key, input.leaseToken, now],
+            [retryAt, lastError, now, input.key, input.leaseToken, now],
           );
           if (rows.length === 0) {
             throw new StoreLeaseLostError(

@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import {
   MAX_SANITIZED_ERROR_LENGTH,
   RecordValidationError,
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
   enforceMaxSanitizedError,
+  isCanonicalIsoZ,
   isIsoTimestamp,
   validateIdempotencyStatus,
   validateIsoTimestamp,
@@ -72,6 +75,26 @@ describe("lease token / payload hash / timestamps", () => {
     expect(isIsoTimestamp("not-a-date")).toBe(false);
     expect(isIsoTimestamp("2026-01-15")).toBe(false);
     expect(validateIsoTimestamp("2026-08-03T00:00:00.000Z", "t")).toBe("2026-08-03T00:00:00.000Z");
+  });
+
+  it("canonicalizes to ISO Z millisecond form for lexical TEXT compares", () => {
+    expect(canonicalizeIsoTimestamp("2026-01-15T12:00:00.000Z")).toBe(
+      "2026-01-15T12:00:00.000Z",
+    );
+    // Offset that is earlier in absolute time but sorts after Z lexically at hour.
+    expect(canonicalizeIsoTimestamp("2026-01-15T14:00:00+05:00")).toBe(
+      "2026-01-15T09:00:00.000Z",
+    );
+    expect(canonicalizeIsoTimestamp("2026-01-15T12:00:00+00:00")).toBe(
+      "2026-01-15T12:00:00.000Z",
+    );
+    expect(isCanonicalIsoZ("2026-01-15T09:00:00.000Z")).toBe(true);
+    expect(isCanonicalIsoZ("2026-01-15T14:00:00+05:00")).toBe(false);
+    expect(canonicalizeOptionalIsoTimestamp(null)).toBeUndefined();
+    expect(canonicalizeOptionalIsoTimestamp("2026-01-15T00:00:00Z")).toBe(
+      "2026-01-15T00:00:00.000Z",
+    );
+    expect(() => canonicalizeIsoTimestamp("not-a-date")).toThrow(RecordValidationError);
   });
 
   it("validates non-negative ints including string digits", () => {

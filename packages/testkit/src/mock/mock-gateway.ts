@@ -1403,17 +1403,22 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         const result = await resolvePaymentOutcome(
           outcome,
           () => {
-            if (state) {
-              if (state.capturedAmountMinor > 0) {
-                throw new InvalidRequestError(
-                  `Cannot void payment ${params.gatewayPaymentId} after capture (mock)`,
-                );
-              }
-              applyLedger = () => {
-                state.status = "cancelled";
-                state.authorized = false;
-              };
+            // TESTKIT-3: fail closed for unknown payment IDs (match capture/refund/get).
+            if (!state) {
+              throw new GatewayApiError(
+                `Payment ${params.gatewayPaymentId} not found (mock)`,
+                name,
+              );
             }
+            if (state.capturedAmountMinor > 0) {
+              throw new InvalidRequestError(
+                `Cannot void payment ${params.gatewayPaymentId} after capture (mock)`,
+              );
+            }
+            applyLedger = () => {
+              state.status = "cancelled";
+              state.authorized = false;
+            };
             return defaultPaymentResult(
               params.gatewayPaymentId,
               "cancelled",

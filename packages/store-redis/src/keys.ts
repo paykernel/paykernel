@@ -26,8 +26,8 @@ export type KeyOptions = {
    * When true, wrap the tenant (or `_`) in `{}` hash tags for Redis Cluster
    * co-location of record + index keys so multi-key Lua (record + ZSET index)
    * stays single-slot. **Required on Redis Cluster** for webhook/recon mutators;
-   * default `false` is correct for standalone Redis/Valkey only.
-   * Bun binding must reject this (no Cluster support).
+   * default `false` is **standalone-only** (REDIS-2): Cluster without hash tags
+   * fails CROSSSLOT. Bun binding rejects this (no Cluster support).
    */
   clusterKeys?: boolean;
 };

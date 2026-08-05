@@ -80,7 +80,31 @@ const SENSITIVE_KEY_PATTERNS = [
   "taxid",
   "national_id",
   "nationalid",
+  // Wallet / network token material (MONEY-2)
+  "mobile",
+  "cryptogram",
+  "security_code",
+  "securitycode",
 ];
+
+/**
+ * Opaque string values that look like PANs (13–19 digits, optional spaces/dashes).
+ * Matched only on string leaves so free-form blobs do not leak card numbers under
+ * non-sensitive keys (MONEY-2).
+ */
+const PAN_LIKE_STRING = /^[\d\s-]{13,23}$/;
+
+function isOpaqueSensitiveString(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length < 13 || trimmed.length > 23) {
+    return false;
+  }
+  if (!PAN_LIKE_STRING.test(trimmed)) {
+    return false;
+  }
+  const digits = trimmed.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
 
 /**
  * Operational identifiers that are never sensitive but would otherwise be
@@ -141,6 +165,8 @@ const SAFE_KEY_ALLOWLIST = new Set([
   "currency",
   "amount",
   "currencycode",
+  // Operational payment-domain flags (substring "auth" would otherwise redact)
+  "authorized",
 ]);
 
 const REDACTED = "[REDACTED]";
@@ -157,6 +183,10 @@ function isSensitiveKey(key: string): boolean {
 /**
  * Recursively redact sensitive fields from a structured log context. Returns a
  * deep-cloned copy; the input is never mutated.
+ *
+ * Redacts:
+ * - Keys matching {@link SENSITIVE_KEY_PATTERNS} (case-insensitive substring)
+ * - Opaque string leaves that look like PANs (13–19 digits)
  */
 export function redact(value: unknown, depth = 0): unknown {
   if (depth > MAX_DEPTH) {
@@ -164,6 +194,9 @@ export function redact(value: unknown, depth = 0): unknown {
   }
 
   if (value === null || typeof value !== "object") {
+    if (typeof value === "string" && isOpaqueSensitiveString(value)) {
+      return REDACTED;
+    }
     return value;
   }
 
@@ -171,8 +204,12 @@ export function redact(value: unknown, depth = 0): unknown {
     return value.map((item) => redact(item, depth + 1));
   }
 
-  const result: Record<string, unknown> = {};
+  const result: Record<string, unknown> = Object.create(null);
   for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    // Skip prototype-polluting keys (MONEY-3 class) — never copy onto output.
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
     result[key] = isSensitiveKey(key) ? REDACTED : redact(val, depth + 1);
   }
   return result;

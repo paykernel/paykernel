@@ -223,6 +223,8 @@ describe("webhook store unit", () => {
     );
     expect(soft).toBeDefined();
     expect(soft?.sql.toLowerCase()).toContain("status = 'pending'");
+    // WEBHOOKS-1: soft-release restores unfinished attempt
+    expect(soft?.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
   });
 
   it("claim SQL template requires available_at for pending reclaim", async () => {
@@ -279,6 +281,11 @@ describe("webhook store unit", () => {
     expect(claimCall?.sql).toContain("available_at");
     expect(claimCall?.sql).toContain("status = 'pending'");
     expect(claimCall?.sql).toContain("status = 'claimed'");
+    // WEBHOOKS-1: expired claimed reclaim keeps attempts; pending burns
+    expect(claimCall?.sql).toMatch(
+      /WHEN\s+"?[\w.]+"?\.status\s*=\s*'claimed'\s+THEN\s+"?[\w.]+"?\.attempts/i,
+    );
+    expect(claimCall?.sql).toContain("attempts + 1");
   });
 });
 
@@ -288,6 +295,119 @@ describe("reconciliation store unit", () => {
     const store = createPostgresReconciliationStore({ executor });
     const r = await store.claim({ key: "missing", owner: "w", leaseMs: 1000 });
     expect(r.kind).toBe("not_found");
+  });
+
+  it("SQL-2: claim miss for free due work repairs lexical due_at and acquires (not in_progress)", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    // Offset due that is due by Date.parse (09:00Z) but fails lexical TEXT vs Z now.
+    const dueOffset = "2026-01-15T14:00:00+05:00";
+    const dueZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    let claimAttempts = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("UPDATE") && sql.includes("status = 'claimed'")) {
+          claimAttempts += 1;
+          if (claimAttempts === 1) return [];
+          // After canonicalize repair, claim succeeds.
+          return [
+            {
+              key: "job-lex",
+              status: "claimed",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: dueZ,
+              lease_owner: "w",
+              lease_token: "lt_repaired",
+              lease_expires_at: new Date(clock.nowMs() + 1000).toISOString(),
+              attempts: 1,
+              generation: 1,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: dueZ,
+              updated_at: now,
+              completed_at: null,
+            },
+          ];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          return [
+            {
+              key: "job-lex",
+              status: "scheduled",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: dueOffset,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 0,
+              generation: 0,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: dueZ,
+              updated_at: dueZ,
+              completed_at: null,
+            },
+          ];
+        }
+        return [];
+      },
+      onExecute: () => ({ rowCount: 1 }),
+    });
+    const store = createPostgresReconciliationStore({ executor, clock });
+    const r = await store.claim({ key: "job-lex", owner: "w", leaseMs: 1000 });
+    expect(r.kind).toBe("acquired");
+    expect(claimAttempts).toBe(2);
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("due_at") &&
+        c.sql.includes("lease_expires_at") &&
+        !c.sql.includes("status = 'claimed'"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.params).toEqual(["job-lex", dueZ, null]);
+  });
+
+  it("SQL-1: schedule stores canonical Z dueAt", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const now = new Date(clock.nowMs()).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql, params) => {
+        if (sql.includes("INSERT")) {
+          expect(params[3]).toBe("2026-01-15T09:00:00.000Z");
+          return [
+            {
+              key: "job-z",
+              status: "scheduled",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: params[3],
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 0,
+              generation: 0,
+              created_at: now,
+              updated_at: now,
+            },
+          ];
+        }
+        return [];
+      },
+    });
+    const store = createPostgresReconciliationStore({ executor, clock });
+    const r = await store.schedule({
+      key: "job-z",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt: "2026-01-15T14:00:00+05:00",
+    });
+    expect(r.kind).toBe("scheduled");
+    if (r.kind === "scheduled") {
+      expect(r.record.dueAt).toBe("2026-01-15T09:00:00.000Z");
+    }
   });
 
   it("schedule already_exists when insert returns empty", async () => {

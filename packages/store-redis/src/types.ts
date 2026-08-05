@@ -25,8 +25,10 @@ export type RedisStoreOptions = {
   /** Key namespace / hash-tag options. */
   keys?: KeyOptions;
   /**
-   * When set, terminal records get EXPIRE with this TTL (ms) after complete/fail.
-   * Retention cleanup via deleteExpired remains supported independently.
+   * When set (>0), terminal **webhook/recon** records may get Redis EXPIRE after
+   * complete/fail. **Completed idempotency fences never EXPIRE** (REDIS-1): silent
+   * eviction would allow re-reserve and double mutation. Use `deleteExpired` for
+   * intentional idempotency cleanup. Default (unset/0) is safe for all stores.
    */
   retentionTtlMs?: number;
 };

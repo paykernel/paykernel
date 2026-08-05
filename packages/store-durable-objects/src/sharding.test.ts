@@ -3,9 +3,13 @@ import {
   resolveDoShardName,
   resolveDoDiscoveryPartitions,
   enumerateDoPartitionShardNames,
+  resolveDoHashLayoutId,
+  resolveDoHashLayoutMetaShardName,
+  assertDoHashPartitionLayoutStable,
   assertDoShardingStrategy,
   hashStringToUint32,
   RECOMMENDED_HASH_PARTITIONS,
+  DO_HASH_LAYOUT_META_SUFFIX,
 } from "./sharding";
 
 describe("resolveDoShardName", () => {
@@ -31,6 +35,14 @@ describe("resolveDoShardName", () => {
       ),
     );
     expect(parts.size).toBeGreaterThan(1);
+  });
+
+  it("hash with layoutId: names use layoutId not bare N (DO-1 stable identity)", () => {
+    const s = { kind: "hash" as const, partitions: 16, layoutId: "payments-v1" };
+    const a = resolveDoShardName(s, { key: "alpha" });
+    expect(a).toMatch(/^hash:payments-v1:\d+$/);
+    expect(a).not.toContain(":16:");
+    expect(resolveDoHashLayoutId(s)).toBe("payments-v1");
   });
 
   it("tenant strategy: isolates by tenant", () => {
@@ -148,5 +160,79 @@ describe("resolveDoDiscoveryPartitions", () => {
     expect(r.kind).toBe("unsupported");
     if (r.kind !== "unsupported") return;
     expect(r.reason).toMatch(/dynamic tenantId/);
+  });
+
+  it("hash with layoutId: discovery uses layoutId (not partitions) in names", () => {
+    const r = resolveDoDiscoveryPartitions({
+      kind: "hash",
+      partitions: 2,
+      layoutId: "pay",
+    });
+    expect(r.kind).toBe("partitions");
+    if (r.kind !== "partitions") return;
+    expect([...r.shardNames]).toEqual(["hash:pay:0", "hash:pay:1"]);
+  });
+});
+
+describe("DO-1 hash layout seal", () => {
+  it("meta shard name is stable across partition count (no N embed)", () => {
+    const a = resolveDoHashLayoutMetaShardName({ kind: "hash", partitions: 16 });
+    const b = resolveDoHashLayoutMetaShardName({ kind: "hash", partitions: 32 });
+    expect(a).toBe(b);
+    expect(a).toBe(`hash:default:${DO_HASH_LAYOUT_META_SUFFIX}`);
+    expect(a).not.toMatch(/hash:16:/);
+    expect(a).not.toMatch(/hash:32:/);
+  });
+
+  it("meta shard name scopes by layoutId and prefix", () => {
+    expect(
+      resolveDoHashLayoutMetaShardName({
+        kind: "hash",
+        partitions: 8,
+        layoutId: "prod",
+      }),
+    ).toBe(`hash:prod:${DO_HASH_LAYOUT_META_SUFFIX}`);
+    expect(
+      resolveDoHashLayoutMetaShardName(
+        { kind: "hash", partitions: 8, layoutId: "prod" },
+        { prefix: "v2" },
+      ),
+    ).toBe(`v2:hash:prod:${DO_HASH_LAYOUT_META_SUFFIX}`);
+  });
+
+  it("assertDoHashPartitionLayoutStable throws on legacy N change", () => {
+    expect(() =>
+      assertDoHashPartitionLayoutStable(
+        { kind: "hash", partitions: 16 },
+        { kind: "hash", partitions: 32 },
+      ),
+    ).toThrow(/DO-1/);
+  });
+
+  it("assertDoHashPartitionLayoutStable throws on same layoutId N change", () => {
+    expect(() =>
+      assertDoHashPartitionLayoutStable(
+        { kind: "hash", partitions: 16, layoutId: "pay" },
+        { kind: "hash", partitions: 32, layoutId: "pay" },
+      ),
+    ).toThrow(/layoutId "pay"/);
+  });
+
+  it("assertDoHashPartitionLayoutStable allows new layoutId reshard", () => {
+    expect(() =>
+      assertDoHashPartitionLayoutStable(
+        { kind: "hash", partitions: 16, layoutId: "pay-v1" },
+        { kind: "hash", partitions: 32, layoutId: "pay-v2" },
+      ),
+    ).not.toThrow();
+  });
+
+  it("assertDoHashPartitionLayoutStable allows same partitions", () => {
+    expect(() =>
+      assertDoHashPartitionLayoutStable(
+        { kind: "hash", partitions: 16 },
+        { kind: "hash", partitions: 16 },
+      ),
+    ).not.toThrow();
   });
 });

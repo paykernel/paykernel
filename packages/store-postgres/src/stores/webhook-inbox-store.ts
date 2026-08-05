@@ -200,6 +200,7 @@ export function createPostgresWebhookInboxStore(
       return withMappedErrors(async () => {
         // Soft-release abandoned expired claims so get reclaims expired leases for this key
         // (parity with memory get soft-release and Redis WEBHOOK_GET_LUA).
+        // WEBHOOKS-1: restore unfinished claim attempt so crash reclaim does not burn maxAttempts.
         const now = clockNowIso(ctx.clock);
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
@@ -207,6 +208,7 @@ export function createPostgresWebhookInboxStore(
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = $1,
              updated_at = $1
            WHERE key = $2
@@ -223,15 +225,16 @@ export function createPostgresWebhookInboxStore(
       return withMappedErrors(async () => {
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // Soft-release abandoned expired claims so processRetryable can drain them
-        // (attempts kept; lease fields cleared). Matches memory list recovery and
-        // Redis listRetryable also bulk SCAN soft-releases expired claimed rows.
+        // Soft-release abandoned expired claims so processRetryable can drain them.
+        // WEBHOOKS-1: restore unfinished claim attempt (floor 0); next claim of pending
+        // re-increments so crash reclaim is net-zero vs maxAttempts handler budget.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'pending',
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = $1,
              updated_at = $1
            WHERE status = 'claimed'

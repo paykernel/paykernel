@@ -179,6 +179,15 @@ describe("Paymob merchant exponent overrides", () => {
       toMinorUnits("20.125", "OMR", { exponentOverrides: overrides }),
     ).toThrow(InvalidRequestError);
   });
+
+  it("money() stores override exponent so bare toMinorUnits does not 10× (MONEY-1)", () => {
+    const overrides = { OMR: 2 } as const;
+    const m = money("20.12", "OMR", { exponentOverrides: overrides });
+    expect(m.exponent).toBe(2);
+    expect(toMinorUnits(m)).toBe(2012n);
+    // Re-normalize with ISO path still available for full three-decimal strings
+    expect(toMinorUnits("20.125", "OMR")).toBe(20125n);
+  });
 });
 
 describe("cross-profile consistency for shared major amounts", () => {

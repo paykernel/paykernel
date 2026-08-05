@@ -16,13 +16,20 @@ bun add @paykernel/webhooks
 Inject any `WebhookInboxStore` (testkit memory in tests; Phase 11+ durable adapters in production).
 
 ```typescript
-import { hashWebhookPayload } from "@paykernel/core";
 import {
   createWebhookInboxEngine,
+  resolveInboxPayloadHash,
   type WebhookInboxStore,
 } from "@paykernel/webhooks";
 
 declare const store: WebhookInboxStore;
+/** Verified event from PaymentClient.handleWebhook / gateway.parseWebhookEvent */
+declare const webhookEvent: {
+  id: string;
+  payloadHash?: string;
+  rawPayload?: unknown;
+  event?: unknown;
+};
 
 const engine = createWebhookInboxEngine({
   store,
@@ -32,11 +39,18 @@ const engine = createWebhookInboxEngine({
 });
 
 // Prefer: verify with PaymentClient.handleWebhook (core), then processVerified.
+// WEBHOOKS-2: one hash source — prefer event.payloadHash; else hash the same
+// object shape the gateway used (parsed rawPayload). Do NOT mix rawBody string
+// hashing with object event.payloadHash (different digests → payload_conflict).
+const payloadHash = resolveInboxPayloadHash({
+  eventPayloadHash: webhookEvent.payloadHash,
+  payloadForHash: webhookEvent.rawPayload ?? webhookEvent.event ?? webhookEvent,
+});
 const outcome = await engine.processVerified({
   gateway: "stripe",
-  providerEventId: "evt_123",
-  payloadHash: hashWebhookPayload(rawBody),
-  event: normalizedPaymentEvent,
+  providerEventId: webhookEvent.id,
+  payloadHash,
+  event: webhookEvent.event ?? webhookEvent,
   // Optional sanitized dual-write envelope (never raw signatures / secrets):
   // envelope: toPersistedPaymentEventEnvelope(paymentEvent, { payloadHash }),
   // → payloadRef = { schemaVersion, event, payloadHash, storedAt }
@@ -92,6 +106,8 @@ const engine = createWebhookInboxEngine({ store, mode: "inline", clock });
 ### With injected verifier
 
 ```typescript
+import { resolveInboxPayloadHash } from "@paykernel/webhooks";
+
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   verifyAndNormalize: async (raw) => {
@@ -100,7 +116,11 @@ const outcome = await engine.processWithVerifier({
       ok: true,
       gateway: "stripe",
       providerEventId: event.id,
-      payloadHash: hashWebhookPayload(raw.body),
+      // Prefer gateway payloadHash; hash parsed shape only as fallback
+      payloadHash: resolveInboxPayloadHash({
+        eventPayloadHash: event.payloadHash,
+        payloadForHash: event.rawPayload ?? event.event ?? event,
+      }),
       event,
     };
   },
@@ -150,11 +170,12 @@ type WebhookProcessingOutcome =
 Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
-- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available" }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
+- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available" }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process (WEBHOOKS-3).
 - `scheduled_for_retry { reason: "parked" }` is safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
-- **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease.
+- **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts` (WEBHOOKS-1).
 - Durable redrive never materializes stub events: missing `payloadRef` → dead-letter / `handler_failed { retryable: false }`.
+- Terminal claim outcomes (`already_completed` / `duplicate_failed`) take precedence over `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done (WEBHOOKS-4).
 
 ## Event key
 

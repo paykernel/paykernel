@@ -463,6 +463,7 @@ describe("operation-result helpers", () => {
     const payment = paymentFromGatewayResult(
       baseResult({
         amount: 12.5,
+        currency: "SAR",
         fee: 0.5,
         capturedAmount: 12.5,
         refundedAmount: 1,
@@ -472,12 +473,35 @@ describe("operation-result helpers", () => {
       }),
     );
     expect(payment.amount).toBe(12.5);
+    expect(payment.currency).toBe("SAR");
     expect(payment.fee).toBe(0.5);
     expect(payment.capturedAmount).toBe(12.5);
     expect(payment.refundedAmount).toBe(1);
     expect(payment.redirectUrl).toBe("https://r");
     expect(payment.clientSecret).toBe("cs_test");
     expect(payment.nextAction?.type).toBe("redirect");
+  });
+
+  it("paymentFromGatewayResult fail-closes amount without currency (CORE-1)", () => {
+    const incomplete = paymentFromGatewayResult(
+      baseResult({
+        amount: 12.5,
+        fee: 0.5,
+        capturedAmount: 12.5,
+        refundedAmount: 1,
+      }),
+    );
+    expect(incomplete.amount).toBeUndefined();
+    expect(incomplete.currency).toBeUndefined();
+    expect(incomplete.fee).toBeUndefined();
+    expect(incomplete.capturedAmount).toBeUndefined();
+    expect(incomplete.refundedAmount).toBeUndefined();
+
+    const currencyOnly = paymentFromGatewayResult(
+      baseResult({ currency: "usd" }),
+    );
+    expect(currencyOnly.currency).toBe("USD");
+    expect(currencyOnly.amount).toBeUndefined();
   });
 
   it("inferOperationOutcome covers failed/declined/processing branches", () => {

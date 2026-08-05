@@ -6,6 +6,12 @@ import {
 } from "./retry";
 import { redact, createRedactingLogger, type Logger } from "./logger";
 import {
+  CaptureParamsSchema,
+  CreatePaymentParamsSchema,
+  RefundParamsSchema,
+} from "../types/validation";
+import { resolveDefaultCrypto } from "../runtime/crypto-provider";
+import {
   InMemoryIdempotencyStore,
   fingerprintParams,
 } from "./idempotency";
@@ -295,6 +301,8 @@ describe("redact", () => {
       captureId: "CAP-1",
       orderId: "ORD-1",
       paymentId: "pay_1",
+      // OBS-1: operational flag must not be redacted by substring "auth"
+      authorized: true,
       authorization: "Bearer secret",
       apiKey: "sk_live_xxx",
     }) as Record<string, unknown>;
@@ -306,6 +314,7 @@ describe("redact", () => {
     expect(out.captureId).toBe("CAP-1");
     expect(out.orderId).toBe("ORD-1");
     expect(out.paymentId).toBe("pay_1");
+    expect(out.authorized).toBe(true);
     expect(out.authorization).toBe("[REDACTED]");
     expect(out.apiKey).toBe("[REDACTED]");
   });
@@ -459,6 +468,112 @@ describe("redact", () => {
     expect(out.status).toBe("paid");
     expect(out.amount).toBe(10.5);
     expect(out.currency).toBe("SAR");
+  });
+
+  it("redacts mobile / cryptogram / security_code and opaque PAN-like strings (MONEY-2)", () => {
+    const out = redact({
+      mobile: "0512345678",
+      customerMobile: "966512345678",
+      cryptogram: "AAABBBcccDDD==",
+      networkCryptogram: "xyz",
+      security_code: "123",
+      securityCode: "456",
+      note: "ok",
+      // Opaque blob under a non-sensitive key
+      raw: "4242424242424242",
+      spaced: "4242 4242 4242 4242",
+      shortDigits: "1234567890",
+      amount: 10,
+    }) as Record<string, unknown>;
+
+    expect(out.mobile).toBe("[REDACTED]");
+    expect(out.customerMobile).toBe("[REDACTED]");
+    expect(out.cryptogram).toBe("[REDACTED]");
+    expect(out.networkCryptogram).toBe("[REDACTED]");
+    expect(out.security_code).toBe("[REDACTED]");
+    expect(out.securityCode).toBe("[REDACTED]");
+    expect(out.note).toBe("ok");
+    expect(out.raw).toBe("[REDACTED]");
+    expect(out.spaced).toBe("[REDACTED]");
+    expect(out.shortDigits).toBe("1234567890");
+    expect(out.amount).toBe(10);
+  });
+});
+
+describe("idempotencyKey validation (CORE-2)", () => {
+  it("rejects empty and whitespace-only idempotency keys", () => {
+    const base = {
+      amount: 10,
+      currency: "USD",
+      callbackUrl: "https://example.com/callback",
+    };
+    expect(
+      CreatePaymentParamsSchema.safeParse({ ...base, idempotencyKey: "" })
+        .success,
+    ).toBe(false);
+    expect(
+      CreatePaymentParamsSchema.safeParse({
+        ...base,
+        idempotencyKey: "   ",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreatePaymentParamsSchema.safeParse({
+        ...base,
+        idempotencyKey: "\t\n",
+      }).success,
+    ).toBe(false);
+    expect(
+      CaptureParamsSchema.safeParse({
+        gatewayPaymentId: "pay_1",
+        idempotencyKey: "  ",
+      }).success,
+    ).toBe(false);
+    expect(
+      RefundParamsSchema.safeParse({
+        gatewayPaymentId: "pay_1",
+        idempotencyKey: " ",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("accepts non-empty keys including those with internal spaces", () => {
+    const parsed = CreatePaymentParamsSchema.safeParse({
+      amount: 10,
+      currency: "USD",
+      callbackUrl: "https://example.com/callback",
+      idempotencyKey: "order-123 retry",
+    });
+    expect(parsed.success).toBe(true);
+  });
+});
+
+describe("resolveDefaultCrypto (CORE-3)", () => {
+  it("uses Web Crypto when available", () => {
+    const provider = resolveDefaultCrypto();
+    const id = provider.randomUUID();
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const bytes = new Uint8Array(8);
+    provider.getRandomValues(bytes);
+    expect(bytes.length).toBe(8);
+  });
+
+  it("throws when Web Crypto is absent (no Math.random fallback)", () => {
+    const original = globalThis.crypto;
+    Object.defineProperty(globalThis, "crypto", {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      expect(() => resolveDefaultCrypto()).toThrow(/Web Crypto API is unavailable/);
+    } finally {
+      Object.defineProperty(globalThis, "crypto", {
+        configurable: true,
+        value: original,
+      });
+    }
   });
 });
 

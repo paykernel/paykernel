@@ -117,7 +117,14 @@ type Mockish = PaymentGateway & {
   history?: ReadonlyArray<{ operation: string; params: unknown }>;
   buildWebhook?: (overrides?: Record<string, unknown>) => unknown;
   getLastProviderSideSuccess?: () => { success?: boolean } | undefined;
-  getPaymentState?: (id: string) => { amount: number; capturedAmount: number } | undefined;
+  getPaymentState?: (id: string) =>
+    | {
+        amount: number;
+        capturedAmount: number;
+        refundedAmount?: number;
+        status?: PaymentStatus | string;
+      }
+    | undefined;
   /** Optional testkit logger injection surface */
   setLogger?: (logger: Logger) => void;
 };
@@ -642,12 +649,13 @@ export async function runGatewayConformanceSuite(
         });
         assert(r2.gatewayId, "retry create gatewayId");
 
+        // Same provider object required for every gateway under full/applicable
+        // network ops (TESTKIT-2). A double-charging adapter must not green-pass.
+        assert(
+          r1.gatewayId === r2.gatewayId,
+          `safe_retry: expected same gatewayId on idempotent retry, got ${r1.gatewayId} vs ${r2.gatewayId}`,
+        );
         if (isScriptableMock(g)) {
-          // Mock records one payment id for same key (no double-charge)
-          assert(
-            r1.gatewayId === r2.gatewayId,
-            `safe_retry: expected same gatewayId on idempotent retry, got ${r1.gatewayId} vs ${r2.gatewayId}`,
-          );
           const mockish = g as Mockish;
           if (mockish.history) {
             const creates = mockish.history.filter(
@@ -660,7 +668,6 @@ export async function runGatewayConformanceSuite(
             );
           }
         }
-        // Non-mock: only require both calls accepted without throw
       },
     },
 
@@ -924,23 +931,33 @@ export async function runGatewayConformanceSuite(
           amount: 40,
           currency: "USD",
         });
+        // TESTKIT-1: partial money must be proven. Full capture / paid status /
+        // omitted capturedAmount must not green-pass (fail-closed incomplete snapshot).
+        // Exact partially_captured + capturedAmount=40 implies not full paid/100.
+        assert(cap.success === true, "partial capture must report success");
         assert(
-          cap.status === "partially_captured" ||
-            cap.capturedAmount === 40 ||
-            (cap.success === true &&
-              (cap.capturedAmount === undefined ||
-                cap.capturedAmount === 40 ||
-                cap.capturedAmount < 100)),
-          "partial capture must update remaining / partially_captured",
+          cap.status === "partially_captured",
+          `partial capture must report partially_captured, got ${cap.status}`,
+        );
+        assert(
+          cap.capturedAmount === 40,
+          `partial capture must report capturedAmount=40, got ${String(cap.capturedAmount)}`,
         );
         const mockish = g as Mockish;
         if (typeof mockish.getPaymentState === "function") {
           const state = mockish.getPaymentState(created.gatewayId);
           if (state) {
             assert(
-              state.capturedAmount === 40 ||
-                state.capturedAmount < state.amount,
-              "mock ledger remaining capture amount",
+              state.capturedAmount === 40,
+              `mock ledger capturedAmount must be 40, got ${state.capturedAmount}`,
+            );
+            assert(
+              state.capturedAmount < state.amount,
+              "mock ledger must leave remaining capturable amount",
+            );
+            assert(
+              state.status === "partially_captured",
+              `mock ledger status must be partially_captured, got ${state.status}`,
             );
           }
         }
@@ -971,12 +988,64 @@ export async function runGatewayConformanceSuite(
           amount: 25,
           currency: "USD",
         });
+        // TESTKIT-1: partial refund money + partial status. Full refund / omitted
+        // amount must not green-pass.
         assert(
-          refund.success === true ||
-            refund.status === "completed" ||
-            refund.status === "pending",
-          "partial refund accepted",
+          refund.success === true,
+          "partial refund must report success",
         );
+        assert(
+          refund.status === "completed" || refund.status === "pending",
+          `partial refund status must be completed|pending, got ${refund.status}`,
+        );
+        // Fail-closed: totalRefunded required and must equal requested partial amount
+        // (exact 25 implies not full capture amount 100).
+        assert(
+          refund.totalRefunded === 25,
+          `partial refund must report totalRefunded=25, got ${String(refund.totalRefunded)}`,
+        );
+
+        // Payment-level partially_refunded (or partial refundedAmount) when readable.
+        if (typeof g.getPayment !== "function") {
+          throw new SkipSignal(
+            "partial_refund: getPayment not implemented; cannot assert payment-level partial status",
+          );
+        }
+        const after = await g.getPayment({
+          gatewayPaymentId: created.gatewayId,
+        });
+        const partialPaymentStatus =
+          after.status === "partially_refunded" ||
+          after.status === "refund_pending";
+        const partialRefundedAmount =
+          after.refundedAmount === 25 ||
+          (after.refundedAmount !== undefined &&
+            after.refundedAmount < 100 &&
+            after.refundedAmount > 0);
+        assert(
+          partialPaymentStatus || partialRefundedAmount,
+          `partial refund must leave payment partially_refunded (or refundedAmount=25); got status=${after.status} refundedAmount=${String(after.refundedAmount)}`,
+        );
+        assert(
+          after.status !== "refunded" ||
+            (after.refundedAmount !== undefined && after.refundedAmount < 100),
+          "partial refund must not fully refund the payment",
+        );
+
+        const mockish = g as Mockish;
+        if (typeof mockish.getPaymentState === "function") {
+          const state = mockish.getPaymentState(created.gatewayId);
+          if (state) {
+            assert(
+              state.refundedAmount === 25,
+              `mock ledger refundedAmount must be 25, got ${state.refundedAmount}`,
+            );
+            assert(
+              state.status === "partially_refunded",
+              `mock ledger status must be partially_refunded, got ${state.status}`,
+            );
+          }
+        }
       },
     },
 

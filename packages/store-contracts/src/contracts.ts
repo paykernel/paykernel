@@ -431,8 +431,11 @@ export type WebhookInboxRecord = {
   leaseToken?: LeaseToken | undefined;
   leaseExpiresAt?: IsoTimestamp | undefined;
   /**
-   * Claim/handler attempt count. Successful claim acquire increments by 1 unless
-   * a subsequent `fail({ restoreAttempt: true })` undoes a parking claim.
+   * Handler attempt budget counter. Successful **pending** claim increments by 1.
+   * Restored (not burned) by:
+   * - `fail({ restoreAttempt: true })` parking claims
+   * - soft-release of expired `claimed` (crash/deploy reclaim)
+   * Direct reclaim of expired `claimed` does not increment (WEBHOOKS-1).
    */
   attempts: number;
   lastError?: string | undefined;
@@ -534,11 +537,16 @@ export type ListRetryableInput = {
  * dead_letter/failed → duplicate_failed;
  * pending with `availableAt` in the future → `not_available` (no acquire, no attempt++);
  * expired lease may be re-acquired with a new fencing token (generation++).
+ * Soft-release of expired claimed MUST restore one attempt (floor 0); direct
+ * reclaim of expired claimed MUST NOT increment `attempts` (WEBHOOKS-1 — only
+ * pending/handler reclaims burn the maxAttempts budget).
  */
 export interface WebhookInboxStore extends WithTransaction {
   /**
    * Atomic claim (or re-claim after lease expiry / due availableAt).
    * Increments `generation` and issues a new unguessable `leaseToken` on acquire.
+   * Pending reclaim increments `attempts`; expired-`claimed` reclaim keeps
+   * `attempts` unchanged (crash recovery).
    * MUST NOT acquire a pending row whose `availableAt` is still in the future —
    * return `{ kind: "not_available", ... }` instead (no attempt increment).
    */
@@ -565,6 +573,12 @@ export interface WebhookInboxStore extends WithTransaction {
   fail(input: FailWebhookInput): Promise<void>;
 
   get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined>;
+
+  /**
+   * Rows due for worker redrive (`status === "pending"` and `availableAt <= now`).
+   * Soft-release of expired `claimed` MUST restore one attempt (floor 0)
+   * before exposing rows as pending (WEBHOOKS-1).
+   */
   listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]>;
   deleteExpired(input: CleanupInput): Promise<CleanupResult>;
 }

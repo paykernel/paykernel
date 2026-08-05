@@ -8,7 +8,12 @@
  */
 
 // Engine
-export { createWebhookInboxEngine, computePayloadHash } from "./engine";
+export {
+  createWebhookInboxEngine,
+  computePayloadHash,
+  resolveInboxPayloadHash,
+} from "./engine";
+export type { ResolveInboxPayloadHashInput } from "./engine";
 
 // Event key
 export { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";

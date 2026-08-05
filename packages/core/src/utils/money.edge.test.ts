@@ -387,11 +387,14 @@ describe("5.4 currency whitespace and unknown codes", () => {
     expect(money("  100  ", "JPY").amount).toBe("100");
   });
 
-  it("unknown currency codes default to exponent 2", () => {
-    expect(getCurrencyExponent("XXX")).toBe(2);
-    expect(getCurrencyExponent("ZZZ")).toBe(2);
-    expect(toMinorUnits("1.50", "XXX")).toBe(150n);
-    expect(() => toMinorUnits("1.501", "XXX")).toThrow(InvalidRequestError);
+  it("unknown currency codes fail closed (MONEY-4)", () => {
+    expect(() => getCurrencyExponent("XXX")).toThrow(InvalidRequestError);
+    expect(() => getCurrencyExponent("ZZZ")).toThrow(InvalidRequestError);
+    expect(() => toMinorUnits("1.50", "XXX")).toThrow(InvalidRequestError);
+    expect(() => money("1.50", "JYP")).toThrow(InvalidRequestError);
+    // Explicit exponent still allowed for intentional non-ISO codes
+    expect(toMinorUnits("1.50", "XXX", { exponent: 2 })).toBe(150n);
+    expect(getCurrencyExponent("XXX", { allowUnknown: true })).toBe(2);
   });
 
   it("empty / whitespace-only currency throws", () => {

@@ -4,6 +4,10 @@
 
 ### Patch Changes
 
+- **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged; contract + memory + durable adapter (postgres/sqlite/d1/turso/redis/DO) parity + conformance so crash/deploy reclaim does not burn handler `maxAttempts`.
+- **WEBHOOKS-2:** Canonical payload hash source — `resolveInboxPayloadHash` prefers gateway `event.payloadHash`; docs/README refuse treating `hashWebhookPayload(rawBodyString)` as interchangeable with object hashes. Core JSDoc aligned.
+- **WEBHOOKS-3:** Confirmed `not_available` → `scheduled_for_retry { reason: "not_available" }` (no silent 200); adapter policy docs stress 5xx unless a durable worker owns the row.
+- **WEBHOOKS-4:** Claim classifies `already_completed` / `duplicate_failed` before `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done.
 - **B3:** `ackAfterClaim` parking uses `fail({ restoreAttempt: true })` so the parking claim does not consume `maxAttempts` (documented as max **handler** attempts). Regression: `maxAttempts=3` + ackAfterClaim → 3 handler failures before `dead_letter`.
 - **B4:** Key-addressed `claim` respects `availableAt` — pending rows with future `availableAt` return `{ kind: "not_available" }` (no attempt++). Engine maps to `scheduled_for_retry`. True backoff under provider redelivery.
 - **N2 (envelope unwrap):** Default `processRetryable` materialization auto-unwraps core `PersistedPaymentEventEnvelope` (`schemaVersion`+`event`+`payloadHash`) so handlers receive `.event` (PaymentEvent). Plain PaymentEvent / custom `payloadRef` shapes pass through. Custom `resolveEvent` still overrides. Docs: README + webhook-inbox.md.

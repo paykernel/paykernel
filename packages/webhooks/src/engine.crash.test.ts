@@ -241,6 +241,90 @@ describe("crash boundaries (10.6)", () => {
   });
 
   /**
+   * WEBHOOKS-1 — Crash reclaim must not burn maxAttempts handler budget.
+   * Deploy death after claim used to increment attempts on every reclaim so
+   * durable_retry dead-lettered after fewer real handler failures.
+   */
+  it("WEBHOOKS-1: repeated crash reclaim does not burn maxAttempts handler budget", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const maxAttempts = 3;
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      maxAttempts,
+      defaultRetryAfterMs: 0,
+      clock,
+      defaultLeaseMs: 1000,
+    });
+
+    // Simulate maxAttempts deploy crashes after claim (no handler outcome).
+    for (let i = 0; i < maxAttempts; i++) {
+      const claim = await store.claim({
+        key: "stripe:evt_crash_budget",
+        payloadHash: "h",
+        owner: `crash-${i}`,
+        leaseMs: 1000,
+        payloadRef: JSON.stringify({ id: "evt_crash_budget" }),
+      });
+      expect(claim.kind).toBe("acquired");
+      if (claim.kind === "acquired") {
+        // Soft-release on get restores unfinished attempt (WEBHOOKS-1).
+        clock.advance(2000);
+        const after = await store.get("stripe:evt_crash_budget");
+        expect(after?.status).toBe("pending");
+        expect(after?.attempts).toBe(0);
+      }
+    }
+
+    // First real handler failure still retryable (budget intact).
+    let runs = 0;
+    const firstFail = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_crash_budget",
+      payloadHash: "h",
+      event: { id: "evt_crash_budget" },
+      handler: async () => {
+        runs++;
+        throw new Error("transient after crashes");
+      },
+    });
+    expect(firstFail).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
+    expect(runs).toBe(1);
+    expect((await store.get("stripe:evt_crash_budget"))?.attempts).toBe(1);
+    expect((await store.get("stripe:evt_crash_budget"))?.status).toBe("pending");
+
+    // Need maxAttempts real handler failures to dead-letter.
+    for (let i = 2; i <= maxAttempts; i++) {
+      const o = await engine.processVerified({
+        gateway: "stripe",
+        providerEventId: "evt_crash_budget",
+        payloadHash: "h",
+        event: { id: "evt_crash_budget" },
+        handler: async () => {
+          runs++;
+          throw new Error(`fail #${i}`);
+        },
+      });
+      if (i < maxAttempts) {
+        expect(o).toEqual({
+          outcome: "scheduled_for_retry",
+          reason: "handler_retry",
+        });
+      } else {
+        expect(o).toEqual({ outcome: "handler_failed", retryable: false });
+      }
+    }
+    expect(runs).toBe(maxAttempts);
+    expect((await store.get("stripe:evt_crash_budget"))?.status).toBe(
+      "dead_letter",
+    );
+  });
+
+  /**
    * 10.6.5 — Crash AFTER completion
    * Terminal completed state; redelivery → duplicate_completed; handler not re-run.
    */

@@ -52,6 +52,9 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "isIsoTimestamp",
   "validateIsoTimestamp",
   "validateOptionalIsoTimestamp",
+  "canonicalizeIsoTimestamp",
+  "canonicalizeOptionalIsoTimestamp",
+  "isCanonicalIsoZ",
   "validatePayloadHash",
   "validateNonNegativeInt",
   // codecs
@@ -86,6 +89,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "decideIdempotencyReserve",
   "decideWebhookClaim",
   "decideReconciliationClaim",
+  "classifyReconciliationClaimMiss",
   "evaluateClaim",
   "decideLeaseMutation",
   "isActiveLeaseToken",

@@ -2164,6 +2164,62 @@ describe("MoyasarGateway", () => {
       expect(fetchCalls).toHaveLength(2);
     });
 
+    it("keeps reservation after 2xx invalid JSON on refund (MOYASAR-1)", async () => {
+      // HTTP 2xx with unparseable body: mutation may already have applied.
+      // Fence must stay so a retry cannot double-refund.
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(input), init });
+        return new Response("not-json{{{", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund-key-bad-json-2xx",
+      };
+
+      await expect(gateway.refundPayment(params)).rejects.toBeTruthy();
+      // Indeterminate post-2xx parse failure → unknown fence, no second apply.
+      await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("keeps reservation after 2xx map failure on capture (MOYASAR-1)", async () => {
+      // Valid JSON 2xx body that fails money mapping after HTTP may have applied.
+      // Keep fence; do not allow a second capture attempt with the same key.
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      mockFetchJson(
+        paymentResponse({
+          status: "captured",
+          // Non-integer minor units → fromMinorUnits throws after HTTP success.
+          amount: 10000.5,
+          captured: 5000.5,
+        }),
+      );
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "capture-key-map-fail-2xx",
+      };
+
+      await expect(gateway.capturePayment(params)).rejects.toBeTruthy();
+      await expect(gateway.capturePayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
     it("retries a 5xx error on createPayment when an idempotency key is present", async () => {
       const gateway = createGateway();
       mockFetchSequence(

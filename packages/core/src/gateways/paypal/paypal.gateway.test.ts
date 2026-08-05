@@ -704,8 +704,9 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
-            // Latest capture id for refund target; amount is sum (not last-slice 60).
-            expect(event.gatewayPaymentId).toBe('CAPTURE-LAST');
+            // PAYPAL-1: multi-capture uses order id, not latest capture + full aggregate amount.
+            expect(event.gatewayPaymentId).toBe('order-multi');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-LAST');
             expect(event.amount).toBe(100);
             expect(event.status).toBe('paid');
             expect(isPaidOutcome({
@@ -716,7 +717,7 @@ describe('PayPalGateway', () => {
             })).toBe(true);
         });
 
-        it('should prefer the capture with the latest create_time/update_time for id; still aggregate amount', () => {
+        it('should aggregate multi-capture amount by create_time order without single capture id (PAYPAL-1)', () => {
             const payload = {
                 id: 'WH-multi-capture-times',
                 event_type: 'CHECKOUT.ORDER.COMPLETED',
@@ -762,10 +763,70 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
-            expect(event.gatewayPaymentId).toBe('CAPTURE-NEWER');
+            // Order id — not a single capture (would dual-write false full-refund target).
+            expect(event.gatewayPaymentId).toBe('order-multi-times');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-NEWER');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-OLDER-LAST-IN-ARRAY');
             // Aggregate 40+60, not last-by-time slice 40 alone
             expect(event.amount).toBe(100);
             expect(event.status).toBe('paid');
+        });
+
+        it('ORDER multi-capture with one REFUNDED sibling → partially_refunded, excludes refunded face (PAYPAL-2)', () => {
+            const payload = {
+                id: 'WH-multi-capture-partial-refund',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-multi-refunded-slice',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-REFUNDED-SLICE',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAPTURE-STILL-HELD',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '60.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            // Not false paid; remaining held is 60 not 100.
+            expect(event.status).toBe('partially_refunded');
+            expect(event.status).not.toBe('paid');
+            expect(event.amount).toBe(60);
+            expect(event.amount).not.toBe(100);
+            // Single refundable capture remains → capture id is honest refund target.
+            expect(event.gatewayPaymentId).toBe('CAPTURE-STILL-HELD');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-multi-refunded-slice',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
         });
 
         it('ORDER.COMPLETED under-total multi-capture → partially_captured not paid (audit PAYPAL-2)', () => {
@@ -883,9 +944,13 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
-            // Auth id is not refundable — callers must use a capture ID for refunds
+            // Auth id is not refundable — callers must use a capture ID for refunds.
+            // PAYPAL-5: dual-write payment.succeeded, not capture.completed (auth ≠ capture).
             expect(event.gatewayPaymentId).toBe('AUTH-NO-CAPTURE-LINK');
             expect(event.status).toBe('paid');
+            expect(event.stableType).toBe('payment.succeeded');
+            expect(event.stableType).not.toBe('capture.completed');
+            expect(event.event?.type).toBe('payment.succeeded');
         });
 
         it('should extract custom_id from purchase_units', () => {
@@ -2157,9 +2222,11 @@ describe('PayPalGateway', () => {
             );
 
             try {
+                // Use a known ISO currency so the request reaches PayPal; the
+                // mock returns CURRENCY_NOT_SUPPORTED for an unknown provider code.
                 await gateway.createPayment({
                     amount: 100,
-                    currency: 'XYZ',
+                    currency: 'USD',
                     callbackUrl: 'https://example.com/callback',
                 });
                 expect(true).toBe(false); // Should not reach
@@ -2821,6 +2888,10 @@ describe('PayPalGateway', () => {
                 return createMockResponse({
                 id: 'REFUND-ABC',
                 status: 'COMPLETED',
+                amount: {
+                    currency_code: 'USD',
+                    value: '25.50',
+                },
                 });
             }) as unknown as typeof fetch;
 
@@ -2836,8 +2907,26 @@ describe('PayPalGateway', () => {
             expect(result.outcome).toBe('succeeded');
             expect(result.gatewayRefundId).toBe('REFUND-ABC');
             expect(result.status).toBe('completed');
+            // PAYPAL-4: map refund amount from representation body
+            expect(result.totalRefunded).toBe(25.5);
             expect(capturedHeaders!['PayPal-Request-Id']).toBe('refund-idem-1');
             expect(capturedHeaders!.Prefer).toBe('return=representation');
+        });
+
+        it('should map totalRefunded from request amount when body omits amount (PAYPAL-4)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'REFUND-NO-BODY-AMOUNT',
+                status: 'COMPLETED',
+            });
+
+            const result = await gateway.refundPayment({
+                gatewayPaymentId: 'CAPTURE-123',
+                amount: 12.34,
+                currency: 'USD',
+            });
+
+            expect(result.totalRefunded).toBe(12.34);
+            expect(result.status).toBe('completed');
         });
 
         it('should reject malformed successful refund responses', async () => {
@@ -3483,7 +3572,7 @@ describe('PayPalGateway', () => {
             expect(afterOperation).toBe('getPayment');
         });
 
-        it('should prefer the last capture id and aggregate multi-capture amounts', async () => {
+        it('should omit captureId on multi-capture and aggregate held amounts (PAYPAL-1)', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'ORDER-MULTI-CAP',
                 status: 'COMPLETED',
@@ -3519,12 +3608,147 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.getPayment({ gatewayPaymentId: 'ORDER-MULTI-CAP' });
 
-            // Last capture for refund target; amount is sum of successful captures (PAYPAL-5)
-            expect(result.captureId).toBe('CAP-NEW');
+            // PAYPAL-1: do not dual-write full aggregate with only latest captureId
+            expect(result.captureId).toBeUndefined();
             expect(result.amount).toBe(100);
             expect(result.capturedAmount).toBe(100);
             expect(result.status).toBe('paid');
             expect(isPaidOutcome(result)).toBe(true);
+        });
+
+        it('multi-capture with REFUNDED sibling is not false paid; amounts exclude refunded face (PAYPAL-2)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-MULTI-CAP-REFUND',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-REFUNDED',
+                                    status: 'REFUNDED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                                {
+                                    id: 'CAP-HELD',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '60.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-MULTI-CAP-REFUND',
+            });
+
+            // Latest COMPLETED must not force paid when a sibling is REFUNDED.
+            expect(result.status).toBe('partially_refunded');
+            expect(result.status).not.toBe('paid');
+            expect(isPaidOutcome(result)).toBe(false);
+            // Held remaining only — not original 100 including REFUNDED face.
+            expect(result.amount).toBe(60);
+            expect(result.capturedAmount).toBe(60);
+            expect(result.amount).not.toBe(100);
+            // Exactly one refundable capture remains → honest single captureId.
+            expect(result.captureId).toBe('CAP-HELD');
+        });
+
+        it('multi-capture all REFUNDED → refunded with zero held amount (PAYPAL-2)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-ALL-REFUNDED',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-R1',
+                                    status: 'REFUNDED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                                {
+                                    id: 'CAP-R2',
+                                    status: 'REFUNDED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '60.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-ALL-REFUNDED',
+            });
+
+            expect(result.status).toBe('refunded');
+            expect(isPaidOutcome(result)).toBe(false);
+            // No still-held captures → aggregate amount omitted (not false 100).
+            expect(result.amount).toBeUndefined();
+            expect(result.capturedAmount).toBeUndefined();
+            expect(result.captureId).toBeUndefined();
+        });
+
+        it('PARTIALLY_REFUNDED capture alone does not report face amount as held (PAYPAL-2 fail-closed)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-PARTIAL-REFUND-ONLY',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-PARTIAL-REF',
+                                    status: 'PARTIALLY_REFUNDED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '100.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-PARTIAL-REFUND-ONLY',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            expect(isPaidOutcome(result)).toBe(false);
+            // Face amount without net remaining → omit (do not claim full 100 held).
+            expect(result.amount).toBeUndefined();
+            expect(result.capturedAmount).toBeUndefined();
+            // Still refundable (partial) — single id is honest.
+            expect(result.captureId).toBe('CAP-PARTIAL-REF');
         });
 
         it('should not prefer COMPLETED capture over PARTIALLY_CAPTURED authorization (PAYPAL-2)', async () => {

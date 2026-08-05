@@ -25,6 +25,7 @@ describe("public API runtime surface", () => {
       // Redaction
       ["createRedactingTelemetrySink", observability.createRedactingTelemetrySink],
       ["redactTelemetryData", observability.redactTelemetryData],
+      ["redactAttributeBag", observability.redactAttributeBag],
       // OperationContext (core)
       ["createOperationContext", observability.createOperationContext],
       ["finalizeOperationContext", observability.finalizeOperationContext],

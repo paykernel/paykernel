@@ -255,6 +255,7 @@ export function createSqliteWebhookInboxStore(
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
       return withMappedErrors(() => {
+        // WEBHOOKS-1: restore unfinished claim attempt on expired-lease soft-release.
         const now = clockNowIso(ctx.clock);
         ctx.getExecutor().run(
           `UPDATE ${table} SET
@@ -262,6 +263,7 @@ export function createSqliteWebhookInboxStore(
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = ?,
              updated_at = ?
            WHERE key = ?
@@ -279,12 +281,14 @@ export function createSqliteWebhookInboxStore(
         const now = input.now ?? clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
+        // WEBHOOKS-1: restore unfinished claim attempt (floor 0).
         ctx.getExecutor().run(
           `UPDATE ${table} SET
              status = 'pending',
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = ?,
              updated_at = ?
            WHERE status = 'claimed'

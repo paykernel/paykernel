@@ -2,6 +2,7 @@ import { describe, it, expect } from "bun:test";
 import type { TelemetrySink } from "@paykernel/core";
 import {
   createRedactingTelemetrySink,
+  redactAttributeBag,
   redactTelemetryData,
 } from "./redaction";
 
@@ -64,6 +65,24 @@ describe("createRedactingTelemetrySink (A3)", () => {
     expect(data.inboxEventKey).toBe("inbox:evt_1");
     expect(data.token).toBe("[REDACTED]");
   });
+
+  it("preserves operational authorized flag (OBS-1)", () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const sink: TelemetrySink = {
+      emit(_event, data) {
+        seen.push(data);
+      },
+    };
+    createRedactingTelemetrySink(sink).emit?.("payment.operation", {
+      authorized: true,
+      authorization: "Bearer secret",
+      status: "authorized",
+    });
+    const data = seen[0]!;
+    expect(data.authorized).toBe(true);
+    expect(data.authorization).toBe("[REDACTED]");
+    expect(data.status).toBe("authorized");
+  });
 });
 
 describe("redactTelemetryData", () => {
@@ -77,5 +96,38 @@ describe("redactTelemetryData", () => {
       "[REDACTED]",
     );
     expect((out.nested as Record<string, unknown>).safe).toBe("ok");
+  });
+
+  it("restores authorized after core auth over-match (OBS-1)", () => {
+    const out = redactTelemetryData({
+      authorized: false,
+      nested: { authorized: true, token: "x" },
+    });
+    expect(out.authorized).toBe(false);
+    expect((out.nested as Record<string, unknown>).authorized).toBe(true);
+    expect((out.nested as Record<string, unknown>).token).toBe("[REDACTED]");
+  });
+});
+
+describe("redactAttributeBag (OBS-2)", () => {
+  it("redacts sensitive labels and keeps authorized/gateway", () => {
+    const out = redactAttributeBag({
+      gateway: "stripe",
+      authorized: true,
+      token: "tok_secret",
+      cardNumber: "4111",
+      latencyMs: 12,
+    });
+    expect(out).toEqual({
+      gateway: "stripe",
+      authorized: true,
+      token: "[REDACTED]",
+      cardNumber: "[REDACTED]",
+      latencyMs: 12,
+    });
+  });
+
+  it("returns undefined for undefined input", () => {
+    expect(redactAttributeBag(undefined)).toBeUndefined();
   });
 });

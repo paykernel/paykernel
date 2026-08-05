@@ -119,7 +119,9 @@ const eligibility = evaluateFallback({
 // eligibility.allowed === false for timeout without override
 ```
 
-Alternate selection (only when `eligibility.allowed`):
+Alternate selection (only when eligibility is safe). `trySelectFallbackGateway`
+re-validates `isSafeFallbackEligible(submissionState)` and does **not** trust a
+forged `{ allowed: true }` without `expertOverride: true`:
 
 ```typescript
 import { trySelectFallbackGateway } from "@paykernel/routing";

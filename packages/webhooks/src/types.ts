@@ -121,7 +121,19 @@ export type WebhookHandler = (ctx: WebhookHandlerContext) => void | Promise<void
 export type ProcessVerifiedInput = {
   gateway: string;
   providerEventId: string;
-  /** Precomputed payload hash (from core `hashWebhookPayload` or equivalent). */
+  /**
+   * Precomputed payload hash for claim duplicate/conflict detection.
+   *
+   * **Canonical source (WEBHOOKS-2):** prefer gateway/event `payloadHash` when
+   * present (e.g. Stripe `computePayloadHash` on the parsed event). Otherwise
+   * hash the **same object shape** the gateway used — typically the verified
+   * event / `rawPayload` object via core `hashWebhookPayload`.
+   *
+   * Do **not** mix `hashWebhookPayload(rawBodyString)` with an object hash for
+   * the same event: non-object strings are not JSON-parsed before hashing, so
+   * digests differ and redelivery permanently returns `payload_conflict`.
+   * See {@link resolveInboxPayloadHash}.
+   */
   payloadHash: string;
   /**
    * Verified + normalized event passed to the handler.
@@ -249,11 +261,16 @@ export type CreateWebhookInboxEngineOptions = {
   /**
    * Max **handler** attempts before dead-letter on durable_retry. Default: 5.
    * Must be a finite integer `>= 1` (constructor throws otherwise).
-   * Each claim that runs (or would run) the handler increments store `attempts`.
-   * The `ackAfterClaim` parking claim is free (`fail({ restoreAttempt: true })`).
-   * Provider redelivery while `availableAt` is in the future returns
-   * `not_available` / `scheduled_for_retry` (`reason: "not_available"`) and does
-   * not increment attempts.
+   *
+   * Counts handler outcomes (claim that reaches fail/complete under a live
+   * lease), **not** crash/deploy reclaims or parking claims:
+   * - each successful claim increments store `attempts`
+   * - `ackAfterClaim` parking is free (`fail({ restoreAttempt: true })`)
+   * - soft-release of an expired `claimed` lease restores the unfinished attempt
+   *   so reclaim does not burn this budget (WEBHOOKS-1)
+   * - provider redelivery while `availableAt` is in the future returns
+   *   `not_available` / `scheduled_for_retry` (`reason: "not_available"`) and
+   *   does not increment attempts
    */
   maxAttempts?: number;
   /**

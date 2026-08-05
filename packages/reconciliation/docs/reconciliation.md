@@ -197,9 +197,9 @@ switch (decision.action) {
 | `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound) |
 | `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
-| `retry_later` | `false` | Temporarily unavailable / retryable not-found (when not forbidding replacement) |
-| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial — surface capture work) |
-| `do_not_create_replacement` | `false` | Not-found / incomplete lookup while local is indeterminate |
+| `retry_later` | `false` | Temporarily unavailable / retryable not-found on terminal non-open locals (when not forbidding replacement via primary action) |
+| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed` — surface capture/refund work) |
+| `do_not_create_replacement` | `false` | Not-found while local is indeterminate **or open money** (incl. `refund_pending`) |
 
 ### Replacement charge rule
 
@@ -215,7 +215,8 @@ Returns `true` when:
 - `result.outcome === "provider_not_found"` (original may still settle), or
 - `result.outcome === "temporarily_unavailable"`, or
 - local expected is missing/indeterminate **or** any open money state
-  (`pending` / `processing` / `authorized` / `approved` / partial / `paid` / refunded / setup)
+  (`pending` / `processing` / `authorized` / `approved` / partial / `paid` /
+  `refunded` / `refund_pending` / setup)
 
 **Never** convert `temporarily_unavailable` or retryable `provider_not_found` into local `failed` without a definitive provider response.
 

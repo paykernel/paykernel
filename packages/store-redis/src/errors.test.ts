@@ -7,6 +7,7 @@ import {
   StoreError,
   StoreTimeoutError,
   StoreCorruptedRecordError,
+  StoreInvalidSchemaError,
   withMappedErrors,
 } from "./errors";
 
@@ -40,6 +41,16 @@ describe("mapDriverError", () => {
     });
     const mapped = mapDriverError(err);
     expect(mapped).toBeInstanceOf(StoreCorruptedRecordError);
+  });
+
+  it("maps CROSSSLOT with clusterKeys honesty (REDIS-2)", () => {
+    const err = new Error(
+      "CROSSSLOT Keys in request don't hash to the same slot",
+    );
+    const mapped = mapDriverError(err);
+    expect(mapped).toBeInstanceOf(StoreInvalidSchemaError);
+    expect(mapped.message.toLowerCase()).toContain("crossslot");
+    expect(mapped.message).toMatch(/clusterKeys/i);
   });
 
   it("sanitizes redis URLs and secrets from messages", () => {

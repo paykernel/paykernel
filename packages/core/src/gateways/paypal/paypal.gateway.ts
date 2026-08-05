@@ -141,6 +141,11 @@ interface PayPalOrderResponse {
 interface PayPalRefundResponse {
   id: string;
   status: string;
+  /** Present when Prefer: return=representation (this refund's amount). */
+  amount?: {
+    currency_code: string;
+    value: string;
+  };
   message?: string;
   name?: string;
   details?: Array<{
@@ -353,8 +358,12 @@ export class PayPalGateway extends BaseGateway {
         this.assertOrderResponse(data, "get payment");
 
         const captures = data.purchase_units?.[0]?.payments?.captures;
-        // Prefer the last capture for captureId / refund target (most recent).
+        // Preferred capture is for status mapping only — not a multi-capture refund target.
         const capture = this.preferLastCapture(captures);
+        // PAYPAL-1: only dual-write captureId when a single refundable capture remains.
+        // Multiple captures + aggregated amount + one latest id implies a false full refund path.
+        const singleRefundableCaptureId =
+          this.selectSingleRefundableCaptureId(captures);
         const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
         const purchaseUnitAmount = data.purchase_units?.[0]?.amount;
         const status = this.mapPaymentResultStatus(
@@ -363,15 +372,17 @@ export class PayPalGateway extends BaseGateway {
           authorization,
           captures,
         );
-        // Aggregate multi-capture money; do not report last-slice only as total.
+        // Aggregate remaining held capture money (excludes fully REFUNDED face amounts).
         const aggregatedCaptured = this.sumSuccessfulCaptureAmounts(
           captures,
           "get payment",
         );
+        // When captures exist, do not fall back to a single capture's face amount if
+        // the aggregate is empty (e.g. all REFUNDED / PARTIALLY_REFUNDED without net).
         const singleAmount =
           capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
         const amountMajor =
-          aggregatedCaptured !== undefined
+          captures && captures.length > 0
             ? aggregatedCaptured
             : singleAmount
               ? this.parseAmount(singleAmount, "get payment")
@@ -383,7 +394,9 @@ export class PayPalGateway extends BaseGateway {
           rawResponse: data,
           providerNativeStatus:
             capture?.status ?? authorization?.status ?? data.status,
-          ...(capture?.id !== undefined ? { captureId: capture.id } : {}),
+          ...(singleRefundableCaptureId !== undefined
+            ? { captureId: singleRefundableCaptureId }
+            : {}),
           ...(authorization?.id !== undefined
             ? { authorizationId: authorization.id }
             : {}),
@@ -740,12 +753,33 @@ export class PayPalGateway extends BaseGateway {
             : status === "failed"
               ? "failed"
               : "pending";
+        // PAYPAL-4: map refund amount when PayPal returns it (Prefer representation)
+        // or when the caller supplied a partial amount. This is this-op amount; PayPal
+        // does not return capture-wide cumulative refunded on the refund resource alone.
+        let totalRefunded: number | undefined;
+        if (data.amount) {
+          try {
+            totalRefunded = this.parseAmount(data.amount, "refund");
+          } catch {
+            totalRefunded = undefined;
+          }
+        } else if (p.amount !== undefined && p.currency) {
+          // AmountInput is number | Money — normalize to major units for totalRefunded.
+          try {
+            totalRefunded = moneyToMajorNumber(
+              normalizeAmountInput(p.amount, p.currency),
+            );
+          } catch {
+            totalRefunded = undefined;
+          }
+        }
         // Terminal failed/cancelled refunds → outcome failed → success false.
         return applyOutcomeToGatewayRefundResult(
           {
             gatewayRefundId: data.id,
             status,
             rawResponse: data,
+            ...(totalRefunded !== undefined ? { totalRefunded } : {}),
           },
           outcome,
         );
@@ -1134,7 +1168,17 @@ export class PayPalGateway extends BaseGateway {
 
     const paymentId = this.extractWebhookPaymentId(raw);
 
-    const gatewayPaymentId = captureId ?? raw.resource.id ?? raw.resource.order_id;
+    // PAYPAL-1: multi-capture order webhooks aggregate amount across captures.
+    // Never dual-write that aggregate with a single latest capture id (false full-refund target).
+    // Prefer order id when more than one refundable capture is present.
+    const refundableCaptureCount =
+      this.listRefundableCaptures(orderCaptures).length;
+    const multiCaptureOrder = refundableCaptureCount > 1;
+    const orderResourceId = raw.resource.id ?? raw.resource.order_id;
+    const gatewayPaymentId =
+      multiCaptureOrder && orderResourceId
+        ? orderResourceId
+        : (captureId ?? orderResourceId);
     if (!gatewayPaymentId) {
       throw new GatewayApiError(
         "Invalid webhook payload: missing gateway payment identifier",
@@ -1142,9 +1186,14 @@ export class PayPalGateway extends BaseGateway {
         raw,
       );
     }
-    const gatewayObjectId = raw.resource.id && captureId && captureId !== raw.resource.id
-      ? raw.resource.id
-      : undefined;
+    // Single-capture order events: object id is the order when gatewayPaymentId is the capture.
+    // Multi-capture: primary id is already the order — do not invent a single capture object id.
+    const gatewayObjectId =
+      multiCaptureOrder
+        ? undefined
+        : raw.resource.id && captureId && captureId !== raw.resource.id
+          ? raw.resource.id
+          : undefined;
 
     const event: WebhookEvent = {
       id: raw.id,
@@ -1167,7 +1216,12 @@ export class PayPalGateway extends BaseGateway {
     const attached = attachPaymentEvent(event, { computePayloadHash: true });
     // Non-final / partial captures must not dual-write fulfillment-ready types.
     // Demote to payment.processing so type-only handlers match isPaidOutcome.
-    return this.demotePartialCaptureWebhookDualWrite(attached);
+    // PAYPAL-5: AUTHORIZATION.CAPTURED without a capture id must not dual-write
+    // capture.completed against a non-refundable authorization id.
+    return this.demoteAuthCapturedWithoutCaptureId(
+      this.demotePartialCaptureWebhookDualWrite(attached),
+      captureId,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -2236,8 +2290,8 @@ export class PayPalGateway extends BaseGateway {
     currency_code: string;
     value: string;
   } | undefined {
-    // Multi-capture order webhooks: aggregate successful capture amounts so
-    // event.amount matches getPayment (not last-slice only).
+    // Multi-capture order webhooks: aggregate still-held capture amounts so
+    // event.amount matches getPayment (not last-slice only; excludes REFUNDED).
     const orderCaptures = this.extractWebhookOrderCaptures(raw);
     if (orderCaptures && orderCaptures.length > 0) {
       const aggregated = this.sumSuccessfulCaptureAmounts(
@@ -2253,14 +2307,31 @@ export class PayPalGateway extends BaseGateway {
             value: this.formatAmount(aggregated, currencyCode),
           };
         } catch {
-          // Fall through to single-slice / resource amount if format fails.
+          // Incomplete aggregate format — omit amount rather than last-slice face.
+          return undefined;
         }
       }
+      // Captures present but none still held: do not fall back to REFUNDED face
+      // amounts or order total (PAYPAL-2). Fully refunded/reversed → 0 remaining.
+      // PARTIALLY_REFUNDED without net → omit (fail-closed incomplete snapshot).
+      const refundAgg = this.aggregateCaptureRefundStatus(orderCaptures);
+      if (
+        (refundAgg === "refunded" || refundAgg === "reversed") &&
+        currencyCode
+      ) {
+        try {
+          return {
+            currency_code: currencyCode,
+            value: this.formatAmount(0, currencyCode),
+          };
+        } catch {
+          return undefined;
+        }
+      }
+      return undefined;
     }
 
-    const lastCapture = this.preferLastCapture(orderCaptures);
     return raw.resource.amount ??
-      lastCapture?.amount ??
       raw.resource.purchase_units?.[0]?.amount;
   }
 
@@ -2481,6 +2552,9 @@ export class PayPalGateway extends BaseGateway {
    * polling after a non-final partial does not report paid / isPaidOutcome.
    * Multi-capture totals vs order/auth amount demote COMPLETED → partially_captured
    * when captured sum is strictly less than the authorized/order total.
+   *
+   * PAYPAL-2: sibling captures matter — latest COMPLETED must not force `paid`
+   * when another capture is REFUNDED / PARTIALLY_REFUNDED.
    */
   private mapPaymentResultStatus(
     order: PayPalOrderResponse,
@@ -2488,6 +2562,12 @@ export class PayPalGateway extends BaseGateway {
     authorization?: { status: string; amount?: { currency_code: string; value: string } },
     captures?: Array<PayPalEmbeddedCapture>,
   ): PaymentStatus {
+    // Sibling refund/reversal across the capture set wins over preferred-last COMPLETED.
+    const siblingRefundStatus = this.aggregateCaptureRefundStatus(captures);
+    if (siblingRefundStatus !== undefined) {
+      return siblingRefundStatus;
+    }
+
     if (authorization) {
       const authMapped = this.mapResourceStatus(authorization.status);
       // Open partial auth must not be overridden by a COMPLETED capture slice.
@@ -2548,6 +2628,102 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
+   * Aggregate refund/reversal status across sibling captures (PAYPAL-2).
+   * Returns undefined when no capture is refunded/reversed so callers continue
+   * paid / partially_captured mapping.
+   */
+  private aggregateCaptureRefundStatus(
+    captures: Array<PayPalEmbeddedCapture> | undefined,
+  ): PaymentStatus | undefined {
+    if (!captures || captures.length === 0) {
+      return undefined;
+    }
+
+    let hasRefunded = false;
+    let hasPartialRefund = false;
+    let hasReversed = false;
+    let hasHeld = false; // COMPLETED / non-final still holding funds
+    let moneyCount = 0;
+
+    for (const capture of captures) {
+      const mapped = this.mapResourceStatus(capture.status);
+      if (
+        mapped === "pending" ||
+        mapped === "failed" ||
+        mapped === "cancelled"
+      ) {
+        continue;
+      }
+      moneyCount += 1;
+      if (mapped === "refunded") {
+        hasRefunded = true;
+      } else if (mapped === "partially_refunded") {
+        hasPartialRefund = true;
+      } else if (mapped === "reversed") {
+        hasReversed = true;
+      } else if (mapped === "paid" || mapped === "partially_captured") {
+        hasHeld = true;
+      }
+    }
+
+    if (moneyCount === 0) {
+      return undefined;
+    }
+
+    // Mix of held + refunded/reversed, or any partial refund → partially_refunded.
+    if (
+      hasPartialRefund ||
+      (hasHeld && (hasRefunded || hasReversed))
+    ) {
+      return "partially_refunded";
+    }
+
+    if (hasRefunded && !hasHeld) {
+      return "refunded";
+    }
+
+    if (hasReversed && !hasHeld && !hasRefunded) {
+      return "reversed";
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Captures that can still be targeted for a refund (held / partially refunded).
+   * Fully REFUNDED / REVERSED / failed / pending are not refund targets.
+   */
+  private listRefundableCaptures(
+    captures: Array<PayPalEmbeddedCapture> | undefined,
+  ): Array<PayPalEmbeddedCapture> {
+    if (!captures || captures.length === 0) {
+      return [];
+    }
+    return captures.filter((capture) => {
+      const mapped = this.mapResourceStatus(capture.status);
+      return (
+        mapped === "paid" ||
+        mapped === "partially_refunded" ||
+        mapped === "partially_captured"
+      );
+    });
+  }
+
+  /**
+   * PAYPAL-1: only surface a captureId when exactly one refundable capture remains.
+   * Multi-capture aggregates must not dual-write one latest id as a full-order refund target.
+   */
+  private selectSingleRefundableCaptureId(
+    captures: Array<PayPalEmbeddedCapture> | undefined,
+  ): string | undefined {
+    const refundable = this.listRefundableCaptures(captures);
+    if (refundable.length !== 1) {
+      return undefined;
+    }
+    return refundable[0]?.id;
+  }
+
+  /**
    * True when successful capture amounts sum to less than the order/auth total.
    * Missing comparable totals → false (do not demote without money evidence).
    */
@@ -2582,8 +2758,11 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Sum amounts of successful captures (COMPLETED / PARTIALLY_REFUNDED / REFUNDED)
-   * in minor units then convert once — avoids last-slice-only reporting.
+   * Sum amounts of captures that still hold funds (COMPLETED / non-final partial).
+   *
+   * PAYPAL-2: exclude fully REFUNDED face amounts (they are not held).
+   * PARTIALLY_REFUNDED face amounts overstate remaining without refund breakdown —
+   * fail-closed: omit them from the sum (status is partially_refunded separately).
    */
   private sumSuccessfulCaptureAmounts(
     captures: Array<PayPalEmbeddedCapture> | undefined,
@@ -2596,16 +2775,18 @@ export class PayPalGateway extends BaseGateway {
     let totalMinor: bigint | undefined;
     let currency: string | undefined;
     let scale: number | undefined;
+    let sawPartialRefundWithoutNet = false;
 
     for (const capture of captures) {
       const mapped = this.mapResourceStatus(capture.status);
-      if (
-        mapped !== "paid" &&
-        mapped !== "partially_refunded" &&
-        mapped !== "refunded" &&
-        mapped !== "partially_captured"
-      ) {
-        // pending/failed/voided captures do not contribute to captured total
+      // Only fully held slices contribute. REFUNDED face is not remaining funds.
+      // PARTIALLY_REFUNDED lacks net remaining on embedded order captures.
+      if (mapped === "partially_refunded") {
+        sawPartialRefundWithoutNet = true;
+        continue;
+      }
+      if (mapped !== "paid" && mapped !== "partially_captured") {
+        // refunded / pending / failed / voided / reversed do not contribute
         continue;
       }
       if (!capture.amount) {
@@ -2646,7 +2827,16 @@ export class PayPalGateway extends BaseGateway {
       }
     }
 
-    if (totalMinor === undefined || currency === undefined || scale === undefined) {
+    // Only PARTIALLY_REFUNDED slices (no COMPLETED siblings): incomplete money snapshot.
+    // Do not report original face amounts as held funds.
+    if (
+      totalMinor === undefined ||
+      currency === undefined ||
+      scale === undefined
+    ) {
+      if (sawPartialRefundWithoutNet) {
+        return undefined;
+      }
       return undefined;
     }
 
@@ -2714,6 +2904,50 @@ export class PayPalGateway extends BaseGateway {
       event: {
         schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
         type: "payment.processing",
+        payment,
+        provider: event.provider,
+      },
+    };
+  }
+
+  /**
+   * PAYPAL-5: `PAYMENT.AUTHORIZATION.CAPTURED` maps domain status to `paid`, but
+   * without a linked capture id `gatewayPaymentId` is the authorization id — not
+   * refundable. Do not dual-write `capture.completed` (implies a capture resource).
+   * Prefer `payment.succeeded` so refund paths are not pointed at an auth id.
+   */
+  private demoteAuthCapturedWithoutCaptureId(
+    event: WebhookEvent,
+    captureId: string | undefined,
+  ): WebhookEvent {
+    if (
+      event.type !== "PAYMENT.AUTHORIZATION.CAPTURED" ||
+      captureId ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    if (
+      event.stableType !== "capture.completed" &&
+      event.event?.type !== "capture.completed"
+    ) {
+      return event;
+    }
+
+    const payment =
+      (event.event &&
+      "payment" in event.event &&
+      event.event.payment !== undefined
+        ? event.event.payment
+        : undefined) ?? paymentFromWebhookEvent(event);
+
+    return {
+      ...event,
+      stableType: "payment.succeeded",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "payment.succeeded",
         payment,
         provider: event.provider,
       },

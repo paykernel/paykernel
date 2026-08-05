@@ -190,6 +190,60 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(got?.status).toBe("completed");
   });
 
+  it("SQL-1/SQL-2: offset dueAt is stored as Z and free due work is claimable (not in_progress)", async () => {
+    // now = 12:00Z; due offset +05:00 at 14:00 wall = 09:00Z (due) but sorts after Z lexically.
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const s = await store.schedule({
+      key: "job-offset",
+      subjectId: "pay_off",
+      reason: "timeout",
+      dueAt: "2026-01-15T14:00:00+05:00",
+    });
+    expect(s.kind).toBe("scheduled");
+    if (s.kind === "scheduled") {
+      expect(s.record.dueAt).toBe("2026-01-15T09:00:00.000Z");
+    }
+    const c = await store.claim({
+      key: "job-offset",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(c.kind).toBe("acquired");
+  });
+
+  it("SQL-2: legacy non-canonical due_at row repairs and claims (never stuck in_progress)", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    // Bypass schedule: insert offset due_at the way a pre-fix writer would.
+    const dueOffset = "2026-01-15T14:00:00+05:00";
+    const created = "2026-01-15T08:00:00.000Z";
+    executor.run(
+      `INSERT INTO payment_reconciliation_jobs (
+         key, status, subject_id, reason, due_at,
+         attempts, generation, created_at, updated_at
+       ) VALUES (?, 'scheduled', ?, ?, ?, 0, 0, ?, ?)`,
+      ["job-legacy", "pay_leg", "timeout", dueOffset, created, created],
+    );
+    // Pure Date.parse says due; lexical TEXT compare vs Z now would miss.
+    expect(dueOffset <= new Date(clock.nowMs()).toISOString()).toBe(false);
+    expect(Date.parse(dueOffset) < clock.nowMs()).toBe(true);
+
+    const c = await store.claim({
+      key: "job-legacy",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(c.kind).toBe("acquired");
+    if (c.kind === "acquired") {
+      expect(c.record.dueAt).toBe("2026-01-15T09:00:00.000Z");
+    }
+  });
+
   it("listDue rediscovers abandoned expired claims without prior get", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteReconciliationStore({ executor, clock });
@@ -317,7 +371,8 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     const row = listed.find((r) => r.key === "abandoned-evt");
     expect(row).toBeDefined();
     expect(row?.status).toBe("pending");
-    expect(row?.attempts).toBe(1);
+    // WEBHOOKS-1: soft-release restores unfinished claim attempt
+    expect(row?.attempts).toBe(0);
     expect(row?.leaseToken).toBeUndefined();
 
     const got = await store.get("abandoned-evt");

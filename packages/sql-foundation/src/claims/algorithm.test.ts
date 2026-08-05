@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  classifyReconciliationClaimMiss,
   decideIdempotencyReserve,
   decideLeaseMutation,
   decideReconciliationClaim,
@@ -298,8 +299,24 @@ describe("decideWebhookClaim", () => {
     expect(expired.kind).toBe("acquired");
     if (expired.kind === "acquired") {
       expect(expired.generation).toBe(6);
-      expect(expired.attempts).toBe(5);
+      // WEBHOOKS-1: expired claimed reclaim keeps attempts (crash recovery)
+      expect(expired.attempts).toBe(4);
       expect(expired.leaseToken).toBe("t3");
+    }
+
+    // pending reclaim still burns an attempt (handler retry path)
+    const pendingRetry = decideWebhookClaim({
+      key: "e",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+      newLeaseToken: "t4",
+      clock: { nowMs },
+      existing: { ...base, status: "pending", attempts: 2 },
+    });
+    expect(pendingRetry.kind).toBe("acquired");
+    if (pendingRetry.kind === "acquired") {
+      expect(pendingRetry.attempts).toBe(3);
     }
   });
 
@@ -474,6 +491,63 @@ describe("decideReconciliationClaim", () => {
     if (reclaim.kind === "acquired") {
       expect(reclaim.generation).toBe(3);
     }
+  });
+});
+
+describe("classifyReconciliationClaimMiss (SQL-2)", () => {
+  it("never classifies free due scheduled work as in_progress", () => {
+    // Offset form that is due by Date.parse but fails lexical TEXT compare vs Z now.
+    expect(
+      classifyReconciliationClaimMiss(
+        {
+          status: "scheduled",
+          dueAt: "2026-01-15T14:00:00+05:00", // 09:00Z < 12:00Z
+        },
+        nowMs,
+      ),
+    ).toBe("claimable");
+  });
+
+  it("classifies free expired-lease claimed+due work as claimable (not in_progress)", () => {
+    expect(
+      classifyReconciliationClaimMiss(
+        {
+          status: "claimed",
+          dueAt: "2026-01-15T11:00:00.000Z",
+          leaseExpiresAt: "2026-01-15T11:30:00.000Z",
+        },
+        nowMs,
+      ),
+    ).toBe("claimable");
+  });
+
+  it("classifies active foreign lease as in_progress", () => {
+    expect(
+      classifyReconciliationClaimMiss(
+        {
+          status: "claimed",
+          dueAt: "2026-01-15T11:00:00.000Z",
+          leaseExpiresAt: "2026-01-15T12:30:00.000Z",
+        },
+        nowMs,
+      ),
+    ).toBe("in_progress");
+  });
+
+  it("classifies not_due / terminal / not_found", () => {
+    expect(classifyReconciliationClaimMiss(undefined, nowMs)).toBe("not_found");
+    expect(
+      classifyReconciliationClaimMiss(
+        { status: "scheduled", dueAt: "2026-01-15T13:00:00.000Z" },
+        nowMs,
+      ),
+    ).toBe("not_due");
+    expect(
+      classifyReconciliationClaimMiss(
+        { status: "completed", dueAt: "2026-01-15T11:00:00.000Z" },
+        nowMs,
+      ),
+    ).toBe("already_terminal");
   });
 });
 

@@ -64,6 +64,10 @@ const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
  * Provider statuses that mean money may already exist, still needs capture /
  * fulfillment work, or funds left the merchant via refund/chargeback — never
  * treat sparse local + these as safe mark_consistent (false recovery completion).
+ *
+ * RECON-2: includes in-flight / failed refund lifecycle (`refund_pending`,
+ * `refund_failed`) so recovery cannot complete as mark_consistent while money
+ * state is still incomplete.
  */
 const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "authorized",
@@ -73,12 +77,17 @@ const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "pending",
   "partially_refunded",
   "refunded",
+  "refund_pending",
+  "refund_failed",
   "reversed",
 ]);
 
 /**
  * Local statuses where a second createPayment would risk duplicate money
  * movement (open auth/settlement, already settled/refunded, or chargeback).
+ *
+ * RECON-1: includes `refund_pending` so shouldForbidReplacementCharge stays
+ * true while a refund is still in flight (second createPayment would double-move).
  */
 const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "pending",
@@ -89,6 +98,7 @@ const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "partially_refunded",
   "paid",
   "refunded",
+  "refund_pending",
   "reversed",
   "setup_completed",
 ]);
@@ -291,13 +301,21 @@ export function decideReconciliationPolicy(
 
     case "provider_not_found":
       if (result.retryable) {
-        // Original may still settle — forbid replacement while indeterminate
-        if (isIndeterminateLocal(target.expected)) {
+        // RECON-3: shouldForbidReplacementCharge is always true for
+        // provider_not_found. Surface do_not_create_replacement for open-money
+        // and indeterminate locals so sample loops that only switch on policy
+        // action cannot treat this as a pure reschedule-then-recreate path.
+        // Terminal non-open locals still get retry_later (reschedule lookup);
+        // callers must still consult shouldForbidReplacementCharge.
+        if (
+          isIndeterminateLocal(target.expected) ||
+          isOpenMoneyLocal(target.expected)
+        ) {
           return {
             action: "do_not_create_replacement",
             safe: false,
             reason:
-              "Provider payment not found yet and local state is indeterminate — do not create replacement",
+              "Provider payment not found yet and local money state is open or indeterminate — do not create replacement",
           };
         }
         return { action: "retry_later", safe: false };
@@ -345,7 +363,8 @@ export const decideReconciliationAction = decideReconciliationPolicy;
  * - result is `provider_not_found` (original may still settle or exist)
  * - result is `temporarily_unavailable` (unknown provider state)
  * - local expected is missing/indeterminate **or** any open money state
- *   (`authorized` / `approved` / partial / `paid` / refunded / setup, etc.)
+ *   (`authorized` / `approved` / partial / `paid` / refunded /
+ *   `refund_pending` / setup, etc.)
  *
  * Only terminal failed/cancelled locals without ambiguous/not-found outcomes
  * leave room for an application-level re-attempt after review.

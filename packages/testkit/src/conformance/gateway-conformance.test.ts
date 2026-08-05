@@ -109,4 +109,43 @@ describe("runGatewayConformanceSuite", () => {
     expect(Array.isArray(report.failed)).toBe(true);
     expect(Array.isArray(report.skipped)).toBe(true);
   });
+
+  it("partial_capture and partial_refund cases pass with strict money asserts (TESTKIT-1)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "partial-money",
+      mode: "full",
+      include: ["partial_capture", "partial_refund", "safe_retry"],
+      createGateway: () =>
+        mockGateway({
+          name: "partial-money",
+          capabilities: fullCaps,
+        }),
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(true);
+    expect(report.failed).toEqual([]);
+    expect(report.passed).toContain("partial_capture");
+    expect(report.passed).toContain("partial_refund");
+    expect(report.passed).toContain("safe_retry");
+  });
+
+  it("safe_retry fails when gatewayId diverges on retry (TESTKIT-2)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "unsafe-retry",
+      mode: "full",
+      include: ["safe_retry"],
+      createGateway: () =>
+        mockGateway({
+          name: "split",
+          capabilities: fullCaps,
+          // Disable process-local idempotency so retries mint new gatewayIds
+          honorIdempotencyKey: false,
+        }),
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(false);
+    const fail = report.failed.find((f) => f.case === "safe_retry");
+    expect(fail).toBeDefined();
+    expect(fail?.error).toMatch(/same gatewayId/i);
+  });
 });

@@ -48,6 +48,7 @@ export const DO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "Not packages/store-d1 (shared D1). Not adapter-sqlite local file. Not adapter-turso.",
     "Never route all payment work through one global Durable Object.",
     "Sharding strategies: key | hash-partitioned | tenant — document ordering and hot-key risks.",
+    "DO-1: hash partitions are sealed on a stable layout meta DO (hash:{layoutId|default}:__pk_layout__). Changing N under the same layout hard-throws — never silently route to empty partition objects. Use a new layoutId/objectNamePrefix to reshard after migration.",
     "Claims use sql.exec UPSERT/RETURNING and/or transactionSync; never get-then-set.",
     "transactionSync callbacks must be synchronous; no await external I/O inside storage transactions.",
     "Correct pattern: claim → commit → external provider work → complete with lease token.",

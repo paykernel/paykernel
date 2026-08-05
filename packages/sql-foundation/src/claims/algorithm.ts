@@ -236,12 +236,17 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
   }
 
   // pending (due) or expired lease → reclaim
+  // WEBHOOKS-1: only pending (handler retry path) burns an attempt. Expired
+  // claimed reclaim is crash/deploy recovery — keep attempts unchanged so
+  // maxAttempts tracks handler outcomes, not lease reclaim count.
   const payloadRef = input.payloadRef ?? existing.payloadRef;
+  const nextAttempts =
+    existing.status === "claimed" ? existing.attempts : existing.attempts + 1;
   const acquired: WebhookClaimDecision = {
     kind: "acquired",
     action: "update",
     generation: existing.generation + 1,
-    attempts: existing.attempts + 1,
+    attempts: nextAttempts,
     leaseToken: input.newLeaseToken,
     leaseOwner: input.owner,
     leaseExpiresAt: addMsIso(clock.nowMs, input.leaseMs),
@@ -329,6 +334,53 @@ export function decideReconciliationClaim(
     status: "claimed",
     updatedAt: nowIso(clock.nowMs),
   };
+}
+
+/**
+ * Classification of an empty reconciliation claim RETURNING / 0-row UPDATE.
+ *
+ * Pure Date.parse temporal rules (same as {@link decideReconciliationClaim}).
+ * When the pure decision would acquire (`claimable`), SQL adapters MUST NOT
+ * map the miss to `in_progress` — that freezes free due work forever under
+ * lexical TEXT timestamp mismatch (SQL-1/SQL-2). Prefer canonicalize+retry
+ * or a retryable error so pollers can reclaim.
+ */
+export type ReconciliationClaimMissKind =
+  | "not_found"
+  | "already_terminal"
+  | "in_progress"
+  | "not_due"
+  | "claimable";
+
+export type ReconciliationClaimMissSnapshot = {
+  status: string;
+  leaseExpiresAt?: string | undefined | null;
+  dueAt: string;
+};
+
+export function classifyReconciliationClaimMiss(
+  existing: ReconciliationClaimMissSnapshot | undefined | null,
+  nowMs: number,
+): ReconciliationClaimMissKind {
+  if (!existing) {
+    return "not_found";
+  }
+  if (
+    existing.status === "completed" ||
+    existing.status === "failed" ||
+    existing.status === "manual_review"
+  ) {
+    return "already_terminal";
+  }
+  if (existing.status === "claimed" && isLeaseActive(existing.leaseExpiresAt, nowMs)) {
+    return "in_progress";
+  }
+  const dueMs = Date.parse(existing.dueAt);
+  if (Number.isFinite(dueMs) && dueMs > nowMs) {
+    return "not_due";
+  }
+  // scheduled|claimed with free/expired lease and due (or unparseable due) → claimable
+  return "claimable";
 }
 
 /**

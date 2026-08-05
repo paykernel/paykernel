@@ -138,9 +138,13 @@ export function classifyFromOperationOutcome(
  *
  * Priority:
  * 1. Explicit `submissionState` if provided
- * 2. Known error kinds (timeout, connection_reset, etc.)
- * 3. PaymentOperationOutcome / indeterminate detection
- * 4. Default: `indeterminate` (fail-closed for fallback)
+ * 2. Known transport/uncertain error kinds (timeout, connection_reset, etc.)
+ * 3. PaymentOperationOutcome when it indicates money may have moved / is
+ *    uncertain (indeterminate / succeeded / requires_action / declined / failed)
+ *    — **ROUTE-2:** these must not be overridden to `pre_submission_failure`
+ *    by a mis-mapped `validation_error`
+ * 4. Remaining error kinds / error object shapes (including validation_error)
+ * 5. Default: `indeterminate` (fail-closed for fallback)
  *
  * **Never** maps indeterminate → pre_submission_failure.
  *
@@ -188,16 +192,21 @@ export function classifySubmissionState(input: {
     return input.submissionState;
   }
 
+  // Transport / uncertain error kinds still win (timeout, reset, 5xx, abort).
+  // Pre-submission-only kinds (validation_error, configuration_error) are
+  // deferred until after outcome so ROUTE-2 cannot auto-fallback after money moved.
   const fromErrorKind = classifyErrorKind(input.errorKind, abortAsNotSubmitted);
-  if (fromErrorKind !== null) {
+  if (fromErrorKind !== null && !isPreSubmissionOnlyClassification(fromErrorKind)) {
     return fromErrorKind;
   }
 
   const fromError = classifyErrorObject(input.error, abortAsNotSubmitted);
-  if (fromError !== null) {
+  if (fromError !== null && !isPreSubmissionOnlyClassification(fromError)) {
     return fromError;
   }
 
+  // ROUTE-2: outcome / result that indicate submission or uncertainty take
+  // precedence over validation_error → pre_submission_failure.
   if (input.outcome !== undefined) {
     return classifyFromOperationOutcome(input.outcome);
   }
@@ -209,8 +218,21 @@ export function classifySubmissionState(input: {
     }
   }
 
+  // No money-moving outcome: allow deferred pre-submission classifications.
+  if (fromErrorKind !== null) {
+    return fromErrorKind;
+  }
+  if (fromError !== null) {
+    return fromError;
+  }
+
   // Fail-closed: unknown → indeterminate (blocks automatic fallback).
   return "indeterminate";
+}
+
+/** True for states that only mean "never reached provider" (safe fallback). */
+function isPreSubmissionOnlyClassification(state: SubmissionState): boolean {
+  return state === "pre_submission_failure" || state === "not_submitted";
 }
 
 /**
@@ -387,7 +409,14 @@ function classifyErrorObject(
 }
 
 /**
- * Select an alternate gateway only when eligibility.allowed.
+ * Select an alternate gateway only when eligibility is safe.
+ *
+ * **ROUTE-1:** does not trust `eligibility.allowed` alone. Re-validates
+ * {@link isSafeFallbackEligible} on `eligibility.submissionState`. Forged
+ * `{ allowed: true, submissionState: "timeout" | "submitted" | … }` is denied
+ * unless `eligibility.expertOverride === true` (loud opt-in from
+ * {@link evaluateFallback}).
+ *
  * Excludes already-attempted gateways from candidates.
  *
  * Throws {@link UnsafeFallbackDeniedError} when not allowed or no alternate.
@@ -407,6 +436,18 @@ export function trySelectFallbackGateway(
       {
         submissionState: eligibility.submissionState,
         reason: eligibility.reason,
+      },
+    );
+  }
+
+  // ROUTE-1: re-validate submission safety — never trust forged allowed:true.
+  const state = eligibility.submissionState;
+  if (!isSafeFallbackEligible(state) && eligibility.expertOverride !== true) {
+    throw new UnsafeFallbackDeniedError(
+      `Post-attempt fallback denied: submission state is not safe for multi-gateway retry (${state})`,
+      {
+        submissionState: state,
+        reason: unsafeDenyReason(state),
       },
     );
   }

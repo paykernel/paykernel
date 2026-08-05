@@ -108,7 +108,13 @@ end
 
 -- pending (available) or expired claim → re-claim
 local gen = (tonumber(m['generation'] or '0') or 0) + 1
-local attempts = (tonumber(m['attempts'] or '0') or 0) + 1
+local prevAttempts = tonumber(m['attempts'] or '0') or 0
+-- WEBHOOKS-1: only pending (handler retry) burns an attempt; expired claimed
+-- reclaim is crash recovery and keeps attempts unchanged.
+local attempts = prevAttempts
+if status == 'pending' then
+  attempts = prevAttempts + 1
+end
 local created = m['created_at'] or nowIso
 local pref = payloadRef
 if pref == '' then
@@ -370,13 +376,20 @@ local m = hgetall_map(rec)
 if (m['status'] or '') == 'claimed' then
   local exp = tonumber(m['lease_expires_ms'] or '0') or 0
   if exp <= nowMs then
+    -- WEBHOOKS-1: restore unfinished claim attempt so crash reclaim does not
+    -- burn maxAttempts handler budget (parity with memory soft-release).
     local logicalKey = m['key'] or ''
+    local attempts = tonumber(m['attempts'] or '0') or 0
+    if attempts > 0 then
+      attempts = attempts - 1
+    end
     redis.call('HSET', rec,
       'status', 'pending',
       'lease_owner', '',
       'lease_token', '',
       'lease_expires_at', '',
       'lease_expires_ms', '0',
+      'attempts', tostring(attempts),
       'available_at', nowIso,
       'available_ms', tostring(nowMs),
       'updated_at', nowIso

@@ -142,6 +142,34 @@ describe("sign zero policies and overrides", () => {
     expect(toMinorUnits("1.234", "USD", { exponent: 3 })).toBe(1234n);
   });
 
+  it("preserves non-ISO exponent on Money for bare toMinorUnits re-resolve (MONEY-1)", () => {
+    const omrMerchant = money("20.12", "OMR", {
+      exponentOverrides: { OMR: 2 },
+    });
+    expect(omrMerchant.amount).toBe("20.12");
+    expect(omrMerchant.exponent).toBe(2);
+    // Without re-passing overrides, ISO OMR=3 would pad → 20120n (silent 10×).
+    expect(toMinorUnits(omrMerchant)).toBe(2012n);
+    expect(toMinorUnits(omrMerchant)).toBe(
+      toMinorUnits("20.12", "OMR", { exponentOverrides: { OMR: 2 } }),
+    );
+
+    const isoOmr = money("20.125", "OMR");
+    expect(isoOmr.exponent).toBeUndefined();
+    expect(toMinorUnits(isoOmr)).toBe(20125n);
+
+    const usdZero = money("10", "USD", { exponent: 0 });
+    expect(usdZero.amount).toBe("10");
+    expect(usdZero.exponent).toBe(0);
+    expect(toMinorUnits(usdZero)).toBe(10n);
+
+    const fromMinor = fromMinorUnits(2012n, "OMR", {
+      exponentOverrides: { OMR: 2 },
+    });
+    expect(fromMinor.exponent).toBe(2);
+    expect(toMinorUnits(fromMinor)).toBe(2012n);
+  });
+
   it("throws on invalid override values", () => {
     expect(() =>
       toMinorUnits("1", "SAR", { exponentOverrides: { SAR: -1 } }),

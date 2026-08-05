@@ -7,6 +7,7 @@ import { hashWebhookPayload } from "@paykernel/core";
 import {
   computePayloadHash,
   createWebhookInboxEngine,
+  resolveInboxPayloadHash,
 } from "./engine";
 import { createMemoryWebhookInboxStore } from "./memory-store";
 import { isStoreLeaseLostError } from "./store";
@@ -40,6 +41,141 @@ describe("processVerified happy path", () => {
   it("computePayloadHash matches core hashWebhookPayload", () => {
     const body = { id: "1", amount: 10 };
     expect(computePayloadHash(body)).toBe(hashWebhookPayload(body));
+  });
+});
+
+describe("WEBHOOKS-2 payloadHash source honesty", () => {
+  it("raw body string hash differs from object hash (not interchangeable)", () => {
+    const obj = { id: "evt_1", type: "payment_intent.succeeded" };
+    const rawBody = JSON.stringify(obj);
+    expect(hashWebhookPayload(rawBody)).not.toBe(hashWebhookPayload(obj));
+    expect(computePayloadHash(rawBody)).not.toBe(computePayloadHash(obj));
+  });
+
+  it("resolveInboxPayloadHash prefers event.payloadHash over re-hash", () => {
+    const obj = { id: "evt_1" };
+    const objectHash = hashWebhookPayload(obj);
+    const stringHash = hashWebhookPayload(JSON.stringify(obj));
+    expect(stringHash).not.toBe(objectHash);
+
+    expect(
+      resolveInboxPayloadHash({
+        eventPayloadHash: objectHash,
+        payloadForHash: JSON.stringify(obj),
+      }),
+    ).toBe(objectHash);
+
+    expect(
+      resolveInboxPayloadHash({
+        payloadForHash: obj,
+      }),
+    ).toBe(objectHash);
+  });
+
+  it("resolveInboxPayloadHash trims eventPayloadHash and refuses empty", () => {
+    expect(
+      resolveInboxPayloadHash({
+        eventPayloadHash: "  abc  ",
+      }),
+    ).toBe("abc");
+    expect(() => resolveInboxPayloadHash({})).toThrow(/eventPayloadHash|payloadForHash/);
+    expect(() =>
+      resolveInboxPayloadHash({ eventPayloadHash: "   " }),
+    ).toThrow(/eventPayloadHash|payloadForHash/);
+  });
+
+  it("mixing string vs object hash on same key → payload_conflict (pending row)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
+    const obj = { id: "evt_mix", type: "payment.succeeded" };
+    const objectHash = hashWebhookPayload(obj);
+    const stringHash = hashWebhookPayload(JSON.stringify(obj));
+
+    const first = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_mix",
+      payloadHash: objectHash,
+      event: obj,
+      handler: async () => {
+        throw new Error("leave pending");
+      },
+    });
+    expect(first.outcome).toBe("scheduled_for_retry");
+
+    const second = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_mix",
+      payloadHash: stringHash,
+      event: obj,
+      handler: async () => {},
+    });
+    expect(second).toEqual({ outcome: "payload_conflict" });
+  });
+});
+
+describe("WEBHOOKS-4 terminal before payload_hash_conflict", () => {
+  it("completed row redelivered with different hash → duplicate_completed", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    let runs = 0;
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_term_hash",
+      payloadHash: "hash-a",
+      handler: async () => {
+        runs++;
+      },
+    });
+    expect(runs).toBe(1);
+    expect((await store.get("stripe:evt_term_hash"))?.status).toBe("completed");
+
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_term_hash",
+      payloadHash: "hash-b",
+      handler: async () => {
+        runs++;
+      },
+    });
+    expect(o).toEqual({ outcome: "duplicate_completed" });
+    expect(runs).toBe(1);
+  });
+
+  it("dead_letter row redelivered with different hash → handler_failed non-retryable", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      maxAttempts: 1,
+      defaultRetryAfterMs: 0,
+    });
+
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_dl_hash",
+      payloadHash: "hash-a",
+      event: { id: "evt_dl_hash" },
+      handler: async () => {
+        throw new Error("poison");
+      },
+    });
+    expect((await store.get("stripe:evt_dl_hash"))?.status).toBe("dead_letter");
+
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_dl_hash",
+      payloadHash: "hash-b",
+      event: { id: "evt_dl_hash" },
+      handler: async () => {
+        throw new Error("should not run");
+      },
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: false });
   });
 });
 
@@ -259,25 +395,34 @@ describe("A4 stale worker completion rejected", () => {
 });
 
 describe("A5 payload_conflict", () => {
-  it("different payloadHash → payload_conflict, handler not called", async () => {
+  it("different payloadHash on non-terminal row → payload_conflict, handler not called", async () => {
     const store = createMemoryWebhookInboxStore();
-    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
     let runs = 0;
 
+    // Leave pending (not completed) so hash conflict applies (WEBHOOKS-4).
     await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_conflict",
       payloadHash: "hash-a",
+      event: { id: "evt_conflict" },
       handler: async () => {
         runs++;
+        throw new Error("leave pending");
       },
     });
     expect(runs).toBe(1);
+    expect((await store.get("stripe:evt_conflict"))?.status).toBe("pending");
 
     const o = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_conflict",
       payloadHash: "hash-b",
+      event: { id: "evt_conflict" },
       handler: async () => {
         runs++;
       },

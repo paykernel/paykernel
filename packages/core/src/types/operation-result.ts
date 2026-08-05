@@ -74,12 +74,18 @@ export type PaymentErrorLike = {
  * Normalized payment snapshot embedded in operation outcomes.
  *
  * Amount fields remain major-unit `number` in 0.x (Phase 5 money model for inputs).
+ *
+ * **Money completeness:** major-unit amount fields without {@link currency} are
+ * incomplete. {@link paymentFromGatewayResult} omits amount-like fields when
+ * `currency` is missing (fail-closed) so callers never see a naked major-unit
+ * number that cannot be re-scaled safely.
  */
 export type Payment = {
     /** Normalized payment lifecycle status (domain status preferred). */
     status: PaymentDomainStatus | PaymentStatus;
     /** Major currency units (0.x); may become Money at 1.0 */
     amount?: number;
+    /** ISO 4217 code; required for a complete money snapshot when amount-like fields are set */
     currency?: string;
     references: ProviderReferences;
     redirectUrl?: string;
@@ -192,6 +198,12 @@ export function paymentNextActionToAction(
 
 /**
  * Build a {@link Payment} snapshot from a gateway result (+ optional gateway name).
+ *
+ * **CORE-1 / fail-closed money:** amount-like major-unit fields (`amount`,
+ * `fee`, `capturedAmount`, `refundedAmount`) are copied only when
+ * `result.currency` is a non-empty string. A major-unit number without currency
+ * cannot be re-scaled safely and is omitted rather than published incomplete.
+ * Currency alone (no amounts) is still copied when present.
  */
 export function paymentFromGatewayResult(
     result: GatewayPaymentResult,
@@ -225,16 +237,26 @@ export function paymentFromGatewayResult(
         rawResponse: result.rawResponse,
     };
 
-    if (result.amount !== undefined) payment.amount = result.amount;
     if (result.redirectUrl !== undefined) payment.redirectUrl = result.redirectUrl;
     if (result.clientSecret !== undefined) payment.clientSecret = result.clientSecret;
     if (result.nextAction !== undefined) payment.nextAction = result.nextAction;
-    if (result.fee !== undefined) payment.fee = result.fee;
-    if (result.capturedAmount !== undefined) {
-        payment.capturedAmount = result.capturedAmount;
-    }
-    if (result.refundedAmount !== undefined) {
-        payment.refundedAmount = result.refundedAmount;
+
+    const currency =
+        typeof result.currency === "string" && result.currency.trim().length > 0
+            ? result.currency.trim().toUpperCase()
+            : undefined;
+
+    if (currency !== undefined) {
+        payment.currency = currency;
+        // Complete money snapshot only — never publish major units without currency.
+        if (result.amount !== undefined) payment.amount = result.amount;
+        if (result.fee !== undefined) payment.fee = result.fee;
+        if (result.capturedAmount !== undefined) {
+            payment.capturedAmount = result.capturedAmount;
+        }
+        if (result.refundedAmount !== undefined) {
+            payment.refundedAmount = result.refundedAmount;
+        }
     }
 
     return payment;
@@ -418,6 +440,8 @@ export type ApplyOutcomeGatewayBase = {
     authorizationId?: string | undefined;
     redirectUrl?: string | undefined;
     amount?: number | undefined;
+    /** ISO 4217 code for major-unit money fields; prefer always set when amount is set. */
+    currency?: string | undefined;
     fee?: number | undefined;
     capturedAmount?: number | undefined;
     refundedAmount?: number | undefined;
@@ -520,6 +544,7 @@ export function applyOutcomeToGatewayResult(
         result.authorizationId = base.authorizationId;
     }
     if (base.amount !== undefined) result.amount = base.amount;
+    if (base.currency !== undefined) result.currency = base.currency;
     if (base.fee !== undefined) result.fee = base.fee;
     if (base.capturedAmount !== undefined) {
         result.capturedAmount = base.capturedAmount;

@@ -6,6 +6,9 @@
  */
 
 import {
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyReconciliationClaimMiss,
   reconciliationClaimTemplates,
   resolveTableName,
   LOGICAL_TABLES,
@@ -34,6 +37,16 @@ import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { SqliteStoreOptions } from "../types";
 import { mapReconciliationRow, newLeaseToken, resolveStoreContext } from "./shared";
 
+function claimMissToResult(
+  kind: Exclude<ReturnType<typeof classifyReconciliationClaimMiss>, "claimable">,
+  existing: ReconciliationRecord | undefined,
+): ClaimResult {
+  if (kind === "not_found" || existing === undefined) {
+    return { kind: "not_found" };
+  }
+  return { kind, record: existing };
+}
+
 const SELECT_COLS = `key, status, subject_id, reason, due_at,
               lease_owner, lease_token, lease_expires_at, attempts, generation,
               last_error_sanitized, tenant_id, created_at, updated_at, completed_at`;
@@ -61,6 +74,7 @@ export function createSqliteReconciliationStore(
     async schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult> {
       return withMappedErrors(() => {
         const now = clockNowIso(ctx.clock);
+        const dueAt = canonicalizeIsoTimestamp(input.dueAt, "dueAt");
         const exec = ctx.getExecutor();
 
         return exec.transaction(() => {
@@ -72,7 +86,7 @@ export function createSqliteReconciliationStore(
                ?, 'scheduled', ?, ?, ?,
                0, 0, ?, ?
              )`,
-            [input.key, input.subjectId, input.reason, input.dueAt, now, now],
+            [input.key, input.subjectId, input.reason, dueAt, now, now],
           );
 
           if (inserted.changes === 1) {
@@ -130,25 +144,56 @@ export function createSqliteReconciliationStore(
           }
 
           const existing = selectByKey(input.key);
-          if (!existing) return { kind: "not_found" as const };
-          if (
-            existing.status === "completed" ||
-            existing.status === "failed" ||
-            existing.status === "manual_review"
-          ) {
-            return { kind: "already_terminal" as const, record: existing };
+          const miss = classifyReconciliationClaimMiss(existing, ctx.clock.nowMs());
+          if (miss !== "claimable") {
+            return claimMissToResult(miss, existing);
           }
-          if (
-            existing.status === "claimed" &&
-            existing.leaseExpiresAt !== undefined &&
-            Date.parse(existing.leaseExpiresAt) > ctx.clock.nowMs()
-          ) {
-            return { kind: "in_progress" as const, record: existing };
+
+          // SQL-2: free due work; repair non-canonical TEXT timestamps and retry once.
+          const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
+          const leaseZ =
+            canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
+            null;
+          exec.run(
+            `UPDATE ${table} SET
+               due_at = ?,
+               lease_expires_at = ?
+             WHERE key = ?
+               AND status NOT IN ('completed', 'failed', 'manual_review')`,
+            [dueAtZ, leaseZ, input.key],
+          );
+
+          const retried = exec.run(claimTpl.sql, [
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+            input.key,
+            now,
+            now,
+          ]);
+          if (retried.changes === 1) {
+            const record = selectByKey(input.key);
+            if (!record) {
+              throw new StoreUnavailableError(
+                "reconciliation claim: update succeeded but row missing",
+              );
+            }
+            return {
+              kind: "acquired" as const,
+              record,
+              leaseToken: record.leaseToken ?? leaseToken,
+            };
           }
-          if (Date.parse(existing.dueAt) > ctx.clock.nowMs()) {
-            return { kind: "not_due" as const, record: existing };
+
+          const after = selectByKey(input.key);
+          const miss2 = classifyReconciliationClaimMiss(after, ctx.clock.nowMs());
+          if (miss2 === "claimable") {
+            throw new StoreUnavailableError(
+              "reconciliation claim: free due work failed after timestamp canonicalize; retry",
+            );
           }
-          return { kind: "in_progress" as const, record: existing };
+          return claimMissToResult(miss2, after);
         }, { mode: "immediate" });
       });
     },
@@ -230,6 +275,7 @@ export function createSqliteReconciliationStore(
         const exec = ctx.getExecutor();
 
         if (input.retryAt !== undefined) {
+          const retryAt = canonicalizeIsoTimestamp(input.retryAt, "retryAt");
           const result = exec.run(
             `UPDATE ${table} SET
                status = 'scheduled',
@@ -244,7 +290,7 @@ export function createSqliteReconciliationStore(
                AND status = 'claimed'
                AND lease_expires_at IS NOT NULL
                AND lease_expires_at > ?`,
-            [input.retryAt, lastError, now, input.key, input.leaseToken, now],
+            [retryAt, lastError, now, input.key, input.leaseToken, now],
           );
           if (result.changes === 0) {
             throw new StoreLeaseLostError(

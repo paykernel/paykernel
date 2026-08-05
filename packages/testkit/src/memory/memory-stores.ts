@@ -422,12 +422,15 @@ export function createMemoryWebhookInboxStore(
       rec.leaseExpiresAt &&
       Date.parse(rec.leaseExpiresAt) <= clock.nowMs()
     ) {
+      // WEBHOOKS-1: restore unfinished claim attempt so crash reclaim does not
+      // burn maxAttempts handler budget (parity with @paykernel/webhooks memory).
       const released: WebhookInboxRecord = {
         ...rec,
         status: "pending",
         leaseToken: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        attempts: Math.max(0, rec.attempts - 1),
         availableAt: iso(clock),
         updatedAt: iso(clock),
       };

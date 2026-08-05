@@ -90,6 +90,16 @@ function isStripeRetryableError(error: unknown): boolean {
 // Stripe API Response Types (Partial)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/** Charge fields used for refund / capture mapping (expanded or re-fetched). */
+interface StripeChargeSnapshot {
+  id?: string;
+  amount?: number;
+  amount_refunded?: number;
+  amount_captured?: number;
+  currency?: string;
+  refunded?: boolean;
+}
+
 interface StripePaymentIntent {
   id: string;
   object: "payment_intent";
@@ -100,15 +110,7 @@ interface StripePaymentIntent {
   client_secret: string | null;
   receipt_email: string | null;
   metadata: Record<string, string>;
-  latest_charge:
-    | string
-    | {
-        id?: string;
-        amount_refunded?: number;
-        amount_captured?: number;
-        currency?: string;
-      }
-    | null;
+  latest_charge: string | StripeChargeSnapshot | null;
   /** Stripe-native next_action; treated as opaque PaymentNextAction passthrough. */
   next_action?: PaymentNextAction | null;
 }
@@ -547,6 +549,11 @@ function stripeInvoicePaymentIntentId(invoice: Record<string, any>): string | un
  * Money-bearing invoice events prefer PaymentIntent for gatewayPaymentId so
  * refunds/captures can use the id directly. Subscription id is exposed via
  * gatewaySubscriptionId on the normalized event.
+ *
+ * STRIPE-8: `capturePayment` / `refundPayment` / `voidPayment` require `pi_*`.
+ * When this returns `sub_*` (subscription checkout / non-money invoice /
+ * subscription lifecycle), callers must resolve a PaymentIntent before money
+ * mutations — do not pass `sub_*` / `cs_*` into those APIs.
  */
 function stripeInvoicePrefersPaymentIntent(eventType: string): boolean {
   return (
@@ -564,7 +571,7 @@ function stripeWebhookPaymentId(
     const session = object as any;
     // Subscription Checkout often includes both payment_intent (first invoice)
     // and subscription. Prefer the subscription id so gatewayPaymentId tracks
-    // the recurring object rather than a one-off PaymentIntent.
+    // the recurring object rather than a one-off PaymentIntent (STRIPE-8).
     if (session.mode === "subscription") {
       return (
         expandableId(session.subscription) ??
@@ -587,7 +594,8 @@ function stripeWebhookPaymentId(
     const paymentIntentId = stripeInvoicePaymentIntentId(invoice);
 
     // Money events: prefer PI when present so callers can refund/capture with
-    // gatewayPaymentId. Non-money invoice events keep subscription preference.
+    // gatewayPaymentId. Non-money invoice events keep subscription preference
+    // (may be sub_* — not valid for refund/capture/void; STRIPE-8).
     if (
       eventType &&
       stripeInvoicePrefersPaymentIntent(eventType) &&
@@ -792,10 +800,14 @@ function validateStripeIdempotencyKey(idempotencyKey?: string): void {
 
 /**
  * Stripe mutations are only safe to retry when an Idempotency-Key is present.
- * Auto-generate one when the caller omits it (or passes empty/whitespace) so
- * transient network/5xx retries do not create duplicate PaymentIntents, captures,
- * refunds, voids, or sessions. Callers that need app-level crash/retry safety
- * should still supply a stable key.
+ * Auto-generate an ephemeral key when the caller omits it (or passes
+ * empty/whitespace) so **in-process** retries of transient network/5xx errors
+ * do not create duplicate PaymentIntents, captures, refunds, voids, or sessions.
+ *
+ * STRIPE-6 honesty: the auto-generated key is known only for the lifetime of
+ * that single SDK call. It does **not** protect app-level crash/retry across
+ * processes or after the call returns. Callers that need durable mutation
+ * fencing must supply their own stable `idempotencyKey`.
  */
 function resolveStripeIdempotencyKey(
   idempotencyKey: string | undefined,
@@ -807,6 +819,21 @@ function resolveStripeIdempotencyKey(
   }
   validateStripeIdempotencyKey(key);
   return key;
+}
+
+/**
+ * Normalize a non-empty currency code for money conversion, or undefined.
+ * Never invent `"usd"` when Stripe omits currency (STRIPE-2 / STRIPE-4).
+ */
+function stripeCurrencyCode(
+  ...candidates: Array<string | null | undefined>
+): string | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim().toLowerCase();
+    }
+  }
+  return undefined;
 }
 
 function stripePaymentIntentPathId(paymentIntentId: string): string {
@@ -1122,14 +1149,15 @@ export class StripeGateway extends BaseGateway {
 
         // Amount: amount_received → amount_captured → amount. Never coerce
         // missing amount_received alone to major 0 via fromStripeAmount(undefined).
-        const currency = response.currency ?? p.currency ?? "usd";
+        // STRIPE-4: never invent "usd" when Stripe and caller omit currency.
+        const currency = stripeCurrencyCode(response.currency, p.currency);
         const settledMinor = resolveStripeCapturedMinor(response);
         const amountMinor =
           settledMinor ?? finiteStripeMinor(response.amount);
 
         return this.mapPaymentIntentResult(response, {
           status,
-          ...(amountMinor !== undefined
+          ...(amountMinor !== undefined && currency !== undefined
             ? { amount: fromStripeAmount(amountMinor, currency) }
             : {}),
           // Capture paths historically omit redirectUrl (undefined).
@@ -1178,6 +1206,9 @@ export class StripeGateway extends BaseGateway {
         }
 
         const callerSignal = extractAbortSignal(p);
+        // Expand charge so amount_refunded can recover totalRefunded if the
+        // secondary refunds list fails (STRIPE-3).
+        body.expand = ["charge"];
         const response = await this.stripeRequest<StripeRefund>(
           "POST",
           "/refunds",
@@ -1185,15 +1216,41 @@ export class StripeGateway extends BaseGateway {
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           callerSignal,
         );
+        // STRIPE-4: never invent "usd" for cumulative conversion.
+        const refundCurrency = stripeCurrencyCode(
+          response.currency,
+          p.currency,
+          typeof response.charge === "object" && response.charge !== null
+            ? response.charge.currency
+            : undefined,
+        );
         let totalRefunded: number | undefined;
-        try {
-          totalRefunded = await this.getTotalRefundedForPaymentIntent(
-            p.gatewayPaymentId,
-            response.currency ?? p.currency ?? "usd",
-            callerSignal,
-          );
-        } catch {
-          totalRefunded = undefined;
+        if (refundCurrency !== undefined) {
+          try {
+            totalRefunded = await this.getTotalRefundedForPaymentIntent(
+              p.gatewayPaymentId,
+              refundCurrency,
+              callerSignal,
+            );
+          } catch {
+            // STRIPE-3: list failed — prefer charge.amount_refunded (cumulative
+            // on that charge) over inventing a single-refund "total".
+            const charge = response.charge;
+            if (
+              typeof charge === "object" &&
+              charge !== null &&
+              typeof charge.amount_refunded === "number" &&
+              Number.isFinite(charge.amount_refunded)
+            ) {
+              totalRefunded = fromStripeAmount(
+                charge.amount_refunded,
+                stripeCurrencyCode(charge.currency, refundCurrency) ??
+                  refundCurrency,
+              );
+            } else {
+              totalRefunded = undefined;
+            }
+          }
         }
 
         const status = mapStripeRefundStatus(response.status);
@@ -1236,8 +1293,13 @@ export class StripeGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
+        // STRIPE-4: omit amount when currency is missing — never invent "usd".
+        const currency = stripeCurrencyCode(response.currency);
+        const amountMinor = finiteStripeMinor(response.amount);
         return this.mapPaymentIntentResult(response, {
-          amount: fromStripeAmount(response.amount, response.currency ?? "usd"),
+          ...(amountMinor !== undefined && currency !== undefined
+            ? { amount: fromStripeAmount(amountMinor, currency) }
+            : {}),
           omitRedirectUrl: true,
           // Void completed successfully even when status is cancelled.
           forceOutcome: "succeeded",
@@ -1259,24 +1321,61 @@ export class StripeGateway extends BaseGateway {
         const paymentIntentPathId = stripePaymentIntentPathId(
           p.gatewayPaymentId,
         );
+        const callerSignal = extractAbortSignal(p);
         const paymentIntent = await this.stripeRequest<StripePaymentIntent>(
           "GET",
           `/payment_intents/${paymentIntentPathId}?expand[]=latest_charge`,
           undefined,
           undefined,
-          extractAbortSignal(p),
+          callerSignal,
         );
-        const latestCharge =
+
+        // Prefer expanded object; re-fetch when Stripe returns an unexpanded
+        // string charge ID so refund fields remain observable (STRIPE-1).
+        let latestCharge: StripeChargeSnapshot | undefined =
           typeof paymentIntent.latest_charge === "object" &&
           paymentIntent.latest_charge !== null
             ? paymentIntent.latest_charge
             : undefined;
+        let chargeRefundStateUnknown = false;
+        if (
+          latestCharge === undefined &&
+          typeof paymentIntent.latest_charge === "string" &&
+          paymentIntent.latest_charge.length > 0
+        ) {
+          try {
+            latestCharge = await this.stripeRequest<StripeChargeSnapshot>(
+              "GET",
+              `/charges/${encodeURIComponent(paymentIntent.latest_charge)}`,
+              undefined,
+              undefined,
+              callerSignal,
+            );
+          } catch {
+            // Cannot observe amount_refunded without a charge snapshot.
+            chargeRefundStateUnknown = true;
+          }
+        }
 
-        const currency = paymentIntent.currency ?? "usd";
+        // STRIPE-4: never invent "usd" when Stripe omits currency.
+        const currency = stripeCurrencyCode(
+          paymentIntent.currency,
+          latestCharge?.currency,
+        );
         let status = this.mapStatus(paymentIntent.status);
 
         // Settled amount: amount_received → latest_charge.amount_captured (no auth fallback).
-        const settledMinor = resolveStripeCapturedMinor(paymentIntent);
+        // Include re-fetched charge so amount_captured is visible when expand failed.
+        const piCharges = (
+          paymentIntent as {
+            charges?: { data?: Array<{ amount_captured?: unknown }> };
+          }
+        ).charges;
+        const settledMinor = resolveStripeCapturedMinor({
+          amount_received: paymentIntent.amount_received,
+          latest_charge: latestCharge ?? paymentIntent.latest_charge,
+          ...(piCharges !== undefined ? { charges: piCharges } : {}),
+        });
         const amountReceived = paymentIntent.amount_received;
         const hasAmountReceived =
           typeof amountReceived === "number" && Number.isFinite(amountReceived);
@@ -1298,7 +1397,11 @@ export class StripeGateway extends BaseGateway {
         // Refund status overrides partial-capture status when both apply.
         // Full refund when amount_refunded covers the captured base (not the original auth).
         const amountRefunded = latestCharge?.amount_refunded;
-        if (
+        if (chargeRefundStateUnknown && paymentIntent.status === "succeeded") {
+          // STRIPE-1 fail-closed: succeeded + unobservable refunds must never
+          // map to paid (Stripe keeps PI status succeeded after refunds).
+          status = "processing";
+        } else if (
           paymentIntent.status === "succeeded" &&
           typeof amountRefunded === "number" &&
           amountRefunded > 0
@@ -1320,12 +1423,14 @@ export class StripeGateway extends BaseGateway {
           }
         }
 
+        const refundCurrency = stripeCurrencyCode(
+          latestCharge?.currency,
+          currency,
+        );
         const refundedAmount =
-          latestCharge?.amount_refunded !== undefined
-            ? fromStripeAmount(
-                latestCharge.amount_refunded,
-                latestCharge.currency ?? currency,
-              )
+          latestCharge?.amount_refunded !== undefined &&
+          refundCurrency !== undefined
+            ? fromStripeAmount(latestCharge.amount_refunded, refundCurrency)
             : undefined;
         const chargeId =
           typeof paymentIntent.latest_charge === "string"
@@ -1333,7 +1438,11 @@ export class StripeGateway extends BaseGateway {
             : latestCharge?.id;
         return this.mapPaymentIntentResult(paymentIntent, {
           status,
-          amount: fromStripeAmount(amountMinor, currency),
+          ...(typeof amountMinor === "number" &&
+          Number.isFinite(amountMinor) &&
+          currency !== undefined
+            ? { amount: fromStripeAmount(amountMinor, currency) }
+            : {}),
           omitRedirectUrl: true,
           ...(refundedAmount !== undefined ? { refundedAmount } : {}),
           ...(chargeId !== undefined ? { chargeId } : {}),
@@ -1720,13 +1829,23 @@ export class StripeGateway extends BaseGateway {
     let status: PaymentStatus = "pending";
     // Only set amount from real money fields — do not default to 0.
     let amount: number | undefined;
-    // Do not default missing currency to "usd" on the normalized event.
-    const currency =
-      typeof object.currency === "string" && object.currency.length > 0
-        ? object.currency.toLowerCase()
-        : undefined;
-    // Conversion still needs an exponent when Stripe omits currency (rare).
-    const amountCurrency = currency ?? "usd";
+    // STRIPE-2: do not default missing currency to "usd" for conversion or
+    // the normalized event. Without currency, omit amount (wrong scale risk
+    // for zero-decimal / three-decimal codes, esp. invoice/checkout).
+    const currency = stripeCurrencyCode(
+      typeof object.currency === "string" ? object.currency : undefined,
+    );
+    const convertMinor = (
+      minor: number | undefined | null,
+    ): number | undefined => {
+      if (currency === undefined || minor === undefined || minor === null) {
+        return undefined;
+      }
+      if (typeof minor !== "number" || !Number.isFinite(minor)) {
+        return undefined;
+      }
+      return fromStripeAmount(minor, currency);
+    };
 
     if (object.object === "payment_intent") {
       const pi = object as any;
@@ -1738,26 +1857,26 @@ export class StripeGateway extends BaseGateway {
       ) {
         const settled = resolveStripeCapturedMinor(pi);
         if (settled !== undefined) {
-          amount = fromStripeAmount(settled, amountCurrency);
+          amount = convertMinor(settled);
         } else if (typeof pi.amount === "number") {
           // Incomplete snapshot: report authorized amount only (status fail-closed).
-          amount = fromStripeAmount(pi.amount, amountCurrency);
+          amount = convertMinor(pi.amount);
         }
       } else if (typeof pi.amount === "number") {
-        amount = fromStripeAmount(pi.amount, amountCurrency);
+        amount = convertMinor(pi.amount);
       }
     } else if (object.amount !== undefined) {
-      amount = fromStripeAmount(object.amount, amountCurrency);
+      amount = convertMinor(object.amount);
     }
     // Checkout sessions use amount_total instead of amount
     if (object.amount_total !== undefined) {
-      amount = fromStripeAmount(object.amount_total, amountCurrency);
+      amount = convertMinor(object.amount_total);
     }
     if (object.object === "invoice") {
       const invoice = object as any;
       const invoiceAmount = stripeInvoiceAmount(raw.type, invoice);
       if (invoiceAmount !== undefined) {
-        amount = fromStripeAmount(invoiceAmount, amountCurrency);
+        amount = convertMinor(invoiceAmount);
       }
     }
 
@@ -1823,7 +1942,7 @@ export class StripeGateway extends BaseGateway {
               ? charge.amount
               : undefined;
         if (paymentMinor !== undefined) {
-          amount = fromStripeAmount(paymentMinor, amountCurrency);
+          amount = convertMinor(paymentMinor);
         }
 
         if (charge.refunded === true) {

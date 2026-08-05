@@ -248,8 +248,19 @@ const MoyasarMetadataSchema = z.record(
 // Core Operation Params Schemas
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/** Non-empty idempotency key when provided (empty string rejected). */
-const OptionalIdempotencyKeySchema = z.string().min(1, "idempotencyKey must be non-empty when provided").optional();
+/**
+ * Non-empty idempotency key when provided.
+ * Rejects empty string and whitespace-only values (CORE-2): whitespace-only keys
+ * are unstable across gateways that trim (e.g. Stripe → missing → auto-UUID per
+ * call), which silently drops crash/retry protection.
+ */
+const OptionalIdempotencyKeySchema = z
+    .string()
+    .min(1, "idempotencyKey must be non-empty when provided")
+    .refine((value) => value.trim().length > 0, {
+        message: "idempotencyKey must not be whitespace-only",
+    })
+    .optional();
 
 /**
  * Moyasar payment sources safe for merchant backend use.

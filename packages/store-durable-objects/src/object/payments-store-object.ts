@@ -149,6 +149,58 @@ export class PaymentsStoreObject {
     return this.schemaPromise;
   }
 
+  /**
+   * Pin hash `partitions` for this layout meta DO (DO-1).
+   *
+   * First call stores `partitions`. Later calls with a different count throw —
+   * never allow silent re-routing to empty partition objects after N changes.
+   * Idempotent when the sealed count matches.
+   */
+  bindHashPartitionLayout(partitions: number): Promise<void> {
+    if (
+      typeof partitions !== "number" ||
+      !Number.isInteger(partitions) ||
+      partitions < 1
+    ) {
+      return Promise.reject(
+        new TypeError(
+          "bindHashPartitionLayout: partitions must be an integer >= 1",
+        ),
+      );
+    }
+    try {
+      this.storage.sql.exec(
+        `CREATE TABLE IF NOT EXISTS pk_do_hash_layout (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          partitions INTEGER NOT NULL
+        )`,
+      );
+      const rows = this.storage.sql
+        .exec(`SELECT partitions AS partitions FROM pk_do_hash_layout WHERE id = 1`)
+        .toArray();
+      if (rows.length === 0) {
+        this.storage.sql.exec(
+          `INSERT INTO pk_do_hash_layout (id, partitions) VALUES (1, ?)`,
+          partitions,
+        );
+        return Promise.resolve();
+      }
+      const sealed = Number(rows[0]!["partitions"]);
+      if (sealed !== partitions) {
+        return Promise.reject(
+          new TypeError(
+            `sharding DO-1: hash partitions sealed as ${sealed} but config is ${partitions}. ` +
+              `Changing N re-routes keys and orphans Durable Object state. ` +
+              `Keep partitions fixed, or use a new layoutId/objectNamePrefix and migrate — never silently route to empty DOs.`,
+          ),
+        );
+      }
+      return Promise.resolve();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
   // ── Idempotency RPC ──────────────────────────────────────────────────────
 
   reserveIdempotency(

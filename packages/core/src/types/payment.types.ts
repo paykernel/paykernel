@@ -554,8 +554,18 @@ export interface GatewayPaymentResult {
      * shared fromMinorUnits + safe conversion. Prefer treating as display/legacy;
      * do not re-input float-derived values without re-validation. May become
      * {@link Money} at 1.0.
+     *
+     * When `amount` / `fee` / `capturedAmount` / `refundedAmount` is set,
+     * prefer also setting {@link currency} so Phase-6 snapshots are complete.
+     * {@link import("./operation-result").paymentFromGatewayResult} fail-closes
+     * incomplete money (amount-like fields without currency are omitted).
      */
     amount?: number | undefined;
+    /**
+     * ISO 4217 currency code for major-unit money fields on this result.
+     * Required for a complete money snapshot when any amount-like field is set.
+     */
+    currency?: string | undefined;
     /** Fee charged by gateway in major currency units (0.x number; see amount) */
     fee?: number | undefined;
     /** Amount captured so far (partial captures) in major units (0.x number) */

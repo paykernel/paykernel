@@ -121,9 +121,14 @@ export function mapDriverError(err: unknown): StoreError {
     return new StoreUnavailableError(msg || "Redis script/engine unavailable", err);
   }
 
-  // CROSSSLOT / cluster topology misconfig
+  // CROSSSLOT / cluster topology misconfig (REDIS-2 honesty)
+  if (lower.includes("crossslot")) {
+    return new StoreInvalidSchemaError(
+      "Redis Cluster CROSSSLOT: multi-key Lua requires keys.clusterKeys:true so record+index share a hash tag (standalone default is not Cluster-safe)",
+      err,
+    );
+  }
   if (
-    lower.includes("crossslot") ||
     (lower.includes("cluster") && lower.includes("down")) ||
     lower.includes("moved ") ||
     lower.includes("ask ")

@@ -98,12 +98,18 @@ export function createMemoryWebhookInboxStore(
       rec.leaseExpiresAt &&
       Date.parse(rec.leaseExpiresAt) <= clock.nowMs()
     ) {
+      // WEBHOOKS-1: crash/deploy reclaim must not burn the maxAttempts handler
+      // budget. This claim never completed via fail/complete (handler outcome),
+      // so restore the claim's attempt++ before exposing the row as pending.
+      // Soft-release is the only safe place: get/listRetryable may release
+      // before the next claim, so claim-time detection alone is insufficient.
       const released: WebhookInboxRecord = {
         ...rec,
         status: "pending",
         leaseToken: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        attempts: Math.max(0, rec.attempts - 1),
         availableAt: iso(clock),
         updatedAt: iso(clock),
       };
@@ -163,43 +169,49 @@ export function createMemoryWebhookInboxStore(
     async claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult> {
       maybeCrash();
       const existing = entries.get(input.key);
-      if (existing) {
-        const rec = releaseExpiredLease(input.key, existing);
-        if (rec.payloadHash !== input.payloadHash) {
-          return { kind: "payload_hash_conflict", record: rec };
+      // Soft-release at most once; never re-apply against a stale pre-release snapshot
+      // (that would re-use the old attempts value and can desync the handler budget).
+      const base = existing
+        ? releaseExpiredLease(input.key, existing)
+        : undefined;
+      if (base) {
+        // WEBHOOKS-4: terminal outcomes win before payload_hash_conflict so a
+        // completed/dead-lettered row redelivered with a mismatched hash (e.g.
+        // rawBody vs object hash footgun) still ACKs as already done / failed
+        // rather than permanent payload_conflict that never re-runs a terminal
+        // idempotent path.
+        if (base.status === "completed") {
+          return { kind: "already_completed", record: base };
         }
-        if (rec.status === "completed") {
-          return { kind: "already_completed", record: rec };
+        if (base.status === "dead_letter" || base.status === "failed") {
+          return { kind: "duplicate_failed", record: base };
         }
-        if (rec.status === "dead_letter" || rec.status === "failed") {
-          return { kind: "duplicate_failed", record: rec };
+        if (base.payloadHash !== input.payloadHash) {
+          return { kind: "payload_hash_conflict", record: base };
         }
-        if (rec.status === "claimed" && isLeaseActive(rec, clock)) {
-          return { kind: "in_progress", record: rec };
+        if (base.status === "claimed" && isLeaseActive(base, clock)) {
+          return { kind: "in_progress", record: base };
         }
         // True backoff: pending with future availableAt must not reacquire.
         if (
-          rec.status === "pending" &&
-          Date.parse(rec.availableAt) > clock.nowMs()
+          base.status === "pending" &&
+          Date.parse(base.availableAt) > clock.nowMs()
         ) {
           return {
             kind: "not_available",
-            record: rec,
-            availableAt: rec.availableAt,
+            record: base,
+            availableAt: base.availableAt,
           };
         }
       }
 
       enforceCap(input.key);
-      const generation = (existing?.generation ?? 0) + 1;
+      const generation = (base?.generation ?? 0) + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const now = iso(clock);
-      // `existing` already passed the availableAt gate above (or is expired-claimed
-      // soft-released to pending with availableAt=now). Re-read for lease release only.
-      const base = existing ? releaseExpiredLease(input.key, existing) : undefined;
-      if (base && base.payloadHash !== input.payloadHash) {
-        return { kind: "payload_hash_conflict", record: base };
-      }
+      // base already passed availableAt / terminal / hash gates (or is new).
+      // Pending reclaim burns an attempt; expired-claimed soft-release restored one
+      // so this +1 returns the counter to the unfinished-handler budget (WEBHOOKS-1).
       const record: WebhookInboxRecord = {
         key: input.key,
         status: "claimed",

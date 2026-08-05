@@ -190,6 +190,8 @@ describe("decideReconciliationPolicy", () => {
       "processing",
       "refunded",
       "partially_refunded",
+      "refund_pending",
+      "refund_failed",
       "reversed",
     ] as const) {
       const provider = buildProviderPaymentSnapshot({
@@ -206,6 +208,29 @@ describe("decideReconciliationPolicy", () => {
       const d = decideReconciliationPolicy(result, {
         gateway: "stripe",
         gatewayPaymentId: "pi_open",
+      });
+      expect(d.action).toBe("manual_review");
+      expect(d.safe).toBe(false);
+      expect(d.action).not.toBe("mark_consistent");
+    }
+  });
+
+  it("RECON-2: indeterminate local + provider refund_pending is not mark_consistent safe", () => {
+    for (const status of ["refund_pending", "refund_failed"] as const) {
+      const provider = buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_refund_inflight",
+        status,
+        amount: money("10.00", "USD"),
+        providerStatus: status,
+      });
+      const result: ReconciliationResult = {
+        outcome: "consistent",
+        provider,
+      };
+      const d = decideReconciliationPolicy(result, {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_refund_inflight",
+        expected: { status: "pending" },
       });
       expect(d.action).toBe("manual_review");
       expect(d.safe).toBe(false);
@@ -294,6 +319,7 @@ describe("shouldForbidReplacementCharge", () => {
       "partially_refunded",
       "paid",
       "refunded",
+      "refund_pending",
       "reversed",
     ] as const) {
       expect(
@@ -325,5 +351,60 @@ describe("shouldForbidReplacementCharge", () => {
         { gateway: "s", expected: { status: "failed" } },
       ),
     ).toBe(false);
+  });
+
+  it("RECON-1: consistent local+provider refund_pending forbids replacement charge", () => {
+    const refundPendingProvider = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "refund_pending",
+      amount: money("10.00", "USD"),
+      providerStatus: "pending",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: refundPendingProvider,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "refund_pending" },
+    };
+    expect(shouldForbidReplacementCharge(result, target)).toBe(true);
+    // Provider open-incomplete alone also forbids even if local looks terminal failed.
+    expect(
+      shouldForbidReplacementCharge(result, {
+        gateway: "stripe",
+        expected: { status: "failed" },
+      }),
+    ).toBe(true);
+  });
+
+  it("RECON-3: provider_not_found + open money local surfaces do_not_create_replacement", () => {
+    const result: ReconciliationResult = {
+      outcome: "provider_not_found",
+      retryable: true,
+    };
+    for (const status of ["paid", "authorized", "refund_pending"] as const) {
+      const d = decideReconciliationPolicy(result, {
+        gateway: "stripe",
+        expected: { status },
+      });
+      expect(d.action).toBe("do_not_create_replacement");
+      expect(shouldForbidReplacementCharge(result, { gateway: "s", expected: { status } })).toBe(
+        true,
+      );
+    }
+    // Terminal non-open local: policy may retry_later, but forbid helper still true.
+    const failedLocal = decideReconciliationPolicy(result, {
+      gateway: "stripe",
+      expected: { status: "failed" },
+    });
+    expect(failedLocal.action).toBe("retry_later");
+    expect(
+      shouldForbidReplacementCharge(result, {
+        gateway: "s",
+        expected: { status: "failed" },
+      }),
+    ).toBe(true);
   });
 });

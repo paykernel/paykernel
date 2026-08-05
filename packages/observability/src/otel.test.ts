@@ -84,7 +84,7 @@ describe("createOpenTelemetryBridge", () => {
     expect(s.status?.code).toBe(1);
   });
 
-  it("maps error status and sanitizes recordException (OBS-1)", () => {
+  it("maps error status and sanitizes recordException", () => {
     const mock = createMockOtelApi();
     const tracer = createOpenTelemetryBridge(mock.api);
     const span = tracer.startSpan(PAYMENT_SPAN_NAMES.refund);
@@ -99,6 +99,28 @@ describe("createOpenTelemetryBridge", () => {
     expect(s.status?.code).toBe(2);
     expect(s.status?.message).toBe("Error");
     expect(s.ended).toBe(true);
+  });
+
+  it("auto-redacts span attributes on start and setAttribute (OBS-2)", () => {
+    const mock = createMockOtelApi();
+    const tracer = createOpenTelemetryBridge(mock.api);
+    const span = tracer.startSpan(PAYMENT_SPAN_NAMES.capture, {
+      gateway: "stripe",
+      token: "tok_live_secret",
+      authorized: true,
+    });
+    span.setAttribute("cardNumber", "4111111111111111");
+    span.setAttribute("providerRequestId", "req_ok");
+    span.end({ code: "ok" });
+
+    const s = mock.spans[0]!;
+    expect(s.attributes.gateway).toBe("stripe");
+    expect(s.attributes.authorized).toBe(true);
+    expect(s.attributes.token).toBe("[REDACTED]");
+    expect(s.attributes.cardNumber).toBe("[REDACTED]");
+    expect(s.attributes.providerRequestId).toBe("req_ok");
+    expect(JSON.stringify(s.attributes)).not.toContain("tok_live");
+    expect(JSON.stringify(s.attributes)).not.toContain("4111111111111111");
   });
 
   it("works without SpanStatusCode (numeric fallback)", () => {

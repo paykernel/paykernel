@@ -33,7 +33,7 @@ Roadmap §10.1 maps to the engine as follows. Steps 1–3 happen **outside** or 
 | 1 | Receive raw request | Your HTTP framework |
 | 2 | Verify signature / authenticity | `PaymentClient.handleWebhook`, `gateway.verifyWebhook`, or injected `verifyAndNormalize` |
 | 3 | Normalize event | Same path; dual-write `PaymentEvent` preferred (Phase 7) |
-| 4 | Calculate payload hash | Core `hashWebhookPayload` / package `computePayloadHash` |
+| 4 | Calculate payload hash | Prefer gateway `event.payloadHash`; else `resolveInboxPayloadHash` / same object shape as gateway (`hashWebhookPayload` — **not** interchangeable with raw body string) |
 | 5 | Derive event key | `deriveWebhookEventKey(gateway, providerEventId)` → `gateway:providerEventId` |
 | 6 | Atomically claim | `store.claim` only (engine never get-then-set) |
 | 7 | Conflict / non-acquired | Map claim kinds → `WebhookProcessingOutcome` (no handler) |
@@ -44,12 +44,10 @@ Roadmap §10.1 maps to the engine as follows. Steps 1–3 happen **outside** or 
 ### Code sample
 
 ```typescript
-import {
-  hashWebhookPayload,
-  toPersistedPaymentEventEnvelope,
-} from "@paykernel/core";
+import { toPersistedPaymentEventEnvelope } from "@paykernel/core";
 import {
   createWebhookInboxEngine,
+  resolveInboxPayloadHash,
   type WebhookInboxStore,
   type WebhookProcessingOutcome,
 } from "@paykernel/webhooks";
@@ -82,15 +80,21 @@ async function onStripeWebhook(
   // Steps 1–3: verify + normalize (core; not the inbox engine)
   const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
   const providerEventId = webhookEvent.id;
-  const payloadHash =
-    webhookEvent.payloadHash ?? hashWebhookPayload(rawBody);
+  // WEBHOOKS-2: prefer gateway payloadHash; fallback hashes the same object
+  // shape the gateway used — never mix rawBody string with object digests.
+  const payloadHash = resolveInboxPayloadHash({
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash:
+      webhookEvent.rawPayload ?? webhookEvent.event ?? webhookEvent,
+  });
 
   // Optional sanitized envelope for durable_retry workers (never raw secrets)
   const envelope =
     webhookEvent.event !== undefined
       ? toPersistedPaymentEventEnvelope(webhookEvent.event as never, {
           payloadHash,
-          rawForHash: rawBody,
+          // rawForHash only if you intentionally want that digest in the envelope;
+          // prefer the same payloadHash used for claim.
         })
       : undefined;
 
@@ -134,7 +138,10 @@ const event = await client.handleWebhook("moyasar", body);
 const outcome = await engine.processVerified({
   gateway: "moyasar",
   providerEventId: event.id,
-  payloadHash: event.payloadHash ?? hashWebhookPayload(body),
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: event.payloadHash,
+    payloadForHash: event.rawPayload ?? event.event ?? event,
+  }),
   event: event.event ?? event,
   handler: async (ctx) => {
     await fulfill(ctx.event);
@@ -160,7 +167,10 @@ const outcome = await engine.processWithVerifier({
         ok: true,
         gateway: "stripe",
         providerEventId: event.id,
-        payloadHash: hashWebhookPayload(raw.body),
+        payloadHash: resolveInboxPayloadHash({
+          eventPayloadHash: event.payloadHash,
+          payloadForHash: event.rawPayload ?? event.event ?? event,
+        }),
         event: event.event ?? event,
       };
     } catch {
@@ -185,7 +195,11 @@ const normalized = gateway.parseWebhookEvent(rawBody);
 await engine.processVerified({
   gateway: "stripe",
   providerEventId: normalized.id,
-  payloadHash: hashWebhookPayload(rawBody),
+  // Prefer normalized.payloadHash when computePayloadHash was used on parse
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: normalized.payloadHash,
+    payloadForHash: normalized.rawPayload ?? normalized,
+  }),
   event: normalized,
   handler: async (ctx) => {
     await fulfill(ctx.event);
@@ -212,19 +226,37 @@ parseWebhookEventKey("stripe:evt_123");     // { gateway: "stripe", providerEven
 - **Gateway must not contain `:`** (colon is the key separator). Rejecting colon-in-gateway prevents collisions such as `a:b`+`c` vs `a`+`b:c`. `providerEventId` may still contain colons.
 - Format: `{gateway}:{providerEventId}` (first colon splits for parse).
 
-### Payload hash
+### Payload hash (one canonical source — WEBHOOKS-2)
 
 ```typescript
 import { hashWebhookPayload } from "@paykernel/core";
-import { computePayloadHash } from "@paykernel/webhooks";
+import {
+  computePayloadHash,
+  resolveInboxPayloadHash,
+} from "@paykernel/webhooks";
 
-// Prefer core helper (redacts known secret keys, portable SHA-256)
-const h1 = hashWebhookPayload(rawBody);
-// Thin wrapper used by the package:
-const h2 = computePayloadHash(rawBody); // === hashWebhookPayload(rawBody)
+// Canonical for inbox claim:
+const payloadHash = resolveInboxPayloadHash({
+  eventPayloadHash: webhookEvent.payloadHash, // prefer when gateway set it
+  payloadForHash: webhookEvent.rawPayload ?? webhookEvent, // same shape as gateway
+});
+
+// computePayloadHash === hashWebhookPayload (thin wrapper). Shape matters:
+// hashWebhookPayload does NOT JSON-parse non-object strings, so
+// hashWebhookPayload(rawBodyString) !== hashWebhookPayload(parsedObject)
+// even when rawBodyString is JSON of that object. Mixing them → permanent
+// payload_conflict on redelivery.
+const objectHash = computePayloadHash({ id: "evt_1" });
+const stringHash = computePayloadHash(JSON.stringify({ id: "evt_1" }));
+// objectHash !== stringHash — never interchange them for the same event key
+void objectHash;
+void stringHash;
+void hashWebhookPayload;
 ```
 
-Pass a **precomputed** hash into `processVerified`. Same key + different hash → store `payload_hash_conflict` → engine `{ outcome: "payload_conflict" }`.
+Pass a **precomputed** hash into `processVerified`. Same key + different hash on a **non-terminal** row → store `payload_hash_conflict` → engine `{ outcome: "payload_conflict" }`.
+
+**Terminal precedence (WEBHOOKS-4):** if the row is already `completed` / `dead_letter` / `failed`, claim returns `already_completed` / `duplicate_failed` **before** hash conflict — so a completed paid event redelivered with a raw-vs-object hash mismatch still ACKs as done (handler not re-run).
 
 ---
 
@@ -241,7 +273,7 @@ Domain-owned in this package; structurally compatible with Phase 9 testkit.
 | `payloadHash` | Hash for duplicate / conflict detection |
 | `payloadRef?` | Optional **sanitized** snapshot for durable workers (JSON string) |
 | `leaseOwner?` / `leaseToken?` / `leaseExpiresAt?` | Lease fencing |
-| `attempts` | Handler/claim attempt count (parking `ackAfterClaim` restores so it does not consume budget) |
+| `attempts` | Handler attempt budget counter (parking `ackAfterClaim` + expired-lease soft-release restore so crash reclaim does not consume `maxAttempts`) |
 | `lastError?` | **Sanitized** error only |
 | `createdAt` / `updatedAt` / `availableAt` | ISO-8601 strings |
 | `generation` | Monotonic; increments on claim/renew |
@@ -309,9 +341,11 @@ const durableEngine = createWebhookInboxEngine({
 ### Attempt budget and backoff
 
 - `maxAttempts` is max **handler** attempts before `dead_letter` on `durable_retry` (default 5). Must be a finite integer **`>= 1`** (constructor throws otherwise).
-- Each successful store `claim` acquire increments `attempts`. The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
-- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry { reason: "not_available" }`.
-- `listRetryable` only returns rows with `availableAt <= now` (same gate).
+- Each successful store `claim` acquire increments `attempts`.
+- The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
+- **Crash reclaim (WEBHOOKS-1):** soft-release of an expired `claimed` lease restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget — only handler outcomes (fail without restore / complete path) consume it.
+- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry { reason: "not_available" }`. Adapters should map this to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
+- `listRetryable` only returns rows with `availableAt <= now` (same gate). Soft-release on list/get/claim restores unfinished claim attempts.
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
 - `defaultRetryAfterMs` must be a finite number **`>= 0`** (constructor throws otherwise). Default remains **5_000**.
 

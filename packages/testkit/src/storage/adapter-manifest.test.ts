@@ -69,8 +69,10 @@ describe("MEMORY_STORAGE_ADAPTER_MANIFEST", () => {
     );
   });
 
-  it("is a strong-claim adapter (claims strong + leases)", () => {
-    expect(isStrongClaimAdapter(MEMORY_STORAGE_ADAPTER_MANIFEST)).toBe(true);
+  it("is not a production strong-claim adapter (TESTKIT-4: NON_PRODUCTION memory)", () => {
+    // Isolate-local claims:strong is honest in notes, but isStrongClaimAdapter
+    // requires production-safe coordination (not single-process/ephemeral).
+    expect(isStrongClaimAdapter(MEMORY_STORAGE_ADAPTER_MANIFEST)).toBe(false);
   });
 });
 
@@ -188,9 +190,29 @@ describe("isProductionSafeCoordination / isStrongClaimAdapter", () => {
     ).toBe(false);
   });
 
-  it("isStrongClaimAdapter requires leases", () => {
+  it("isStrongClaimAdapter requires leases + production-safe coordination", () => {
     expect(
       isStrongClaimAdapter(cloneManifest({ supportsLeases: false })),
+    ).toBe(false);
+    // Durable multi-host + strong claims + leases → true
+    expect(
+      isStrongClaimAdapter(
+        cloneManifest({
+          coordinationScope: "multi-host",
+          durability: "durable",
+          supportsLeases: true,
+        }),
+      ),
+    ).toBe(true);
+    // Memory-shaped (ephemeral single-process) stays false even with leases
+    expect(
+      isStrongClaimAdapter(
+        cloneManifest({
+          coordinationScope: "single-process",
+          durability: "ephemeral",
+          supportsLeases: true,
+        }),
+      ),
     ).toBe(false);
   });
 });

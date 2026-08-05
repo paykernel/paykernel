@@ -34,6 +34,7 @@ export {
   createDoIdempotencyStoreFromNamespace,
   createDoWebhookInboxStoreFromNamespace,
   createDoReconciliationStoreFromNamespace,
+  ensureDoHashPartitionLayout,
 } from "./client";
 
 export {
@@ -55,13 +56,18 @@ export {
   resolveDoShardName,
   resolveDoDiscoveryPartitions,
   enumerateDoPartitionShardNames,
+  resolveDoHashLayoutId,
+  resolveDoHashLayoutMetaShardName,
+  assertDoHashPartitionLayoutStable,
   hashStringToUint32,
   getDoStub,
   assertDoShardingStrategy,
   RECOMMENDED_HASH_PARTITIONS,
+  DO_HASH_LAYOUT_META_SUFFIX,
 } from "./sharding";
 export type {
   DoShardingStrategy,
+  DoHashShardingStrategy,
   DoShardInput,
   ResolveDoShardNameOptions,
   DoDiscoveryPartitions,

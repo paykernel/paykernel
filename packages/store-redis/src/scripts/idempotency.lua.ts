@@ -179,14 +179,19 @@ local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], newToken}
 `.trim();
 
-/** KEYS[1]=record  ARGV: nowMs, nowIso, leaseToken, resultJson, retentionTtlSec (0=none) */
+/**
+ * KEYS[1]=record  ARGV: nowMs, nowIso, leaseToken, resultJson, retentionTtlSec
+ * retentionTtlSec is accepted for call-site parity but **ignored** (REDIS-1):
+ * completed fences must not EXPIRE into re-acquirable empty keys.
+ */
 export const IDEMPOTENCY_COMPLETE_LUA = `
 local rec = KEYS[1]
 local nowMs = tonumber(ARGV[1])
 local nowIso = ARGV[2]
 local leaseToken = ARGV[3]
 local resultJson = ARGV[4]
-local retentionTtlSec = tonumber(ARGV[5]) or 0
+-- ARGV[5] retentionTtlSec intentionally unused for completed (REDIS-1)
+local _retentionTtlSec = tonumber(ARGV[5]) or 0
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -219,9 +224,12 @@ redis.call('HSET', rec,
   'lease_expires_ms', '0',
   'updated_at', nowIso
 )
-if retentionTtlSec > 0 then
-  redis.call('EXPIRE', rec, retentionTtlSec)
-end
+-- REDIS-1: never EXPIRE completed idempotency fences.
+-- Evicting the key makes reserve see EXISTS==0 and re-acquire (double charge/capture).
+-- retentionTtlSec is accepted for API compatibility but ignored for completed.
+-- Intentional cleanup remains deleteExpired (operator-driven).
+-- Keep PERSIST so a prior TTL (if any) cannot silently re-open the fence.
+redis.call('PERSIST', rec)
 return {'ok'}
 `.trim();
 

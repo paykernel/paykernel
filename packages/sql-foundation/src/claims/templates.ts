@@ -190,7 +190,8 @@ export function webhookClaimTemplates(namespace?: ResolvedSchemaNamespace): Clai
   const intent =
     "Atomic claim: insert-if-absent or reclaim pending-when-due/expired lease only; " +
     "pending requires available_at <= now; expired claimed lease may reclaim for recovery " +
-    "even if available_at is future; payload_hash must match; increment generation/attempts.";
+    "even if available_at is future; payload_hash must match; increment generation; " +
+    "attempts++ only for pending (handler) reclaim — expired claimed reclaim keeps attempts (WEBHOOKS-1).";
 
   const postgresSql = `
 INSERT INTO ${t} (
@@ -205,7 +206,10 @@ ON CONFLICT (key) DO UPDATE SET
   lease_owner = EXCLUDED.lease_owner,
   lease_token = EXCLUDED.lease_token,
   lease_expires_at = EXCLUDED.lease_expires_at,
-  attempts = ${t}.attempts + 1,
+  attempts = CASE
+    WHEN ${t}.status = 'claimed' THEN ${t}.attempts
+    ELSE ${t}.attempts + 1
+  END,
   generation = ${t}.generation + 1,
   available_at = EXCLUDED.available_at,
   updated_at = EXCLUDED.updated_at
@@ -241,7 +245,10 @@ UPDATE ${t} SET
   lease_owner = ?,
   lease_token = ?,
   lease_expires_at = ?,
-  attempts = attempts + 1,
+  attempts = CASE
+    WHEN status = 'claimed' THEN attempts
+    ELSE attempts + 1
+  END,
   generation = generation + 1,
   available_at = ?,
   updated_at = ?

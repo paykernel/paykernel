@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   CardDeclinedError,
+  GatewayApiError,
   InvalidRequestError,
   NetworkError,
   defineGatewayCapabilities,
@@ -654,6 +655,20 @@ describe("mockGateway", () => {
     const voided = await g.voidPayment!({ gatewayPaymentId: pay.gatewayId });
     expect(voided.status).toBe("cancelled");
     expect(await g.getPaymentStatus!(pay.gatewayId)).toBe("cancelled");
+  });
+
+  it("voidPayment fails closed for unknown payment IDs (TESTKIT-3)", async () => {
+    const g = mockGateway();
+    await expect(
+      g.voidPayment!({ gatewayPaymentId: "pay_does_not_exist" }),
+    ).rejects.toBeInstanceOf(GatewayApiError);
+    // Align with capture/refund/get not-found posture
+    await expect(
+      g.capturePayment({ gatewayPaymentId: "pay_does_not_exist" }),
+    ).rejects.toBeInstanceOf(GatewayApiError);
+    await expect(
+      g.getPayment({ gatewayPaymentId: "pay_does_not_exist" }),
+    ).rejects.toBeInstanceOf(GatewayApiError);
   });
 
   it("enqueue extends queues at runtime", async () => {

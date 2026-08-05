@@ -59,9 +59,10 @@ export type {
   PaymentOperationFnResult,
 } from "./instrumentation";
 
-// Redaction (core re-exports + helper)
+// Redaction (core-aligned + operational restore / attribute scrubbers)
 export {
   createRedactingTelemetrySink,
+  redactAttributeBag,
   redactTelemetryData,
 } from "./redaction";
 export type { TelemetrySink } from "./redaction";

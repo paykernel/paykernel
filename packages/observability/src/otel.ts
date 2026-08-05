@@ -7,6 +7,7 @@
  * @packageDocumentation
  */
 
+import { redactAttributeBag } from "./redaction";
 import type { PaymentSpan, PaymentSpanStatus, PaymentTracer } from "./spans";
 
 /**
@@ -122,8 +123,9 @@ function applyOtelSpanStatus(
  * const tracer = createOpenTelemetryBridge({ trace, SpanStatusCode });
  * ```
  *
- * Sensitive values must never be set as span attributes (use allow-listed
- * diagnostics only; prefer redacting sinks for structured telemetry bags).
+ * Span attributes are auto-redacted (OBS-2) via {@link redactAttributeBag}
+ * so secrets/card/token keys never reach exporters. Prefer allow-listed
+ * diagnostics; use redacting sinks for rich structured telemetry bags.
  */
 export function createOpenTelemetryBridge(
   otelApi: OpenTelemetryApiLike,
@@ -142,8 +144,9 @@ export function createOpenTelemetryBridge(
       name: string,
       attributes?: Record<string, string | number | boolean>,
     ): PaymentSpan {
+      const safeAttrs = redactAttributeBag(attributes);
       const spanOptions =
-        attributes !== undefined ? { attributes: { ...attributes } } : {};
+        safeAttrs !== undefined ? { attributes: safeAttrs } : {};
       const otelSpan = otelTracer.startSpan(name, spanOptions);
 
       return {
@@ -152,7 +155,12 @@ export function createOpenTelemetryBridge(
           otelSpan.end();
         },
         setAttribute(key: string, value: string | number | boolean): void {
-          otelSpan.setAttribute(key, value);
+          // OBS-2: scrub single-key attributes the same way as startSpan bags.
+          const scrubbed = redactAttributeBag({ [key]: value });
+          if (scrubbed === undefined) return;
+          const next = scrubbed[key];
+          if (next === undefined) return;
+          otelSpan.setAttribute(key, next);
         },
         recordException(error: unknown): void {
           if (otelSpan.recordException !== undefined) {

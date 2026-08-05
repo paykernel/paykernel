@@ -521,11 +521,15 @@ can refund the customer twice.
 The SDK does **not** auto-retry capture/refund/void with `withRetry` (a lost
 response after a successful mutation could double-apply). `idempotencyStore` +
 `idempotencyKey` make **your** retries safe: completed results are cached,
-in-progress / unknown outcomes refuse a second attempt, and definite 4xx
-failures clear the reservation so a caller retry is allowed. Stores without
-atomic `reserve()` are refused at mutation time (non-atomic get-then-set races
-under concurrency). The SDK also logs a construction-time warning when no store
-is configured or when `reserve()` is missing.
+in-progress / unknown outcomes refuse a second attempt, and **only** definite
+4xx rejections (Moyasar refused the mutation; excluding 429) clear the
+reservation so a caller retry is allowed. Post-2xx invalid JSON, mapping
+errors after a successful HTTP response, network/5xx/429, and other
+indeterminate failures **keep** the fence as `unknown` — the mutation may
+already have applied server-side; resolve via `getPayment` before reusing the
+key. Stores without atomic `reserve()` are refused at mutation time (non-atomic
+get-then-set races under concurrency). The SDK also logs a construction-time
+warning when no store is configured or when `reserve()` is missing.
 
 ```typescript
 import { PaymentClient, InMemoryIdempotencyStore } from '@paykernel/core';
@@ -556,11 +560,12 @@ Behavior of the guard, keyed by `idempotencyKey + operation + paymentId`:
 - **Completed** for the key: the cached result is returned, no API call is made.
 - **In progress / outcome unknown** for the key: the call is refused rather than
   risking a duplicate mutation.
-- **Definite failure** (4xx/validation): the reservation is cleared so a retry is
-  allowed.
-- **Transient/indeterminate failure** (network/5xx): an `unknown` marker is kept
-  so the mutation is never silently re-applied — resolve it (e.g. by inspecting
-  the payment) before retrying with the same key.
+- **Definite failure** (HTTP 4xx except 429 — Moyasar rejected the mutation):
+  the reservation is cleared so a retry is allowed.
+- **Indeterminate failure** (network/5xx/429, post-2xx invalid JSON or mapping
+  errors after HTTP success, unexpected throws): an `unknown` marker is kept so
+  the mutation is never silently re-applied — resolve it (e.g. via `getPayment`)
+  before retrying with the same key.
 
 For full cross-worker protection, implement the store's optional atomic
 `reserve` with Redis `SET NX`, a database unique constraint, or equivalent.

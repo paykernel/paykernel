@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **N2 (webhook inbox conformance):** `runWebhookInboxStoreConformanceSuite` now asserts claim `not_available` / `availableAt` gate (no attempt++) and `fail({ restoreAttempt: true })` attempt restore (parking claim parity). Adapters that already implement correctly keep passing.
 - **Paid-like parity:** `paymentStatusToOperationOutcome("approved")` returns `requires_action` (not `succeeded`), matching core `inferOperationOutcome` / PayPal pre-capture semantics. `isPaidOutcome` remains false for approved.
 - **N5 / deleteExpired parity:** memory idempotency `deleteExpired` only removes terminal `completed`/`expired` rows (SQL/Redis parity). Reclaimable `reserved` rows with past `leaseExpiresAt` are no longer wiped by cleanup; soft-release/reclaim remains separate.

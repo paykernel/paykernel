@@ -990,6 +990,46 @@ describe("PaymobGateway", () => {
       expect(result.status).toBe("pending");
     });
 
+    it("estimates totalRefunded when refund body omits refunded_amount_cents (PAYMOB-3)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, refunded_amount_cents: 2000, currency: "SAR" }),
+        // Success body has a distinct refund txn id but no cumulative refunded total.
+        jsonResponse({ id: 999001, success: true, currency: "SAR" }),
+      );
+
+      const result = await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 30,
+        currency: "SAR",
+      });
+
+      // prior 20 + this 30 = 50 major units
+      expect(result.totalRefunded).toBe(50);
+      // PAYMOB-4: gatewayRefundId is the refund txn id — not the payment id.
+      expect(result.gatewayRefundId).toBe("999001");
+      expect(result.gatewayRefundId).not.toBe("123456789");
+      expect(result.status).toBe("completed");
+    });
+
+    it("rejects refund responses missing refund transaction id (PAYMOB-4)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ success: true, refunded_amount_cents: 5000, currency: "SAR" }),
+      );
+
+      await expect(
+        actionGateway.refundPayment({
+          gatewayPaymentId: "123456789",
+          amount: 50,
+          currency: "SAR",
+        }),
+      ).rejects.toThrow(GatewayApiError);
+    });
+
     it("derives full capture amount from transaction inquiry when amount is omitted", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
@@ -2419,6 +2459,79 @@ describe("PaymobGateway", () => {
         expect(event.stableType).toBe("payment.processing");
         expect(event.stableType).not.toBe("capture.completed");
         expect(event.stableType).not.toBe("payment.succeeded");
+        // PAYMOB-1: incomplete capture must not publish full order amount_cents.
+        expect(event.amount).toBeUndefined();
+      }
+    });
+
+    it("omits amount on incomplete capture webhooks (PAYMOB-1)", () => {
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_auth: false,
+        is_capture: true,
+        amount_cents: 10000,
+        captured_amount: 5000,
+      }));
+
+      expect(event.status).toBe("processing");
+      expect(event.amount).toBeUndefined();
+      expect(event.currency).toBe("SAR");
+      expect(event.stableType).toBe("payment.processing");
+      if (event.event?.type === "payment.processing") {
+        expect(event.event.payment.amount).toBeUndefined();
+      }
+    });
+
+    it("does not promote order.id into Phase-7 refundId/captureId (PAYMOB-2)", () => {
+      // Mock payload order.id=987654, obj.id=123456789 (distinct child txn).
+      const refundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: true,
+        is_refunded: undefined,
+        amount_cents: 10000,
+      } as Partial<PaymobWebhookPayload["obj"]>));
+
+      expect(refundEvent.gatewayPaymentId).toBe("123456789");
+      expect(refundEvent.gatewayObjectId).toBeUndefined();
+      expect(refundEvent.status).toBe("refund_completed");
+      expect(refundEvent.stableType).toBe("refund.pending");
+      if (refundEvent.event?.type === "refund.pending") {
+        const refs = refundEvent.event.refund.references;
+        expect(refs.providerObjectId).toBe("123456789");
+        expect(refs.parentId).toBe("987654");
+        expect(refs.relatedIds?.orderId).toBe("987654");
+        // True refund resource is the emitting txn — never order.id.
+        expect(refs.relatedIds?.refundId).toBe("123456789");
+        expect(refs.relatedIds?.refundId).not.toBe("987654");
+      }
+
+      const captureIncomplete = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_auth: false,
+        is_capture: true,
+        amount_cents: 10000,
+      }));
+
+      expect(captureIncomplete.gatewayObjectId).toBeUndefined();
+      expect(captureIncomplete.status).toBe("processing");
+      if (captureIncomplete.event?.type === "payment.processing") {
+        const refs = captureIncomplete.event.payment.references;
+        expect(refs.providerObjectId).toBe("123456789");
+        expect(refs.parentId).toBe("987654");
+        expect(refs.relatedIds?.orderId).toBe("987654");
+        // No capture.completed dual-write without trusted captured_amount — but
+        // order.id must still not appear as captureId if present.
+        expect(refs.relatedIds?.captureId).not.toBe("987654");
+      }
+
+      const paid = gateway.parseWebhookEvent(createMockWebhookPayload());
+      expect(paid.gatewayObjectId).toBeUndefined();
+      if (paid.event?.type === "payment.succeeded") {
+        const refs = paid.event.payment.references;
+        expect(refs.parentId).toBe("987654");
+        expect(refs.relatedIds?.orderId).toBe("987654");
+        expect(refs.relatedIds?.refundId).toBeUndefined();
+        expect(refs.relatedIds?.captureId).toBeUndefined();
       }
     });
 
@@ -2692,6 +2805,16 @@ describe("PaymobGateway", () => {
       expect(event.stableType).not.toBe("capture.completed");
       expect(event.stableType).not.toBe("payment.succeeded");
       expect(event.event?.type).toBe("payment.processing");
+      // PAYMOB-1: omit amount on incomplete capture (symmetric with incomplete refunds).
+      expect(event.amount).toBeUndefined();
+      if (event.event?.type === "payment.processing") {
+        expect(event.event.payment.amount).toBeUndefined();
+        // PAYMOB-2: order.id is parent only — not gatewayObjectId / captureId.
+        expect(event.gatewayObjectId).toBeUndefined();
+        expect(event.event.payment.references.parentId).toBe("987654");
+        expect(event.event.payment.references.relatedIds?.orderId).toBe("987654");
+        expect(event.event.payment.references.relatedIds?.captureId).not.toBe("987654");
+      }
     });
 
     it("Phase 7 dual-write: failed is_refund action is payment.failed not refund.completed", () => {

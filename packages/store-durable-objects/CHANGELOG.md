@@ -4,6 +4,7 @@
 
 ### Patch
 
+- **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **B5 multi-partition discovery:** Worker client `listDue` / `listRetryable` / `deleteExpired` no longer route only to sentinel shards (`__list__` / `__cleanup__`). Under `kind: "hash"`, they fan out to all N partitions (merge/dedupe/limit for lists; sum deleted for cleanup). Under `kind: "key"` (and dynamic tenant), those methods throw `StoreUnsupportedFeatureError` instead of silently returning empty. Soft-release of expired claims remains per-partition SQL. See `docs/sharding.md`.
 - Reconciliation `listDue` soft-releases expired claimed rows so abandoned jobs are rediscoverable via poll; `markManualReview` requires active (unexpired) lease (parity with complete/fail).
 

@@ -209,14 +209,65 @@ function isRetryableVerifyInfrastructureError(err: unknown): boolean {
   return false;
 }
 
-// ─── Payload hash helper ─────────────────────────────────────────────────────
+// ─── Payload hash helpers ────────────────────────────────────────────────────
 
 /**
- * Compute a redacted portable SHA-256 payload hash via core `hashWebhookPayload`.
- * Prefer passing a precomputed hash into `processVerified` when available.
+ * Thin wrapper over core `hashWebhookPayload` (redacted portable SHA-256).
+ *
+ * **Hash-source honesty (WEBHOOKS-2):** this is **not** interchangeable across
+ * shapes. `hashWebhookPayload` does **not** JSON-parse non-object strings, so:
+ * - `computePayloadHash(parsedObject)` and `computePayloadHash(rawBodyString)`
+ *   produce **different** digests even when `rawBodyString` is JSON of the object
+ * - Gateways that set `event.payloadHash` (e.g. Stripe with `computePayloadHash`
+ *   on the **parsed** event / `rawPayload` object) must be matched on redelivery
+ *
+ * Prefer {@link resolveInboxPayloadHash} for claim inputs.
  */
 export function computePayloadHash(raw: unknown): string {
   return hashWebhookPayload(raw);
+}
+
+export type ResolveInboxPayloadHashInput = {
+  /**
+   * Preferred: gateway/event precomputed hash (trimmed). When non-empty after
+   * trim, returned as-is — never re-hashed.
+   */
+  eventPayloadHash?: string | undefined;
+  /**
+   * Fallback hash input. Must be the **same object shape** the gateway used for
+   * `payloadHash` (typically verified/parsed event or `rawPayload` object).
+   * Passing a raw HTTP body **string** is only correct if that string is exactly
+   * what was hashed upstream (usually it is not).
+   */
+  payloadForHash?: unknown;
+};
+
+/**
+ * Canonical inbox claim hash (WEBHOOKS-2).
+ *
+ * 1. Prefer `eventPayloadHash` when present (non-empty after trim)
+ * 2. Else `hashWebhookPayload(payloadForHash)` on the **gateway-shaped** value
+ * 3. Else throw (refuse empty / missing — fail closed)
+ *
+ * Never treat raw body string hashing as equivalent to object-event hashing
+ * without an explicit upstream contract that the gateway hashed that string.
+ */
+export function resolveInboxPayloadHash(
+  input: ResolveInboxPayloadHashInput,
+): string {
+  const fromEvent =
+    typeof input.eventPayloadHash === "string"
+      ? input.eventPayloadHash.trim()
+      : "";
+  if (fromEvent.length > 0) {
+    return fromEvent;
+  }
+  if (input.payloadForHash !== undefined) {
+    return hashWebhookPayload(input.payloadForHash);
+  }
+  throw new Error(
+    "resolveInboxPayloadHash: need eventPayloadHash or payloadForHash (refuse empty hash)",
+  );
 }
 
 // ─── Envelope → payloadRef ───────────────────────────────────────────────────
@@ -323,7 +374,8 @@ function isNonRetryable(error: unknown): boolean {
  * Whether store.fail should mark dead_letter (terminal) vs pending retry.
  *
  * `maxAttempts` is max **handler** attempts (claim counter after real handler
- * work; parking `ackAfterClaim` restores the parking claim via restoreAttempt).
+ * work; parking `ackAfterClaim` restores via restoreAttempt; crash soft-release
+ * restores unfinished claims so deploy reclaim does not burn the budget).
  */
 function shouldDeadLetter(error: unknown, attempts: number, maxAttempts: number, mode: WebhookProcessingMode): boolean {
   if (error instanceof NonRetryableHandlerError) {
@@ -363,7 +415,11 @@ function shouldDeadLetter(error: unknown, attempts: number, maxAttempts: number,
  * const outcome = await engine.processVerified({
  *   gateway: "stripe",
  *   providerEventId: "evt_1",
- *   payloadHash: computePayloadHash(body),
+ *   // Prefer gateway event.payloadHash; never mix rawBody string vs object hashes
+ *   payloadHash: resolveInboxPayloadHash({
+ *     eventPayloadHash: webhookEvent.payloadHash,
+ *     payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
+ *   }),
  *   event: normalized,
  *   handler: async (ctx) => { await fulfill(ctx.event); },
  * });

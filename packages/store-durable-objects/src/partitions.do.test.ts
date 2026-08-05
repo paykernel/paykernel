@@ -7,6 +7,7 @@ import { createFakeClock } from "@paykernel/testkit";
 import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import {
   createDoPaymentStores,
+  resolveDoHashLayoutMetaShardName,
   resolveDoShardName,
 } from "./index";
 import { createMockDoNamespace } from "./test-utils/mock-namespace";
@@ -207,8 +208,9 @@ describe("do multi-partition discovery fan-out", () => {
       expect(keys.has(keyB), `listDue missing keyB=${keyB} (shard ${shardB})`).toBe(
         true,
       );
-      // Fan-out materialises all hash partitions (empty ones included).
-      expect(ns.partitions.size).toBe(partitions);
+      // Fan-out materialises all hash partitions (empty ones included) + layout meta DO.
+      expect(ns.partitions.size).toBeGreaterThanOrEqual(partitions);
+      expect(ns.partitions.size).toBe(partitions + 1); // N data shards + DO-1 layout meta
     } finally {
       ns.close();
     }
@@ -351,7 +353,8 @@ describe("do multi-partition discovery fan-out", () => {
 
       const listed = await stores.reconciliation.listDue({ now });
       expect(listed.map((r) => r.key)).toEqual(["only-job"]);
-      expect(ns.partitions.size).toBe(1);
+      // Single data partition + DO-1 layout meta object.
+      expect(ns.partitions.size).toBe(2);
     } finally {
       ns.close();
     }
@@ -437,6 +440,94 @@ describe("do multi-partition discovery fan-out", () => {
       const listed = await stores.reconciliation.listDue({ now, limit: 1 });
       expect(listed).toHaveLength(1);
       expect([keyA, keyB]).toContain(listed[0]!.key);
+    } finally {
+      ns.close();
+    }
+  });
+
+  it("DO-1: changing hash partitions under same layout hard-throws (no empty re-route)", async () => {
+    const prefix = uniqueTablePrefix("do1");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const stores16 = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions: 16 },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      // First op seals partitions=16 on stable layout meta DO.
+      const r = await stores16.idempotency.reserve({
+        key: "seal-key",
+        fingerprint: "fp",
+        owner: "w1",
+        leaseMs: 30_000,
+      });
+      expect(r.kind).toBe("acquired");
+
+      const metaName = resolveDoHashLayoutMetaShardName({
+        kind: "hash",
+        partitions: 16,
+      });
+      expect(ns.partitions.has(metaName)).toBe(true);
+
+      // Same namespace, N=32 — must not silently route to empty hash:32:* objects.
+      const stores32 = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions: 32 },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      await expect(
+        stores32.idempotency.reserve({
+          key: "other-key",
+          fingerprint: "fp2",
+          owner: "w1",
+          leaseMs: 30_000,
+        }),
+      ).rejects.toThrow(/DO-1|partitions sealed|partitions changed/i);
+    } finally {
+      ns.close();
+    }
+  });
+
+  it("DO-1: new layoutId allows different partition count (intentional empty layout)", async () => {
+    const prefix = uniqueTablePrefix("do1b");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const a = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions: 8, layoutId: "layout-a" },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      await a.idempotency.reserve({
+        key: "k1",
+        fingerprint: "fp",
+        owner: "w1",
+        leaseMs: 30_000,
+      });
+
+      const b = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions: 16, layoutId: "layout-b" },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      const r = await b.idempotency.reserve({
+        key: "k2",
+        fingerprint: "fp2",
+        owner: "w1",
+        leaseMs: 30_000,
+      });
+      expect(r.kind).toBe("acquired");
     } finally {
       ns.close();
     }

@@ -190,11 +190,23 @@ export function isProductionSafeCoordination(m: StorageAdapterManifest): boolean
 }
 
 /**
- * True when the adapter advertises strong claims **and** lease fencing support.
- * Get+set-only adapters must not set `claims: "strong"`.
+ * True when the adapter advertises **production-grade** strong claims with
+ * lease fencing support.
+ *
+ * Requires `claims: "strong"`, `supportsLeases`, **and** production-safe
+ * coordination (not single-process / ephemeral). Get+set-only adapters must
+ * not set `claims: "strong"`. NON-PRODUCTION memory may declare isolate-local
+ * `claims: "strong"` in its manifest notes, but this helper returns **false**
+ * for that posture (TESTKIT-4) so deploy gates do not treat test memory as a
+ * production strong-claim adapter.
  */
 export function isStrongClaimAdapter(m: StorageAdapterManifest): boolean {
-  return m.consistency.claims === "strong" && m.supportsLeases === true;
+  if (m.consistency.claims !== "strong" || m.supportsLeases !== true) {
+    return false;
+  }
+  // Ephemeral / single-process (e.g. in-memory testkit) is not a production
+  // strong-claim adapter even when isolate-local claims are strong.
+  return isProductionSafeCoordination(m);
 }
 
 // ─── Memory adapter declaration ──────────────────────────────────────────────

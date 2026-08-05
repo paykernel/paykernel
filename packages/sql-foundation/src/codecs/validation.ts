@@ -120,6 +120,8 @@ export function validateReconciliationStatus(value: unknown): ReconciliationStat
 /**
  * Basic ISO-8601 check for portable TEXT timestamps.
  * Does not require full calendar validity beyond Date.parse when present.
+ * Accepts Z and numeric offsets; prefer {@link canonicalizeIsoTimestamp} at
+ * SQL write boundaries so TEXT lexical compares match Date.parse/Redis.
  */
 export function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== "string" || value.length < 20) return false;
@@ -139,6 +141,39 @@ export function validateIsoTimestamp(value: unknown, field: string): string {
 export function validateOptionalIsoTimestamp(value: unknown, field: string): string | undefined {
   if (value === null || value === undefined || value === "") return undefined;
   return validateIsoTimestamp(value, field);
+}
+
+/**
+ * Canonical portable TEXT form: `YYYY-MM-DDTHH:mm:ss.sssZ` (Date#toISOString).
+ *
+ * SQL adapters store due_at / lease_expires_at / available_at as TEXT and
+ * compare them lexically in claim WHERE clauses. Offset forms
+ * (`…+05:00`) and non-millisecond Z forms sort incorrectly vs `now`
+ * from `toISOString()`. Always write and claim-bind through this helper.
+ */
+export function canonicalizeIsoTimestamp(value: unknown, field = "timestamp"): string {
+  const raw = validateIsoTimestamp(value, field);
+  return new Date(Date.parse(raw)).toISOString();
+}
+
+/** Optional canonicalize: undefined/null/"" → undefined. */
+export function canonicalizeOptionalIsoTimestamp(
+  value: unknown,
+  field = "timestamp",
+): string | undefined {
+  if (value === null || value === undefined || value === "") return undefined;
+  return canonicalizeIsoTimestamp(value, field);
+}
+
+/**
+ * True when value is already the canonical Z millisecond form produced by
+ * `Date#toISOString` (fast path for skip-repair in claim miss handlers).
+ */
+export function isCanonicalIsoZ(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  // Date#toISOString always emits exactly 3 fractional digits + Z.
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  return Number.isFinite(Date.parse(value));
 }
 
 /**

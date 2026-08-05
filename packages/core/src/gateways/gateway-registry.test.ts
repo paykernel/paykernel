@@ -389,22 +389,16 @@ describe("createDefaultGatewayContext", () => {
     }
   });
 
-  it("uses Math.random polyfill when Web Crypto is absent", () => {
+  it("throws when Web Crypto is absent (no Math.random fallback; CORE-3)", () => {
     const original = globalThis.crypto;
     Object.defineProperty(globalThis, "crypto", {
       configurable: true,
       value: undefined,
     });
     try {
-      const ctx = createDefaultGatewayContext();
-      const id = ctx.crypto.randomUUID();
-      expect(id).toMatch(
-        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      expect(() => createDefaultGatewayContext()).toThrow(
+        /Web Crypto API is unavailable/,
       );
-      const bytes = new Uint8Array(8);
-      ctx.crypto.getRandomValues(bytes);
-      // Polyfill filled the buffer (not all zero with high probability)
-      expect(bytes.length).toBe(8);
     } finally {
       Object.defineProperty(globalThis, "crypto", {
         configurable: true,

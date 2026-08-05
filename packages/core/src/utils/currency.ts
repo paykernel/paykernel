@@ -76,6 +76,59 @@ const FOUR_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Known ISO 4217 alphabetic codes with minor-unit exponent 2 (default scale).
+ * Used so typos like `JYP` (vs `JPY`) fail closed instead of silently scaling ×100.
+ * Provider-specific / funds codes not listed here must pass `overrides` or
+ * {@link GetCurrencyExponentOptions.allowUnknown}.
+ */
+const TWO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
+  "AED", "AFN", "ALL", "AMD", "ANG", "AOA", "ARS", "AUD", "AWG", "AZN",
+  "BAM", "BBD", "BDT", "BGN", "BMD", "BND", "BOB", "BOV", "BRL", "BSD",
+  "BTN", "BWP", "BYN", "BZD", "CAD", "CDF", "CHE", "CHF", "CHW", "CNY",
+  "COP", "COU", "CRC", "CUC", "CUP", "CVE", "CZK", "DKK", "DOP", "DZD",
+  "EGP", "ERN", "ETB", "EUR", "FJD", "FKP", "GBP", "GEL", "GHS", "GIP",
+  "GMD", "GTQ", "GYD", "HKD", "HNL", "HRK", "HTG", "HUF", "IDR", "ILS",
+  "INR", "IRR", "KES", "KGS", "KHR", "KPW", "KYD", "KZT", "LAK", "LBP",
+  "LKR", "LRD", "LSL", "MAD", "MDL", "MGA", "MKD", "MMK", "MNT", "MOP",
+  "MRU", "MUR", "MVR", "MWK", "MXN", "MXV", "MYR", "MZN", "NAD", "NGN",
+  "NIO", "NOK", "NPR", "NZD", "PAB", "PEN", "PGK", "PHP", "PKR", "PLN",
+  "QAR", "RON", "RSD", "RUB", "SAR", "SBD", "SCR", "SDG", "SEK", "SGD",
+  "SHP", "SLE", "SLL", "SOS", "SRD", "SSP", "STN", "SVC", "SYP", "SZL",
+  "THB", "TJS", "TMT", "TOP", "TRY", "TTD", "TWD", "TZS", "UAH", "USD",
+  "USN", "UYU", "UZS", "VED", "VES", "WST", "XCD", "YER", "ZAR", "ZMW",
+  "ZWG", "ZWL",
+  // Precious metals / units of account commonly accepted as 2-decimal in PSPs
+  "XAG", "XAU", "XBA", "XBB", "XBC", "XBD", "XDR", "XPD", "XPT", "XTS",
+]);
+
+/**
+ * True when `currency` is a known ISO 4217 code in the SDK tables (0/2/3/4).
+ * Does not consult overrides.
+ */
+export function isKnownCurrencyCode(currency: string): boolean {
+  const code = normalizeCurrencyCode(currency);
+  return (
+    ZERO_DECIMAL_CURRENCIES.has(code) ||
+    TWO_DECIMAL_CURRENCIES.has(code) ||
+    THREE_DECIMAL_CURRENCIES.has(code) ||
+    FOUR_DECIMAL_CURRENCIES.has(code)
+  );
+}
+
+/**
+ * Options for {@link getCurrencyExponent}.
+ */
+export type GetCurrencyExponentOptions = {
+  /** Per-call / merchant exponent overrides (same as the legacy 2nd arg map). */
+  overrides?: CurrencyExponentOverrides;
+  /**
+   * When true, unrecognized codes default to exponent 2 (legacy behavior).
+   * Default **false** (MONEY-4 fail-closed) so typos like `JYP` throw.
+   */
+  allowUnknown?: boolean;
+};
+
+/**
  * Normalize a currency code: trim whitespace and uppercase.
  */
 export function normalizeCurrencyCode(currency: string): string {
@@ -136,7 +189,12 @@ function lookupOverride(
  * 2. ISO 4217 zero-decimal table → 0
  * 3. ISO 4217 three-decimal table → 3
  * 4. ISO 4217 four-decimal table → 4
- * 5. Default → 2
+ * 5. Known two-decimal ISO codes → 2
+ * 6. Unknown codes → throw {@link InvalidRequestError} (MONEY-4 fail-closed),
+ *    unless `allowUnknown: true` (then default 2)
+ *
+ * The second argument accepts either a legacy overrides map or
+ * {@link GetCurrencyExponentOptions}.
  *
  * Provider-specific deviations (Stripe ISK/UGX, PayPal HUF/TWD, Paymob merchant
  * maps) must be supplied via `overrides` or an explicit `exponent` on money
@@ -144,9 +202,27 @@ function lookupOverride(
  */
 export function getCurrencyExponent(
   currency: string,
-  overrides?: CurrencyExponentOverrides,
+  overridesOrOptions?: CurrencyExponentOverrides | GetCurrencyExponentOptions,
 ): number {
   const normalizedCurrency = normalizeCurrencyCode(currency);
+
+  let overrides: CurrencyExponentOverrides | undefined;
+  let allowUnknown = false;
+
+  if (overridesOrOptions !== undefined) {
+    if (
+      typeof overridesOrOptions === "object" &&
+      overridesOrOptions !== null &&
+      ("overrides" in overridesOrOptions ||
+        "allowUnknown" in overridesOrOptions)
+    ) {
+      const opts = overridesOrOptions as GetCurrencyExponentOptions;
+      overrides = opts.overrides;
+      allowUnknown = opts.allowUnknown === true;
+    } else {
+      overrides = overridesOrOptions as CurrencyExponentOverrides;
+    }
+  }
 
   if (overrides !== undefined) {
     const override = lookupOverride(overrides, normalizedCurrency);
@@ -164,5 +240,16 @@ export function getCurrencyExponent(
   if (FOUR_DECIMAL_CURRENCIES.has(normalizedCurrency)) {
     return 4;
   }
-  return 2;
+  if (TWO_DECIMAL_CURRENCIES.has(normalizedCurrency)) {
+    return 2;
+  }
+
+  if (allowUnknown) {
+    return 2;
+  }
+
+  throw new InvalidRequestError(
+    `Unknown currency code: ${normalizedCurrency}. ` +
+      "Pass exponentOverrides / explicit exponent, or allowUnknown: true if intentional.",
+  );
 }

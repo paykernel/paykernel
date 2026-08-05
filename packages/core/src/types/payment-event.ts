@@ -410,6 +410,15 @@ function canonicalize(value: unknown): unknown {
  * Uses pure portable SHA-256 ({@link sha256Hex}) — no `node:crypto`. Secrets
  * are redacted before hashing so `secret_token` / signatures never enter the
  * digest input. Algorithm and encoding are unchanged (UTF-8 → lowercase hex).
+ *
+ * **Shape is part of the digest (WEBHOOKS-2 / inbox honesty):** non-object
+ * strings are **not** JSON-parsed before redaction/stringify. Therefore
+ * `hashWebhookPayload(rawBodyString)` and `hashWebhookPayload(parsedObject)`
+ * are **not** interchangeable even when the string is JSON of that object —
+ * mixing them in the webhook inbox claim path causes permanent
+ * `payload_conflict`. Prefer a single source: gateway `event.payloadHash`
+ * when set (e.g. `computePayloadHash: true` on the **parsed** `rawPayload`),
+ * or always hash the same object shape the gateway used.
  */
 export function hashWebhookPayload(raw: unknown): string {
   const redacted = redactWebhookPayloadSecrets(raw);
@@ -999,6 +1008,8 @@ export function attachPaymentEvent(
     out.stableType = paymentEvent.type;
   }
 
+  // Hash the gateway's parsed rawPayload object (not a raw HTTP body string).
+  // Callers who re-hash a body string for inbox claim will not match this digest.
   if (opts?.computePayloadHash === true) {
     out.payloadHash = hashWebhookPayload(event.rawPayload);
   }
