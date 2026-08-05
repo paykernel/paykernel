@@ -30,8 +30,14 @@ import {
 | Export | Role |
 | --- | --- |
 | `TelemetrySink` | `{ emit?(event, data?) }` — optional structured sink |
-| `createRedactingTelemetrySink(sink)` | Wraps sink; every `data` bag passes through core `redact()` |
-| `redactTelemetryData(data)` | One-shot scrub via core `redact()` |
+| `createRedactingTelemetrySink(sink)` | Package-owned wrap: core `redact()` **plus** operational-key restore (e.g. `authorized`). Prefer this over core’s sink for observability paths (OBS-2 honesty). |
+| `redactTelemetryData(data)` | One-shot scrub via core `redact()` + operational restore |
+| `redactAttributeBag(attrs)` | Span/metric attribute scrubber (same model) |
+
+> **OBS-2:** Core also exports a `createRedactingTelemetrySink`. This package’s
+> version is **not** a pure re-export — it restores operational keys core
+> over-matches (`authorized`). `withPaymentOperation` uses **this** package’s
+> wrapper so telemetry bags keep operational flags.
 
 ### Redacting sink
 

@@ -57,7 +57,7 @@ const input: RoutingInput = {
 | `tenant` | Exact string equality vs `input.tenant` |
 | `tenantConfig` | Exact equality for **every** specified key vs `input.tenantConfig` |
 | `requiredCapabilities` | All keys `true` on `input.gatewayCapabilities[rule.gateway]` |
-| `merchantPreference` | Exact trim match vs `input.merchantPreference` (hard filter on that rule) |
+| `merchantPreference` | Case-insensitive trim match vs `input.merchantPreference` (hard filter on that rule; ROUTE-2) |
 
 Empty match `{}` is a **catch-all** rule (still subject to health / exclude / capability filters at select time).
 

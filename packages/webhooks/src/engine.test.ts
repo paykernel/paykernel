@@ -85,7 +85,7 @@ describe("WEBHOOKS-2 payloadHash source honesty", () => {
     ).toThrow(/eventPayloadHash|payloadForHash/);
   });
 
-  it("mixing string vs object hash on same key → payload_conflict (pending row)", async () => {
+  it("mixing string vs object hash on idle pending row → supersede + process (WEBHOOKS-3)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -107,6 +107,7 @@ describe("WEBHOOKS-2 payloadHash source honesty", () => {
     });
     expect(first.outcome).toBe("scheduled_for_retry");
 
+    // Idle non-terminal + corrected hash source: supersede, do not stick forever.
     const second = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_mix",
@@ -114,7 +115,10 @@ describe("WEBHOOKS-2 payloadHash source honesty", () => {
       event: obj,
       handler: async () => {},
     });
-    expect(second).toEqual({ outcome: "payload_conflict" });
+    expect(second).toEqual({ outcome: "processed" });
+    const rec = await store.get("stripe:evt_mix");
+    expect(rec?.status).toBe("completed");
+    expect(rec?.payloadHash).toBe(stringHash);
   });
 });
 
@@ -555,8 +559,8 @@ describe("A4 stale worker completion rejected", () => {
   });
 });
 
-describe("A5 payload_conflict", () => {
-  it("different payloadHash on non-terminal row → payload_conflict, handler not called", async () => {
+describe("A5 payload_conflict / WEBHOOKS-3 supersede", () => {
+  it("different payloadHash on idle pending row → supersede and run handler (WEBHOOKS-3)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -565,7 +569,7 @@ describe("A5 payload_conflict", () => {
     });
     let runs = 0;
 
-    // Leave pending (not completed) so hash conflict applies (WEBHOOKS-4).
+    // Leave pending (not completed) so idle supersede applies.
     await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_conflict",
@@ -588,8 +592,53 @@ describe("A5 payload_conflict", () => {
         runs++;
       },
     });
+    expect(o).toEqual({ outcome: "processed" });
+    expect(runs).toBe(2);
+    expect((await store.get("stripe:evt_conflict"))?.payloadHash).toBe("hash-b");
+  });
+
+  it("different payloadHash while lease active → payload_conflict, handler not called", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      clock,
+      defaultLeaseMs: 30_000,
+    });
+    let runs = 0;
+
+    const gate = { release: null as null | (() => void) };
+    const first = engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_active_conflict",
+      payloadHash: "hash-a",
+      event: { id: "evt_active_conflict" },
+      handler: async () => {
+        runs++;
+        await new Promise<void>((r) => {
+          gate.release = r;
+        });
+      },
+    });
+    // Wait until first handler has the lease
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_active_conflict",
+      payloadHash: "hash-b",
+      event: { id: "evt_active_conflict" },
+      handler: async () => {
+        runs++;
+      },
+    });
     expect(o).toEqual({ outcome: "payload_conflict" });
     expect(runs).toBe(1);
+
+    gate.release?.();
+    await first;
   });
 });
 
@@ -724,7 +773,7 @@ describe("processWithVerifier", () => {
     expect(store.size).toBe(0);
   });
 
-  it("verify infra/network throw → retryable handler_failed not invalid_webhook (WEBHOOKS-2)", async () => {
+  it("verify infra/network throw → retryable handler_failed not invalid_webhook (WEBHOOKS-1)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
     const netErr = new Error("PayPal verify postback timed out");
@@ -733,6 +782,106 @@ describe("processWithVerifier", () => {
       raw: {},
       verifyAndNormalize: async () => {
         throw netErr;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
+  it("RateLimitError during verify → retryable handler_failed not invalid_webhook (WEBHOOKS-1/4)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("Rate limit exceeded for paypal. Retry after 2s");
+    err.name = "RateLimitError";
+    (err as Error & { code?: string; statusCode?: number }).code =
+      "RATE_LIMIT_EXCEEDED";
+    (err as Error & { statusCode?: number }).statusCode = 429;
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
+  it("TypeError during verify → retryable handler_failed not invalid_webhook (WEBHOOKS-1/4)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw new TypeError("fetch failed: body used already");
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
+  it("generic Error during verify → retryable handler_failed (fail-open WEBHOOKS-1)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw new Error("unexpected verify boom");
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
+  it("InvalidWebhookError during verify → invalid_webhook (forgery class WEBHOOKS-1)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("Webhook verification failed");
+    err.name = "InvalidWebhookError";
+    (err as Error & { code?: string }).code = "INVALID_WEBHOOK";
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o.outcome).toBe("invalid_webhook");
+    expect(store.size).toBe(0);
+  });
+
+  it("permanent GatewayApiError structure → non-retryable handler_failed (WEBHOOKS-6)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("Invalid webhook payload: not valid JSON");
+    err.name = "GatewayApiError";
+    (err as Error & { code?: string }).code = "GATEWAY_API_ERROR";
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: false });
+    expect(store.size).toBe(0);
+  });
+
+  it("transient GatewayApiError (postback) → retryable handler_failed (WEBHOOKS-6)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("PayPal verify endpoint 503");
+    err.name = "GatewayApiError";
+    (err as Error & { code?: string; statusCode?: number }).code =
+      "GATEWAY_API_ERROR";
+    (err as Error & { statusCode?: number }).statusCode = 502;
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
       },
       handler: async () => {},
     });
@@ -826,5 +975,33 @@ describe("no silent ACK of failures", () => {
     });
     expect(o.outcome).not.toBe("processed");
     expect(o.outcome).not.toBe("duplicate_completed");
+  });
+});
+
+describe("WEBHOOKS-5 first-delivery redaction parity", () => {
+  it("redacts secret keys on first-delivery handler event (inline)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    let seen: unknown;
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_redact_first",
+      payloadHash: "h",
+      event: {
+        id: "evt_redact_first",
+        client_secret: "sk_live_secret",
+        secret_token: "tok_secret",
+        amount: 100,
+      },
+      handler: async (ctx) => {
+        seen = ctx.event;
+      },
+    });
+    expect(seen).toMatchObject({
+      id: "evt_redact_first",
+      amount: 100,
+      client_secret: "[REDACTED]",
+      secret_token: "[REDACTED]",
+    });
   });
 });

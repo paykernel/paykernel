@@ -45,7 +45,11 @@ There is no separate `MetricsRegistry` / `PaymentMeter` type — use `PaymentMet
 | `adapterLatencyMs` | histogram | `payments.adapter.latency_ms` | `adapter`, `operation` |
 | `adapterErrors` | counter | `payments.adapter.errors` | `adapter`, `errorKind` |
 
-> **OBS-2 naming honesty:** `reconciliationDrift` increments when `reconciliationRequired` is set on finalize — **not** only when money is proven drifted. The name is historical/ops-oriented. Disable via `countReconciliationDrift: false` on `withPaymentOperation` / `recordPaymentOperation` if the flag is noisy for your dashboards.
+> **OBS-3 money-drift honesty:** `reconciliationDrift` increments only when
+> `countReconciliationDrift: true` **and** the op is `payment.reconcile` with
+> `reconciliationRequired: true` (proven recon path). Transport-indeterminate
+> creates that flag recon-needed do **not** auto-count. Default for the option
+> is `false` (opt-in).
 
 ### Manual emit
 
@@ -120,7 +124,7 @@ Prefer allow-listed diagnostic keys aligned with `OperationContext` (see [redact
 2. Record `providerLatencyMs` with measured `durationMs`.
 3. If outcome is indeterminate (`indeterminate` or `indeterminate.*`), also increment `indeterminateOperations`.
 4. If `retry === true`, increment `retries`.
-5. If `reconciliationRequired === true` and `countReconciliationDrift` is true (default), increment `reconciliationDrift` (flag-based — not proven money drift; see OBS-2 note above).
+5. If `countReconciliationDrift` is true **and** `reconciliationRequired === true` **and** `operationType` is `payment.reconcile` (or `payment.reconcile.*`), increment `reconciliationDrift` (OBS-3 proven money-drift path only).
 
 Webhook duplicate/conflict/handler and lease reclaim counters are **app-owned** — increment them at the composition root when the domain package reports those outcomes (webhooks/reconciliation do not hard-depend on this package).
 

@@ -81,12 +81,14 @@ const result = await resolveProviderSnapshot(target, lookup);
 | `found` with **>1** snapshot | **`ambiguous_match`** immediately — never pick-first |
 | `found` with 0 snapshots | Treat as not_found; continue |
 | `found` with 1 snapshot | Compare against `target.expected` → `consistent` or `drift_detected` |
-| `not_found` | Continue to next runnable step |
+| `not_found` | Continue to next runnable step (see RECON-3 when primary was `gatewayPaymentId`) |
 | `unavailable` or thrown exception | `temporarily_unavailable` (optional `retryAfterMs`) |
 | `error` with `retryable: true` | `temporarily_unavailable` — do not invent paid/failed; do **not** continue to later keys (primary may still exist) |
 | `error` with `retryable: false` | Continue to next runnable method (e.g. unsupported key shape for this method) |
 | All steps not_found (or only non-retryable method errors) | `provider_not_found` with `retryable: true` |
-| Single found snapshot but `provider.gatewayPaymentId` ≠ `target.gatewayPaymentId` (when target has one) | `drift_detected` with `gatewayPaymentId` difference — never silent consistent / safe paid upgrade against a different charge |
+| Primary `gatewayPaymentId` was `not_found`, secondary finds a **different** payment (RECON-3) | `manual_review_required` — **do not** attach the foreign snapshot as `provider` |
+| Single found snapshot but `provider.gatewayPaymentId` ≠ `target.gatewayPaymentId` (when target has one) | `manual_review_required` — never expose foreign payment as canonical `provider` (no silent consistent / drift with wrong charge) |
+| Primary `not_found` then secondary recovers the **same** `gatewayPaymentId` | Compare as usual (`consistent` / `drift_detected`) — eventual-consistency recovery |
 
 **Multi-match is never silent.** Operators / policy must resolve ambiguity (`manual_review`); apps must not create replacement charges for `ambiguous_match` (see `shouldForbidReplacementCharge`).
 

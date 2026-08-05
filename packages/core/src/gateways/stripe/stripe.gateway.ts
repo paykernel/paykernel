@@ -718,6 +718,32 @@ function requireCurrencyForPartialAmount(
   return currency.toLowerCase();
 }
 
+/**
+ * STRIPE-1: bind partial major-unit conversion to PaymentIntent currency.
+ * Rejects caller currency that does not match the PI (Paymob resolveActionAmountCents posture).
+ * Never converts majors with the caller currency alone when the PI currency differs
+ * (e.g. PI USD + caller JPY would otherwise send 50 minor instead of 5000 cents).
+ */
+function assertPartialAmountCurrencyMatchesPaymentIntent(
+  operation: string,
+  callerCurrency: string,
+  paymentIntentCurrency: string | undefined | null,
+): string {
+  const piCurrency = stripeCurrencyCode(paymentIntentCurrency);
+  if (piCurrency === undefined) {
+    throw new InvalidRequestError(
+      `Stripe ${operation} requires PaymentIntent currency to validate the requested amount`,
+    );
+  }
+  if (callerCurrency !== piCurrency) {
+    throw new InvalidRequestError(
+      `Stripe ${operation} currency ${callerCurrency.toUpperCase()} does not match PaymentIntent currency ${piCurrency.toUpperCase()}`,
+      [{ path: ["currency"] }],
+    );
+  }
+  return piCurrency;
+}
+
 function mapStripeRefundStatus(
   status: string,
 ): "pending" | "completed" | "failed" {
@@ -1135,13 +1161,17 @@ export class StripeGateway extends BaseGateway {
         const paymentIntentPathId = stripePaymentIntentPathId(
           p.gatewayPaymentId,
         );
+        const callerSignal = extractAbortSignal(p);
         const body: Record<string, any> = {};
         if (p.amount !== undefined) {
-          const currency = requireCurrencyForPartialAmount(
+          // STRIPE-1: bind conversion to PaymentIntent currency (fetch + match).
+          body.amount_to_capture = await this.resolvePartialAmountToStripeMinor(
             "capturePayment",
+            paymentIntentPathId,
+            p.amount,
             p.currency,
+            callerSignal,
           );
-          body.amount_to_capture = toStripeAmount(p.amount, currency);
         }
 
         const response = await this.stripeRequest<StripePaymentIntent>(
@@ -1149,7 +1179,7 @@ export class StripeGateway extends BaseGateway {
           `/payment_intents/${paymentIntentPathId}/capture`,
           body,
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
-          extractAbortSignal(p),
+          callerSignal,
         );
 
         // Partial capture: succeeded + settled < authorized amount.
@@ -1194,17 +1224,23 @@ export class StripeGateway extends BaseGateway {
       "refundPayment",
       params,
       async (p) => {
-        stripePaymentIntentPathId(p.gatewayPaymentId);
+        const paymentIntentPathId = stripePaymentIntentPathId(
+          p.gatewayPaymentId,
+        );
+        const callerSignal = extractAbortSignal(p);
         const body: Record<string, any> = {
           payment_intent: p.gatewayPaymentId,
         };
 
         if (p.amount !== undefined) {
-          const currency = requireCurrencyForPartialAmount(
+          // STRIPE-1: bind conversion to PaymentIntent currency (fetch + match).
+          body.amount = await this.resolvePartialAmountToStripeMinor(
             "refundPayment",
+            paymentIntentPathId,
+            p.amount,
             p.currency,
+            callerSignal,
           );
-          body.amount = toStripeAmount(p.amount, currency);
         }
 
         if (p.reason) {
@@ -1223,7 +1259,6 @@ export class StripeGateway extends BaseGateway {
           body.metadata = refundMetadata;
         }
 
-        const callerSignal = extractAbortSignal(p);
         // Expand charge so amount_refunded can recover totalRefunded if the
         // secondary refunds list fails (STRIPE-3).
         body.expand = ["charge"];
@@ -1406,10 +1441,12 @@ export class StripeGateway extends BaseGateway {
           Number.isFinite(latestCharge.amount_captured)
             ? latestCharge.amount_captured
             : undefined;
-        // Captured base for refund completeness: amount_received → amount_captured → amount.
+        // Captured base for refund completeness: amount_received → amount_captured only.
+        // STRIPE-4: never fall back to authorized `amount` — that would claim full
+        // `refunded` against the auth total when only a partial capture settled.
         const capturedBase = hasAmountReceived
           ? amountReceived
-          : (amountCaptured ?? paymentIntent.amount);
+          : amountCaptured;
         // Result amount prefers settled total when known; else authorized amount.
         const amountMinor =
           paymentIntent.status === "succeeded" && settledMinor !== undefined
@@ -1428,8 +1465,12 @@ export class StripeGateway extends BaseGateway {
           typeof amountRefunded === "number" &&
           amountRefunded > 0
         ) {
+          // Known captured base only: full refund when amount_refunded covers it.
+          // Missing captured fields → partially_refunded (fail closed; STRIPE-4).
           status =
-            capturedBase > 0 && amountRefunded >= capturedBase
+            typeof capturedBase === "number" &&
+            capturedBase > 0 &&
+            amountRefunded >= capturedBase
               ? "refunded"
               : "partially_refunded";
         } else if (paymentIntent.status === "succeeded") {
@@ -1943,6 +1984,8 @@ export class StripeGateway extends BaseGateway {
           // is NOT paid — align with subscription lifecycle trialing→pending
           // so type-only handlers do not unlock fulfillment before collection
           // (STRIPE-2). Dual-write stays provider.unmapped (not payment.succeeded).
+          // STRIPE-3: when `mode` is missing (and no setup_intent), fail closed
+          // to pending — do not invent paid fulfillment from an incomplete session.
           if (
             session.mode === "setup" ||
             expandableId(session.setup_intent) !== undefined
@@ -1950,8 +1993,10 @@ export class StripeGateway extends BaseGateway {
             status = "setup_completed";
           } else if (session.mode === "subscription") {
             status = "pending";
-          } else {
+          } else if (session.mode === "payment") {
             status = "paid";
+          } else {
+            status = "pending";
           }
         } else {
           // incomplete / unpaid checkout remains pending
@@ -2144,6 +2189,33 @@ export class StripeGateway extends BaseGateway {
   // ═══════════════════════════════════════════════════════════════════════════
   // Private Methods
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * STRIPE-1: GET PaymentIntent, require caller currency === PI currency, convert
+   * majors with the PI scale. Mirrors Paymob `resolveActionAmountCents`.
+   */
+  private async resolvePartialAmountToStripeMinor(
+    operation: "capturePayment" | "refundPayment",
+    paymentIntentPathId: string,
+    amount: AmountInput,
+    currency: string | undefined,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const callerCurrency = requireCurrencyForPartialAmount(operation, currency);
+    const paymentIntent = await this.stripeRequest<StripePaymentIntent>(
+      "GET",
+      `/payment_intents/${paymentIntentPathId}`,
+      undefined,
+      undefined,
+      signal,
+    );
+    const piCurrency = assertPartialAmountCurrencyMatchesPaymentIntent(
+      operation,
+      callerCurrency,
+      paymentIntent.currency,
+    );
+    return toStripeAmount(amount, piCurrency);
+  }
 
   private async getTotalRefundedForPaymentIntent(
     paymentIntentId: string,

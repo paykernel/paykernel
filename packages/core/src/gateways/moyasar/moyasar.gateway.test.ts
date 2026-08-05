@@ -462,7 +462,7 @@ describe("MoyasarGateway", () => {
       expect(result.currency).toBe("KWD");
     });
 
-    it("defensively maps non-finite amount after 2xx without throwing (MOYASAR-2)", async () => {
+    it("fail-closes non-finite amount after 2xx without inventing paid 0 (MOYASAR-1)", async () => {
       mockFetchJson(
         paymentResponse({
           amount: Number.NaN,
@@ -483,9 +483,13 @@ describe("MoyasarGateway", () => {
       });
 
       // Incomplete amount must not throw post-create (retry could double-charge).
-      expect(result.amount).toBe(0);
-      expect(result.capturedAmount).toBe(0);
+      // Paid-like + missing amount demotes; omit coerced-0 majors (MOYASAR-1).
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.amount).toBeUndefined();
+      expect(result.capturedAmount).toBeUndefined();
       expect(result.fee).toBe(2.5);
+      expect(result.refundedAmount).toBe(0);
       expect(result.currency).toBe("SAR");
     });
 
@@ -814,10 +818,33 @@ describe("MoyasarGateway", () => {
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
+      // Preflight GET binds currency to payment (MOYASAR-3); then capture POST.
       expect(fetchCalls[0]?.url).toBe(
+        `https://api.moyasar.com/v1/payments/${PAYMENT_ID}`,
+      );
+      expect(fetchCalls[1]?.url).toBe(
         `https://api.moyasar.com/v1/payments/${PAYMENT_ID}/capture`,
       );
       expect(lastRequestBody().amount).toBe(1234);
+    });
+
+    it("rejects partial capture currency that does not match payment (MOYASAR-3)", async () => {
+      mockFetchJson(paymentResponse({ currency: "SAR", amount: 10000, captured: 0 }));
+
+      await expect(
+        createGateway().capturePayment({
+          gatewayPaymentId: PAYMENT_ID,
+          amount: 50,
+          currency: "JPY",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
+      ).rejects.toThrow(/does not match payment currency/);
+
+      // Preflight GET only — mutation must not run on currency mismatch.
+      expect(fetchCalls).toHaveLength(1);
+      expect(fetchCalls[0]?.url).toBe(
+        `https://api.moyasar.com/v1/payments/${PAYMENT_ID}`,
+      );
     });
 
     it("requires currency for partial captures instead of defaulting to SAR", async () => {
@@ -895,9 +922,9 @@ describe("MoyasarGateway", () => {
       expect(result.totalRefunded).toBe(40);
     });
 
-    it("treats refund HTTP success with incomplete refunded amount as completed op without inventing total", async () => {
+    it("treats incomplete refund snapshot as pending without inventing totalRefunded=0 (MOYASAR-2)", async () => {
       // Provider status refunded but no positive refunded amount — payment domain
-      // would be refund_completed; refund op still reports totalRefunded honestly.
+      // is refund_completed; refund op must not claim completed/succeeded with 0.
       mockFetchJson(
         paymentResponse({
           status: "refunded",
@@ -913,10 +940,35 @@ describe("MoyasarGateway", () => {
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
-      expect(result.status).toBe("completed");
-      expect(result.outcome).toBe("succeeded");
-      expect(result.totalRefunded).toBe(0);
+      expect(result.status).toBe("pending");
+      expect(result.outcome).toBe("pending");
+      expect(result.success).toBe(true); // pending dual-writes success true
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.totalRefunded).not.toBe(0);
       expect(result.totalRefunded).not.toBe(100);
+    });
+
+    it("rejects partial refund currency that does not match payment (MOYASAR-3)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          currency: "SAR",
+          amount: 10000,
+          captured: 10000,
+        }),
+      );
+
+      await expect(
+        createGateway().refundPayment({
+          gatewayPaymentId: PAYMENT_ID,
+          amount: 50,
+          currency: "JPY",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
+      ).rejects.toThrow(/does not match payment currency/);
+
+      expect(fetchCalls).toHaveLength(1);
+      expect(String(fetchCalls[0]?.url)).not.toContain("/refund");
     });
 
     it("maps getPayment partial refund amounts to partially_refunded", async () => {
@@ -1049,8 +1101,8 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("refund_completed");
       expect(result.status).not.toBe("refunded");
-      // Defensive money fields treat non-finite as 0 (status still fail-closed).
-      expect(result.refundedAmount).toBe(0);
+      // MOYASAR-1: omit non-finite refunded rather than invent major 0.
+      expect(result.refundedAmount).toBeUndefined();
     });
 
     it("uses authorization amount as refund baseline when captured is 0", async () => {
@@ -1185,6 +1237,48 @@ describe("MoyasarGateway", () => {
       expect(lastRequestBodyOrUndefined()).toBeUndefined();
       const headers = fetchCalls[0]?.init?.headers as Record<string, string>;
       expect(headers["Content-Type"]).toBeUndefined();
+    });
+
+    it("voidPayment forceOutcome succeeded only when provider status is voided (MOYASAR-5)", async () => {
+      mockFetchJson(paymentResponse({ status: "voided" }));
+
+      const voided = await createGateway().voidPayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(voided.status).toBe("cancelled");
+      expect(voided.outcome).toBe("succeeded");
+      expect(voided.success).toBe(true);
+    });
+
+    it("voidPayment does not force succeeded when provider status is not voided (MOYASAR-5)", async () => {
+      // Residual 2xx body still paid — must not force operation-succeeded.
+      mockFetchJson(paymentResponse({ status: "paid" }));
+
+      const notVoided = await createGateway().voidPayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(notVoided.status).toBe("paid");
+      // Natural map for paid is succeeded; force path is skipped but paid still
+      // maps succeeded. The regression is void forcing on non-void statuses that
+      // would otherwise be failed (e.g. cancelled from non-void source).
+      expect(notVoided.outcome).toBe("succeeded");
+    });
+
+    it("voidPayment does not force succeeded on failed residual body (MOYASAR-5)", async () => {
+      mockFetchJson(paymentResponse({ status: "failed" }));
+
+      const failed = await createGateway().voidPayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(failed.status).toBe("failed");
+      expect(failed.outcome).toBe("declined");
+      expect(failed.outcome).not.toBe("succeeded");
     });
 
     it("keeps Moyasar validation error details when error fields are not arrays", async () => {
@@ -2214,7 +2308,11 @@ describe("MoyasarGateway", () => {
       await gateway.refundPayment(params);
       await gateway.refundPayment(params);
 
-      expect(fetchCalls).toHaveLength(1);
+      // Mutation POST exactly once (preflight GETs may repeat before fence hits cache).
+      const refundPosts = fetchCalls.filter((c) =>
+        String(c.url).includes("/refund"),
+      );
+      expect(refundPosts).toHaveLength(1);
     });
 
     it("rejects reusing an idempotency key with different parameters", async () => {
@@ -2278,6 +2376,7 @@ describe("MoyasarGateway", () => {
     it("keeps reservation after 2xx invalid JSON on refund (MOYASAR-1)", async () => {
       // HTTP 2xx with unparseable body: mutation may already have applied.
       // Fence must stay so a retry cannot double-refund.
+      // Full refund (no amount) — no preflight GET so the only call is the mutation.
       const idempotencyStore = new InMemoryIdempotencyStore();
       const gateway = createGateway({ ...CONFIG, idempotencyStore });
       globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2290,8 +2389,6 @@ describe("MoyasarGateway", () => {
 
       const params = {
         gatewayPaymentId: PAYMENT_ID,
-        amount: 50,
-        currency: "SAR",
         idempotencyKey: "refund-key-bad-json-2xx",
       };
 
@@ -2306,6 +2403,7 @@ describe("MoyasarGateway", () => {
     it("keeps reservation after 2xx map failure on capture (MOYASAR-1)", async () => {
       // Valid JSON 2xx body that fails money mapping after HTTP may have applied.
       // Keep fence; do not allow a second capture attempt with the same key.
+      // Full capture (no amount) — no preflight GET so the only call is the mutation.
       const idempotencyStore = new InMemoryIdempotencyStore();
       const gateway = createGateway({ ...CONFIG, idempotencyStore });
       mockFetchJson(
@@ -2319,8 +2417,6 @@ describe("MoyasarGateway", () => {
 
       const params = {
         gatewayPaymentId: PAYMENT_ID,
-        amount: 50,
-        currency: "SAR",
         idempotencyKey: "capture-key-map-fail-2xx",
       };
 

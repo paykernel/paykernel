@@ -361,12 +361,15 @@ Moyasar payments are typically auto-captured by default. Set `capture: false` on
 const result = await client.capturePayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
   amount: 100, // Optional: Capture partial amount if supported
-  currency: 'SAR', // Required whenever amount is provided
+  currency: 'SAR', // Required whenever amount is provided; must match payment currency
   idempotencyKey: 'capture-order-123',
 }, 'moyasar');
 ```
 
 Omit `amount` for a full capture; the SDK sends no request body in that case.
+When `amount` is set, the SDK GETs the payment first and converts majors with
+the **payment** currency (caller `currency` must match — wrong ISO scale would
+under/over-capture).
 
 > **Capture window**: Authorization holds are issuer-controlled and can expire
 > while Moyasar still reports `authorized`. **mada** holds are typically
@@ -381,19 +384,28 @@ Moyasar's refund endpoint does not accept a reason field — any `reason` on the
 params is ignored for Moyasar.
 
 `refundPayment` returns `GatewayRefundResult`. On HTTP success, `result.status` is
-**`completed`** when the payment reflects a refund (full, partial, or incomplete
-snapshot: `refunded > 0` or resolved status `refunded` / `partially_refunded` /
-`refund_completed`, or provider string `refunded`). Payment lookup/webhook **payment**
-status uses the amount-derived mapping above (`partially_refunded` / `refunded` /
-`refund_completed` for incomplete money).
+**`completed`** / `outcome: 'succeeded'` only when the payment has a **proven**
+refund total (`refunded > 0`, or resolved payment status `refunded` /
+`partially_refunded`). Incomplete snapshots (`refund_completed` — provider
+claims refunded without a positive `refunded` amount) stay **`pending`** and
+omit `totalRefunded` rather than inventing `0` (MOYASAR-2). Payment lookup /
+webhook **payment** status still uses the amount-derived mapping above
+(`partially_refunded` / `refunded` / `refund_completed` for incomplete money).
+
+Partial amounts convert with the **payment** currency from a preflight GET
+(caller `currency` must match; required whenever `amount` is set).
+
+> ⚠️ Configure shared `moyasar.idempotencyStore` and pass `idempotencyKey` —
+> required on every refund (no native Moyasar refund idempotency).
 
 ```typescript
 const result = await client.refundPayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
   amount: 50, // Optional: Partial refund (major units)
-  currency: 'SAR', // Required whenever amount is provided
+  currency: 'SAR', // Required whenever amount is provided; must match payment
+  idempotencyKey: 'refund-order-123',
 }, 'moyasar');
-// result.status === 'completed' for successful full or partial refunds
+// result.status === 'completed' for proven full or partial refunds
 ```
 
 Omit `amount` for a full refund; the SDK sends no request body in that case.
@@ -407,10 +419,15 @@ Void while Moyasar still allows reversal (Payment Operations):
   settlement window (commonly about **2 hours** after payment). After that
   window closes, use `refundPayment` instead.
 
+> ⚠️ Configure shared `moyasar.idempotencyStore` and pass `idempotencyKey` —
+> required on every void (no native Moyasar void idempotency).
+
 ```typescript
 const result = await client.voidPayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
+  idempotencyKey: 'void-order-123',
 }, 'moyasar');
+// outcome === 'succeeded' only when provider status is voided (→ cancelled)
 ```
 
 ## Callback / 3DS return

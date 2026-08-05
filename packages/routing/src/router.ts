@@ -7,12 +7,15 @@
  * config.fallback is SELECT-TIME default only — not post-attempt recovery.
  */
 
+import { amountOutsideConfiguredRange } from "./amount-range";
 import { NoRouteMatchError } from "./errors";
 import {
   costScore,
   gatewayHasCapabilities,
   isGatewayHealthy,
   ruleMatches,
+  ruleMatchesIgnoringAmount,
+  stringsEqualCi,
 } from "./match";
 import type {
   CreatePaymentRouterOptions,
@@ -107,6 +110,16 @@ function selectImpl(
   }
 
   if (candidates.length === 0) {
+    // ROUTE-1: amount-range honesty — do not use unconstrained select-time
+    // fallback when at least one non-excluded healthy rule matches all
+    // non-amount criteria but fails amount range. Falling back would silently
+    // accept amounts outside configured money bounds.
+    if (hasAmountRangeOnlyReject(input, rules, exclude, healthThreshold)) {
+      throw new NoRouteMatchError(
+        "No routing rule matched: input amount is outside configured rule amount ranges (select-time fallback does not bypass amount bounds)",
+        input,
+      );
+    }
     return selectFallback(input, fallback, healthThreshold, exclude);
   }
 
@@ -114,16 +127,42 @@ function selectImpl(
   return buildDecision(chosen, input);
 }
 
+/**
+ * True when a resolvable input amount is outside inclusive min/max on at least
+ * one non-excluded healthy rule whose non-amount criteria already match.
+ * Cross-currency / missing-amount / other criterion failures do not count
+ * (fallback may still apply for those).
+ */
+function hasAmountRangeOnlyReject(
+  input: RoutingInput,
+  rules: readonly RoutingRule[],
+  exclude: ReadonlySet<string>,
+  healthThreshold: number,
+): boolean {
+  for (const rule of rules) {
+    if (exclude.has(rule.gateway.trim().toLowerCase())) continue;
+    if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
+    if (!ruleMatchesIgnoringAmount(rule, input)) continue;
+    if (amountOutsideConfiguredRange(input, rule.match)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function pickCandidate(
   candidates: Candidate[],
   input: RoutingInput,
 ): Candidate {
   // Merchant preference boost: among matches, prefer gateway === preference.
+  // ROUTE-2: compare gateway ids case-insensitively (same as exclude/health/cost).
   let pool = candidates;
   if (input.merchantPreference !== undefined) {
     const pref = input.merchantPreference.trim();
     if (pref) {
-      const preferred = candidates.filter((c) => c.rule.gateway === pref);
+      const preferred = candidates.filter((c) =>
+        stringsEqualCi(c.rule.gateway, pref),
+      );
       if (preferred.length > 0) {
         pool = preferred;
       }
@@ -155,7 +194,7 @@ function buildDecision(
   let reason: RoutingDecisionReason = "rule_match";
   if (
     input.merchantPreference !== undefined &&
-    chosen.rule.gateway === input.merchantPreference.trim()
+    stringsEqualCi(chosen.rule.gateway, input.merchantPreference.trim())
   ) {
     reason = "rule_match_merchant_preference";
   } else if (input.cost !== undefined) {

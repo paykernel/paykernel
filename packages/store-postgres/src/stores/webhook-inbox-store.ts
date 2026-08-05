@@ -9,6 +9,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
+  canonicalizeIsoTimestamp,
 } from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
@@ -90,17 +91,20 @@ export function createPostgresWebhookInboxStore(
         if (!existing) {
           throw new StoreUnavailableError("webhook claim: no row after claim attempt");
         }
-        // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
+        // Terminal before hash; active-lease hash mismatch only → conflict.
+        // Idle supersede is handled by claim SQL (payload_hash update).
         if (existing.status === "completed") {
           return { kind: "already_completed", record: existing };
         }
         if (existing.status === "failed" || existing.status === "dead_letter") {
           return { kind: "duplicate_failed", record: existing };
         }
-        if (existing.payloadHash !== input.payloadHash) {
+        if (
+          existing.status === "claimed" &&
+          existing.payloadHash !== input.payloadHash
+        ) {
           return { kind: "payload_hash_conflict", record: existing };
         }
-        // pending + failed claim SQL = available_at gate (do not burn attempts)
         if (existing.status === "pending") {
           return {
             kind: "not_available",
@@ -224,7 +228,12 @@ export function createPostgresWebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
-        const now = input.now ?? clockNowIso(ctx.clock);
+        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
+        // Non-Z input.now written into available_at on soft-release would break ordering.
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0); next claim of pending

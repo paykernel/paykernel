@@ -228,8 +228,15 @@ mirroring payment dual-write with `applyOutcomeToGatewayResult`:
 | --- | --- |
 | `applyOutcomeToGatewayRefundResult(base, outcome)` | Dual-write `outcome` + `success` (+ `reconciliationRequired` when indeterminate) |
 | `successFromRefundOutcome(outcome)` | Map refund outcome → deprecated `success` boolean |
-| `inferRefundOperationOutcome(result)` | Infer when gateway has not set `outcome` yet |
+| `inferRefundOperationOutcome(result)` | Infer / coerce when branching on refund outcomes (see below) |
 | `mapGatewayRefundToOperationResult(result)` | Gateway refund shape → preferred refund union |
+
+**CORE-1:** `inferRefundOperationOutcome` coerces an explicit `outcome` against
+gateway `status` (same family as payment `inferOperationOutcome`). Bare
+`outcome: 'succeeded'` with `status: 'pending'` returns `'pending'`; bare
+`outcome: 'pending'` with `status: 'completed'` returns `'succeeded'`. Prefer
+`mapGatewayRefundToOperationResult` for Phase-6 union shapes; bare infer is safe
+for status-consistent branching only after this coerce.
 
 Do not treat a pending refund as settled. Same Engineering Rule 3 applies after
 submit when the refund request may have been accepted.

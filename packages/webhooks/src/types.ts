@@ -141,8 +141,10 @@ export type ProcessVerifiedInput = {
    *
    * Do **not** mix `hashWebhookPayload(rawBodyString)` with an object hash for
    * the same event: non-object strings are not JSON-parsed before hashing, so
-   * digests differ and redelivery permanently returns `payload_conflict`.
-   * See {@link resolveInboxPayloadHash}.
+   * digests differ. Idle non-terminal rows **supersede** the stored hash on the
+   * next claim (WEBHOOKS-3); active-lease mismatch still returns
+   * `payload_conflict`. Prefer one canonical source via
+   * {@link resolveInboxPayloadHash}.
    */
   payloadHash: string;
   /**
@@ -317,7 +319,18 @@ export type WebhookInboxEngine = {
   processVerified(input: ProcessVerifiedInput): Promise<WebhookProcessingOutcome>;
   /**
    * Optional wrapper: run injected verifyAndNormalize, then processVerified.
-   * On verify failure → `invalid_webhook` (never claims).
+   *
+   * **Verify classification (WEBHOOKS-1 / WEBHOOKS-4):**
+   * - `{ ok: false }` or forgery throw (`InvalidWebhookError`) → `invalid_webhook`
+   *   (never claims)
+   * - Permanent structure/config throws → `handler_failed { retryable: false }`
+   * - Infrastructure / unknown throws (NetworkError, RateLimitError, TypeError,
+   *   generic Error, onWebhookVerified) → `handler_failed { retryable: true }`
+   *
+   * **Composition (WEBHOOKS-2):** `verifyAndNormalize` must be verify-only.
+   * Do **not** run fulfillment / `onWebhookVerified` money side effects here —
+   * claim first via the returned path, then fulfill in `handler` /
+   * `processRetryable`.
    */
   processWithVerifier(input: ProcessWithVerifierInput): Promise<WebhookProcessingOutcome>;
   /**

@@ -177,7 +177,7 @@ const capture = await stripe.capturePayment({
 });
 ```
 
-When passing a partial capture `amount`, `currency` is required so the gateway can apply Stripe's minor-unit rules correctly. Omit `amount` to capture the full authorized amount.
+When passing a partial capture `amount`, `currency` is **required** and **must match the PaymentIntent currency**. The gateway GETs the PaymentIntent before converting majors to Stripe minor units and rejects a currency mismatch (same posture as Paymob) — never convert with a caller-only currency that differs from the PI (e.g. PI in USD + `currency: "JPY"` would under-capture). Omit `amount` to capture the full authorized amount.
 After a successful capture, settled amount is `amount_received` → `latest_charge.amount_captured`. If settled is finite and less than authorized `amount`, the normalized status is `partially_captured` (same rule as `getPayment` / succeeded PaymentIntent webhooks). If settled fields are missing, status is `processing` (fail closed — not full `paid`), and the result amount falls back to authorized `amount` rather than major `0`.
 
 ## Refunds
@@ -197,7 +197,7 @@ const refund = await stripe.refundPayment({
 
 Stripe-supported reasons (`duplicate`, `fraudulent`, `requested_by_customer`) are sent to Stripe as `reason`. Other custom reason strings are attached as `metadata.reason`. Caller-provided refund metadata is forwarded to Stripe and is useful for binding refund webhooks back to your own transaction or order records.
 
-When passing a partial refund `amount`, `currency` is required. Omit `amount` for a full refund. After creating the refund, the gateway asks Stripe for refunds on the PaymentIntent so `totalRefunded` reflects cumulative succeeded refunds. Pending or action-required refunds are not counted until Stripe marks them succeeded. The refund create expands `charge`; if the follow-up refunds list fails after Stripe has already accepted the refund, `totalRefunded` falls back to expanded `charge.amount_refunded` when present, otherwise it is left undefined rather than inventing a single-refund cumulative total or defaulting currency to USD.
+When passing a partial refund `amount`, `currency` is **required** and **must match the PaymentIntent currency**. The gateway GETs the PaymentIntent before converting majors and rejects a mismatch — never convert with a caller-only currency that differs from the PI. Omit `amount` for a full refund. After creating the refund, the gateway asks Stripe for refunds on the PaymentIntent so `totalRefunded` reflects cumulative succeeded refunds. Pending or action-required refunds are not counted until Stripe marks them succeeded. The refund create expands `charge`; if the follow-up refunds list fails after Stripe has already accepted the refund, `totalRefunded` falls back to expanded `charge.amount_refunded` when present, otherwise it is left undefined rather than inventing a single-refund cumulative total or defaulting currency to USD.
 
 ## Void And Lookup
 
@@ -236,8 +236,8 @@ Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must matc
 
 1. **Charge snapshot**: prefer an expanded `latest_charge` object. When Stripe returns `latest_charge` as an **unexpanded string ID**, the gateway re-fetches `GET /charges/{id}` for `amount_refunded` / `amount_captured`. If that re-fetch fails, status is **`processing`** (fail closed) — never map `succeeded` + unobservable refunds as `paid` (Stripe keeps PaymentIntent status `succeeded` after refunds).
 2. **Refunds first** (override capture state): if `latest_charge.amount_refunded > 0`, refund completeness is measured against the **captured base**, not the original authorization:
-   - captured base = `amount_received` (if finite) → else `latest_charge.amount_captured` (if finite) → else PaymentIntent `amount`
-   - status is `refunded` when `amount_refunded >= capturedBase` and `capturedBase > 0`, otherwise `partially_refunded`
+   - captured base = `amount_received` (if finite) → else `latest_charge.amount_captured` (if finite). **No fallback to authorized PaymentIntent `amount`** (STRIPE-4) — that would claim full `refunded` against the auth total after a partial capture.
+   - status is `refunded` when the captured base is known, `capturedBase > 0`, and `amount_refunded >= capturedBase`; otherwise `partially_refunded` (including when captured fields are missing — fail closed).
 3. **Partial capture**: if not refunded, settled amount is `amount_received` (if finite) → else `latest_charge.amount_captured` (if finite). When settled is known and `< amount`, status is `partially_captured`. Settled does **not** fall back to authorized `amount` (that would hide partial captures).
 4. **Incomplete money snapshot**: if not refunded and settled amount is missing, status is **`processing`** (fail closed) — never map missing settled fields to full `paid`.
 5. Otherwise the Stripe PaymentIntent status is mapped (`succeeded` → `paid`, `requires_capture` → `authorized`, etc.). Unmapped PaymentIntent statuses fail closed as `failed` (with a logger warning) so unknown states are not treated as pending fulfillment.
@@ -248,7 +248,7 @@ Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must matc
 
 ## Idempotency
 
-Stripe mutations (`createPayment`, `capturePayment`, `refundPayment`, `voidPayment`, `createCheckoutSession`) always send an `Idempotency-Key`. When you omit `idempotencyKey` (or pass an empty/whitespace string), the SDK generates a `crypto.randomUUID()` so in-process retries of transient network/5xx errors are safe against double-charges. Supply your own stable UUID when you need app-level crash/retry safety across processes (the auto-generated key is only known for the lifetime of that single call).
+Stripe mutations (`createPayment`, `capturePayment`, `refundPayment`, `voidPayment`, `createCheckoutSession`) always send an `Idempotency-Key`. When you **omit** `idempotencyKey` (leave the field undefined), the SDK generates a `crypto.randomUUID()` so in-process retries of transient network/5xx errors are safe against double-charges. **Do not pass an empty or whitespace-only key** — validation rejects those with `InvalidRequestError` / schema failure (STRIPE-6). Supply your own stable UUID when you need app-level crash/retry safety across processes (the auto-generated key is only known for the lifetime of that single call).
 
 ## Checkout customer identity
 
@@ -318,7 +318,7 @@ Unhandled / unknown event types do **not** run non-`payment_intent` object statu
 
 Only `canceled` and `incomplete_expired` map to `cancelled`. **`active` maps to `processing`**, not `paid` — a live subscription is not a settled one-shot charge; fulfill from invoice/PI money events (or Checkout paid) instead of subscription status alone. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. Note: a Checkout Session with `payment_status: paid` for a $0 trial can still normalize as `paid` via the `checkout.session.completed` path.
 
-> **Warning (STRIPE-6):** subscription lifecycle webhooks and **subscription-mode Checkout** paid events often set `gatewayPaymentId` to `sub_...` (not `pi_...`) and dual-write `provider.unmapped` for pure lifecycle events. Refund/capture/void **require** a `pi_...` PaymentIntent ID and fail closed with `InvalidRequestError` on `sub_*` / `cs_*`. Prefer invoice money events that surface a PaymentIntent, or resolve the PI via `getCheckoutSession` / Stripe before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
+> **Warning (STRIPE-5):** subscription lifecycle webhooks and **subscription-mode Checkout** paid events often set `gatewayPaymentId` to `sub_...` (not `pi_...`) and dual-write `provider.unmapped` for pure lifecycle events. Refund/capture/void **require** a `pi_...` PaymentIntent ID and fail closed with `InvalidRequestError` on `sub_*` / `cs_*`. Prefer invoice money events that surface a PaymentIntent, or resolve the PI via `getCheckoutSession` / Stripe before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
 
 For `payment_intent.succeeded` (and other succeeded PaymentIntent payloads), webhook `amount` prefers settled money: `amount_received` → `latest_charge.amount_captured` / `charges.data[0].amount_captured` so partial captures report the settled total. When settled is finite and less than authorized `amount`, status is `partially_captured` (not `paid`). When settled fields are **missing**, status is **`processing`** (fail closed) — never map an incomplete snapshot to full `paid` / over-fulfill on auth amount alone. **Phase 7 dual-write** for both the **partial** (`partially_captured`) and **incomplete-settled** (`processing`) cases sets `stableType` / `event.type` to **`payment.processing`**, not `payment.succeeded` — aligned with Paymob and with `isPaidOutcome` (neither partial nor incomplete settled is paid-like). Full success (status `paid`) dual-writes `payment.succeeded`. Fulfill only when status is `paid` or `isPaidOutcome(...)` is true; do not ship on type-only `payment.succeeded` handlers without checking status. Amount is only set from real money fields on the event object; it is not defaulted to `0` when Stripe omits amount data. Currency is only set when Stripe includes it — missing currency is left undefined rather than defaulted to `USD`. **Amount conversion is also skipped when currency is missing** (invoice/checkout and any incomplete snapshot): the gateway never invents a USD exponent to scale minor units, because that mis-scales zero-decimal and three-decimal currencies.
 
@@ -328,4 +328,11 @@ Refund webhooks handle both modern `refund.created` / `refund.updated` / `refund
 
 Webhook signature verification uses **bidirectional** 300s tolerance (`Math.abs(now - t) > 300` rejects) — stripe-node parity for both aged and far-future timestamps (STRIPE-4).
 
-`checkout.session.completed` with `payment_status: 'no_payment_required'` and `status: 'complete'` is normalized as `setup_completed` **only** when `mode === 'setup'` **or** a `setup_intent` is present. Payment-mode (and other non-setup) sessions that complete with `no_payment_required` (for example $0 free orders or 100% coupons) normalize as **`paid`** so fulfillment / `payment.succeeded` dual-write can fire — not `pending` and not `setup_completed`.
+`checkout.session.completed` with `payment_status: 'no_payment_required'` and `status: 'complete'` is normalized as:
+
+| Session shape | Domain status |
+| --- | --- |
+| `mode === 'setup'` **or** a `setup_intent` is present | `setup_completed` |
+| `mode === 'subscription'` (trials / $0 first invoice) | `pending` (STRIPE-2 — not fulfillment-ready paid) |
+| `mode === 'payment'` ($0 free orders / 100% coupons) | `paid` so fulfillment / `payment.succeeded` dual-write can fire |
+| `mode` missing / unrecognized and no `setup_intent` | `pending` (STRIPE-3 fail closed — do not invent paid) |

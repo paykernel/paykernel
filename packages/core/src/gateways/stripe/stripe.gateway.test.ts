@@ -500,6 +500,32 @@ describe("StripeGateway", () => {
       expect(event.gatewayPaymentId).toBe("sub_trial_123");
     });
 
+    it("STRIPE-3: no_payment_required with missing mode fails closed to pending (not paid)", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_checkout_no_mode",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_no_mode",
+            object: "checkout.session",
+            // mode intentionally omitted
+            payment_status: "no_payment_required",
+            status: "complete",
+            amount_total: 0,
+            currency: "usd",
+            metadata: { paymentId: "order_no_mode" },
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("pending");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("setup_completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
     it("should use Subscription ID for subscription checkout completion", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_checkout_subscription",
@@ -2116,6 +2142,7 @@ describe("StripeGateway", () => {
     });
 
     it("should mark partial capturePayment as partially_captured", async () => {
+      // STRIPE-1: GET PI (currency bind) then POST capture — same currency shape works for both.
       globalThis.fetch = mock(async () =>
         createMockResponse({
           id: "pi_cap_partial",
@@ -2187,8 +2214,12 @@ describe("StripeGateway", () => {
 
     it("should capture JPY partial amount without multiplying by 100", async () => {
       let capturedBody: string = "";
-      globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        capturedBody = opts.body as string;
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        // Capture POST body only (STRIPE-1 GET PI first for currency bind).
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.method === "POST" && opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "pi_cap_jpy",
           status: "succeeded",
@@ -2213,11 +2244,15 @@ describe("StripeGateway", () => {
 
     it("should leave capturable amount limits to Stripe for partial captures", async () => {
       let capturedBody: string = "";
-      globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        capturedBody = opts.body as string;
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.method === "POST" && opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "pi_cap_large",
           status: "succeeded",
+          amount: 100000000,
           amount_received: 100000000,
           currency: "usd",
         });
@@ -2243,6 +2278,71 @@ describe("StripeGateway", () => {
       ).rejects.toThrow(
         "Stripe capturePayment requires currency when amount is provided",
       );
+    });
+
+    it("STRIPE-1: rejects partial capture when caller currency mismatches PaymentIntent", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_cap_currency_mismatch",
+          object: "payment_intent",
+          status: "requires_capture",
+          amount: 10000,
+          currency: "usd",
+        }),
+      ) as unknown as typeof fetch;
+
+      // PI is USD; caller claims JPY → would convert 50 (zero-decimal) instead of 5000 cents.
+      await expect(
+        gateway.capturePayment({
+          gatewayPaymentId: "pi_cap_currency_mismatch",
+          amount: 50,
+          currency: "JPY",
+        }),
+      ).rejects.toThrow(
+        /capturePayment currency JPY does not match PaymentIntent currency USD/i,
+      );
+    });
+
+    it("STRIPE-1: partial capture converts majors with PaymentIntent currency scale", async () => {
+      let capturedBody: string = "";
+      let getCount = 0;
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        if (opts.method === "GET" || opts.body === undefined) {
+          getCount += 1;
+          return createMockResponse({
+            id: "pi_cap_usd_scale",
+            object: "payment_intent",
+            status: "requires_capture",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
+        return createMockResponse({
+          id: "pi_cap_usd_scale",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 5000,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.capturePayment({
+        gatewayPaymentId: "pi_cap_usd_scale",
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(getCount).toBeGreaterThanOrEqual(1);
+      expect(new URLSearchParams(capturedBody).get("amount_to_capture")).toBe(
+        "5000",
+      );
+      expect(result.status).toBe("partially_captured");
+      expect(result.amount).toBe(50);
+      expect(result.currency).toBe("USD");
     });
 
     it("should reject malformed PaymentIntent IDs before building request URLs", async () => {
@@ -2984,7 +3084,18 @@ describe("StripeGateway", () => {
     it("should refund payment intent and return cumulative refunded amount", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        // STRIPE-1: GET PaymentIntent for currency bind before POST /refunds.
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3014,7 +3125,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_123",
           status: "succeeded",
@@ -3046,10 +3160,90 @@ describe("StripeGateway", () => {
       );
     });
 
+    it("STRIPE-1: rejects partial refund when caller currency mismatches PaymentIntent", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_ref_currency_mismatch",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+        }),
+      ) as unknown as typeof fetch;
+
+      await expect(
+        gateway.refundPayment({
+          gatewayPaymentId: "pi_ref_currency_mismatch",
+          amount: 50,
+          currency: "JPY",
+        }),
+      ).rejects.toThrow(
+        /refundPayment currency JPY does not match PaymentIntent currency USD/i,
+      );
+    });
+
+    it("STRIPE-1: partial refund converts majors with PaymentIntent currency scale", async () => {
+      let capturedBody: string = "";
+      globalThis.fetch = mock(async (url, opts: RequestInit) => {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref_usd_scale",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
+          return createMockResponse(
+            createStripeRefundList([
+              {
+                id: "re_usd_scale",
+                status: "succeeded",
+                amount: 5000,
+                currency: "usd",
+              },
+            ]),
+          );
+        }
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
+        return createMockResponse({
+          id: "re_usd_scale",
+          status: "succeeded",
+          amount: 5000,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_ref_usd_scale",
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(new URLSearchParams(capturedBody).get("amount")).toBe("5000");
+      expect(result.totalRefunded).toBe(50);
+      expect(result.status).toBe("completed");
+    });
+
     it("should refund JPY amount without multiplying by 100", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref_jpy",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 500,
+            currency: "jpy",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3061,7 +3255,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_jpy",
           status: "succeeded",
@@ -3083,7 +3280,17 @@ describe("StripeGateway", () => {
     it("should leave refundable amount limits to Stripe for partial refunds", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref_large",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 100000000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3095,7 +3302,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_large",
           status: "succeeded",
@@ -3117,7 +3327,17 @@ describe("StripeGateway", () => {
     it("should send official Stripe refund reasons as reason", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3129,7 +3349,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_reason",
           status: "succeeded",
@@ -3153,7 +3376,17 @@ describe("StripeGateway", () => {
     it("should send custom refund reasons as metadata", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3165,7 +3398,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_custom_reason",
           status: "succeeded",
@@ -3189,7 +3425,17 @@ describe("StripeGateway", () => {
     it("should attach caller metadata to Stripe refunds", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        if (String(url).includes("/refunds?")) {
+        const href = String(url);
+        if (href.includes("/payment_intents/")) {
+          return createMockResponse({
+            id: "pi_ref",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+          });
+        }
+        if (href.includes("/refunds?")) {
           return createMockResponse(
             createStripeRefundList([
               {
@@ -3201,7 +3447,10 @@ describe("StripeGateway", () => {
             ]),
           );
         }
-        capturedBody = opts.body as string;
+        // Body is URLSearchParams from toUrlEncoded — stringify for URLSearchParams parsing.
+        if (opts.body != null) {
+          capturedBody = String(opts.body);
+        }
         return createMockResponse({
           id: "re_metadata",
           status: "succeeded",
@@ -3242,12 +3491,14 @@ describe("StripeGateway", () => {
     });
 
     it("should retrieve JPY payment intent without dividing by 100", async () => {
+      // STRIPE-7: include amount_received so status is paid (not processing fail-closed).
       globalThis.fetch = mock(async () =>
         createMockResponse({
           id: "pi_get_jpy",
           object: "payment_intent",
           status: "succeeded",
           amount: 5000,
+          amount_received: 5000,
           currency: "jpy",
           client_secret: "pi_get_jpy_secret",
         }),
@@ -3260,6 +3511,7 @@ describe("StripeGateway", () => {
       expect(result.amount).toBe(5000);
       // STRIPE-1: currency with major-unit amount
       expect(result.currency).toBe("JPY");
+      expect(result.status).toBe("paid");
       expect(result.clientSecret).toBe("pi_get_jpy_secret");
     });
 
@@ -3272,10 +3524,12 @@ describe("StripeGateway", () => {
           object: "payment_intent",
           status: "succeeded",
           amount: 10000,
+          amount_received: 10000,
           currency: "usd",
           client_secret: "pi_get_refunded_secret",
           latest_charge: {
             id: "ch_refunded",
+            amount_captured: 10000,
             amount_refunded: 10000,
             currency: "usd",
           },
@@ -3291,6 +3545,33 @@ describe("StripeGateway", () => {
       // STRIPE-1: currency accompanies refundedAmount / amount
       expect(result.currency).toBe("USD");
       expect(result.status).toBe("refunded");
+    });
+
+    it("STRIPE-4: getPayment does not treat refund as full when captured base is missing", async () => {
+      // amount_refunded present but no amount_received / amount_captured —
+      // must not fall back to authorized amount and claim full refunded.
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_refund_no_captured_base",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+          latest_charge: {
+            id: "ch_refund_no_captured_base",
+            amount_refunded: 10000,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_refund_no_captured_base",
+      });
+
+      expect(result.status).toBe("partially_refunded");
+      expect(result.status).not.toBe("refunded");
+      expect(result.refundedAmount).toBe(100);
     });
 
     it("should mark fully refunded PaymentIntents as refunded", async () => {

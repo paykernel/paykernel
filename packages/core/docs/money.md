@@ -41,7 +41,7 @@ formatMoney(amount); // "10.50 SAR"
 | Type | Role |
 | --- | --- |
 | `DecimalString` | Clean decimal text (`"10.50"`, `"100"`, `"-1.250"`) |
-| `Money` | `{ readonly amount: DecimalString; readonly currency: string }` |
+| `Money` | `{ readonly amount: DecimalString; readonly currency: string; readonly exponent?: number }` |
 | `MinorAmount` | `bigint` integer minor units (internal / provider integer APIs) |
 | `AmountInput` | `number \| Money` — create/capture/refund/checkout input union in 0.x |
 | `MoneyRoundingMode` | `'reject' \| 'half_up' \| 'half_even' \| 'floor' \| 'ceil' \| 'trunc'` |
@@ -51,13 +51,41 @@ formatMoney(amount); // "10.50 SAR"
 `JSON.stringify` works without custom replacers. When you need to store minors,
 persist `minor.toString()`.
 
+### `Money.exponent` (MONEY-1 — do not strip)
+
+Optional `exponent` is the **resolved minor-unit scale** used to canonicalize
+`amount`. Runtime attaches it when the scale **differs from bare ISO** for that
+currency (e.g. merchant OMR as 2 decimals while ISO OMR is 3; Stripe MGA as 0
+while ISO MGA is 2):
+
+```ts
+const omrMerchant = money("20.12", "OMR", { exponentOverrides: { OMR: 2 } });
+// => { amount: "20.12", currency: "OMR", exponent: 2 }
+
+toMinorUnits(omrMerchant); // 2012n — re-pins stored exponent (no overrides needed)
+```
+
+**Integrators must persist `exponent` together with `amount` + `currency` when
+present.** Stripping it causes silent 10×/100× rescale: bare `toMinorUnits` falls
+back to ISO (e.g. `"20.12"` OMR without `exponent: 2` → ISO scale 3 → wrong
+minors after re-parse). Runtime re-pins stored `exponent` when options omit
+scale; empty `exponentOverrides: {}` does **not** drop it.
+
+Invalid `Money.exponent` values (non-integer, negative, > 18) **fail closed**
+(`MoneyAmountError` kind `invalid_exponent`) — they are never ignored in favor
+of ISO.
+
+ISO-default money omits the field (`exponent` is undefined) so JSON stays
+`{"amount":"10.50","currency":"SAR"}`.
+
 ## Conversion rules
 
 1. Parse major-unit **decimal strings** (or stringify deprecated `number` inputs carefully).
 2. Resolve the minor-unit **exponent**:
    - explicit `options.exponent`, else
+   - stored `Money.exponent` when present (re-pin path), else
    - `options.exponentOverrides` via `getCurrencyExponent`, else
-   - ISO 4217 tables in `getCurrencyExponent` (0 / 2 / 3).
+   - ISO 4217 tables in `getCurrencyExponent` (0 / 2 / 3 / **4** for CLF/UYW funds codes).
 3. Scale with **bigint** only — never `amount * 10 ** n` as a float result path.
 4. Default **rounding is `reject`**: excess fractional digits throw
    `InvalidRequestError`.
@@ -72,6 +100,8 @@ persist `minor.toString()`.
 | `money("10.5", "JPY")` | JPY (exp 0) | **throws** |
 | `money("1.234", "KWD")` | KWD (exp 3) | OK |
 | `money("1.2345", "KWD")` | KWD | **throws** |
+| `money("1.2345", "CLF")` | CLF (exp **4**, ISO funds) | OK |
+| `money("1.2345", "UYW")` | UYW (exp **4**, ISO funds) | OK |
 
 Canonical `Money.amount` is **minor-aligned**: padded to the currency exponent
 (e.g. `"10.5"` → `"10.50"` for SAR; zero-decimal has no fractional part).

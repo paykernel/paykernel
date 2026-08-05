@@ -87,6 +87,121 @@ describe("decideReconciliationPolicy", () => {
     expect(d.action).toBe("update_local_to_failed");
   });
 
+  it("RECON-1: non-zero captured + failed provider is not safe update_local_to_failed", () => {
+    const failedWithCapture = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "failed",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("10.00", "USD"),
+      providerStatus: "failed",
+    });
+    for (const outcome of ["consistent", "drift_detected"] as const) {
+      const result: ReconciliationResult =
+        outcome === "consistent"
+          ? { outcome: "consistent", provider: failedWithCapture }
+          : {
+              outcome: "drift_detected",
+              provider: failedWithCapture,
+              differences: [
+                { field: "status", local: "pending", provider: "failed" },
+              ],
+            };
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_1",
+        expected: { status: "pending" },
+      };
+      const d = decideReconciliationPolicy(result, target);
+      expect(d.action).not.toBe("update_local_to_failed");
+      expect(d.safe).toBe(false);
+      if (outcome === "consistent") {
+        expect(d.action).toBe("manual_review");
+      } else {
+        expect(d.action).toBe("apply_drift_review");
+      }
+      // Replacement create must also be forbidden while funds moved.
+      expect(shouldForbidReplacementCharge(result, target)).toBe(true);
+    }
+  });
+
+  it("RECON-1: non-zero refundedAmount + failed provider is not safe update_local_to_failed", () => {
+    const failedWithRefund = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "failed",
+      amount: money("10.00", "USD"),
+      refundedAmount: money("3.00", "USD"),
+      providerStatus: "failed",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: failedWithRefund,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "pending" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).toBe("manual_review");
+    expect(d.safe).toBe(false);
+    expect(shouldForbidReplacementCharge(result, target)).toBe(true);
+  });
+
+  it("RECON-1: zero captured/refunded still allows safe update_local_to_failed", () => {
+    const failedZeroMoney = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "failed",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("0", "USD"),
+      refundedAmount: money("0.00", "USD"),
+      providerStatus: "failed",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: failedZeroMoney,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "pending" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).toBe("update_local_to_failed");
+    if (d.action === "update_local_to_failed") {
+      expect(d.safe).toBe(true);
+    }
+  });
+
+  it("RECON-2: paid + non-zero refundedAmount is not safe update_local_to_paid", () => {
+    const paidWithRefund = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      refundedAmount: money("2.00", "USD"),
+      providerStatus: "succeeded",
+    });
+    for (const outcome of ["consistent", "drift_detected"] as const) {
+      const result: ReconciliationResult =
+        outcome === "consistent"
+          ? { outcome: "consistent", provider: paidWithRefund }
+          : {
+              outcome: "drift_detected",
+              provider: paidWithRefund,
+              differences: [
+                { field: "status", local: "pending", provider: "paid" },
+              ],
+            };
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_1",
+        expected: { status: "pending" },
+      };
+      const d = decideReconciliationPolicy(result, target);
+      expect(d.action).not.toBe("update_local_to_paid");
+      expect(d.safe).toBe(false);
+    }
+  });
+
   it("amount drift → apply_drift_review never auto-mutate money", () => {
     const result: ReconciliationResult = {
       outcome: "drift_detected",

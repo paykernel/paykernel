@@ -159,7 +159,7 @@ Prefer `PaymentClient.handleWebhook(gateway, payload, signatureOrHeaders?, heade
 
 - Verification is an **API postback**, not a local HMAC. The SDK embeds raw body bytes/text as `webhook_event` **without** parse→stringify reordering.
 - Parsed objects are accepted but re-serialized and **may fail** verification.
-- Extra guards: `paypal-cert-url` must be HTTPS under `*.paypal.com`; `paypal-transmission-time` older than **15 minutes** (or unparseable) is rejected before calling PayPal.
+- Extra guards: `paypal-cert-url` must be HTTPS under `*.paypal.com`; unparseable or far-future `paypal-transmission-time` is rejected before calling PayPal; **aged** transmissions (including older than 15 minutes) are **soft-accepted** with a warn and still verified. There is **no hard 15-minute replay reject** — merchants **must** dedupe by **`event.id`**.
 - Transient PayPal API failures during verification throw (return 5xx so PayPal retries); use 4xx only for invalid transmissions.
 
 ### Moyasar

@@ -411,6 +411,40 @@ describe("mapProviderEventTypeToStable tables", () => {
       },
     );
 
+    it("CORE-2: charge.refunded + refund_completed → refund.pending (not completed)", () => {
+      expect(
+        mapProviderEventTypeToStable("stripe", "charge.refunded", {
+          status: "refund_completed",
+        }),
+      ).toBe("refund.pending");
+    });
+
+    it("CORE-2: charge.refunded + refunded/partially_refunded → refund.completed", () => {
+      expect(
+        mapProviderEventTypeToStable("stripe", "charge.refunded", {
+          status: "refunded",
+        }),
+      ).toBe("refund.completed");
+      expect(
+        mapProviderEventTypeToStable("stripe", "charge.refunded", {
+          status: "partially_refunded",
+        }),
+      ).toBe("refund.completed");
+    });
+
+    it("CORE-2: attachPaymentEvent demotes incomplete charge.refunded snapshots", () => {
+      const dual = attachPaymentEvent(
+        baseWebhook({
+          type: "charge.refunded",
+          status: "refund_completed",
+          gateway: "stripe",
+        }),
+      );
+      expect(dual.stableType).toBe("refund.pending");
+      expect(dual.event?.type).toBe("refund.pending");
+      expect(dual.type).toBe("charge.refunded"); // provider-native preserved
+    });
+
     it("payment_intent.succeeded + partially_captured → payment.processing", () => {
       expect(
         mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
@@ -761,6 +795,31 @@ describe("envelope + hash + secrets", () => {
     expect(json).not.toContain("secret_token");
 
     assertNoSecretsInEnvelope(envelope);
+  });
+
+  it("CORE-3: toPersistedPaymentEventEnvelope fails closed without payloadHash/rawForHash", () => {
+    const pe = webhookEventToPaymentEvent(baseWebhook());
+    expect(() => toPersistedPaymentEventEnvelope(pe)).toThrow(
+      /payloadHash or rawForHash/,
+    );
+    expect(() => toPersistedPaymentEventEnvelope(pe, {})).toThrow(
+      /payloadHash or rawForHash/,
+    );
+    expect(() =>
+      toPersistedPaymentEventEnvelope(pe, { payloadHash: "" }),
+    ).toThrow(/non-empty string/);
+    expect(() =>
+      toPersistedPaymentEventEnvelope(pe, { payloadHash: "   " }),
+    ).toThrow(/non-empty string/);
+    // Explicit rawForHash (even empty object) is intentional — not the silent default.
+    const withEmptyRaw = toPersistedPaymentEventEnvelope(pe, {
+      rawForHash: {},
+    });
+    expect(withEmptyRaw.payloadHash).toBe(hashWebhookPayload({}));
+    const withHash = toPersistedPaymentEventEnvelope(pe, {
+      payloadHash: "a".repeat(64),
+    });
+    expect(withHash.payloadHash).toBe("a".repeat(64));
   });
 
   it("hashWebhookPayload redacts secret_token / signature", () => {

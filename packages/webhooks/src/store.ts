@@ -177,19 +177,25 @@ export type ClaimWebhookInput = {
 /**
  * Result of an atomic claim attempt.
  *
- * Precedence for an existing row (WEBHOOKS-4):
+ * Precedence for an existing row (WEBHOOKS-4 / WEBHOOKS-3):
  * 1. `completed` → `already_completed` (even if `payloadHash` differs)
  * 2. `dead_letter` / `failed` → `duplicate_failed` (even if hash differs)
- * 3. hash mismatch on non-terminal → `payload_hash_conflict`
- * 4. active lease → `in_progress`
- * 5. pending with future `availableAt` → `not_available`
- * 6. else acquire
+ * 3. active lease + same hash → `in_progress`
+ * 4. active lease + **different** hash → `payload_hash_conflict` (cannot
+ *    supersede while another worker holds the row)
+ * 5. non-terminal, **no** active lease, different hash → **supersede**: acquire
+ *    with the new hash (WEBHOOKS-3 recovery for hash-source mistakes so paid
+ *    redrive is not permanently stuck). Updates `payloadHash` / optional
+ *    `payloadRef` on acquire.
+ * 6. pending with future `availableAt` + **same** hash → `not_available`
+ * 7. else acquire
  *
  * Kinds:
  * - `acquired` — caller holds the lease; run handler or park
  * - `already_completed` / `duplicate_failed` — terminal; do not re-run
  * - `in_progress` — active lease held by another worker
- * - `payload_hash_conflict` — same key, different body hash (non-terminal only)
+ * - `payload_hash_conflict` — same key, different body hash **while a lease is
+ *   still active** (non-terminal). Idle pending/expired-claimed rows supersede.
  * - `not_available` — pending but `availableAt` is still in the future (backoff);
  *   must **not** increment attempts; engine maps to
  *   `scheduled_for_retry { reason: "not_available" }`
@@ -269,9 +275,11 @@ export type ListRetryableInput = {
  *
  * Same event key: second claim with same payload hash while in-progress → in_progress;
  * completed → already_completed (before hash check); dead_letter/failed → duplicate_failed
- * (before hash check); non-terminal different hash → payload_hash_conflict;
- * pending with `availableAt` in the future → `not_available` (no acquire, no attempt++);
- * expired lease may be re-acquired with a new fencing token (generation++).
+ * (before hash check); active lease + different hash → payload_hash_conflict;
+ * non-terminal **idle** different hash → **supersede** acquire (WEBHOOKS-3);
+ * pending with `availableAt` in the future and same hash → `not_available`
+ * (no acquire, no attempt++); expired lease may be re-acquired with a new
+ * fencing token (generation++).
  * Soft-release of expired claimed rows MUST restore one attempt (floor 0) so
  * crash reclaim does not consume the handler `maxAttempts` budget.
  * Direct reclaim of expired `claimed` (without prior soft-release) MUST NOT
@@ -285,7 +293,9 @@ export interface WebhookInboxStore extends WithTransaction {
    * reclaim keeps `attempts` unchanged (crash recovery, WEBHOOKS-1).
    * MUST NOT acquire a pending row whose `availableAt` is still in the future —
    * return `{ kind: "not_available", ... }` instead (no attempt increment).
-   * Terminal statuses are classified before `payload_hash_conflict`.
+   * Terminal statuses are classified before hash / lease checks.
+   * Non-terminal idle hash mismatch supersedes (WEBHOOKS-3); active-lease
+   * hash mismatch returns `payload_hash_conflict`.
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 

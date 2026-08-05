@@ -1240,9 +1240,19 @@ export class PayPalGateway extends BaseGateway {
 
     const webhookAmount = this.extractWebhookAmount(raw);
     if (!webhookAmount && this.webhookEventRequiresAmount(raw.event_type)) {
-      throw new InvalidRequestError(
-        `PayPal webhook event ${raw.event_type} is missing amount information`,
-      );
+      // Incomplete multi-capture partial-refund snapshots omit amount honestly
+      // (REFUNDED+PENDING siblings, PARTIALLY_REFUNDED without net remaining).
+      // Deliver status; do not throw and drop the event.
+      const incompletePartialRefund =
+        orderCaptures !== undefined &&
+        orderCaptures.length > 0 &&
+        this.aggregateCaptureRefundStatus(orderCaptures) ===
+          "partially_refunded";
+      if (!incompletePartialRefund) {
+        throw new InvalidRequestError(
+          `PayPal webhook event ${raw.event_type} is missing amount information`,
+        );
+      }
     }
     const amount = webhookAmount
       ? this.parseAmount(webhookAmount, "webhook")
@@ -2437,48 +2447,96 @@ export class PayPalGateway extends BaseGateway {
 
   /**
    * Net still-held major units on a capture resource after refunds/reversals.
-   * PAYPAL-3 / audit PAYPAL-1: never treat original face as held when status is
-   * refunded / partially_refunded / reversed without a proven remaining balance.
+   * Never treat original face as held when status is refunded / partially_refunded /
+   * reversed without a proven remaining balance.
+   *
+   * Subtraction is bigint minor units (same path as {@link sumSuccessfulCaptureAmounts});
+   * never major-unit JS float subtract — `remaining === 0` is exact on minor bigint.
    */
   private captureRemainingHeldAmount(
     data: PayPalPaymentResource,
     status: PaymentStatus,
     operation: string,
   ): { amount: number; currency: string } | undefined {
-    const face = this.tryParsePayPalMoney(data.amount, operation);
-    if (!face) {
-      return undefined;
-    }
-
     // Full chargeback/reversal: no still-held funds (do not publish face).
     if (status === "reversed") {
       return undefined;
     }
 
     if (status !== "partially_refunded" && status !== "refunded") {
-      return face;
+      return this.tryParsePayPalMoney(data.amount, operation);
+    }
+
+    const faceMoney = data.amount;
+    if (
+      !faceMoney ||
+      typeof faceMoney.currency_code !== "string" ||
+      typeof faceMoney.value !== "string" ||
+      faceMoney.value.length === 0
+    ) {
+      return undefined;
     }
 
     const totalRefundedMoney =
       data.seller_receivable_breakdown?.total_refunded_amount;
-    const totalRefunded = totalRefundedMoney
-      ? this.tryParsePayPalMoney(totalRefundedMoney, `${operation} total refunded`)
-      : undefined;
-
-    if (totalRefunded && totalRefunded.currency === face.currency) {
-      const remaining = face.amount - totalRefunded.amount;
-      if (!Number.isFinite(remaining) || remaining < 0) {
-        return undefined;
-      }
-      // Fully refunded (or over-refund report) → no still-held funds.
-      if (status === "refunded" || remaining === 0) {
-        return undefined;
-      }
-      return { amount: remaining, currency: face.currency };
+    if (
+      !totalRefundedMoney ||
+      typeof totalRefundedMoney.currency_code !== "string" ||
+      typeof totalRefundedMoney.value !== "string" ||
+      totalRefundedMoney.value.length === 0
+    ) {
+      // No cumulative refund breakdown: fail-closed — omit face as still-held.
+      return undefined;
     }
 
-    // No cumulative refund breakdown: fail-closed — omit face as still-held.
-    return undefined;
+    try {
+      const faceCode = this.normalizeCurrencyCode(faceMoney.currency_code);
+      const refundCode = this.normalizeCurrencyCode(
+        totalRefundedMoney.currency_code,
+      );
+      if (faceCode !== refundCode) {
+        return undefined;
+      }
+
+      const scale = this.getCurrencyScale(faceCode);
+      const parseOpts = {
+        rounding: "reject" as const,
+        exponent: scale,
+        allowZero: true,
+        allowNegative: false,
+      };
+
+      const faceParsed = money(faceMoney.value, faceCode, parseOpts);
+      const faceMinor = sharedToMinorUnits(faceParsed, parseOpts);
+      const refundParsed = money(totalRefundedMoney.value, refundCode, parseOpts);
+      const refundMinor = sharedToMinorUnits(refundParsed, parseOpts);
+
+      const remainingMinor = faceMinor - refundMinor;
+      if (remainingMinor < 0n) {
+        return undefined;
+      }
+      // Fully refunded (status) or exact zero remaining on minor bigint → no held.
+      if (status === "refunded" || remainingMinor === 0n) {
+        return undefined;
+      }
+
+      return {
+        amount: moneyToMajorNumber(
+          sharedFromMinorUnits(remainingMinor, faceCode, parseOpts),
+          {
+            exponent: scale,
+            allowZero: true,
+            allowNegative: false,
+          },
+        ),
+        currency: faceCode,
+      };
+    } catch {
+      this.logger.warn(
+        `[PayPal] Failed to compute remaining held amount during ${operation}; omitting`,
+      );
+      return undefined;
+    }
   }
 
   private extractWebhookAmount(raw: PayPalWebhookPayload): {
@@ -2955,9 +3013,12 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Aggregate refund/reversal status across sibling captures (PAYPAL-2).
+   * Aggregate refund/reversal status across sibling captures.
    * Returns undefined when no capture is refunded/reversed so callers continue
    * paid / partially_captured mapping.
+   *
+   * PENDING siblings are open money paths: REFUNDED+PENDING must not report
+   * full `refunded` (PAYPAL-3).
    */
   private aggregateCaptureRefundStatus(
     captures: Array<PayPalEmbeddedCapture> | undefined,
@@ -2970,15 +3031,16 @@ export class PayPalGateway extends BaseGateway {
     let hasPartialRefund = false;
     let hasReversed = false;
     let hasHeld = false; // COMPLETED / non-final still holding funds
+    let hasPending = false; // PENDING — may still settle; not full-refund evidence
     let moneyCount = 0;
 
     for (const capture of captures) {
       const mapped = this.mapResourceStatus(capture.status);
-      if (
-        mapped === "pending" ||
-        mapped === "failed" ||
-        mapped === "cancelled"
-      ) {
+      if (mapped === "pending") {
+        hasPending = true;
+        continue;
+      }
+      if (mapped === "failed" || mapped === "cancelled") {
         continue;
       }
       moneyCount += 1;
@@ -2997,19 +3059,20 @@ export class PayPalGateway extends BaseGateway {
       return undefined;
     }
 
-    // Mix of held + refunded/reversed, or any partial refund → partially_refunded.
+    // Mix of held/pending + refunded/reversed, or any partial refund → partially_refunded.
+    // PENDING siblings block full refunded/reversed (open settlement path).
     if (
       hasPartialRefund ||
-      (hasHeld && (hasRefunded || hasReversed))
+      ((hasHeld || hasPending) && (hasRefunded || hasReversed))
     ) {
       return "partially_refunded";
     }
 
-    if (hasRefunded && !hasHeld) {
+    if (hasRefunded && !hasHeld && !hasPending) {
       return "refunded";
     }
 
-    if (hasReversed && !hasHeld && !hasRefunded) {
+    if (hasReversed && !hasHeld && !hasPending && !hasRefunded) {
       return "reversed";
     }
 

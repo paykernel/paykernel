@@ -115,6 +115,82 @@ export function amountInRange(
 }
 
 /**
+ * True only when the rule has amount bounds, the input amount is resolvable
+ * in the **same** currency as the rule, and the amount is outside inclusive
+ * min/max. Cross-currency, missing amount, or invalid decimals return false
+ * (those are not "amount-range honesty" violations for select-time fallback).
+ *
+ * Used by select-time fallback (ROUTE-1) so unconstrained fallback cannot
+ * accept amounts that a matching rule already bounded.
+ */
+export function amountOutsideConfiguredRange(
+  input: RoutingInput,
+  match: RouteMatchCriteria,
+): boolean {
+  const hasMin = match.amountMin !== undefined;
+  const hasMax = match.amountMax !== undefined;
+  if (!hasMin && !hasMax) {
+    return false;
+  }
+
+  const ruleCurrency =
+    match.amountCurrency !== undefined
+      ? String(match.amountCurrency).trim()
+      : "";
+  if (!ruleCurrency) {
+    return false;
+  }
+
+  const resolved = resolveInputAmount(input);
+  if (!resolved) {
+    return false;
+  }
+
+  if (
+    normalizeCurrency(resolved.currency) !== normalizeCurrency(ruleCurrency)
+  ) {
+    return false;
+  }
+
+  const zeroOk = { allowZero: true as const };
+
+  let inputMinor: bigint;
+  try {
+    inputMinor = toMinorUnits(resolved.amount, ruleCurrency, zeroOk);
+  } catch {
+    return false;
+  }
+
+  if (hasMin && match.amountMin !== undefined) {
+    try {
+      const minMinor = toMinorUnits(
+        String(match.amountMin).trim(),
+        ruleCurrency,
+        zeroOk,
+      );
+      if (inputMinor < minMinor) return true;
+    } catch {
+      return false;
+    }
+  }
+
+  if (hasMax && match.amountMax !== undefined) {
+    try {
+      const maxMinor = toMinorUnits(
+        String(match.amountMax).trim(),
+        ruleCurrency,
+        zeroOk,
+      );
+      if (inputMinor > maxMinor) return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
+}
+
+/**
  * Compare two major-unit decimal strings in the same currency using bigint.
  * Returns negative if a < b, 0 if equal, positive if a > b.
  * Throws if either amount is invalid.

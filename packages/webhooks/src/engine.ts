@@ -198,58 +198,124 @@ function outcomeInvalidWebhook(reason?: string): WebhookProcessingOutcome {
 }
 
 /**
- * WEBHOOKS-2: classify verify/normalize throws that are infrastructure/transport
- * outages (not signature forgery). Callers should map retryable handler_failed
- * to 5xx so providers redeliver (PayPal verify postback outages, network blips).
+ * WEBHOOKS-1 / WEBHOOKS-4: forgery-class verify failures only.
+ *
+ * Reserved for explicit signature / authenticity failures — typically
+ * `InvalidWebhookError` from `PaymentClient.handleWebhook` when verify returns
+ * false. Do **not** put transport, rate-limit, TypeError, or unknown throws
+ * here (those must be 5xx-class so providers redeliver paid events).
+ *
+ * Explicit `{ ok: false }` from `verifyAndNormalize` is handled separately
+ * (never throws).
  */
-function isRetryableVerifyInfrastructureError(err: unknown): boolean {
-  if (err === null || err === undefined) return false;
-  if (typeof err !== "object") return false;
+function isForgeryClassVerifyError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== "object") return false;
+  const e = err as { name?: unknown; code?: unknown };
+  const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
+  const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
+  if (name === "invalidwebhookerror") return true;
+  if (code === "invalid_webhook") return true;
+  return false;
+}
+
+/**
+ * WEBHOOKS-6: permanent (non-retryable) verify/normalize failures that are
+ * **not** forgery — e.g. structural `GatewayApiError` ("Invalid webhook payload"),
+ * explicit `retryable: false`, or definite 4xx (except 429).
+ *
+ * Map to `handler_failed { retryable: false }` (not infinite 5xx, not forgery 400).
+ */
+function isPermanentNonRetryableVerifyError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== "object") return false;
   const e = err as {
     name?: unknown;
     code?: unknown;
     message?: unknown;
     statusCode?: unknown;
     retryable?: unknown;
+    rawError?: unknown;
   };
-  if (e.retryable === true) return true;
+  if (e.retryable === false) return true;
+  if (e.retryable === true) return false;
+
   const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
   const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+
+  // Rate limits are transient even though status is 4xx.
+  if (name === "ratelimiterror" || code === "rate_limit_exceeded") return false;
+  if (typeof e.statusCode === "number" && e.statusCode === 429) return false;
+
+  // Permanent payload / parse structure failures (PayPal coerceWebhookPayload etc.).
   if (
-    name === "networkerror" ||
-    name === "timeouterror" ||
-    name === "aborterror" ||
     name === "gatewayapierror" ||
-    code === "network_error" ||
-    code === "timeout" ||
-    code === "etimedout" ||
-    code === "econnreset" ||
-    code === "econnrefused" ||
-    code === "provider_5xx" ||
+    code === "gateway_api_error" ||
     code === "gateway_error"
   ) {
-    return true;
+    if (
+      message.includes("invalid webhook payload") ||
+      message.includes("not valid json") ||
+      message.includes("missing gateway payment identifier") ||
+      message.includes("invalid create_time")
+    ) {
+      return true;
+    }
+    // Nested HTTP status on rawError when gateway attached it.
+    const raw = e.rawError;
+    if (raw !== null && typeof raw === "object") {
+      const status =
+        "status" in raw
+          ? (raw as { status?: unknown }).status
+          : "statusCode" in raw
+            ? (raw as { statusCode?: unknown }).statusCode
+            : undefined;
+      if (
+        typeof status === "number" &&
+        status >= 400 &&
+        status < 500 &&
+        status !== 429
+      ) {
+        return true;
+      }
+    }
+    // Default GatewayApiError (verify postback / 502-class) stays retryable.
+    return false;
   }
-  if (
-    typeof e.statusCode === "number" &&
-    e.statusCode >= 500 &&
-    e.statusCode < 600
-  ) {
-    return true;
+
+  // Definite client errors (config, validation) — retrying will not help.
+  // Exclude rate limit (handled above) and leave network/5xx to fail-open.
+  if (typeof e.statusCode === "number") {
+    if (e.statusCode >= 400 && e.statusCode < 500 && e.statusCode !== 429) {
+      // InvalidWebhookError is forgery (handled first); other 4xx → permanent.
+      if (!isForgeryClassVerifyError(err)) return true;
+    }
   }
-  if (
-    message.includes("timed out") ||
-    message.includes("timeout") ||
-    message.includes("network") ||
-    message.includes("econnreset") ||
-    message.includes("socket hang up") ||
-    message.includes("fetch failed") ||
-    message.includes("temporarily unavailable")
-  ) {
-    return true;
-  }
+
   return false;
+}
+
+/**
+ * WEBHOOKS-1 / WEBHOOKS-4: classify verify/normalize throws.
+ *
+ * Policy (fail-open for paid redelivery):
+ * 1. Forgery (`InvalidWebhookError` / `INVALID_WEBHOOK`) → `invalid_webhook`
+ * 2. Permanent non-retryable (structure GatewayApiError, 4xx, `retryable:false`)
+ *    → `handler_failed { retryable: false }`
+ * 3. **Everything else** (NetworkError, RateLimitError, TypeError, 5xx,
+ *    Timeout, unknown Error, onWebhookVerified throws) →
+ *    `handler_failed { retryable: true }` (map to HTTP 5xx)
+ *
+ * Callers should map retryable `handler_failed` to 5xx so providers redeliver.
+ * Reserve forgery-class outcomes only for explicit verify-false / signature
+ * failures / `{ ok: false }` — never for unknown throws.
+ */
+function classifyVerifyThrow(
+  err: unknown,
+): "forgery" | "permanent" | "retryable" {
+  if (isForgeryClassVerifyError(err)) return "forgery";
+  if (isPermanentNonRetryableVerifyError(err)) return "permanent";
+  // Fail-open: RateLimitError, TypeError, NetworkError, generic Error, etc.
+  return "retryable";
 }
 
 // ─── Payload hash helpers ────────────────────────────────────────────────────
@@ -381,6 +447,7 @@ function isPersistedPaymentEventEnvelopeShape(
 /**
  * Default payloadRef → handler event for `processRetryable`.
  * Dual-write envelopes auto-unwrap `.event`; plain events stay as-is.
+ * payloadRef was already redacted at store time (envelopeToPayloadRef).
  */
 function materializeEventFromPayloadRef(payloadRef: string): unknown {
   let parsed: unknown;
@@ -394,6 +461,31 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
     return parsed.event;
   }
   return parsed;
+}
+
+/**
+ * WEBHOOKS-5: redaction parity between first delivery and durable redrive.
+ *
+ * - Prefer caller `event` when present, deep-redacted via core
+ *   `redactWebhookPayloadSecrets` so first delivery does not expose secrets
+ *   that `processRetryable` would strip from stored `payloadRef`.
+ * - When `event` is omitted, materialize from redacted `payloadRef` (envelope
+ *   or durable snapshot) — same path as redrive.
+ */
+function resolveHandlerEvent(
+  inputEvent: unknown | undefined,
+  payloadRef: string | undefined,
+): unknown {
+  if (inputEvent !== undefined) {
+    if (inputEvent !== null && typeof inputEvent === "object") {
+      return redactWebhookPayloadSecrets(inputEvent);
+    }
+    return inputEvent;
+  }
+  if (payloadRef !== undefined) {
+    return materializeEventFromPayloadRef(payloadRef);
+  }
+  return undefined;
 }
 
 function isNonRetryable(error: unknown): boolean {
@@ -882,14 +974,9 @@ export function createWebhookInboxEngine(
       );
     }
 
-    // WEBHOOKS-2: materialize handler event from envelope/payloadRef when
-    // input.event is missing (envelope-only durable_retry dual-write shape).
-    // Matches processRetryable so first-delivery inline path is not left with
-    // ctx.event === undefined while paid data sits unused in payloadRef.
-    let handlerEvent = input.event;
-    if (handlerEvent === undefined && payloadRef !== undefined) {
-      handlerEvent = materializeEventFromPayloadRef(payloadRef);
-    }
+    // Materialize + redact so first delivery matches processRetryable:
+    // prefer caller event (redacted), else payloadRef snapshot.
+    const handlerEvent = resolveHandlerEvent(input.event, payloadRef);
 
     return runHandlerUnderLease({
       key,
@@ -911,13 +998,20 @@ export function createWebhookInboxEngine(
     try {
       verified = await input.verifyAndNormalize(input.raw);
     } catch (err) {
-      // WEBHOOKS-2: infrastructure / transport failures during verify must not
-      // look like forgery (invalid_webhook → typically 400). Provider redelivery
-      // (esp. PayPal postback outages) needs a retryable signal (5xx class).
-      if (isRetryableVerifyInfrastructureError(err)) {
-        return outcomeHandlerFailed(true);
+      // WEBHOOKS-1 / WEBHOOKS-4: fail-open on verify throws.
+      // Forgery class (InvalidWebhookError) → invalid_webhook (~400).
+      // Permanent structure/config → handler_failed non-retryable.
+      // RateLimitError / TypeError / NetworkError / unknown / onWebhookVerified
+      // throws → handler_failed retryable (~5xx) so paid events redeliver.
+      // Explicit ok:false is the other forgery path (below) — never claim.
+      const kind = classifyVerifyThrow(err);
+      if (kind === "forgery") {
+        return outcomeInvalidWebhook(sanitize(err));
       }
-      return outcomeInvalidWebhook(sanitize(err));
+      if (kind === "permanent") {
+        return outcomeHandlerFailed(false);
+      }
+      return outcomeHandlerFailed(true);
     }
     if (!verified.ok) {
       return outcomeInvalidWebhook(verified.reason);
@@ -973,8 +1067,11 @@ export function createWebhookInboxEngine(
         event = resolved.event;
         const fromEnvelope = envelopeToPayloadRef(resolved.envelope);
         if (fromEnvelope !== undefined) payloadRef = fromEnvelope;
-        // If resolver only provides envelope, materialize event from it.
-        if (event === undefined && payloadRef !== undefined) {
+        // WEBHOOKS-5: redact / materialize with same rules as first delivery.
+        // Prefer custom resolveEvent.event when provided; else payloadRef.
+        if (event !== undefined) {
+          event = resolveHandlerEvent(event, undefined);
+        } else if (payloadRef !== undefined) {
           event = materializeEventFromPayloadRef(payloadRef);
         }
       } else {

@@ -11,8 +11,10 @@
 import {
   attachPaymentEvent,
   hmacSha256Hex,
+  isPaidLikePaymentStatus,
   MOYASAR_EVENT_TYPE_MAP,
   type AttachPaymentEventOptions,
+  type PaymentEvent,
   type PaymentStatus,
   type WebhookEvent,
 } from "@paykernel/core";
@@ -253,12 +255,42 @@ const BUILTIN_GATEWAY_NAMES = new Set([
 ]);
 
 /**
+ * TESTKIT-2: never dual-write `payment.succeeded` unless domain status is
+ * paid-like (`paid` only). Type-only fulfillment tests must not green-pass
+ * pending/authorized/partial as settled money. Demote to `payment.processing`.
+ */
+function demoteUnpaidPaymentSucceeded(event: WebhookEvent): WebhookEvent {
+  const pe = event.event;
+  if (!pe || pe.type !== "payment.succeeded") {
+    return event;
+  }
+  const status = event.status ?? pe.payment?.status;
+  if (typeof status === "string" && isPaidLikePaymentStatus(status)) {
+    return event;
+  }
+
+  const demoted: PaymentEvent = {
+    ...pe,
+    type: "payment.processing",
+  };
+  const out: WebhookEvent = {
+    ...event,
+    event: demoted,
+    stableType: "payment.processing",
+  };
+  return out;
+}
+
+/**
  * Dual-write via core only. For custom/`mock` gateways, free-form types that
  * appear in {@link MOYASAR_EVENT_TYPE_MAP} are mapped by temporarily using the
  * stable name for `attachPaymentEvent`, then restoring the native `type` and
  * `provider.eventType` (Engineering Rule 8: do not hide provider-native names).
  *
  * Built-in gateway names never get this Moyasar-alias fallthrough.
+ *
+ * After mapping, {@link demoteUnpaidPaymentSucceeded} gates `payment.succeeded`
+ * on paid status (TESTKIT-2).
  */
 function dualWriteMockWebhookEvent(
   event: WebhookEvent,
@@ -266,7 +298,7 @@ function dualWriteMockWebhookEvent(
 ): WebhookEvent {
   const first = attachPaymentEvent(event, opts);
   if (first.event && first.event.type !== "provider.unmapped") {
-    return first;
+    return demoteUnpaidPaymentSucceeded(first);
   }
 
   // Built-in maps already ran inside attachPaymentEvent. Do not borrow
@@ -274,13 +306,13 @@ function dualWriteMockWebhookEvent(
   // that would dual-write production-mismatched stable types in tests.
   const gw = (event.gateway ?? "").toLowerCase();
   if (BUILTIN_GATEWAY_NAMES.has(gw)) {
-    return first;
+    return demoteUnpaidPaymentSucceeded(first);
   }
 
   // mock / custom only: free-form types that match Moyasar envelope names
   const alias = MOYASAR_EVENT_TYPE_MAP[event.type];
   if (alias === undefined) {
-    return first;
+    return demoteUnpaidPaymentSucceeded(first);
   }
 
   const remapped = attachPaymentEvent({ ...event, type: alias }, opts);
@@ -308,7 +340,7 @@ function dualWriteMockWebhookEvent(
     // PaymentEvent is a discriminated union; provider-only rewrite keeps arm
     out.event = paymentEvent as NonNullable<WebhookEvent["event"]>;
   }
-  return out;
+  return demoteUnpaidPaymentSucceeded(out);
 }
 
 function stableStringify(value: unknown): string {

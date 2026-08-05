@@ -159,8 +159,12 @@ describe("21.1 inputs affect matching", () => {
           amountMin: "100.00",
           amountCurrency: "USD",
         }).to("enterprise-psp"),
+        // Explicit small-amount rule (ROUTE-1: fallback no longer bypasses bounds)
+        route({
+          amountMax: "99.99",
+          amountCurrency: "USD",
+        }).to("stripe"),
       ],
-      fallback: "stripe",
     });
     expect(
       router.select({
@@ -172,6 +176,50 @@ describe("21.1 inputs affect matching", () => {
         amount: { amount: "50.00", currency: "USD" },
       }).gateway,
     ).toBe("stripe");
+  });
+
+  it("ROUTE-1: select-time fallback does not bypass amount-range bounds", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    // In-range still matches the rule
+    expect(
+      router.select({
+        amount: { amount: "150.00", currency: "USD" },
+      }).gateway,
+    ).toBe("enterprise-psp");
+    // Out-of-range must fail-closed — unconstrained fallback is dishonest
+    expect(() =>
+      router.select({
+        amount: { amount: "50.00", currency: "USD" },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("ROUTE-1: fallback still applies when no rule matches non-amount criteria", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    // EUR never matches the USD rule's non-amount criteria → fallback ok
+    const d = router.select({
+      currency: "EUR",
+      amount: { amount: "50.00", currency: "EUR" },
+    });
+    expect(d.gateway).toBe("stripe");
+    expect(d.usedFallback).toBe(true);
   });
 
   it("capability requirements fail-closed", () => {
@@ -264,6 +312,21 @@ describe("21.1 inputs affect matching", () => {
       merchantPreference: "paypal",
     });
     expect(d.gateway).toBe("paypal");
+    expect(d.reason).toBe("rule_match_merchant_preference");
+  });
+
+  it("ROUTE-2: merchantPreference boost is case-insensitive", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "USD" }).to("PayPal"),
+      ],
+    });
+    const d = router.select({
+      currency: "USD",
+      merchantPreference: "paypal",
+    });
+    expect(d.gateway).toBe("PayPal");
     expect(d.reason).toBe("rule_match_merchant_preference");
   });
 });

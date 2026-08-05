@@ -695,7 +695,9 @@ expectType<RequestLocalWebhookContext>({ rawPayload: {} });
 expectType<boolean>(isStablePaymentEventType("payment.succeeded"));
 expectType<PaymentEvent>(webhookEventToPaymentEvent(webhookEvent));
 expectType<PersistedPaymentEventEnvelope>(
-  toPersistedPaymentEventEnvelope(succeededEvent),
+  toPersistedPaymentEventEnvelope(succeededEvent, {
+    payloadHash: "a".repeat(64),
+  }),
 );
 expectType<string>(hashWebhookPayload({}));
 expectType<"payment.succeeded" | "provider.unmapped">(

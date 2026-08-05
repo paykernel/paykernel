@@ -87,17 +87,19 @@ function cloneUnknown(value: unknown): unknown {
 }
 
 /**
- * Simple in-memory idempotency store with TTL eviction and a bounded size.
+ * Simple in-memory idempotency store with a bounded size.
  * Suitable for a single long-lived process; provide a shared store (Redis/SQL)
  * for multi-worker or serverless deployments.
  *
- * Memory is capped at `maxEntries`. **MONEY-2:** every {@link IdempotencyStatus}
- * (`in_progress`, `completed`, and `unknown` after indeterminate mutations) is a
- * protected fence — never TTL-evicted and never dropped under capacity pressure.
- * Expired fences stay readable until explicit `delete`. When the store is full,
- * new keys are refused (throw) so double-refund/capture guards cannot silently
- * disappear. Records from `get`/`reserve` and stored by `set` are cloned so
- * callers cannot mutate the live cache.
+ * Memory is capped at `maxEntries`. **MONEY-2 (TTL honesty):** every
+ * {@link IdempotencyStatus} (`in_progress`, `completed`, and `unknown` after
+ * indeterminate mutations) is a **protected fence** — never TTL-evicted and never
+ * dropped under capacity pressure. The constructor `ttlMs` is retained only for
+ * diagnostics / future non-fence statuses and is **not** used for eviction today;
+ * fences stay readable past any recorded `expiresAt` until explicit `delete`.
+ * When the store is full, new keys are refused (throw) so double-refund/capture
+ * guards cannot silently disappear. Records from `get`/`reserve` and stored by
+ * `set` are cloned so callers cannot mutate the live cache.
  *
  * Prefer a shared store (Redis/SQL) for multi-worker or high-cardinality keys;
  * this in-memory store prioritizes fence integrity over automatic reclamation.
@@ -108,6 +110,11 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
     { record: IdempotencyRecord; expiresAt: number }
   >();
 
+  /**
+   * @param ttlMs - Retained for API compatibility / diagnostics only (MONEY-2).
+   *   Does **not** evict protected fences; records remain until `delete`.
+   * @param maxEntries - Hard cap; new keys throw when full of fences.
+   */
   constructor(
     private readonly ttlMs: number = DEFAULT_TTL_MS,
     private readonly maxEntries: number = DEFAULT_MAX_ENTRIES,

@@ -285,9 +285,10 @@ export function createRedisReconciliationStore(
 
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(async () => {
+        // STORES-4: fail closed on invalid input.now — never NaN/"NaN" ZSET scores.
         const nowMs =
           input.now !== undefined
-            ? String(Date.parse(input.now))
+            ? msFromIso(input.now)
             : clockNowMsString(ctx.clock);
         const nowIso =
           input.now !== undefined ? input.now : clockNowIso(ctx.clock);

@@ -8,6 +8,7 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
+  canonicalizeIsoTimestamp,
 } from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
@@ -48,6 +49,7 @@ INSERT INTO ${table} (
 )
 ON CONFLICT (key) DO UPDATE SET
   status = 'claimed',
+  payload_hash = excluded.payload_hash,
   payload_ref = COALESCE(excluded.payload_ref, ${table}.payload_ref),
   lease_owner = excluded.lease_owner,
   lease_token = excluded.lease_token,
@@ -60,12 +62,15 @@ ON CONFLICT (key) DO UPDATE SET
   generation = ${table}.generation + 1,
   available_at = excluded.available_at,
   updated_at = excluded.updated_at
-WHERE ${table}.payload_hash = excluded.payload_hash
-  AND ${table}.status NOT IN ('completed', 'failed', 'dead_letter')
+WHERE ${table}.status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
     (
       ${table}.status = 'pending'
-      AND (${table}.available_at IS NULL OR ${table}.available_at <= excluded.updated_at)
+      AND (
+        ${table}.available_at IS NULL
+        OR ${table}.available_at <= excluded.updated_at
+        OR ${table}.payload_hash != excluded.payload_hash
+      )
     )
     OR (
       ${table}.status = 'claimed'
@@ -134,17 +139,18 @@ export function createD1WebhookInboxStore(
         if (!existing) {
           throw new StoreUnavailableError("webhook claim: no row after claim attempt");
         }
-        // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
         if (existing.status === "completed") {
           return { kind: "already_completed", record: existing };
         }
         if (existing.status === "failed" || existing.status === "dead_letter") {
           return { kind: "duplicate_failed", record: existing };
         }
-        if (existing.payloadHash !== input.payloadHash) {
+        if (
+          existing.status === "claimed" &&
+          existing.payloadHash !== input.payloadHash
+        ) {
           return { kind: "payload_hash_conflict", record: existing };
         }
-        // pending + failed claim SQL = available_at gate (do not burn attempts)
         if (existing.status === "pending") {
           return {
             kind: "not_available",
@@ -292,7 +298,12 @@ export function createD1WebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
-        const now = input.now ?? clockNowIso(ctx.clock);
+        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
+        // Non-Z input.now written into available_at on soft-release would break ordering.
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0).

@@ -175,7 +175,7 @@ describe("engine + testkit memory store integration", () => {
     expect(runs).toBe(0);
   });
 
-  it("non-terminal payload hash conflict surfaces as payload_conflict outcome", async () => {
+  it("idle non-terminal hash mismatch supersedes and redrives (WEBHOOKS-3)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -198,18 +198,52 @@ describe("engine + testkit memory store integration", () => {
       "pending",
     );
 
-    // Same key, different hash on non-terminal row → payload_conflict.
+    // Idle pending + corrected hash source: supersede, do not stick forever.
     let secondRuns = 0;
-    const conflict = await engine.processVerified({
+    const supersede = await engine.processVerified({
       gateway: "stripe",
       providerEventId: "evt_pending_conflict",
       payloadHash: "h2-different",
+      event: { type: "payment.succeeded" },
       handler: async () => {
         secondRuns++;
-        throw new Error("must not run on payload_conflict");
+      },
+    });
+    expect(supersede.outcome).toBe("processed");
+    expect(secondRuns).toBe(1);
+    expect((await store.get("stripe:evt_pending_conflict"))?.payloadHash).toBe(
+      "h2-different",
+    );
+  });
+
+  it("active lease + different hash still surfaces payload_conflict", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      defaultRetryAfterMs: 0,
+    });
+
+    // Park an in-progress claim by acquiring via store (active lease held).
+    const held = await store.claim({
+      key: "stripe:evt_active_conflict",
+      payloadHash: "h1",
+      owner: "worker-a",
+      leaseMs: 60_000,
+    });
+    expect(held.kind).toBe("acquired");
+
+    let runs = 0;
+    const conflict = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_active_conflict",
+      payloadHash: "h2-different",
+      event: { type: "payment.succeeded" },
+      handler: async () => {
+        runs++;
       },
     });
     expect(conflict).toEqual({ outcome: "payload_conflict" });
-    expect(secondRuns).toBe(0);
+    expect(runs).toBe(0);
   });
 });

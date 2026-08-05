@@ -135,7 +135,8 @@ describe("withPaymentOperation", () => {
     );
     expect(outcomes[0]!.attributes?.outcome).toBe("indeterminate");
     expect(snap.counters[METRIC_NAMES.indeterminateOperations]).toBe(1);
-    expect(snap.counters[METRIC_NAMES.reconciliationDrift]).toBe(1);
+    // OBS-3: create + reconRequired is not proven money drift — no drift count
+    expect(snap.counters[METRIC_NAMES.reconciliationDrift] ?? 0).toBe(0);
     // Must not collapse indeterminate into a synthetic "failed" only label
     expect(
       outcomes.every((o) => o.attributes?.outcome !== "failed"),
@@ -143,6 +144,82 @@ describe("withPaymentOperation", () => {
     // OBS-1: non-throw indeterminate must not end span OK
     expect(spans[0]!.status?.code).toBe("error");
     expect(spans[0]!.status?.message).toBe("indeterminate");
+  });
+
+  it("counts reconciliationDrift only on proven money recon path (OBS-3)", async () => {
+    const metrics = createInMemoryPaymentMetrics();
+    const ctx = createOperationContext({
+      operationId: "op_recon_drift",
+      gateway: "stripe",
+      operationType: "payment.reconcile",
+    });
+
+    await withPaymentOperation(
+      {
+        context: ctx,
+        metrics,
+        clock: fakeClock([0, 3]),
+        countReconciliationDrift: true,
+      },
+      async () => ({
+        result: { drifted: true },
+        contextPatch: {
+          normalizedOutcome: "succeeded",
+          reconciliationRequired: true,
+        },
+      }),
+    );
+
+    expect(metrics.snapshot().counters[METRIC_NAMES.reconciliationDrift]).toBe(
+      1,
+    );
+
+    // Same flag on create still does not count as money drift
+    const metrics2 = createInMemoryPaymentMetrics();
+    await withPaymentOperation(
+      {
+        context: createOperationContext({
+          operationId: "op_create_recon",
+          gateway: "stripe",
+          operationType: "payment.create",
+        }),
+        metrics: metrics2,
+        clock: fakeClock([0, 1]),
+        countReconciliationDrift: true,
+      },
+      async () => ({
+        result: true,
+        contextPatch: {
+          normalizedOutcome: "indeterminate",
+          reconciliationRequired: true,
+        },
+      }),
+    );
+    expect(
+      metrics2.snapshot().counters[METRIC_NAMES.reconciliationDrift] ?? 0,
+    ).toBe(0);
+  });
+
+  it("ends span error when normalizedOutcome is omitted (OBS-1)", async () => {
+    const metrics = createInMemoryPaymentMetrics();
+    const { tracer, spans } = recordingTracer();
+    const ctx = createOperationContext({
+      operationId: "op_no_outcome",
+      gateway: "stripe",
+      operationType: "payment.create",
+    });
+
+    await withPaymentOperation(
+      { context: ctx, metrics, tracer, clock: fakeClock([0, 2]) },
+      async () => ({ result: { id: "pi_x" } }),
+    );
+
+    expect(spans[0]!.status?.code).toBe("error");
+    expect(spans[0]!.status?.message).toBe("unknown");
+    const outcomes = metrics.snapshot().samples.filter(
+      (s) => s.name === METRIC_NAMES.operationOutcomes,
+    );
+    expect(outcomes[0]!.attributes?.outcome).toBe("unknown");
   });
 
   it("ends span error for non-throw failed outcomes (OBS-1)", async () => {
@@ -297,7 +374,7 @@ describe("withPaymentOperation", () => {
     expect(spans[0]!.attributes.durationMs).toBe(3);
   });
 
-  it("re-throws errors, marks span error, outcome indeterminate (OBS-2)", async () => {
+  it("re-throws errors, marks span error, outcome indeterminate", async () => {
     const metrics = createInMemoryPaymentMetrics();
     const { tracer, spans } = recordingTracer();
     const ctx = createOperationContext({
@@ -323,10 +400,11 @@ describe("withPaymentOperation", () => {
     expect(metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations]).toBe(
       1,
     );
-    // OBS-4: transport-ambiguous throw must flag recon work for drift counter
+    // OBS-3: transport-ambiguous throw sets reconRequired but does not count
+    // money drift (void is not payment.reconcile).
     expect(
-      metrics.snapshot().counters[METRIC_NAMES.reconciliationDrift],
-    ).toBe(1);
+      metrics.snapshot().counters[METRIC_NAMES.reconciliationDrift] ?? 0,
+    ).toBe(0);
   });
 
   it("classifies CardDeclinedError throw as declined not indeterminate (OBS-2)", async () => {

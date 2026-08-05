@@ -304,6 +304,29 @@ class PaymobIndeterminateGatewayError extends NetworkError {
 }
 
 /**
+ * HTTP 200 after a money mutation with an empty/malformed/unreadable body.
+ * Paymob may have accepted the capture/refund/void; do not release the
+ * idempotency fence (same as network/5xx indeterminate paths).
+ */
+class PaymobIndeterminateResponseError extends NetworkError {
+  constructor(operation: string, detail: string, rawResponse: unknown) {
+    super(
+      `Paymob ${operation} API returned HTTP 200 with an unreadable body; gateway outcome is unknown (${detail})`,
+      rawResponse,
+    );
+    this.name = "PaymobIndeterminateResponseError";
+  }
+}
+
+function isPaymobIndeterminateError(error: unknown): boolean {
+  return (
+    error instanceof PaymobIndeterminateNetworkError ||
+    error instanceof PaymobIndeterminateGatewayError ||
+    error instanceof PaymobIndeterminateResponseError
+  );
+}
+
+/**
  * Paymob (Accept) payment gateway implementation
  * Supports Paymob Unified Intention API and legacy iframe checkout.
  * @see https://developers.paymob.com/paymob-docs/integration-paths/apis
@@ -762,19 +785,24 @@ export class PaymobGateway extends BaseGateway {
           );
         }
 
-        const success = this.requireBoolean(
+        // PAYMOB-1: HTTP 200 means the mutation may already be applied. Coerce
+        // string booleans; missing/invalid success is indeterminate (fence).
+        const success = this.requireMutationBoolean(
           data.success,
           "Paymob Capture API response is missing success",
           data,
+          "Capture",
         );
         // Prefer provider cumulative `captured_amount` when present (including 0).
         // When omitted, sum THIS REQUEST's amount onto inquiry prior (multi-partial).
         // Do not treat response `amount_cents` as this-op — it may be the order
         // total and would overstate cumulative (PAYMOB-4).
+        // PAYMOB-4: coerce string money fields from mutation bodies.
         const currency = this.resolveCurrency(data.currency ?? resolvedAmount.currency);
+        const providerCapturedAmountCents = this.parseNumber(data.captured_amount);
         const cumulativeCapturedAmountCents =
-          typeof data.captured_amount === "number"
-            ? data.captured_amount
+          providerCapturedAmountCents !== undefined
+            ? providerCapturedAmountCents
             : (resolvedAmount.capturedAmountCents ?? 0) + resolvedAmount.amountCents;
         const status = this.mapCaptureStatus(data, success, {
           transactionAmountCents: resolvedAmount.transactionAmountCents,
@@ -874,19 +902,24 @@ export class PaymobGateway extends BaseGateway {
           );
         }
 
-        const success = this.requireBoolean(
+        // PAYMOB-1: HTTP 200 means the mutation may already be applied. Coerce
+        // string booleans; missing/invalid success is indeterminate (fence).
+        const success = this.requireMutationBoolean(
           data.success,
           "Paymob Void API response is missing success",
           data,
+          "Void",
         );
         const status: PaymentStatus = success ? "cancelled" : "failed";
         const outcome: PaymentOperationOutcome = success
           ? "succeeded"
           : "declined";
 
+        // PAYMOB-3: keep parent payment/txn id as gatewayId (same as capture).
+        // Child void response id is not a stable parent handle for later ops.
         return applyOutcomeToGatewayResult(
           {
-            gatewayId: String(data.id ?? p.gatewayPaymentId),
+            gatewayId: p.gatewayPaymentId,
             status,
             rawResponse: data,
             providerNativeStatus: success ? "voided" : "failed",
@@ -957,10 +990,13 @@ export class PaymobGateway extends BaseGateway {
           );
         }
 
-        const success = this.requireBoolean(
+        // PAYMOB-1: HTTP 200 means the mutation may already be applied. Coerce
+        // string booleans; missing/invalid success is indeterminate (fence).
+        const success = this.requireMutationBoolean(
           data.success,
           "Paymob Refund API response is missing success",
           data,
+          "Refund",
         );
         const currency = this.resolveCurrency(data.currency ?? resolvedAmount.currency);
         const status =
@@ -978,10 +1014,11 @@ export class PaymobGateway extends BaseGateway {
 
         // PAYMOB-4: never alias the parent payment/txn id as gatewayRefundId.
         // Prefer the refund transaction id from the response body.
+        // PAYMOB-1: missing id after HTTP 200 is indeterminate — do not clear fence.
         if (data.id === undefined || data.id === null) {
-          throw new GatewayApiError(
+          throw new PaymobIndeterminateResponseError(
+            "Refund",
             "Paymob Refund API response is missing refund transaction id",
-            "paymob",
             { response: data },
           );
         }
@@ -991,11 +1028,13 @@ export class PaymobGateway extends BaseGateway {
         // counted until settled. Only set totalRefunded for completed refunds
         // (body cumulative when present; else inquiry prior + this request).
         // Failed outcomes also omit — never invent a refund total on failure.
+        // PAYMOB-4: coerce string money fields from mutation bodies.
+        const providerRefundedAmountCents = this.parseNumber(data.refunded_amount_cents);
         const totalRefundedCents =
           status === "pending" || status === "failed"
             ? undefined
-            : typeof data.refunded_amount_cents === "number"
-              ? data.refunded_amount_cents
+            : providerRefundedAmountCents !== undefined
+              ? providerRefundedAmountCents
               : (resolvedAmount.refundedAmountCents ?? 0) +
                 resolvedAmount.amountCents;
 
@@ -1226,12 +1265,22 @@ export class PaymobGateway extends BaseGateway {
   }
 
   private parseCardTokenWebhookEvent(payload: PaymobCardTokenWebhookPayload): WebhookEvent {
+    // PAYMOB-2: bind gatewayPaymentId from HMAC-covered fields only.
+    // CARD_TOKEN_HMAC_FIELDS covers order_id + id — not next_payment_intention.
+    // Prefer signed order_id; fall back to token record id (also signed).
+    const signedOrderId =
+      payload.obj.order_id !== undefined &&
+      payload.obj.order_id !== null &&
+      String(payload.obj.order_id).trim().length > 0
+        ? String(payload.obj.order_id).trim()
+        : undefined;
+    const gatewayPaymentId = signedOrderId ?? String(payload.obj.id);
     const legacy: WebhookEvent = {
       id: String(payload.obj.id),
       type: payload.type,
       gateway: "paymob",
       paymentId: undefined,
-      gatewayPaymentId: payload.obj.next_payment_intention ?? String(payload.obj.order_id),
+      gatewayPaymentId,
       gatewayObjectId: String(payload.obj.id),
       gatewayToken: payload.obj.token,
       status: "setup_completed",
@@ -1612,8 +1661,9 @@ export class PaymobGateway extends BaseGateway {
         const moneyCurrency = this.resolveMoneyCurrency(transaction, "transaction inquiry");
         const status = this.mapTransactionStatus(transaction);
         // Fail-closed: missing success must not look paid. Mutations use
-        // requireBoolean; inquiry defaults false so mapPaymobOutcome declines
-        // and mapTransactionStatus cannot treat uncertain success as paid.
+        // requireMutationBoolean (indeterminate after HTTP 200); inquiry defaults
+        // false so mapPaymobOutcome declines and mapTransactionStatus cannot
+        // treat uncertain success as paid.
         const successFlag =
           typeof transaction.success === "boolean" ? transaction.success : false;
         const outcome = this.mapPaymobOutcome(status, successFlag, {
@@ -2799,10 +2849,9 @@ export class PaymobGateway extends BaseGateway {
       }, operation);
       return result;
     }).catch(async (error) => {
-      if (
-        error instanceof PaymobIndeterminateNetworkError ||
-        error instanceof PaymobIndeterminateGatewayError
-      ) {
+      // Network/5xx after POST and HTTP-200 body validation failures all fence:
+      // Paymob may have applied the money op (PAYMOB-1).
+      if (isPaymobIndeterminateError(error)) {
         this.idempotencyCache.set(cacheKey, {
           fingerprint,
           status: "unknown",
@@ -3011,6 +3060,28 @@ export class PaymobGateway extends BaseGateway {
     }
 
     throw new GatewayApiError(message, "paymob", raw);
+  }
+
+  /**
+   * Require a boolean from a money-mutation response after HTTP 200.
+   * Coerces string `"true"`/`"false"` (common on some Paymob edges).
+   * Missing/invalid values are **indeterminate** — the mutation may already
+   * have applied; callers must retain the idempotency fence (PAYMOB-1).
+   */
+  private requireMutationBoolean(
+    value: unknown,
+    message: string,
+    raw: unknown,
+    operation: string,
+  ): boolean {
+    if (typeof value === "boolean") {
+      return value;
+    }
+    const coerced = this.parseBoolean(value);
+    if (coerced !== undefined) {
+      return coerced;
+    }
+    throw new PaymobIndeterminateResponseError(operation, message, raw);
   }
 
   private recordOrUndefined(value: unknown): Record<string, unknown> | undefined {

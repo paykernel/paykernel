@@ -457,10 +457,29 @@ function resolveMoneyParseOptions(
     return options;
   }
 
+  // MONEY-3: if Money carries an exponent field, it must be a valid integer
+  // scale. Invalid values fail closed (never silently drop to ISO and 10×/100×).
+  if (Object.prototype.hasOwnProperty.call(m, "exponent") && m.exponent !== undefined) {
+    const exp = m.exponent;
+    if (typeof exp !== "number" || !Number.isInteger(exp) || exp < 0) {
+      throwInvalidAmount(
+        `Invalid Money.exponent: must be an integer >= 0 (got ${String(exp)})`,
+        "invalid_exponent",
+      );
+    }
+    if (exp > MAX_EXPONENT) {
+      throwInvalidAmount(
+        `Money.exponent ${exp} exceeds maximum supported (${MAX_EXPONENT})`,
+        "invalid_exponent",
+      );
+    }
+  }
+
   const stored =
     typeof m.exponent === "number" &&
     Number.isInteger(m.exponent) &&
-    m.exponent >= 0
+    m.exponent >= 0 &&
+    m.exponent <= MAX_EXPONENT
       ? m.exponent
       : undefined;
 

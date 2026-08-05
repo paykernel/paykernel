@@ -186,14 +186,17 @@ export function createMemoryWebhookInboxStore(
         if (base.status === "dead_letter" || base.status === "failed") {
           return { kind: "duplicate_failed", record: base };
         }
-        if (base.payloadHash !== input.payloadHash) {
-          return { kind: "payload_hash_conflict", record: base };
-        }
+        // Active lease: same hash → in_progress; different hash cannot supersede.
         if (base.status === "claimed" && isLeaseActive(base, clock)) {
+          if (base.payloadHash !== input.payloadHash) {
+            return { kind: "payload_hash_conflict", record: base };
+          }
           return { kind: "in_progress", record: base };
         }
-        // True backoff: pending with future availableAt must not reacquire.
+        // Same-hash backoff only. Idle hash mismatch falls through and
+        // supersedes so raw-string vs object digests do not stick redrive.
         if (
+          base.payloadHash === input.payloadHash &&
           base.status === "pending" &&
           Date.parse(base.availableAt) > clock.nowMs()
         ) {

@@ -1050,7 +1050,7 @@ describe("PaymobGateway", () => {
       expect(result.status).toBe("completed");
     });
 
-    it("rejects refund responses missing refund transaction id (PAYMOB-4)", async () => {
+    it("rejects refund responses missing refund transaction id as indeterminate (PAYMOB-1/4)", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
         jsonResponse({ token: "auth_token_123" }),
@@ -1058,13 +1058,14 @@ describe("PaymobGateway", () => {
         jsonResponse({ success: true, refunded_amount_cents: 5000, currency: "SAR" }),
       );
 
+      // HTTP 200 + missing refund id: NetworkError (indeterminate fence), not clean GatewayApiError.
       await expect(
         actionGateway.refundPayment({
           gatewayPaymentId: "123456789",
           amount: 50,
           currency: "SAR",
         }),
-      ).rejects.toThrow(GatewayApiError);
+      ).rejects.toThrow(NetworkError);
     });
 
     it("derives full capture amount from transaction inquiry when amount is omitted", async () => {
@@ -1832,7 +1833,7 @@ describe("PaymobGateway", () => {
       expect(result.capturedAmount).toBe(40);
     });
 
-    it("rejects malformed successful action responses", async () => {
+    it("rejects malformed successful action responses as indeterminate (PAYMOB-1)", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
         jsonResponse({ token: "auth_token_123" }),
@@ -1840,11 +1841,144 @@ describe("PaymobGateway", () => {
         jsonResponse({ id: 123 }),
       );
 
+      // HTTP 200 + missing success is NetworkError (indeterminate), not a clean GatewayApiError.
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
         amount: 50,
         currency: "SAR",
-      })).rejects.toThrow(GatewayApiError);
+        idempotencyKey: "capture_malformed_body_200",
+      })).rejects.toThrow(NetworkError);
+    });
+
+    it("keeps idempotency fence after HTTP 200 + malformed capture body (PAYMOB-1)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        // HTTP 200 empty-ish body after accepted capture
+        jsonResponse({}),
+      );
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "capture_200_malformed_fence",
+      };
+
+      await expect(actionGateway.capturePayment(params)).rejects.toThrow(NetworkError);
+      // Second attempt must be blocked — fence retained (no double capture).
+      await expect(actionGateway.capturePayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://ksa.paymob.com/api/auth/tokens",
+        "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        "https://ksa.paymob.com/api/acceptance/capture",
+      ]);
+    });
+
+    it("keeps idempotency fence after HTTP 200 + missing refund id (PAYMOB-1)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        // HTTP 200 with success but no refund transaction id
+        jsonResponse({ success: true, refunded_amount_cents: 5000 }),
+      );
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_200_missing_id_fence",
+      };
+
+      await expect(actionGateway.refundPayment(params)).rejects.toThrow(NetworkError);
+      await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://ksa.paymob.com/api/auth/tokens",
+        "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        "https://ksa.paymob.com/api/acceptance/void_refund/refund",
+      ]);
+    });
+
+    it("keeps idempotency fence after HTTP 200 + non-boolean success on void (PAYMOB-1)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, success: "not-a-boolean" }),
+      );
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        idempotencyKey: "void_200_bad_success_fence",
+      };
+
+      await expect(actionGateway.voidPayment(params)).rejects.toThrow(NetworkError);
+      await expect(actionGateway.voidPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://ksa.paymob.com/api/auth/tokens",
+        "https://ksa.paymob.com/api/acceptance/void_refund/void",
+      ]);
+    });
+
+    it("coerces string success and string money fields on capture/refund mutations (PAYMOB-4)", async () => {
+      const captureGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        jsonResponse({
+          id: 888001,
+          success: "true",
+          captured_amount: "4000",
+          currency: "SAR",
+        }),
+      );
+
+      const capture = await captureGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 40,
+        currency: "SAR",
+      });
+      expect(capture.status).toBe("partially_captured");
+      expect(capture.capturedAmount).toBe(40);
+      expect(capture.gatewayId).toBe("123456789");
+
+      const refundGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_456" }),
+        jsonResponse({ id: 123, amount_cents: 10000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({
+          id: 999002,
+          success: "true",
+          refunded_amount_cents: "2500",
+          currency: "SAR",
+        }),
+      );
+
+      const refund = await refundGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 25,
+        currency: "SAR",
+      });
+      expect(refund.status).toBe("completed");
+      expect(refund.totalRefunded).toBe(25);
+      expect(refund.gatewayRefundId).toBe("999002");
+    });
+
+    it("keeps parent gatewayId on void even when response id differs (PAYMOB-3)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 777888, success: true }),
+      );
+
+      const result = await actionGateway.voidPayment({
+        gatewayPaymentId: "123456789",
+      });
+
+      expect(result.gatewayId).toBe("123456789");
+      expect(result.gatewayId).not.toBe("777888");
+      expect(result.status).toBe("cancelled");
     });
 
     it("maps Paymob API errors safely when raw message is not a string", async () => {
@@ -2657,9 +2791,55 @@ describe("PaymobGateway", () => {
 
       expect(event.status).toBe("setup_completed");
       expect(event.paymentId).toBeUndefined();
-      expect(event.gatewayPaymentId).toBe("pi_next_123");
+      // PAYMOB-2: HMAC-covered order_id only — never unsigned next_payment_intention.
+      expect(event.gatewayPaymentId).toBe("order_abc123");
+      expect(event.gatewayPaymentId).not.toBe("pi_next_123");
       expect(event.gatewayObjectId).toBe("9988");
       expect(event.gatewayToken).toBe("tok_saved_card_123");
+    });
+
+    it("TOKEN without next_payment_intention uses signed order_id (PAYMOB-2)", () => {
+      const payload: PaymobCardTokenWebhookPayload = {
+        type: "TOKEN",
+        obj: {
+          id: 9988,
+          token: "tok_saved_card_123",
+          masked_pan: "512345xxxxxx2346",
+          merchant_id: 302852,
+          card_subtype: "MasterCard",
+          created_at: "2024-12-31T12:00:00Z",
+          email: "customer@example.com",
+          order_id: "order_hmac_only_456",
+        },
+      };
+
+      const event = gateway.parseWebhookEvent(payload);
+
+      expect(event.status).toBe("setup_completed");
+      expect(event.gatewayPaymentId).toBe("order_hmac_only_456");
+      expect(event.gatewayObjectId).toBe("9988");
+      expect(event.gatewayToken).toBe("tok_saved_card_123");
+    });
+
+    it("TOKEN falls back to signed token id when order_id is absent (PAYMOB-2)", () => {
+      const payload = {
+        type: "TOKEN",
+        obj: {
+          id: 5544,
+          token: "tok_no_order",
+          masked_pan: "512345xxxxxx2346",
+          merchant_id: 302852,
+          card_subtype: "MasterCard",
+          created_at: "2024-12-31T12:00:00Z",
+          email: "customer@example.com",
+          // next_payment_intention present but unsigned — must not bind
+          next_payment_intention: "pi_victim_intention",
+        },
+      };
+
+      const event = gateway.parseWebhookEvent(payload);
+      expect(event.gatewayPaymentId).toBe("5544");
+      expect(event.gatewayPaymentId).not.toBe("pi_victim_intention");
     });
 
     it("verifies and parses TOKEN callbacks with string digits for id and merchant_id", () => {
@@ -2685,7 +2865,9 @@ describe("PaymobGateway", () => {
       expect(event.status).toBe("setup_completed");
       expect(event.gatewayObjectId).toBe("9988");
       expect(event.gatewayToken).toBe("tok_saved_card_123");
-      expect(event.gatewayPaymentId).toBe("pi_next_123");
+      // PAYMOB-2: signed order_id, not unsigned next_payment_intention.
+      expect(event.gatewayPaymentId).toBe("order_abc123");
+      expect(event.gatewayPaymentId).not.toBe("pi_next_123");
     });
 
     it("parses redirection callbacks without treating gateway order IDs as internal IDs", () => {

@@ -3,7 +3,6 @@
  */
 
 import {
-  createRedactingTelemetrySink,
   finalizeOperationContext,
   operationContextToTelemetryData,
   systemClock,
@@ -12,6 +11,7 @@ import {
   type TelemetrySink,
 } from "@paykernel/core";
 import type { PaymentMetrics } from "./metrics";
+import { createRedactingTelemetrySink } from "./redaction";
 import type { PaymentTracer } from "./spans";
 import { spanNameForOperationType } from "./spans";
 
@@ -22,8 +22,9 @@ export type PaymentOperationInstrumentation = {
   metrics?: PaymentMetrics;
   tracer?: PaymentTracer;
   /**
-   * Optional raw telemetry sink. Emissions are always scrubbed via
-   * {@link createRedactingTelemetrySink} before reaching the sink.
+   * Optional raw telemetry sink. Emissions are always scrubbed via this
+   * package’s {@link createRedactingTelemetrySink} (core `redact` + OBS
+   * operational-key restore) before reaching the sink.
    */
   telemetry?: TelemetrySink;
   /** Injectable clock (portable; defaults to systemClock / Date.now). */
@@ -31,8 +32,12 @@ export type PaymentOperationInstrumentation = {
   /** Telemetry event name. Default: payment.operation */
   telemetryEvent?: string;
   /**
-   * When true (default), reconciliationRequired on finalize increments
-   * reconciliationDrift once.
+   * When true, increments `reconciliationDrift` only for **proven money
+   * drift** signals (OBS-3): `reconciliationRequired` on a
+   * `payment.reconcile` operation. Default **false** — mere recon-needed
+   * flags (e.g. transport-indeterminate creates) must not pollute the
+   * drift counter. Callers with proven amount/status drift on reconcile
+   * should set this true (or emit the metric directly).
    */
   countReconciliationDrift?: boolean;
 };
@@ -111,18 +116,35 @@ function normalizedOutcomeFromThrown(
  * Non-throw outcomes that should end the span as error (OBS-1).
  * Failed / declined / error / indeterminate money results must not report
  * span status OK — OTEL error rates would undercount payment failures.
- * `requires_action` / `succeeded` / missing outcome stay OK.
+ * Missing / `unknown` outcome is also error (never invent healthy money
+ * success). Only explicit `succeeded` / `requires_action` (and prefixes)
+ * stay OK.
  */
 function isSpanErrorOutcome(outcome: string | undefined): boolean {
-  if (outcome === undefined) return false;
+  if (outcome === undefined) return true;
   if (isIndeterminateOutcome(outcome)) return true;
   const lower = outcome.toLowerCase();
-  return (
+  if (lower === "unknown" || lower === "error") return true;
+  if (
     lower === "failed" ||
     lower === "declined" ||
-    lower === "error" ||
     lower.startsWith("failed.") ||
     lower.startsWith("declined.")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Explicit non-error money outcomes that may end the span OK. */
+function isSpanOkOutcome(outcome: string | undefined): boolean {
+  if (outcome === undefined) return false;
+  const lower = outcome.toLowerCase();
+  return (
+    lower === "succeeded" ||
+    lower === "requires_action" ||
+    lower.startsWith("succeeded.") ||
+    lower.startsWith("requires_action.")
   );
 }
 
@@ -173,7 +195,7 @@ export function recordPaymentOperation(
     normalizedOutcome,
     error,
     telemetryEvent = "payment.operation",
-    countReconciliationDrift = true,
+    countReconciliationDrift = false,
   } = options;
 
   const patch: Parameters<typeof finalizeOperationContext>[1] = {
@@ -212,11 +234,25 @@ function applyMetrics(
   if (finished.retry === true) {
     metrics.retries.add(1, labels);
   }
-  // reconciliationRequired signals need for recon work; optional drift counter
-  // for ops dashboards (not "money drifted" alone). Disable via flag if noisy.
-  if (countReconciliationDrift && finished.reconciliationRequired === true) {
+  // OBS-3: drift counter only when caller opts in AND this is a reconcile op
+  // with reconciliationRequired (proven money drift path). Transport
+  // indeterminate creates that flag recon-needed must not pollute drift.
+  if (
+    countReconciliationDrift &&
+    finished.reconciliationRequired === true &&
+    isProvenMoneyDriftOperation(finished)
+  ) {
     metrics.reconciliationDrift.add(1, labels);
   }
+}
+
+/**
+ * True when operation context is the recon path where money drift is the
+ * intended signal (OBS-3). Matches `payment.reconcile` and dotted variants.
+ */
+function isProvenMoneyDriftOperation(ctx: OperationContext): boolean {
+  const t = (ctx.operationType ?? "").toLowerCase();
+  return t === "payment.reconcile" || t.startsWith("payment.reconcile.");
 }
 
 function errorNameForTelemetry(error: unknown): string {
@@ -307,17 +343,26 @@ function finalizeSpan(
     }
     return;
   }
-  // OBS-1: non-throw failed/indeterminate money outcomes end error, not OK.
+  // OBS-1: non-throw failed/indeterminate/missing money outcomes end error,
+  // not OK. Missing outcome is labeled "unknown" so OTEL never undercounts.
   // Message is the outcome label only (enum-ish — not secret-bearing text).
   const outcome = finished.normalizedOutcome;
-  if (isSpanErrorOutcome(outcome) && outcome !== undefined) {
+  if (isSpanOkOutcome(outcome)) {
+    span.end({ code: "ok" });
+    return;
+  }
+  if (isSpanErrorOutcome(outcome)) {
     span.end({
       code: "error",
-      message: outcome,
+      message: outcome ?? "unknown",
     });
     return;
   }
-  span.end({ code: "ok" });
+  // Unrecognized non-ok labels: fail closed to error (do not invent success).
+  span.end({
+    code: "error",
+    message: outcome ?? "unknown",
+  });
 }
 
 /**
@@ -342,7 +387,7 @@ export async function withPaymentOperation<T>(
     telemetry,
     clock = systemClock,
     telemetryEvent = "payment.operation",
-    countReconciliationDrift = true,
+    countReconciliationDrift = false,
   } = options;
 
   const startMs = clock.nowMs();
@@ -393,8 +438,10 @@ export async function withPaymentOperation<T>(
   if (thrown !== undefined && patch.normalizedOutcome === undefined) {
     const classified = normalizedOutcomeFromThrown(thrown);
     patch.normalizedOutcome = classified ?? "indeterminate";
-    // OBS-4: transport-ambiguous throws that stay indeterminate require recon
+    // Transport-ambiguous throws that stay indeterminate require recon work
     // (NetworkError / generic Error). Definitive declined/failed do not.
+    // Note: this sets reconciliationRequired for ops, but does NOT auto-
+    // increment reconciliationDrift (OBS-3 — drift only on proven money recon).
     if (
       classified === undefined &&
       patch.reconciliationRequired === undefined

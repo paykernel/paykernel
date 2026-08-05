@@ -4,6 +4,7 @@
 
 import {
   createSchemaNamespace,
+  MAX_RESULT_JSON_BYTES,
   type ResolvedSchemaNamespace,
   type IdempotencyRecordShape,
   type WebhookInboxRecordShape,
@@ -20,7 +21,10 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
-import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
+import {
+  StoreSerializationFailureError,
+  StoreUnsupportedFeatureError,
+} from "@paykernel/store-contracts";
 import type { DoExecutor } from "../sql-executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -177,8 +181,20 @@ function toReconciliationContract(shape: ReconciliationRecordShape): Reconciliat
   return rec;
 }
 
+/**
+ * Serialize an idempotency cached result for SQL TEXT `result_json`.
+ *
+ * Fail closed when JSON exceeds {@link MAX_RESULT_JSON_BYTES}: never store a
+ * truncated money outcome under the completed fence (STORES-3 / SQL-2).
+ */
 export function serializeResultJson(result: unknown): string {
-  return JSON.stringify(result);
+  const s = JSON.stringify(result);
+  if (s.length > MAX_RESULT_JSON_BYTES) {
+    throw new StoreSerializationFailureError(
+      `idempotency result JSON exceeds MAX_RESULT_JSON_BYTES (${MAX_RESULT_JSON_BYTES}); refusing to store truncated money outcome`,
+    );
+  }
+  return s;
 }
 
 /** Idempotency SELECT column list. */

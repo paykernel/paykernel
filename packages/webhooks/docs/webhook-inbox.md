@@ -129,12 +129,21 @@ Pipeline detail (engine-internal after claim):
 
 ## 3. Verify via `PaymentClient` or gateway, then process
 
-### Recommended: verify with core, process with webhooks
+### Recommended: verify with core, process with webhooks (claim before fulfill)
+
+**WEBHOOKS-2 invariant:** claim/lease **before** money side effects. Never run
+`onWebhookVerified` fulfillment (or any order/inventory mutation) inside
+`handleWebhook` when the inbox engine owns dedupe — put fulfillment in the
+engine `handler` after `processVerified` acquires a lease, or in
+`processRetryable` after re-claim.
 
 ```typescript
+// 1) Verify + normalize ONLY. Disable fulfillment hooks for this path
+//    (or leave onWebhookVerified empty) so side effects cannot run pre-claim.
 const event = await client.handleWebhook("moyasar", body);
-// handleWebhook: verify + normalize + hooks only — no inbox claim
+// handleWebhook: verify + normalize (+ hooks) — no inbox claim
 
+// 2) Claim under lease, then fulfill
 const outcome = await engine.processVerified({
   gateway: "moyasar",
   providerEventId: event.id,
@@ -144,24 +153,27 @@ const outcome = await engine.processVerified({
   }),
   event: event.event ?? event,
   handler: async (ctx) => {
+    // 3) Money / fulfillment side effects ONLY here (post-claim)
     await fulfill(ctx.event);
   },
 });
 ```
 
-Core `PaymentClient.handleWebhook` **does not** claim the inbox. Deduplication and lease fencing belong in this package.
+Core `PaymentClient.handleWebhook` **does not** claim the inbox. Deduplication and lease fencing belong in this package. Core docs require `onWebhookVerified` throws → **5xx** so providers retry; with the inbox, map engine `handler_failed { retryable: true }` the same way — and keep fulfillment out of verify.
 
-### Injected verifier wrapper
+### Injected verifier wrapper (verify-only path)
 
 ```typescript
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
+  // VERIFY ONLY — no fulfill / onWebhookVerified money work (WEBHOOKS-2).
   verifyAndNormalize: async (raw) => {
-    // Let infrastructure/transport throws propagate (network, timeout, 5xx
-    // verify postbacks). processWithVerifier classifies those via
-    // isRetryableVerifyInfrastructureError → handler_failed { retryable: true }
-    // (map to HTTP 5xx so providers redeliver). Only signature/forgery
-    // failures should return ok:false → invalid_webhook (typically 400).
+    // Let throws propagate. processWithVerifier classifies (WEBHOOKS-1/4/6):
+    // - InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
+    // - RateLimitError / TypeError / NetworkError / unknown Error →
+    //   handler_failed { retryable: true } (~5xx; redeliver paid events)
+    // - Permanent structure GatewayApiError → handler_failed { retryable: false }
+    // Never map infrastructure throws to ok:false (that stops redelivery).
     const event = await client.handleWebhook(
       "stripe",
       raw.body,
@@ -178,12 +190,13 @@ const outcome = await engine.processWithVerifier({
       event: event.event ?? event,
     };
   },
+  // Fulfill after claim (or park with ackAfterClaim + processRetryable).
   handler: async (ctx) => {
     await fulfill(ctx.event);
   },
 });
 // Signature forgery / ok:false → { outcome: "invalid_webhook" } — never claims
-// Verify infrastructure throw → { outcome: "handler_failed", retryable: true }
+// Verify infra / unknown throw → { outcome: "handler_failed", retryable: true }
 ```
 
 ### Gateway-only verify
@@ -256,9 +269,26 @@ void stringHash;
 void hashWebhookPayload;
 ```
 
-Pass a **precomputed** hash into `processVerified`. Same key + different hash on a **non-terminal** row → store `payload_hash_conflict` → engine `{ outcome: "payload_conflict" }`.
+Pass a **precomputed** hash into `processVerified`.
 
-**Terminal precedence (WEBHOOKS-4):** if the row is already `completed` / `dead_letter` / `failed`, claim returns `already_completed` / `duplicate_failed` **before** hash conflict — so a completed paid event redelivered with a raw-vs-object hash mismatch still ACKs as done (handler not re-run).
+**Hash conflict policy (WEBHOOKS-3 / WEBHOOKS-4):**
+
+| Existing row | New hash | Claim result |
+| --- | --- | --- |
+| `completed` / `dead_letter` / `failed` | any | terminal (`already_completed` / `duplicate_failed`) — no re-run |
+| Active lease + **same** hash | same | `in_progress` → `already_processing` |
+| Active lease + **different** hash | different | `payload_hash_conflict` → `payload_conflict` |
+| Idle non-terminal (pending / expired lease) + different hash | different | **supersede** — acquire with new hash (paid redrive recovers) |
+| Pending + future `availableAt` + **same** hash | same | `not_available` → `scheduled_for_retry` |
+
+Idle supersede prevents hash-source mistakes (raw body string vs parsed object) from permanently sticking a pending paid event. Prefer one canonical source via `resolveInboxPayloadHash` so supersede is rare.
+
+### Ops recovery for stuck `payload_conflict` / hash mistakes
+
+1. **Idle pending:** redeliver with the corrected `payloadHash` — engine/store supersedes and reclaims (WEBHOOKS-3).
+2. **Active lease conflict:** wait for lease expiry, then redeliver with the correct hash (supersede), or coordinate the holding worker.
+3. **Terminal wrong state / adapter without supersede:** delete the inbox row for `gateway:providerEventId` in your durable store (or age it into `deleteExpired` after `dead_letter`/`completed`), then allow provider redelivery. Document the delete in your runbook — never silent-ACK 200 on `payload_conflict` without a recovery path.
+4. **Going forward:** always use `resolveInboxPayloadHash({ eventPayloadHash, payloadForHash })` with the same object shape the gateway hashed.
 
 ---
 
@@ -419,10 +449,10 @@ type WebhookProcessingOutcome =
 | `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work; optional timing fields | **200 only if a worker runs `processRetryable`** |
 | `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff; includes `availableAt` / `retryAfterMs` when known | **200** if durable worker will re-drive; else **5xx** |
 | `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran; exposes `availableAt` / `retryAfterMs` | **5xx** (provider redelivery) unless a durable scheduler owns the row |
-| `handler_failed` `retryable: true` | Handler failed; may retry | 5xx (provider redelivery) |
-| `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail | 200 or 4xx per policy (do not infinite-retry forever) |
-| `payload_conflict` | Same key, different payload hash | 400 / 409 |
-| `invalid_webhook` | Bad input or verify failed (incl. `ackAfterClaim` without envelope) | 400 |
+| `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown throw (WEBHOOKS-1); may retry | 5xx (provider redelivery) |
+| `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail / permanent verify structure (WEBHOOKS-6) | 200 or 4xx per policy (do not infinite-retry forever) |
+| `payload_conflict` | Same key, different hash **while lease active** (idle rows supersede — WEBHOOKS-3) | 409 / 400 — not silent 200 |
+| `invalid_webhook` | Bad input, `{ ok: false }`, or `InvalidWebhookError` forgery only (not verify transport throws) | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 

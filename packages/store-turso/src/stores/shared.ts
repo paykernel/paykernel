@@ -2,8 +2,10 @@
  * Shared helpers for Turso / libSQL store implementations.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   createSchemaNamespace,
+  MAX_RESULT_JSON_BYTES,
   type ResolvedSchemaNamespace,
   type IdempotencyRecordShape,
   type WebhookInboxRecordShape,
@@ -20,7 +22,10 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
-import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
+import {
+  StoreSerializationFailureError,
+  StoreUnsupportedFeatureError,
+} from "@paykernel/store-contracts";
 import type { TursoExecutor } from "../executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -40,7 +45,11 @@ export function newLeaseToken(): string {
 export type ResolvedStoreContext = {
   namespace: ResolvedSchemaNamespace;
   clock: StoreClock;
-  /** Mutable active executor (swapped inside transaction). */
+  /**
+   * Active executor for this async context.
+   * Inside `withStoreTransaction`, returns the per-context TX executor (STORES-1);
+   * outside, returns the store's base executor.
+   */
   getExecutor: () => TursoExecutor;
   withStoreTransaction: <T>(fn: () => Promise<T> | T) => Promise<T>;
 };
@@ -48,14 +57,23 @@ export type ResolvedStoreContext = {
 export function resolveStoreContext(options: TursoStoreOptions): ResolvedStoreContext {
   const namespace = createSchemaNamespace(options.namespace ?? {});
   const clock = options.clock ?? createSystemClock();
-  let active: TursoExecutor = options.executor;
+  const base: TursoExecutor = options.executor;
+  /**
+   * STORES-1: per-async-context transactional executor.
+   * Concurrent `withTransaction` must not observe a process-global active swap
+   * (foreign ROLLBACK / lost fences on shared store instances).
+   * Nested same-async-context work sees the ALS store and uses the open TX.
+   */
+  const txnExecutor = new AsyncLocalStorage<TursoExecutor>();
+
+  const getExecutor = (): TursoExecutor => txnExecutor.getStore() ?? base;
 
   return {
     namespace,
     clock,
-    getExecutor: () => active,
+    getExecutor,
     withStoreTransaction: async <T>(fn: () => Promise<T> | T): Promise<T> => {
-      const outer = active;
+      const outer = getExecutor();
       if (typeof outer.transaction !== "function") {
         // Fail closed: never pretend multi-mutation atomicity without a real TX
         // (SHARED-1). Prefer single-statement UPSERT/RETURNING.
@@ -64,13 +82,7 @@ export function resolveStoreContext(options: TursoStoreOptions): ResolvedStoreCo
         );
       }
       return outer.transaction(async (tx) => {
-        const prev = active;
-        active = tx;
-        try {
-          return await fn();
-        } finally {
-          active = prev;
-        }
+        return txnExecutor.run(tx, async () => await fn());
       });
     },
   };
@@ -167,8 +179,20 @@ function toReconciliationContract(shape: ReconciliationRecordShape): Reconciliat
   return rec;
 }
 
+/**
+ * Serialize an idempotency cached result for SQL TEXT `result_json`.
+ *
+ * Fail closed when JSON exceeds {@link MAX_RESULT_JSON_BYTES}: never store a
+ * truncated money outcome under the completed fence (STORES-3 / SQL-2).
+ */
 export function serializeResultJson(result: unknown): string {
-  return JSON.stringify(result);
+  const s = JSON.stringify(result);
+  if (s.length > MAX_RESULT_JSON_BYTES) {
+    throw new StoreSerializationFailureError(
+      `idempotency result JSON exceeds MAX_RESULT_JSON_BYTES (${MAX_RESULT_JSON_BYTES}); refusing to store truncated money outcome`,
+    );
+  }
+  return s;
 }
 
 /** Idempotency SELECT column list. */

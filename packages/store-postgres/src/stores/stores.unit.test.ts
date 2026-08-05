@@ -650,4 +650,103 @@ describe("withTransaction honesty (SHARED-1)", () => {
     expect(out).toBe("ok");
     expect(nested).toBe(true);
   });
+
+  it("STORES-1: concurrent withTransaction isolate getExecutor (no process-global swap)", async () => {
+    // Regression: process-global active executor swap let concurrent TX B
+    // rewire store.getExecutor so TX A observed foreign connection / ROLLBACK.
+    const queryLog: string[] = [];
+    let nextLabel = 0;
+    const labels = ["A", "B"] as const;
+
+    const base = createScriptedExecutor({});
+    base.withTransaction = async <T>(fn: (tx: PostgresExecutor) => Promise<T>) => {
+      const label = labels[nextLabel++] ?? `T${nextLabel}`;
+      const tx: PostgresExecutor = {
+        async query() {
+          queryLog.push(label);
+          return [];
+        },
+        async execute() {
+          queryLog.push(`${label}:exec`);
+          return { rowCount: 0 };
+        },
+      };
+      return fn(tx);
+    };
+
+    const store = createPostgresIdempotencyStore({ executor: base });
+
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const holdA = new Promise<void>((r) => {
+      releaseA = r;
+    });
+    const holdB = new Promise<void>((r) => {
+      releaseB = r;
+    });
+
+    const pA = store.withTransaction(async () => {
+      await store.get("a1");
+      await holdA;
+      // While B is still mid-flight, A must still route to A's TX executor.
+      await store.get("a2");
+      return "a";
+    });
+
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    const pB = store.withTransaction(async () => {
+      await store.get("b1");
+      await holdB;
+      await store.get("b2");
+      return "b";
+    });
+
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+
+    // Both held mid-flight: broken global swap would make A's second get hit B.
+    releaseA();
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    releaseB();
+
+    await expect(Promise.all([pA, pB])).resolves.toEqual(["a", "b"]);
+    expect(queryLog).toEqual(["A", "B", "A", "B"]);
+  });
+});
+
+describe("serializeResultJson honesty (STORES-3)", () => {
+  it("rejects oversized idempotency result instead of truncating", async () => {
+    const { serializeResultJson } = await import("./shared");
+    const { MAX_RESULT_JSON_BYTES } = await import("@paykernel/sql-foundation");
+    const { StoreSerializationFailureError } = await import("@paykernel/store-contracts");
+    const ok = { status: "paid", amount: "10.00" };
+    expect(JSON.parse(serializeResultJson(ok))).toEqual(ok);
+    const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
+    expect(() => serializeResultJson(huge)).toThrow(StoreSerializationFailureError);
+  });
+});
+
+describe("listRetryable now canonical (STORES-2)", () => {
+  it("canonicalizes offset input.now for soft-release and select", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const canonicalNow = "2026-01-15T12:00:00.000Z";
+    // Same instant, non-Z form that would sort differently as TEXT.
+    const offsetNow = "2026-01-15T14:00:00+02:00";
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ rowCount: 0 }),
+      onQuery: () => [],
+    });
+    const store = createPostgresWebhookInboxStore({ executor, clock });
+    await store.listRetryable({ now: offsetNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(canonicalNow);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("SELECT") && c.sql.includes("pending"),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(canonicalNow);
+  });
 });

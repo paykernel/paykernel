@@ -18,6 +18,15 @@ Full guide: **[webhook-inbox.md](./webhook-inbox.md)** · Crash matrix: **[crash
 
 Verification/normalization is **injected** (`processWithVerifier` or `PaymentClient.handleWebhook` then `processVerified`); the engine does not hardcode PSP signature checks.
 
+**WEBHOOKS-2:** claim/lease **before** money side effects. Use verify-only
+`handleWebhook` / `verifyAndNormalize`; fulfill in `handler` or
+`processRetryable` after claim — never inside verify when using the inbox.
+
+**WEBHOOKS-1:** verify throws → fail-open `handler_failed { retryable: true }`
+except `InvalidWebhookError` / `{ ok: false }` (forgery) and permanent structure
+errors. Idle hash mismatch **supersedes** (WEBHOOKS-3); active lease conflict stays
+`payload_conflict`.
+
 ## Modes (10.3)
 
 | Mode | Fixed at construction | On handler failure |

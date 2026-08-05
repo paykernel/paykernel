@@ -487,21 +487,21 @@ export function createMemoryWebhookInboxStore(
       const existing = entries.get(input.key);
       if (existing) {
         const rec = releaseExpiredLease(input.key, existing);
-        // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
         if (rec.status === "completed") {
           return { kind: "already_completed", record: rec };
         }
         if (rec.status === "dead_letter" || rec.status === "failed") {
           return { kind: "duplicate_failed", record: rec };
         }
-        if (rec.payloadHash !== input.payloadHash) {
-          return { kind: "payload_hash_conflict", record: rec };
-        }
         if (rec.status === "claimed" && isLeaseActive(rec, clock)) {
+          if (rec.payloadHash !== input.payloadHash) {
+            return { kind: "payload_hash_conflict", record: rec };
+          }
           return { kind: "in_progress", record: rec };
         }
-        // True backoff: pending with future availableAt must not reacquire.
+        // Same-hash backoff only; idle hash mismatch supersedes (WEBHOOKS-3).
         if (
+          rec.payloadHash === input.payloadHash &&
           rec.status === "pending" &&
           Date.parse(rec.availableAt) > clock.nowMs()
         ) {
@@ -511,18 +511,13 @@ export function createMemoryWebhookInboxStore(
             availableAt: rec.availableAt,
           };
         }
-        // pending or expired lease → re-claim below using existing payload hash
       }
 
       enforceCap(input.key);
       const generation = (existing?.generation ?? 0) + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const now = iso(clock);
-      // availableAt gate already applied above when `existing` was present.
       const base = existing ? releaseExpiredLease(input.key, existing) : undefined;
-      if (base && base.payloadHash !== input.payloadHash) {
-        return { kind: "payload_hash_conflict", record: base };
-      }
       const record: WebhookInboxRecord = {
         key: input.key,
         status: "claimed",

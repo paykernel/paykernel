@@ -68,6 +68,9 @@ describe("ruleMatches", () => {
     const rule = route({ merchantPreference: "stripe" }).to("stripe");
     expect(ruleMatches(rule, { merchantPreference: "stripe" })).toBe(true);
     expect(ruleMatches(rule, { merchantPreference: "moyasar" })).toBe(false);
+    // ROUTE-2: case-insensitive
+    expect(ruleMatches(rule, { merchantPreference: "Stripe" })).toBe(true);
+    expect(ruleMatches(rule, { merchantPreference: "STRIPE" })).toBe(true);
   });
 
   it("amount range with AND other criteria", () => {

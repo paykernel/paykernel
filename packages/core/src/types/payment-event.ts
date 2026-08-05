@@ -15,6 +15,7 @@
  * @see docs/webhook-events.md
  */
 
+import { InvalidRequestError } from "../errors";
 import { sha256Hex } from "../runtime/crypto-portable";
 import type {
   CaptureStatus,
@@ -551,13 +552,18 @@ function stripRefund(r: Refund): Refund {
 }
 
 export type ToPersistedEnvelopeOptions = {
-  /** Precomputed hash; if omitted, computed from `rawForHash` when provided. */
+  /**
+   * Precomputed hash (non-empty). Required unless `rawForHash` is provided
+   * (CORE-3 fail-closed — no silent empty-object default).
+   */
   payloadHash?: string;
   /** ISO-8601; defaults to now. */
   storedAt?: string;
   /**
-   * Raw (or already-redacted) body to hash. Prefer the request body after
-   * gateway secret redaction (e.g. Moyasar without `secret_token`).
+   * Raw (or already-redacted) body to hash when `payloadHash` is omitted.
+   * Prefer the request body after gateway secret redaction (e.g. Moyasar
+   * without `secret_token`). Presence of this key (even with `undefined`)
+   * is intentional hashing input — not a missing-opts path.
    */
   rawForHash?: unknown;
 };
@@ -567,8 +573,10 @@ export type ToPersistedEnvelopeOptions = {
  *
  * - Strips nested raw payloads / client secrets from `event`
  * - Does **not** include headers, signatures, or raw webhook bodies
- * - `payloadHash` from opts or {@link hashWebhookPayload}(`rawForHash`);
- *   empty-object hash when neither is provided (callers should supply hash)
+ * - **CORE-3 (fail-closed):** `payloadHash` must come from `opts.payloadHash`
+ *   or {@link hashWebhookPayload}(`opts.rawForHash`). Omitting both throws
+ *   {@link InvalidRequestError} — never silently hash `{}` (identical false
+ *   digests across unrelated envelopes).
  */
 export function toPersistedPaymentEventEnvelope(
   event: PaymentEvent,
@@ -578,12 +586,23 @@ export function toPersistedPaymentEventEnvelope(
 
   let payloadHash: string;
   if (opts?.payloadHash !== undefined) {
+    if (
+      typeof opts.payloadHash !== "string" ||
+      opts.payloadHash.trim().length === 0
+    ) {
+      throw new InvalidRequestError(
+        "toPersistedPaymentEventEnvelope: payloadHash must be a non-empty string",
+      );
+    }
     payloadHash = opts.payloadHash;
   } else if (opts !== undefined && Object.hasOwn(opts, "rawForHash")) {
     payloadHash = hashWebhookPayload(opts.rawForHash);
   } else {
-    // Callers should supply payloadHash or rawForHash for meaningful digests.
-    payloadHash = hashWebhookPayload({});
+    // CORE-3: refuse silent empty-object hash (all bare callers would collide).
+    throw new InvalidRequestError(
+      "toPersistedPaymentEventEnvelope requires payloadHash or rawForHash " +
+        "(refuse default hash of empty object)",
+    );
   }
 
   return {

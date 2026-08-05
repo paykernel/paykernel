@@ -197,6 +197,39 @@ describe("sign zero policies and overrides", () => {
       toMinorUnits("1", "SAR", { exponentOverrides: { SAR: -1 } }),
     ).toThrow(InvalidRequestError);
   });
+
+  it("invalid Money.exponent fails closed (MONEY-3)", () => {
+    // Hand-built Money with corrupt exponent must not silently fall back to ISO.
+    const negative = {
+      amount: "10.50",
+      currency: "SAR",
+      exponent: -1,
+    } as unknown as ReturnType<typeof money>;
+    expect(() => toMinorUnits(negative)).toThrow(MoneyAmountError);
+    try {
+      toMinorUnits(negative);
+    } catch (error) {
+      expect((error as MoneyAmountError).kind).toBe("invalid_exponent");
+    }
+
+    const fractional = {
+      amount: "10.50",
+      currency: "SAR",
+      exponent: 1.5,
+    } as unknown as ReturnType<typeof money>;
+    expect(() => toMinorUnits(fractional)).toThrow(MoneyAmountError);
+
+    const huge = {
+      amount: "10",
+      currency: "JPY",
+      exponent: 99,
+    } as unknown as ReturnType<typeof money>;
+    expect(() => toMinorUnits(huge)).toThrow(MoneyAmountError);
+
+    // Valid stored exponent still re-pins.
+    const ok = money("10", "USD", { exponent: 0 });
+    expect(toMinorUnits(ok)).toBe(10n);
+  });
 });
 
 describe("safe number boundaries", () => {

@@ -105,10 +105,10 @@ export function createSqliteWebhookInboxStore(
             };
           }
 
-          // step2: conditional reclaim
-          // bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now, now
-          // (available_at gate + lease_expires_at gate each bind now)
+          // step2: conditional reclaim / hash supersede
+          // bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now
           const reclaimed = exec.run(updateSql, [
+            input.payloadHash,
             payloadRef,
             input.owner,
             leaseToken,
@@ -116,8 +116,8 @@ export function createSqliteWebhookInboxStore(
             now,
             now,
             input.key,
-            input.payloadHash,
             now,
+            input.payloadHash,
             now,
           ]);
 
@@ -141,17 +141,18 @@ export function createSqliteWebhookInboxStore(
               "webhook claim: no row after claim attempt",
             );
           }
-          // WEBHOOKS-1: terminal before payload_hash_conflict (contract WEBHOOKS-4).
           if (existing.status === "completed") {
             return { kind: "already_completed" as const, record: existing };
           }
           if (existing.status === "failed" || existing.status === "dead_letter") {
             return { kind: "duplicate_failed" as const, record: existing };
           }
-          if (existing.payloadHash !== input.payloadHash) {
+          if (
+            existing.status === "claimed" &&
+            existing.payloadHash !== input.payloadHash
+          ) {
             return { kind: "payload_hash_conflict" as const, record: existing };
           }
-          // pending + failed claim SQL = available_at gate (do not burn attempts)
           if (existing.status === "pending") {
             return {
               kind: "not_available" as const,

@@ -252,18 +252,20 @@ describe("decideWebhookClaim", () => {
       }).kind,
     ).toBe("duplicate_failed");
 
-    // Non-terminal still conflicts on hash mismatch
-    expect(
-      decideWebhookClaim({
-        key: "e",
-        payloadHash: "h2-different",
-        owner: "w",
-        leaseMs: 1000,
-        newLeaseToken: "t",
-        clock: { nowMs },
-        existing: { ...base, status: "pending" },
-      }).kind,
-    ).toBe("payload_hash_conflict");
+    // Idle pending + hash mismatch supersedes (WEBHOOKS-3), not permanent conflict.
+    const idleSupersede = decideWebhookClaim({
+      key: "e",
+      payloadHash: "h2-different",
+      owner: "w",
+      leaseMs: 1000,
+      newLeaseToken: "t",
+      clock: { nowMs },
+      existing: { ...base, status: "pending" },
+    });
+    expect(idleSupersede.kind).toBe("acquired");
+    if (idleSupersede.kind === "acquired") {
+      expect(idleSupersede.payloadHash).toBe("h2-different");
+    }
   });
 
   it("covers pending reclaim, completed, dead_letter, failed, in_progress, expired claim", () => {

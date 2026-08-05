@@ -19,6 +19,7 @@ import {
   CardDeclinedError,
   createRedactingLogger,
   defineGatewayCapabilities,
+  fingerprintParams,
   freezeCapabilities,
   fromMinorUnits,
   GatewayApiError,
@@ -424,20 +425,27 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
   const history: MockRequestRecord[] = [];
   const payments = new Map<string, PaymentStateInternal>();
   /**
-   * Idempotency key → completed createPayment result (process-local).
-   * Includes provider-side dual-timeout successes so retries never double-charge.
+   * Idempotency key → completed createPayment result + request fingerprint
+   * (process-local). Includes provider-side dual-timeout successes so retries
+   * never double-charge. Same key + different params → fingerprint_conflict
+   * (TESTKIT-1; mirrors lease-aware store semantics).
    */
-  const idempotencyResults = new Map<string, GatewayPaymentResult>();
+  const idempotencyResults = new Map<
+    string,
+    { result: GatewayPaymentResult; fingerprint: string }
+  >();
   /**
-   * In-flight createPayment promises by idempotency key.
-   * Prevents concurrent same-key creates from racing past the cache check
-   * (await on latency always yields a microtask even when delay is 0).
+   * In-flight createPayment promises by idempotency key (+ fingerprint of the
+   * first waiter so concurrent same-key / different-params fail closed).
    */
-  const idempotencyInflight = new Map<string, Promise<GatewayPaymentResult>>();
+  const idempotencyInflight = new Map<
+    string,
+    { promise: Promise<GatewayPaymentResult>; fingerprint: string }
+  >();
   /**
    * Per-payment serialization chain for capture / refund / void ledger mutations.
    * Without this, concurrent Promise.all partial captures/refunds race on
-   * remaining/refunded minors and can over-capture or over-refund (TESTKIT-1).
+   * remaining/refunded minors and can over-capture or over-refund.
    */
   const paymentLedgerChains = new Map<string, Promise<unknown>>();
   let seq = 0;
@@ -449,6 +457,45 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
   function nextId(prefix: string): string {
     seq += 1;
     return `${prefix}_${name}_${seq}`;
+  }
+
+  /**
+   * Fingerprint charge-identity params for createPayment idempotency.
+   * Uses resolved integer **minor** units (not raw major number / Money shape)
+   * so economically identical amounts collide; capture/callback/metadata still
+   * participate. Omits idempotencyKey / AbortSignal.
+   */
+  function createPaymentFingerprint(
+    params: CreatePaymentParams,
+    resolved: { minor: number },
+  ): string {
+    return fingerprintParams({
+      amountMinor: resolved.minor,
+      currency: params.currency.toUpperCase(),
+      capture: params.capture !== false,
+      callbackUrl: params.callbackUrl,
+      ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
+      ...(params.description !== undefined
+        ? { description: params.description }
+        : {}),
+    });
+  }
+
+  function fingerprintConflictError(idemKey: string): InvalidRequestError {
+    return new InvalidRequestError(
+      `createPayment idempotency fingerprint_conflict for key ${idemKey} (mock): same key with different amount/params`,
+    );
+  }
+
+  function cacheIdempotentResult(
+    idemKey: string,
+    fingerprint: string,
+    result: GatewayPaymentResult,
+  ): void {
+    idempotencyResults.set(idemKey, {
+      fingerprint,
+      result: { ...result },
+    });
   }
 
   /**
@@ -1052,30 +1099,44 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
           honorIdempotencyKey && params.idempotencyKey
             ? params.idempotencyKey
             : undefined;
+        const requestFingerprint = idemKey
+          ? createPaymentFingerprint(params, { minor })
+          : undefined;
 
-        // Process-local idempotency: same key → same gatewayId (no double-charge)
-        if (idemKey && idempotencyResults.has(idemKey)) {
+        // Process-local idempotency: same key + same fingerprint → same gatewayId
+        // (no double-charge). Same key + different amount/params → conflict.
+        if (idemKey && requestFingerprint && idempotencyResults.has(idemKey)) {
           const cached = idempotencyResults.get(idemKey)!;
+          if (cached.fingerprint !== requestFingerprint) {
+            throw fingerprintConflictError(idemKey);
+          }
           logger.info("createPayment idempotent replay", {
-            gatewayId: cached.gatewayId,
+            gatewayId: cached.result.gatewayId,
             idempotencyKey: idemKey,
           });
-          return { ...cached };
+          return { ...cached.result };
         }
 
         // Join in-flight same-key work so concurrent Promise.all does not charge twice.
-        if (idemKey) {
+        if (idemKey && requestFingerprint) {
           const pending = idempotencyInflight.get(idemKey);
           if (pending) {
+            if (pending.fingerprint !== requestFingerprint) {
+              throw fingerprintConflictError(idemKey);
+            }
             logger.info("createPayment idempotent join in-flight", {
               idempotencyKey: idemKey,
             });
             try {
-              return { ...(await pending) };
+              return { ...(await pending.promise) };
             } catch (err) {
               // Dual-timeout caches provider success before throwing; prefer cache.
               if (idempotencyResults.has(idemKey)) {
-                return { ...idempotencyResults.get(idemKey)! };
+                const cached = idempotencyResults.get(idemKey)!;
+                if (cached.fingerprint !== requestFingerprint) {
+                  throw fingerprintConflictError(idemKey);
+                }
+                return { ...cached.result };
               }
               throw err;
             }
@@ -1127,7 +1188,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 dualProviderResult = withId;
                 const dualMajor = withId.amount ?? major;
                 const dualMinor = majorToMinor(dualMajor, params.currency);
-                // Auth-only provider success: 0 capture + authorized (TESTKIT-2)
+                // Auth-only provider success: 0 capture + authorized
                 const authOnly = withId.status === "authorized";
                 const dualCapturedMajor = authOnly
                   ? 0
@@ -1143,8 +1204,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   authorized: authOnly,
                 });
                 // Cache before throw so retries never double-charge
-                if (idemKey && withId.gatewayId) {
-                  idempotencyResults.set(idemKey, { ...withId });
+                if (idemKey && requestFingerprint && withId.gatewayId) {
+                  cacheIdempotentResult(idemKey, requestFingerprint, withId);
                 }
               },
             );
@@ -1175,9 +1236,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             // Cache any resolved create with a gatewayId — including non-throw
             // indeterminate (success:false / reconciliationRequired). Skipping
             // that arm mints a second payment on same-key retry and trains a
-            // false "safe retry after indeterminate" (TESTKIT-1).
-            if (idemKey && finalResult.gatewayId) {
-              idempotencyResults.set(idemKey, { ...finalResult });
+            // false "safe retry after indeterminate".
+            if (idemKey && requestFingerprint && finalResult.gatewayId) {
+              cacheIdempotentResult(idemKey, requestFingerprint, finalResult);
             }
             return finalResult;
           } catch (err) {
@@ -1188,14 +1249,17 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
           }
         };
 
-        if (!idemKey) {
+        if (!idemKey || !requestFingerprint) {
           return runCreate();
         }
 
         const inflight = runCreate().finally(() => {
           idempotencyInflight.delete(idemKey);
         });
-        idempotencyInflight.set(idemKey, inflight);
+        idempotencyInflight.set(idemKey, {
+          promise: inflight,
+          fingerprint: requestFingerprint,
+        });
         return inflight;
       });
     },

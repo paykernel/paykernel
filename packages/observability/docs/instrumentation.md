@@ -29,7 +29,7 @@ import {
 | `telemetry` | no | Raw or redacting `TelemetrySink` — **always** re-wrapped with `createRedactingTelemetrySink` before emit |
 | `clock` | no | Injectable `Clock` (default `systemClock`) |
 | `telemetryEvent` | no | Default `"payment.operation"` |
-| `countReconciliationDrift` | no | Default `true` — when finalize has `reconciliationRequired: true`, increment `reconciliationDrift` |
+| `countReconciliationDrift` | no | Default `false` — when `true` **and** op is `payment.reconcile` with `reconciliationRequired: true`, increment `reconciliationDrift` (proven money-drift path only; OBS-3) |
 
 ## withPaymentOperation
 
@@ -116,10 +116,11 @@ On throw:
 - Telemetry may include `errorName` only (not `error.message` — may contain secrets).
 - Error is **rethrown** after instrumentation.
 
-On non-throw **failed / declined / indeterminate** outcomes (via `contextPatch.normalizedOutcome`):
+On non-throw **failed / declined / indeterminate / unknown** outcomes (via `contextPatch.normalizedOutcome`):
 
 - Span ends with `code: "error"` and `message` set to the outcome label (enum-ish only — not free-form secret text). OTEL error rates must not undercount payment failures just because the callback returned instead of throwing.
-- `succeeded` / `requires_action` / missing outcome still end `code: "ok"`.
+- **Missing `normalizedOutcome`** also ends `code: "error"` with message `"unknown"` (OBS-1) — never invent healthy money success.
+- Only explicit `succeeded` / `requires_action` end `code: "ok"`.
 
 ```typescript
 try {
@@ -156,14 +157,22 @@ Outcomes matching `indeterminate` or `indeterminate.*` (case-insensitive) trigge
 
 ```typescript
 await withPaymentOperation(
-  { context: started, metrics, countReconciliationDrift: true },
+  {
+    context: createOperationContext({
+      operationId: "…",
+      gateway: "stripe",
+      operationType: "payment.reconcile", // required for drift counter
+    }),
+    metrics,
+    countReconciliationDrift: true, // opt-in
+  },
   async () => ({
     result: x,
     contextPatch: {
       normalizedOutcome: "succeeded",
       retry: true, // → retries counter
-      // → reconciliationDrift counter (name is historical: fires on the
-      // reconciliationRequired *flag*, not proven money drift alone — OBS-2)
+      // → reconciliationDrift only when countReconciliationDrift +
+      // payment.reconcile + reconciliationRequired (OBS-3 proven money path)
       reconciliationRequired: true,
     },
   }),

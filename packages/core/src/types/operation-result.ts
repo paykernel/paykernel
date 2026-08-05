@@ -842,6 +842,11 @@ export function applyOutcomeToGatewayRefundResult(
 
 /**
  * Infer {@link RefundOperationOutcome} from a 0.x {@link GatewayRefundResult}.
+ *
+ * **CORE-1:** Explicit `outcome` is coerced against gateway `status` (same
+ * family as {@link inferOperationOutcome} / `mapGatewayRefundToOperationResult`).
+ * Bare callers must not treat `outcome: 'succeeded'` as settled while status is
+ * still `pending` (or reverse under-report pending when status is completed).
  */
 export function inferRefundOperationOutcome(
     result: GatewayRefundResult,
@@ -855,7 +860,9 @@ export function inferRefundOperationOutcome(
         return "indeterminate";
     }
     if (result.outcome !== undefined) {
-        return result.outcome;
+        // CORE-1: do not trust explicit outcome over gateway status — same
+        // coerce as mapGatewayRefundToOperationResult (payment path parity).
+        return coerceRefundOutcomeToGatewayStatus(result.outcome, result.status);
     }
     if (result.status === "completed" && result.success) {
         return "succeeded";

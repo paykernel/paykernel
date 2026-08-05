@@ -43,6 +43,7 @@ import {
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
 import {
+  msFromIso,
   newLeaseToken,
   normalizeScan,
   resolveRedisStoreContext,
@@ -230,9 +231,10 @@ export function createRedisWebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
+        // STORES-4: fail closed on invalid input.now — never NaN/"NaN" ZSET scores.
         const nowMs =
           input.now !== undefined
-            ? String(Date.parse(input.now))
+            ? msFromIso(input.now)
             : clockNowMsString(ctx.clock);
         const nowIso =
           input.now !== undefined ? input.now : clockNowIso(ctx.clock);

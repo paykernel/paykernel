@@ -103,7 +103,9 @@ export const STRIPE_EVENT_TYPE_MAP: Readonly<
   "charge.dispute.closed": "dispute.closed",
   "charge.dispute.funds_withdrawn": "dispute.updated",
   "charge.dispute.funds_reinstated": "dispute.updated",
-  // charge.refunded is the charge-level "refund activity happened" signal
+  // charge.refunded is the charge-level "refund activity happened" signal.
+  // Status-dependent demotion (refund_completed → refund.pending) is in
+  // mapStripeEventType (CORE-2); bare type without incomplete status stays completed.
   "charge.refunded": "refund.completed",
   "refund.failed": "refund.failed",
 };
@@ -170,6 +172,36 @@ function mapStripeEventType(
     if (status === "partially_captured") {
       return "payment.processing";
     }
+  }
+
+  // CORE-2: charge.refunded is charge-level refund activity. Static map settles
+  // as refund.completed, but incomplete domain snapshots (refund_completed) must
+  // demote to refund.pending so pure attachPaymentEvent / custom gateways match
+  // Stripe gateway demotion and type-only handlers do not over-settle.
+  if (providerEventType === "charge.refunded") {
+    const status = (context?.status ?? "").toLowerCase();
+    if (status === "refund_completed") {
+      return "refund.pending";
+    }
+    if (status === "failed" || status === "canceled" || status === "cancelled") {
+      return "refund.failed";
+    }
+    if (status === "pending" || status === "requires_action") {
+      return "refund.pending";
+    }
+    if (
+      status === "refunded" ||
+      status === "partially_refunded" ||
+      status === "succeeded" ||
+      status === "completed" ||
+      status === ""
+    ) {
+      // Proven full/partial (or bare charge.refunded without status context —
+      // gateway is expected to set domain status when incomplete).
+      return "refund.completed";
+    }
+    // Unrecognized status: fail-closed pending rather than type-only settle.
+    return "refund.pending";
   }
 
   if (

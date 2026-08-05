@@ -110,6 +110,12 @@ export async function resolveProviderSnapshot(
     };
   }
 
+  // RECON-3: when primary gatewayPaymentId returns definitive not_found, later
+  // secondary-key hits must not expose a *different* payment as the canonical
+  // provider snapshot (wrong-charge fulfillment / dual-write footgun). Same-id
+  // recovery via secondary is still allowed (eventual consistency).
+  let primaryPaymentIdNotFound = false;
+
   for (const step of runnable) {
     const key = step.key as string;
     const method = step.method as (
@@ -127,7 +133,10 @@ export async function resolveProviderSnapshot(
 
     if (outcome.kind === "found") {
       if (outcome.snapshots.length === 0) {
-        // Treat empty found as not_found — continue
+        // Treat empty found as not_found — continue (and track primary).
+        if (step.name === "gatewayPaymentId") {
+          primaryPaymentIdNotFound = true;
+        }
         continue;
       }
       if (outcome.snapshots.length > 1) {
@@ -137,10 +146,28 @@ export async function resolveProviderSnapshot(
         };
       }
       const provider = outcome.snapshots[0]!;
+
+      // RECON-3: after primary id not_found, refuse foreign secondary snapshots.
+      if (
+        primaryPaymentIdNotFound &&
+        target.gatewayPaymentId !== undefined &&
+        target.gatewayPaymentId !== "" &&
+        provider.gatewayPaymentId !== target.gatewayPaymentId
+      ) {
+        return {
+          outcome: "manual_review_required",
+          reason:
+            "Primary gatewayPaymentId was not_found but a secondary key resolved a different payment — do not expose foreign provider snapshot; manual identity review required",
+        };
+      }
+
       return finalizeWithExpected(target, provider);
     }
 
     if (outcome.kind === "not_found") {
+      if (step.name === "gatewayPaymentId") {
+        primaryPaymentIdNotFound = true;
+      }
       continue;
     }
 
@@ -162,6 +189,8 @@ export async function resolveProviderSnapshot(
     }
 
     // Non-retryable on this method (e.g. unsupported key shape): try next method.
+    // Do not mark primary as not_found for format errors — secondary may recover
+    // the same identity when the primary method cannot parse the key shape.
     continue;
   }
 
@@ -181,24 +210,21 @@ function finalizeWithExpected(
 ): ReconciliationResult {
   const differences = compareSnapshots(target.expected, provider);
 
-  // RECON-1: Always bind provider identity to target.gatewayPaymentId when the
-  // app already knows the intended provider payment. Secondary-key hits that
-  // resolve a *different* payment must surface as drift (never silent consistent),
-  // so policy cannot safe-upgrade local state against the wrong charge.
+  // RECON-1 / RECON-3: Always bind provider identity to target.gatewayPaymentId
+  // when the app already knows the intended provider payment. Secondary-key
+  // hits that resolve a *different* payment must never surface as a usable
+  // consistent/drift provider snapshot (apps reading result.provider could
+  // fulfill the wrong charge). Escalate without attaching the foreign snapshot.
   if (
     target.gatewayPaymentId !== undefined &&
     target.gatewayPaymentId !== "" &&
     target.gatewayPaymentId !== provider.gatewayPaymentId
   ) {
-    const already = differences.some((d) => d.field === "gatewayPaymentId");
-    if (!already) {
-      differences.push({
-        field: "gatewayPaymentId",
-        local: target.gatewayPaymentId,
-        provider: provider.gatewayPaymentId,
-        message: "gatewayPaymentId mismatch (secondary-key result unbound to target)",
-      });
-    }
+    return {
+      outcome: "manual_review_required",
+      reason:
+        "Lookup resolved a payment whose gatewayPaymentId does not match the target — do not expose foreign provider snapshot; manual identity review required",
+    };
   }
 
   if (differences.length === 0) {

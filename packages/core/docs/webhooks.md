@@ -76,8 +76,12 @@ app.post('/webhooks/paypal', async (req) => {
 ```
 
 - Requires `paypal.webhookId` from the PayPal Developer Dashboard.
-- `paypal-transmission-time` older than **15 minutes** (or unparseable) is
-  rejected before calling PayPal; `paypal-cert-url` must be HTTPS on `*.paypal.com`.
+- `paypal-transmission-time` must be parseable. **Unparseable** or **far-future**
+  timestamps are rejected before calling PayPal. **Aged** transmissions (including
+  older than 15 minutes / late retries after outages) are **soft-accepted**: the
+  SDK warns and still calls PayPal signature verify. There is **no hard 15-minute
+  replay reject** — merchants **must** dedupe by **`event.id`**. `paypal-cert-url`
+  must be HTTPS on `*.paypal.com`.
 - Transient PayPal API failures during verification throw (so PayPal can retry);
   return 5xx for those, 4xx only for genuinely invalid webhooks.
 - Details: [PayPal Webhooks](./paypal.md#webhook-verification).

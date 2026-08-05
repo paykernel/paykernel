@@ -450,6 +450,24 @@ describe("serializeResultJson / msFromIso honesty (audit REDIS-1 / REDIS-2)", ()
     ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
     expect(evalCount).toBe(0);
   });
+
+  it("STORES-4: listDue / listRetryable reject invalid input.now (no NaN scores)", async () => {
+    let sendCount = 0;
+    const { port } = createMockPort(() => {
+      sendCount++;
+      return null;
+    });
+    const recon = createRedisReconciliationStore({ port });
+    const webhook = createRedisWebhookInboxStore({ port });
+    await expect(recon.listDue({ now: "not-a-date" })).rejects.toBeInstanceOf(
+      StoreInvalidSchemaError,
+    );
+    await expect(
+      webhook.listRetryable({ now: "not-a-date" }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    // Fail before SCAN/ZRANGE — never emit NaN score commands.
+    expect(sendCount).toBe(0);
+  });
 });
 
 describe("deleteExpired composite logical keys (REDIS-1)", () => {

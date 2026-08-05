@@ -1360,6 +1360,149 @@ describe('PayPalGateway', () => {
             expect(event.currency).toBe('USD');
         });
 
+        it('CAPTURE.REFUNDED remaining held is exact on bigint minors (PAYPAL-2 float trap)', () => {
+            // Classic binary-float traps: 0.30-0.20 and 1.03-0.42 must not ULP-drift.
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-bigint-remaining',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-BIGINT-REMAINING',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '0.30',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '0.20',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBe(0.1);
+            expect(event.currency).toBe('USD');
+            // Not a float residue (e.g. 0.09999999999999998).
+            expect(Object.is(event.amount, 0.1)).toBe(true);
+        });
+
+        it('CAPTURE.REFUNDED face equals total_refunded → exact zero remaining omit path (PAYPAL-2)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-exact-zero-remaining',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-EXACT-ZERO',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '10.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '10.00',
+                        },
+                    },
+                },
+            });
+
+            // remainingMinor === 0n → no still-held funds (omit face; full path may use 0).
+            expect(event.status).toBe('partially_refunded');
+            // Zero remaining: either omit or publish 0 — never original face 10.
+            if (event.amount !== undefined) {
+                expect(event.amount).toBe(0);
+            }
+            expect(event.amount).not.toBe(10);
+        });
+
+        it('CAPTURE.REFUNDED KWD 3-decimal remaining held is honest (PAYPAL-2)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-kwd-remaining',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-KWD-REMAINING',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'KWD',
+                        value: '1.005',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'KWD',
+                            value: '0.500',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBe(0.505);
+            expect(event.currency).toBe('KWD');
+        });
+
+        it('ORDER multi-capture REFUNDED + PENDING sibling → partially_refunded (PAYPAL-3)', () => {
+            const payload = {
+                id: 'WH-multi-refunded-pending',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-refunded-pending',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-REFUNDED-DONE',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAPTURE-STILL-PENDING',
+                                        status: 'PENDING',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '60.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            // PENDING is an open money path — must not claim full refunded.
+            expect(event.status).toBe('partially_refunded');
+            expect(event.status).not.toBe('refunded');
+            // Incomplete snapshot: omit amount (do not publish REFUNDED/PENDING face).
+            expect(event.amount).toBeUndefined();
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-refunded-pending',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
         it('should throw error for invalid payload (missing id)', () => {
             expect(() => {
                 gateway.parseWebhookEvent({ event_type: 'TEST' });
@@ -4203,6 +4346,141 @@ describe('PayPalGateway', () => {
             expect(result.status).toBe('partially_refunded');
             expect(result.amount).toBe(70);
             expect(result.currency).toBe('USD');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('capture GET remaining held uses bigint minors not float subtract (PAYPAL-2)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-FLOAT-TRAP')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-FLOAT-TRAP',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '1.03',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '0.42',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-FLOAT-TRAP',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            // 103 - 42 = 61 cents → exact 0.61 major (not float residue).
+            expect(result.amount).toBe(0.61);
+            expect(result.currency).toBe('USD');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('capture GET face equals total_refunded → remainingMinor 0n omits held (PAYPAL-2)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-ZERO-REMAINING')) {
+                    return createMockResponse(
+                        { name: 'RESOURCE_NOT_FOUND', message: 'Order not found' },
+                        false,
+                        404,
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-ZERO-REMAINING',
+                    status: 'PARTIALLY_REFUNDED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '25.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '25.00',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-ZERO-REMAINING',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            // Exact zero remaining on minor bigint → no still-held face amount.
+            expect(result.amount).toBeUndefined();
+            expect(result.currency).toBeUndefined();
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('multi-capture REFUNDED + PENDING sibling is partially_refunded not refunded (PAYPAL-3)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-REFUNDED-PENDING',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-REFUNDED-SIB',
+                                    status: 'REFUNDED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                                {
+                                    id: 'CAP-PENDING-SIB',
+                                    status: 'PENDING',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '60.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-REFUNDED-PENDING',
+            });
+
+            expect(result.status).toBe('partially_refunded');
+            expect(result.status).not.toBe('refunded');
             expect(isPaidOutcome(result)).toBe(false);
         });
 

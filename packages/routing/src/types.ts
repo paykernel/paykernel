@@ -80,7 +80,7 @@ export type RouteMatchCriteria = {
   requiredCapabilities?: readonly string[];
   /**
    * When set on a rule, input.merchantPreference must equal this value
-   * (case-sensitive after trim) for the rule to match.
+   * (case-insensitive after trim; ROUTE-2) for the rule to match.
    */
   merchantPreference?: string;
 };

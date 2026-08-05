@@ -8,7 +8,7 @@
  * - amount range: inclusive min/max via money-safe bigint compare (same currency).
  * - tenant / tenantConfig: exact match for specified keys.
  * - requiredCapabilities: fail-closed without capability map for the gateway.
- * - merchantPreference on a rule: exact match against input.merchantPreference.
+ * - merchantPreference on a rule: case-insensitive match against input.merchantPreference.
  */
 
 import { amountInRange } from "./amount-range";
@@ -28,6 +28,21 @@ export function stringsEqualCi(
  * for the rule's target gateway (capabilities checked against that gateway).
  */
 export function ruleMatches(
+  rule: RoutingRule,
+  input: RoutingInput,
+): boolean {
+  if (!ruleMatchesIgnoringAmount(rule, input)) {
+    return false;
+  }
+  return amountInRange(input, rule.match);
+}
+
+/**
+ * Same as {@link ruleMatches} but skips amount-range criteria.
+ * Used by select-time fallback honesty (ROUTE-1) to detect out-of-range
+ * amounts that would otherwise be silently accepted by unconstrained fallback.
+ */
+export function ruleMatchesIgnoringAmount(
   rule: RoutingRule,
   input: RoutingInput,
 ): boolean {
@@ -59,15 +74,12 @@ export function ruleMatches(
     }
   }
 
+  // ROUTE-2: merchantPreference hard filter is case-insensitive (trim).
   if (m.merchantPreference !== undefined) {
     if (input.merchantPreference === undefined) return false;
-    if (m.merchantPreference.trim() !== input.merchantPreference.trim()) {
+    if (!stringsEqualCi(m.merchantPreference, input.merchantPreference)) {
       return false;
     }
-  }
-
-  if (!amountInRange(input, m)) {
-    return false;
   }
 
   // Rule-level requiredCapabilities, or input-level when rule omits them.

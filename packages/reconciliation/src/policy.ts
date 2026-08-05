@@ -5,7 +5,13 @@
  * NEVER call createPayment / capture / refund / void APIs.
  */
 
-import { isPaidLikePaymentStatus } from "@paykernel/core";
+import {
+  MoneyAmountError,
+  isPaidLikePaymentStatus,
+  normalizeCurrencyCode,
+  toMinorUnits,
+  type Money,
+} from "@paykernel/core";
 import type {
   LocalPaymentSnapshot,
   ProviderPaymentSnapshot,
@@ -165,6 +171,61 @@ function identityBoundToTarget(
   return true;
 }
 
+/**
+ * True when a Money total is present and non-zero (or unparseable).
+ *
+ * Fail-closed: missing totals → false (not proven moved). Present but
+ * unparseable / excess-precision → true (treat as funds-moved risk).
+ * Uses bigint minor units via core `toMinorUnits` (never float).
+ */
+function moneyIsNonZero(m: Money | undefined): boolean {
+  if (m === undefined) return false;
+  const amount = String(m.amount ?? "").trim();
+  const currencyRaw = String(m.currency ?? "").trim();
+  if (!amount || !currencyRaw) {
+    // Incomplete money snapshot while field is present — fail-closed.
+    return true;
+  }
+  try {
+    const currency = normalizeCurrencyCode(currencyRaw);
+    const minor = toMinorUnits(amount, currency, {
+      allowZero: true,
+      allowNegative: true,
+    });
+    return minor !== 0n;
+  } catch (err) {
+    if (err instanceof MoneyAmountError) {
+      // Unparseable / excess precision — refuse safe status-only updates.
+      return true;
+    }
+    throw err;
+  }
+}
+
+/**
+ * RECON-1: provider reported definitive failed/cancelled but money totals show
+ * funds already moved (capture or refund). Status-only `update_local_to_failed`
+ * would allow replacement create while provider holds/moved funds.
+ */
+function providerFailedWithMovedFunds(
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (!DEFINITIVE_FAILED_STATUSES.has(provider.status)) return false;
+  return (
+    moneyIsNonZero(provider.capturedAmount) ||
+    moneyIsNonZero(provider.refundedAmount)
+  );
+}
+
+/**
+ * RECON-2: provider is paid-like but already shows non-zero refunds — safe
+ * `update_local_to_paid` would under-report refunded state.
+ */
+function providerPaidWithRefunds(provider: ProviderPaymentSnapshot): boolean {
+  if (!isPaidLikePaymentStatus(provider.status)) return false;
+  return moneyIsNonZero(provider.refundedAmount);
+}
+
 function maySafeUpgradeToPaid(
   target: ReconciliationTarget,
   provider: ProviderPaymentSnapshot,
@@ -172,6 +233,18 @@ function maySafeUpgradeToPaid(
   // RECON-4: never auto-upgrade auth holds / partial captures to paid.
   if (isAuthHoldLocal(target.expected)) return false;
   if (!identityBoundToTarget(target, provider)) return false;
+  // RECON-2: non-zero refundedAmount is not a clean paid upgrade.
+  if (providerPaidWithRefunds(provider)) return false;
+  return true;
+}
+
+function maySafeUpdateToFailed(
+  target: ReconciliationTarget,
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (!identityBoundToTarget(target, provider)) return false;
+  // RECON-1: refuse status-only failed when capture/refund totals are non-zero.
+  if (providerFailedWithMovedFunds(provider)) return false;
   return true;
 }
 
@@ -182,7 +255,9 @@ function maySafeUpgradeToPaid(
  * - consistent → mark_consistent (only when not sparse+open-provider incomplete)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
- * - local pending/indeterminate + provider definitive failed + identity-bound → update_local_to_failed
+ *   (RECON-2: not when provider.refundedAmount is non-zero)
+ * - local pending/indeterminate + provider definitive failed + identity-bound →
+ *   update_local_to_failed (RECON-1: not when capturedAmount/refundedAmount non-zero)
  * - sparse/indeterminate local + open incomplete provider (auth/approved/partial) →
  *   manual_review (never mark_consistent safe:true — surface capture work)
  * - local `authorized` / `partially_captured` → paid is **never** safe auto-upgrade
@@ -215,15 +290,42 @@ export function decideReconciliationPolicy(
           provider: result.provider,
         };
       }
+      // RECON-2: paid + non-zero refunds is not a clean paid upgrade — review.
+      if (
+        isIndeterminateLocal(local) &&
+        providerPaidWithRefunds(result.provider) &&
+        identityBoundToTarget(target, result.provider)
+      ) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider is paid-like but refundedAmount is non-zero — refuse safe update_local_to_paid; surface refund state for review",
+        };
+      }
       if (
         isIndeterminateLocal(local) &&
         DEFINITIVE_FAILED_STATUSES.has(result.provider.status) &&
-        identityBoundToTarget(target, result.provider)
+        maySafeUpdateToFailed(target, result.provider)
       ) {
         return {
           action: "update_local_to_failed",
           safe: true,
           provider: result.provider,
+        };
+      }
+      // RECON-1: failed/cancelled status with non-zero capture/refund totals —
+      // never safe mark failed (replacement create would risk dual money).
+      if (
+        isIndeterminateLocal(local) &&
+        providerFailedWithMovedFunds(result.provider) &&
+        identityBoundToTarget(target, result.provider)
+      ) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider status is failed/cancelled but capturedAmount or refundedAmount is non-zero — refuse safe update_local_to_failed; funds may have moved",
         };
       }
       // Sparse / indeterminate expected + open incomplete provider must not
@@ -265,15 +367,42 @@ export function decideReconciliationPolicy(
           provider: result.provider,
         };
       }
+      // RECON-2 on status-only drift: paid + refunds → drift review, not paid.
+      if (
+        onlyStatus &&
+        isIndeterminateLocal(local) &&
+        providerPaidWithRefunds(result.provider) &&
+        identityBoundToTarget(target, result.provider)
+      ) {
+        return {
+          action: "apply_drift_review",
+          safe: false,
+          differences: result.differences,
+          provider: result.provider,
+        };
+      }
       if (
         onlyStatus &&
         isIndeterminateLocal(local) &&
         DEFINITIVE_FAILED_STATUSES.has(result.provider.status) &&
-        identityBoundToTarget(target, result.provider)
+        maySafeUpdateToFailed(target, result.provider)
       ) {
         return {
           action: "update_local_to_failed",
           safe: true,
+          provider: result.provider,
+        };
+      }
+      // RECON-1 on status-only drift: failed + non-zero money → not safe failed.
+      if (
+        onlyStatus &&
+        isIndeterminateLocal(local) &&
+        providerFailedWithMovedFunds(result.provider)
+      ) {
+        return {
+          action: "apply_drift_review",
+          safe: false,
+          differences: result.differences,
           provider: result.provider,
         };
       }
@@ -384,6 +513,8 @@ export function shouldForbidReplacementCharge(
   }
   // RECON-1: when provider snapshot is present and holds paid/open money,
   // forbid replacement even if local is terminal failed/cancelled (dual create).
+  // Also forbid when status is failed/cancelled but captured/refunded totals
+  // are non-zero (funds already moved — status-only failed is not safe recreate).
   if (
     (result.outcome === "consistent" || result.outcome === "drift_detected") &&
     result.provider !== undefined
@@ -391,7 +522,8 @@ export function shouldForbidReplacementCharge(
     const providerStatus = result.provider.status;
     if (
       isPaidLikePaymentStatus(providerStatus) ||
-      isOpenIncompleteProvider(providerStatus)
+      isOpenIncompleteProvider(providerStatus) ||
+      providerFailedWithMovedFunds(result.provider)
     ) {
       return true;
     }

@@ -31,7 +31,6 @@ import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
   type PaymentOperationOutcome,
-  type RefundOperationOutcome,
 } from "../../types/operation-result";
 import type {
   MoyasarWebhookPayload,
@@ -770,15 +769,30 @@ export class MoyasarGateway extends BaseGateway {
   async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("capturePayment", params, async (p) => {
       const requestBody: Record<string, unknown> = {};
+      const captureSignal = extractAbortSignal(p);
 
-      // Only include amount for partial captures
+      // Only include amount for partial captures. Bind minors to payment currency
+      // (MOYASAR-3) — never convert with caller-only currency (JPY/USD scale drift).
+      // Resolve before the idempotency fence so validation failures never stick the key.
       if (p.amount !== undefined) {
         if (!p.currency) {
           throw new InvalidRequestError(
             "currency is required for Moyasar partial captures so the amount can be converted to minor units correctly",
           );
         }
-        requestBody.amount = this.toMinorUnits(p.amount, p.currency);
+        const paymentCurrency = await this.resolvePaymentCurrencyForPartial(
+          p.gatewayPaymentId,
+          "capture",
+          captureSignal,
+        );
+        const callerCurrency = p.currency.trim().toUpperCase();
+        if (callerCurrency !== paymentCurrency) {
+          throw new InvalidRequestError(
+            `Moyasar capture currency ${callerCurrency} does not match payment currency ${paymentCurrency}`,
+            [{ path: ["currency"] }],
+          );
+        }
+        requestBody.amount = this.toMinorUnits(p.amount, paymentCurrency);
       }
 
       const hasBody = Object.keys(requestBody).length > 0;
@@ -789,7 +803,6 @@ export class MoyasarGateway extends BaseGateway {
       if (hasBody) {
         init.body = JSON.stringify(requestBody);
       }
-      const captureSignal = extractAbortSignal(p);
       if (captureSignal) {
         init.signal = captureSignal;
       }
@@ -823,15 +836,30 @@ export class MoyasarGateway extends BaseGateway {
   async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
     return this.executeWithHooks("refundPayment", params, async (p) => {
       const requestBody: Record<string, unknown> = {};
+      const refundSignal = extractAbortSignal(p);
 
-      // Only include amount for partial refunds
+      // Only include amount for partial refunds. Bind minors to payment currency
+      // (MOYASAR-3) — never convert with caller-only currency.
+      // Resolve before the idempotency fence so validation failures never stick the key.
       if (p.amount !== undefined) {
         if (!p.currency) {
           throw new InvalidRequestError(
             "currency is required for Moyasar partial refunds so the amount can be converted to minor units correctly",
           );
         }
-        requestBody.amount = this.toMinorUnits(p.amount, p.currency);
+        const paymentCurrency = await this.resolvePaymentCurrencyForPartial(
+          p.gatewayPaymentId,
+          "refund",
+          refundSignal,
+        );
+        const callerCurrency = p.currency.trim().toUpperCase();
+        if (callerCurrency !== paymentCurrency) {
+          throw new InvalidRequestError(
+            `Moyasar refund currency ${callerCurrency} does not match payment currency ${paymentCurrency}`,
+            [{ path: ["currency"] }],
+          );
+        }
+        requestBody.amount = this.toMinorUnits(p.amount, paymentCurrency);
       }
 
       const hasBody = Object.keys(requestBody).length > 0;
@@ -842,7 +870,6 @@ export class MoyasarGateway extends BaseGateway {
       if (hasBody) {
         init.body = JSON.stringify(requestBody);
       }
-      const refundSignal = extractAbortSignal(p);
       if (refundSignal) {
         init.signal = refundSignal;
       }
@@ -861,42 +888,59 @@ export class MoyasarGateway extends BaseGateway {
 
           const payment = data as MoyasarPaymentResponse;
           const paymentStatus = this.resolvePaymentStatus(payment);
+          const refundedMinor =
+            typeof payment.refunded === "number" &&
+            Number.isFinite(payment.refunded)
+              ? payment.refunded
+              : undefined;
+          const currency =
+            typeof payment.currency === "string" &&
+            payment.currency.trim().length > 0
+              ? payment.currency.trim().toUpperCase()
+              : undefined;
 
-          // Moyasar returns the payment object with updated refund info.
-          // There's no separate refund ID — refund is tracked on the payment.
-          // Prefer "completed" on HTTP 2xx when the returned payment reflects a
-          // refund (full/partial/incomplete snapshot), not only when provider
-          // status === "refunded". `refund_completed` is the fail-closed
-          // incomplete-money status (provider refunded without amount evidence).
-          const reflectsRefund =
-            payment.refunded > 0 ||
+          // Proven refund money only (full or partial). `refund_completed` is the
+          // fail-closed incomplete-money marker — never claim completed/succeeded
+          // with totalRefunded=0 (MOYASAR-2).
+          const provenRefund =
+            (refundedMinor !== undefined && refundedMinor > 0) ||
             paymentStatus === "refunded" ||
-            paymentStatus === "partially_refunded" ||
-            paymentStatus === "refund_completed" ||
-            payment.status === "refunded";
+            paymentStatus === "partially_refunded";
 
-          const status = reflectsRefund ? "completed" : "pending";
-          const outcome: RefundOperationOutcome = reflectsRefund
-            ? "succeeded"
-            : "pending";
+          if (provenRefund && refundedMinor !== undefined && currency !== undefined) {
+            return applyOutcomeToGatewayRefundResult(
+              {
+                // Payment ID (Moyasar has no separate refund entity)
+                gatewayRefundId: payment.id,
+                status: "completed",
+                totalRefunded: this.fromMinorUnits(refundedMinor, currency),
+                refundedAt: payment.refunded_at
+                  ? new Date(payment.refunded_at)
+                  : undefined,
+                rawResponse: payment,
+              },
+              "succeeded",
+            );
+          }
+
+          // Incomplete snapshot or refund not yet reflected: pending, omit invented 0.
           return applyOutcomeToGatewayRefundResult(
             {
-              // Payment ID (Moyasar has no separate refund entity)
               gatewayRefundId: payment.id,
-              status,
-              totalRefunded: this.fromMinorUnits(
-                typeof payment.refunded === "number" &&
-                  Number.isFinite(payment.refunded)
-                  ? payment.refunded
-                  : 0,
-                payment.currency,
-              ),
+              status: "pending",
+              ...(refundedMinor !== undefined &&
+              currency !== undefined &&
+              refundedMinor > 0
+                ? {
+                    totalRefunded: this.fromMinorUnits(refundedMinor, currency),
+                  }
+                : {}),
               refundedAt: payment.refunded_at
                 ? new Date(payment.refunded_at)
                 : undefined,
               rawResponse: payment,
             },
-            outcome,
+            "pending",
           );
         },
       );
@@ -937,9 +981,14 @@ export class MoyasarGateway extends BaseGateway {
             "Failed to void payment",
           )) as MoyasarPaymentResponse | MoyasarErrorResponse;
 
-          // Void completion is operation-succeeded even when status is cancelled.
-          return this.mapPaymentResponse(data as MoyasarPaymentResponse, {
-            forceOutcome: "succeeded",
+          const payment = data as MoyasarPaymentResponse;
+          // MOYASAR-5: force operation-succeeded only when provider confirms voided
+          // (maps to cancelled). Never force succeeded on paid/authorized/etc.
+          // residual 2xx bodies.
+          return this.mapPaymentResponse(payment, {
+            ...(payment.status === "voided"
+              ? { forceOutcome: "succeeded" as const }
+              : {}),
           });
         },
       );
@@ -1237,38 +1286,67 @@ export class MoyasarGateway extends BaseGateway {
     const nextAction = this.mapNextAction(payment);
     // Single mapStatus call: failed/abandoned/unmapped → "failed" (warn once)
     const baseStatus = this.mapStatus(payment.status);
-    const status = this.resolvePaymentStatus(payment, baseStatus);
+    let status = this.resolvePaymentStatus(payment, baseStatus);
+
+    // Finite minors only — never coerce missing/non-finite → 0 while keeping a
+    // paid-like settled snapshot (MOYASAR-1). Malformed amount after create must
+    // not throw (retry without given_id could double-create).
+    const amountMinor =
+      typeof payment.amount === "number" && Number.isFinite(payment.amount)
+        ? payment.amount
+        : undefined;
+    const feeMinor =
+      typeof payment.fee === "number" && Number.isFinite(payment.fee)
+        ? payment.fee
+        : undefined;
+    const capturedMinor =
+      typeof payment.captured === "number" && Number.isFinite(payment.captured)
+        ? payment.captured
+        : undefined;
+    const refundedMinor =
+      typeof payment.refunded === "number" && Number.isFinite(payment.refunded)
+        ? payment.refunded
+        : undefined;
+
+    // Paid-like without a finite amount snapshot: demote so isPaidOutcome stays
+    // false (Stripe/Paymob fail-closed pattern). Finite 0 is legitimate only for
+    // non-paid paths (e.g. verified → setup_completed).
+    if (status === "paid" && amountMinor === undefined) {
+      status = "processing";
+    }
+
     const outcome =
       options.forceOutcome ??
       this.mapMoyasarOutcome(status, nextAction, redirectUrl);
 
-    // Defensive: treat missing/non-finite amount/fee/captured/refunded as 0 so
-    // incomplete 2xx snapshots never throw while converting money fields
-    // (status still fails closed). Malformed amount after create would otherwise
-    // throw and encourage retries without given_id → double-create (MOYASAR-2).
-    const amountMinor =
-      typeof payment.amount === "number" && Number.isFinite(payment.amount)
-        ? payment.amount
-        : 0;
-    const feeMinor =
-      typeof payment.fee === "number" && Number.isFinite(payment.fee)
-        ? payment.fee
-        : 0;
-    const capturedMinor =
-      typeof payment.captured === "number" && Number.isFinite(payment.captured)
-        ? payment.captured
-        : 0;
-    const refundedMinor =
-      typeof payment.refunded === "number" && Number.isFinite(payment.refunded)
-        ? payment.refunded
-        : 0;
-    // MOYASAR-1: always publish currency with major-unit money fields so
-    // paymentFromGatewayResult keeps amount/fee/captured/refunded and docs
-    // post-3DS checks (`payment.currency === expectedCurrency`) work.
+    // MOYASAR-1: publish currency together with any major-unit money fields.
     const currency =
       typeof payment.currency === "string" && payment.currency.trim().length > 0
         ? payment.currency.trim().toUpperCase()
         : undefined;
+
+    const moneyFields =
+      currency !== undefined
+        ? {
+            currency,
+            ...(amountMinor !== undefined
+              ? { amount: this.fromMinorUnits(amountMinor, currency) }
+              : {}),
+            ...(feeMinor !== undefined
+              ? { fee: this.fromMinorUnits(feeMinor, currency) }
+              : {}),
+            ...(capturedMinor !== undefined
+              ? {
+                  capturedAmount: this.fromMinorUnits(capturedMinor, currency),
+                }
+              : {}),
+            ...(refundedMinor !== undefined
+              ? {
+                  refundedAmount: this.fromMinorUnits(refundedMinor, currency),
+                }
+              : {}),
+          }
+        : {};
 
     return applyOutcomeToGatewayResult(
       {
@@ -1277,19 +1355,7 @@ export class MoyasarGateway extends BaseGateway {
         rawResponse: payment,
         ...(redirectUrl !== undefined ? { redirectUrl } : {}),
         ...(nextAction !== undefined ? { nextAction } : {}),
-        // Currency is required for a complete money snapshot; conversion still
-        // needs a code — fall back only when provider omitted it (should not
-        // happen on real Moyasar 2xx bodies). Prefer omitting major units if we
-        // ever lack a currency (fail-closed via paymentFromGatewayResult).
-        ...(currency !== undefined
-          ? {
-              amount: this.fromMinorUnits(amountMinor, currency),
-              fee: this.fromMinorUnits(feeMinor, currency),
-              capturedAmount: this.fromMinorUnits(capturedMinor, currency),
-              refundedAmount: this.fromMinorUnits(refundedMinor, currency),
-              currency,
-            }
-          : {}),
+        ...moneyFields,
         providerNativeStatus: payment.status,
         gateway: "moyasar",
       },
@@ -1312,6 +1378,42 @@ export class MoyasarGateway extends BaseGateway {
           }
         : undefined,
     );
+  }
+
+  /**
+   * Fetch payment currency before partial capture/refund so minor conversion
+   * is bound to the provider payment (MOYASAR-3 / Paymob `resolveActionAmountCents`).
+   * Runs outside the mutation fence so mismatch never sticks an idempotency key.
+   */
+  private async resolvePaymentCurrencyForPartial(
+    gatewayPaymentId: string,
+    operation: "capture" | "refund",
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const getInit: RequestInit = {
+      method: "GET",
+      headers: this.getHeaders(),
+    };
+    if (signal) {
+      getInit.signal = signal;
+    }
+    const data = (await this.requestJson(
+      this.paymentPath(gatewayPaymentId),
+      getInit,
+      `Failed to fetch payment currency for Moyasar ${operation}`,
+    )) as MoyasarPaymentResponse;
+
+    const currency =
+      typeof data.currency === "string" && data.currency.trim().length > 0
+        ? data.currency.trim().toUpperCase()
+        : undefined;
+    if (currency === undefined) {
+      throw new InvalidRequestError(
+        `Moyasar ${operation} requires payment currency to validate the requested amount`,
+        [{ path: ["currency"] }],
+      );
+    }
+    return currency;
   }
 
   /**

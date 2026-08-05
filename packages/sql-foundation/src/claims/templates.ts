@@ -188,11 +188,13 @@ INSERT OR IGNORE INTO ${t} (
 export function webhookClaimTemplates(namespace?: ResolvedSchemaNamespace): ClaimTemplateSet {
   const t = table(LOGICAL_TABLES.webhookInbox, namespace);
   const intent =
-    "Atomic claim: insert-if-absent or reclaim pending-when-due/expired lease only; " +
-    "pending requires available_at <= now; expired claimed lease may reclaim for recovery " +
-    "even if available_at is future; payload_hash must match; increment generation; " +
-    "attempts++ only for pending (handler) reclaim — expired claimed reclaim keeps attempts (WEBHOOKS-1).";
+    "Atomic claim: insert-if-absent or reclaim pending-when-due/expired lease; " +
+    "pending same-hash requires available_at <= now; hash mismatch supersedes even " +
+    "during backoff (idle only); expired claimed may reclaim; active lease never " +
+    "supersedes; attempts++ only for pending reclaim (WEBHOOKS-1 / WEBHOOKS-3).";
 
+  // WEBHOOKS-3: idle hash mismatch may reclaim and SET payload_hash = EXCLUDED.
+  // Active lease is excluded by lease_expires_at > now (classified as conflict).
   const postgresSql = `
 INSERT INTO ${t} (
   key, status, payload_hash, payload_ref, lease_owner, lease_token, lease_expires_at,
@@ -202,6 +204,7 @@ INSERT INTO ${t} (
 )
 ON CONFLICT (key) DO UPDATE SET
   status = 'claimed',
+  payload_hash = EXCLUDED.payload_hash,
   payload_ref = COALESCE(EXCLUDED.payload_ref, ${t}.payload_ref),
   lease_owner = EXCLUDED.lease_owner,
   lease_token = EXCLUDED.lease_token,
@@ -213,12 +216,15 @@ ON CONFLICT (key) DO UPDATE SET
   generation = ${t}.generation + 1,
   available_at = EXCLUDED.available_at,
   updated_at = EXCLUDED.updated_at
-WHERE ${t}.payload_hash = EXCLUDED.payload_hash
-  AND ${t}.status NOT IN ('completed', 'failed', 'dead_letter')
+WHERE ${t}.status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
     (
       ${t}.status = 'pending'
-      AND (${t}.available_at IS NULL OR ${t}.available_at <= $7)
+      AND (
+        ${t}.available_at IS NULL
+        OR ${t}.available_at <= $7
+        OR ${t}.payload_hash IS DISTINCT FROM EXCLUDED.payload_hash
+      )
     )
     OR (
       ${t}.status = 'claimed'
@@ -241,6 +247,7 @@ INSERT OR IGNORE INTO ${t} (
   const sqliteUpdate = `
 UPDATE ${t} SET
   status = 'claimed',
+  payload_hash = ?,
   payload_ref = COALESCE(?, payload_ref),
   lease_owner = ?,
   lease_token = ?,
@@ -253,12 +260,15 @@ UPDATE ${t} SET
   available_at = ?,
   updated_at = ?
 WHERE key = ?
-  AND payload_hash = ?
   AND status NOT IN ('completed', 'failed', 'dead_letter')
   AND (
     (
       status = 'pending'
-      AND (available_at IS NULL OR available_at <= ?)
+      AND (
+        available_at IS NULL
+        OR available_at <= ?
+        OR payload_hash != ?
+      )
     )
     OR (
       status = 'claimed'
@@ -281,7 +291,7 @@ WHERE key = ?
     sqlite: {
       dialect: "sqlite",
       // Multi-step in one transaction; bind each step separately (see sql comments).
-      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, payloadHash, now, now):\n${sqliteUpdate}`,
+      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now):\n${sqliteUpdate}`,
       params: [
         "step1:key",
         "step1:payloadHash",
@@ -292,6 +302,7 @@ WHERE key = ?
         "step1:now",
         "step1:now",
         "step1:now",
+        "step2:payloadHash",
         "step2:payloadRef",
         "step2:owner",
         "step2:leaseToken",
@@ -299,8 +310,8 @@ WHERE key = ?
         "step2:now",
         "step2:now",
         "step2:key",
-        "step2:payloadHash",
         "step2:now",
+        "step2:payloadHash",
         "step2:now",
       ],
       intent: intent + " SQLite multi-step txn; bind each step separately.",

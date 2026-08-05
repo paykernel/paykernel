@@ -193,8 +193,8 @@ switch (decision.action) {
 
 | `action` | `safe` | When |
 | -------- | ------ | ---- |
-| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set |
-| `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound) |
+| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set; **not** when `provider.refundedAmount` is non-zero (RECON-2) |
+| `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound); **not** when `capturedAmount` or `refundedAmount` is non-zero (RECON-1 — funds may have moved; escalate to manual_review / apply_drift_review) |
 | `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
 | `retry_later` | `false` | Temporarily unavailable (reschedule lookup; never invent failed) |
@@ -216,7 +216,9 @@ Returns `true` when:
 - `result.outcome === "temporarily_unavailable"`, or
 - local expected is missing/indeterminate **or** any open money state
   (`pending` / `processing` / `authorized` / `approved` / partial / `paid` /
-  `refunded` / `refund_pending` / `refund_failed` / `refund_completed` / setup)
+  `refunded` / `refund_pending` / `refund_failed` / `refund_completed` / setup), or
+- provider snapshot is paid-like / open-incomplete **or** status is failed/cancelled
+  with non-zero `capturedAmount` / `refundedAmount` (RECON-1 — funds moved)
 
 **Never** convert `temporarily_unavailable` or retryable `provider_not_found` into local `failed` without a definitive provider response.
 

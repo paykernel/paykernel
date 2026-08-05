@@ -38,10 +38,16 @@ const engine = createWebhookInboxEngine({
   defaultLeaseMs: 30_000,
 });
 
-// Prefer: verify with PaymentClient.handleWebhook (core), then processVerified.
-// WEBHOOKS-2: one hash source — prefer event.payloadHash; else hash the same
-// object shape the gateway used (parsed rawPayload). Do NOT mix rawBody string
-// hashing with object event.payloadHash (different digests → payload_conflict).
+// WEBHOOKS-2 (required composition): claim/lease BEFORE money side effects.
+// 1) Verify + normalize only (core handleWebhook) — do NOT fulfill here.
+// 2) processVerified claims the inbox under a lease.
+// 3) Fulfill only inside handler (or processRetryable after claim).
+// Never run handleWebhook onWebhookVerified fulfillment inside
+// processWithVerifier.verifyAndNormalize when using the inbox engine.
+//
+// Hash source: prefer event.payloadHash; else hash the same object shape the
+// gateway used (parsed rawPayload). Do NOT mix rawBody string hashing with
+// object event.payloadHash (idle rows supersede; active lease → payload_conflict).
 const payloadHash = resolveInboxPayloadHash({
   eventPayloadHash: webhookEvent.payloadHash,
   payloadForHash: webhookEvent.rawPayload ?? webhookEvent.event ?? webhookEvent,
@@ -57,6 +63,7 @@ const outcome = await engine.processVerified({
   // processRetryable default auto-unwraps .event into ctx.event
   handler: async (ctx) => {
     // Long work: await ctx.renew(30_000);
+    // Fulfill AFTER claim — under lease (WEBHOOKS-2).
     await fulfill(ctx.event);
   },
 });
@@ -82,8 +89,11 @@ switch (outcome.outcome) {
     // never silent-ACK uncertain/failed work without a real worker design
     break;
   case "payload_conflict":
+    // typically 409 / 400 — active lease holds a different hash; do not ACK 200
+    // without recovery (WEBHOOKS-3). Idle pending supersedes automatically.
+    break;
   case "invalid_webhook":
-    // typically 400
+    // typically 400 — forgery / bad input only (not verify transport throws)
     break;
 }
 ```
@@ -103,18 +113,24 @@ const engine = createWebhookInboxEngine({ store, mode: "inline", clock });
 
 **Dual memory-store honesty:** this package keeps a **non-exported** in-package `memory-store` for engine unit tests (not on the public surface). Testkit ships a separate `createMemoryWebhookInboxStore` for app tests and conformance. Both are **test-only / NON-PRODUCTION** and can drift on SQL-fencing nuances; production apps must inject durable adapters (`@paykernel/store-*`) that pass `runWebhookInboxStoreConformanceSuite`.
 
-### With injected verifier
+### With injected verifier (verify-only; fulfill after claim)
 
 ```typescript
 import { resolveInboxPayloadHash } from "@paykernel/webhooks";
 
+// WEBHOOKS-2: verifyAndNormalize must be **verify-only**.
+// Do NOT put onWebhookVerified fulfillment / money side effects inside
+// handleWebhook hooks when using the inbox — fulfill in `handler` after claim.
+// Prefer: handleWebhook with no fulfillment hooks, or gateway.verify+parse only.
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   verifyAndNormalize: async (raw) => {
-    // Let infrastructure/transport throws propagate (network, timeout, 5xx
-    // verify postbacks). processWithVerifier classifies those →
-    // handler_failed { retryable: true } (map to HTTP 5xx so providers redeliver).
-    // Only signature/forgery failures should return ok:false → invalid_webhook.
+    // Let throws propagate. Classification (WEBHOOKS-1 / WEBHOOKS-4):
+    // - InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
+    // - RateLimitError / TypeError / NetworkError / unknown Error →
+    //   handler_failed { retryable: true } (~5xx; providers redeliver)
+    // - Permanent structure GatewayApiError → handler_failed { retryable: false }
+    // Prefer ok:false for signature forgery; do not catch-and-map infra to ok:false.
     const event = await client.handleWebhook(
       "stripe",
       raw.body,
@@ -132,11 +148,30 @@ const outcome = await engine.processWithVerifier({
       event,
     };
   },
+  // Fulfill only here — after atomic claim/lease (or in processRetryable).
   handler: async (ctx) => {
     await fulfill(ctx.event);
   },
 });
 ```
+
+### Payload hash conflict recovery (WEBHOOKS-3)
+
+Same key + different `payloadHash` on an **idle** non-terminal row (pending /
+expired lease) **supersedes** the stored hash and reclaims so paid redrive is
+not permanently stuck after a hash-source mistake (e.g. raw body string vs
+parsed object). Active leases still return `payload_conflict`.
+
+Terminal rows (`completed` / `dead_letter`) stay terminal (WEBHOOKS-4).
+
+**Ops recovery** when a row is terminal-wrong or an adapter has not implemented
+idle supersede yet:
+
+1. Prefer one canonical hash via `resolveInboxPayloadHash` going forward.
+2. Delete the stuck inbox row for `gateway:providerEventId` in your store
+   adapter (or `deleteExpired` after the row is `dead_letter` / `completed`
+   and aged), then allow provider redelivery / redrive.
+3. Do **not** silent-ACK `payload_conflict` as HTTP 200 without a recovery plan.
 
 ## Processing modes (explicit)
 

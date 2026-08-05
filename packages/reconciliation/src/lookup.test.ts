@@ -72,7 +72,7 @@ describe("safe lookup order", () => {
     }
   });
 
-  it("RECON-1: secondary-key wrong payment is drift not consistent/safe paid", async () => {
+  it("RECON-3: secondary-key wrong payment after primary not_found is manual_review (no foreign snapshot)", async () => {
     const lookup: ProviderLookupPort = {
       async findByPaymentId() {
         return { kind: "not_found" };
@@ -89,17 +89,40 @@ describe("safe lookup order", () => {
       expected: { status: "pending" },
     };
     const result = await resolveProviderSnapshot(target, lookup);
-    expect(result.outcome).toBe("drift_detected");
-    if (result.outcome === "drift_detected") {
-      expect(result.provider.gatewayPaymentId).toBe("pi_B");
-      expect(
-        result.differences.some((d) => d.field === "gatewayPaymentId"),
-      ).toBe(true);
+    // RECON-3: do not expose foreign provider as drift/consistent snapshot
+    expect(result.outcome).toBe("manual_review_required");
+    if (result.outcome === "manual_review_required") {
+      expect(result.reason).toMatch(/different payment|gatewayPaymentId/i);
     }
+    expect("provider" in result).toBe(false);
     // Policy must not safe-upgrade against the wrong charge
     const decision = decideReconciliationPolicy(result, target);
     expect(decision.action).not.toBe("update_local_to_paid");
     expect(decision.safe).toBe(false);
+  });
+
+  it("RECON-3: secondary same-id recovery after primary not_found still works", async () => {
+    const lookup: ProviderLookupPort = {
+      async findByPaymentId() {
+        return { kind: "not_found" };
+      },
+      async findByIdempotencyKey() {
+        return { kind: "found", snapshots: [snap("pi_A", "paid")] };
+      },
+    };
+    const result = await resolveProviderSnapshot(
+      {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_A",
+        idempotencyKey: "idem_1",
+        expected: { status: "pending" },
+      },
+      lookup,
+    );
+    expect(result.outcome).toBe("drift_detected");
+    if (result.outcome === "drift_detected") {
+      expect(result.provider.gatewayPaymentId).toBe("pi_A");
+    }
   });
 
   it("falls back through localReference then providerRequestId", async () => {

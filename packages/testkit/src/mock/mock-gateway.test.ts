@@ -755,6 +755,43 @@ describe("mockGateway", () => {
     );
     expect(mockAlias.stableType).toBe("payment.succeeded");
 
+    // TESTKIT-2: payment.succeeded dual-write requires paid status
+    const unpaidStable = generateWebhookEvent({
+      type: "payment.succeeded",
+      status: "pending",
+      gatewayPaymentId: "pay_unpaid",
+    });
+    expect(unpaidStable.event.status).toBe("pending");
+    expect(unpaidStable.event.stableType).toBe("payment.processing");
+    expect(unpaidStable.event.event?.type).toBe("payment.processing");
+    expect(
+      unpaidStable.event.event &&
+        isPaymentSucceededEvent(unpaidStable.event.event),
+    ).toBe(false);
+
+    const unpaidAlias = mockPayloadToWebhookEvent(
+      createMockWebhookPayload({
+        type: "payment_paid",
+        status: "authorized",
+        gatewayPaymentId: "pay_auth_only",
+      }),
+      "mock",
+    );
+    expect(unpaidAlias.status).toBe("authorized");
+    expect(unpaidAlias.stableType).toBe("payment.processing");
+    expect(unpaidAlias.event?.type).toBe("payment.processing");
+
+    const partialAlias = mockPayloadToWebhookEvent(
+      createMockWebhookPayload({
+        type: "payment_paid",
+        status: "partially_captured",
+        gatewayPaymentId: "pay_partial",
+      }),
+      "mock",
+    );
+    expect(partialAlias.stableType).toBe("payment.processing");
+    expect(partialAlias.event?.type).toBe("payment.processing");
+
     // Unknown free-form → provider.unmapped (no invented stable name)
     const unknown = generateWebhookEvent({
       type: "invoice.paid",
@@ -1094,7 +1131,7 @@ describe("mockGateway", () => {
     expect(c.gatewayId).not.toBe(a.gatewayId);
   });
 
-  it("caches non-throw indeterminate under idempotencyKey (TESTKIT-1)", async () => {
+  it("caches non-throw indeterminate under idempotencyKey", async () => {
     const g = mockGateway({
       createPayment: [
         { outcome: "indeterminate" },
@@ -1123,5 +1160,62 @@ describe("mockGateway", () => {
     });
     expect(other.outcome).toBe("succeeded");
     expect(other.gatewayId).not.toBe(first.gatewayId);
+  });
+
+  it("same idempotencyKey with different amount is fingerprint_conflict (TESTKIT-1)", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      amount: 10,
+      idempotencyKey: "fp-key",
+    });
+    expect(a.gatewayId).toBeTruthy();
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        amount: 99,
+        idempotencyKey: "fp-key",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        amount: 99,
+        idempotencyKey: "fp-key",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    // Same amount + key still replays
+    const replay = await g.createPayment({
+      ...baseCreate,
+      amount: 10,
+      idempotencyKey: "fp-key",
+    });
+    expect(replay.gatewayId).toBe(a.gatewayId);
+    // Capture-mode flip is also a fingerprint mismatch
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        amount: 10,
+        capture: false,
+        idempotencyKey: "fp-key",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+  });
+
+  it("economically equivalent Money vs number amount shares fingerprint (TESTKIT-1)", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      amount: 10.5,
+      currency: "USD",
+      idempotencyKey: "money-fp",
+    });
+    const b = await g.createPayment({
+      ...baseCreate,
+      amount: money("10.50", "USD"),
+      currency: "USD",
+      idempotencyKey: "money-fp",
+    });
+    expect(b.gatewayId).toBe(a.gatewayId);
   });
 });

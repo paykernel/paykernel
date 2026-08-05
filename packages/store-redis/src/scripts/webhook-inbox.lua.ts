@@ -88,24 +88,26 @@ if status == 'dead_letter' or status == 'failed' then
   return {'duplicate_failed', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 end
 
-if ph ~= payloadHash then
-  local p = pack(m)
-  return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
-end
-
 if status == 'claimed' then
   local exp = tonumber(m['lease_expires_ms'] or '0') or 0
   if exp > nowMs then
+    -- Active lease: hash mismatch cannot supersede; same hash is in_progress.
+    if ph ~= payloadHash then
+      local p = pack(m)
+      return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+    end
     local p = pack(m)
     return {'in_progress', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
   end
-  -- expired lease → fall through to re-claim (recovery)
+  -- expired lease → fall through to re-claim (recovery / hash supersede)
 elseif status == 'pending' then
-  -- Backoff gate: fail(retryAfterMs) / available_ms must delay key-addressed claim
-  local avail = tonumber(m['available_ms'] or '0') or 0
-  if avail > nowMs then
-    local p = pack(m)
-    return {'not_available', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+  -- Same-hash backoff only; idle hash mismatch supersedes even during backoff.
+  if ph == payloadHash then
+    local avail = tonumber(m['available_ms'] or '0') or 0
+    if avail > nowMs then
+      local p = pack(m)
+      return {'not_available', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+    end
   end
 end
 

@@ -699,6 +699,7 @@ describe("operation-result helpers", () => {
         rawResponse: {},
       }),
     ).toBe("failed");
+    // CORE-1: explicit pending + completed status coerces to succeeded (status wins)
     expect(
       inferRefundOperationOutcome({
         success: true,
@@ -709,7 +710,7 @@ describe("operation-result helpers", () => {
         rawResponse: {},
         outcome: "pending",
       }),
-    ).toBe("pending");
+    ).toBe("succeeded");
 
     // CORE-1: reconciliationRequired beats explicit outcome succeeded
     expect(
@@ -724,6 +725,32 @@ describe("operation-result helpers", () => {
         reconciliationRequired: true,
       }),
     ).toBe("indeterminate");
+
+    // CORE-1: bare infer must not report succeeded while status pending
+    expect(
+      inferRefundOperationOutcome({
+        success: true,
+        status: "pending",
+        gatewayRefundId: "re_pending_coerce",
+        amount: 1,
+        currency: "SAR",
+        rawResponse: {},
+        outcome: "succeeded",
+      }),
+    ).toBe("pending");
+
+    // CORE-1: bare infer coerces succeeded + failed status → failed
+    expect(
+      inferRefundOperationOutcome({
+        success: false,
+        status: "failed",
+        gatewayRefundId: "re_failed_coerce",
+        amount: 1,
+        currency: "SAR",
+        rawResponse: {},
+        outcome: "succeeded",
+      }),
+    ).toBe("failed");
 
     const mapped = mapGatewayRefundToOperationResult({
       success: false,

@@ -86,7 +86,18 @@ const SENSITIVE_KEY_PATTERNS = [
   "cryptogram",
   "security_code",
   "securitycode",
+  // Extra CVC aliases (MONEY-4)
+  "cvc2",
+  "cvv2",
+  "cid",
 ];
+
+/**
+ * Exact key names that must redact even when too short/ambiguous for substring
+ * patterns (MONEY-4 — Moyasar source uses bare `month` / `year` for card expiry).
+ * Matched case-insensitively as whole key only (not substring).
+ */
+const SENSITIVE_EXACT_KEYS = new Set(["month", "year"]);
 
 /**
  * Opaque string values that look like PANs (13–19 digits, optional spaces/dashes).
@@ -177,6 +188,9 @@ function isSensitiveKey(key: string): boolean {
   const lower = key.toLowerCase();
   if (SAFE_KEY_ALLOWLIST.has(lower)) {
     return false;
+  }
+  if (SENSITIVE_EXACT_KEYS.has(lower)) {
+    return true;
   }
   return SENSITIVE_KEY_PATTERNS.some((pattern) => lower.includes(pattern));
 }

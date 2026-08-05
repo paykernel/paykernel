@@ -81,7 +81,7 @@ Evaluation is **ordered and deterministic** for the same rules + input:
 3. Skip unhealthy gateways (`input.health` + `healthThreshold`).
 4. Keep rules where `ruleMatches(rule, input)` is true (criteria + capabilities).
 5. Among remaining candidates:
-   - If `input.merchantPreference` is set and any candidate gateway equals it, **restrict** the pool to those.
+   - If `input.merchantPreference` is set and any candidate gateway equals it (**case-insensitive** after trim; ROUTE-2), **restrict** the pool to those.
    - If `input.cost` is provided, sort by ascending cost, then gateway id, then rule index; pick first.
    - Otherwise pick the **first candidate in original rule order**.
 6. If no candidates: select-time fallback path (below).
@@ -116,6 +116,8 @@ Still applied at select-time fallback:
 - `excludeGateways` (fallback excluded if listed)
 - Health of the fallback gateway
 - Input-level `requiredCapabilities` vs `gatewayCapabilities[fallback]` (fail-closed if missing)
+
+**Amount-range honesty (ROUTE-1):** if a non-excluded healthy rule matches all **non-amount** criteria but the input amount is **outside** that rule’s inclusive min/max (same currency), select-time fallback is **not** used — `NoRouteMatchError` is thrown. Unconstrained fallback must not silently accept amounts a configured rule already bounded. Cross-currency or non-amount criterion failures still allow fallback when configured.
 
 If no usable fallback is available, throws **`NoRouteMatchError`** (`code: "no_route_match"`). The library never invents a gateway id.
 

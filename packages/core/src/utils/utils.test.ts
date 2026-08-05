@@ -503,6 +503,38 @@ describe("redact", () => {
     expect(out.shortDigits).toBe("1234567890");
     expect(out.amount).toBe(10);
   });
+
+  it("redacts bare month/year card expiry and CVC aliases (MONEY-4)", () => {
+    const out = redact({
+      // Moyasar source card fields
+      month: 12,
+      year: 2029,
+      Month: 1,
+      Year: 2030,
+      cvc2: "123",
+      cvv2: "456",
+      cid: "789",
+      // Must not over-redact operational / non-expiry keys that merely contain substrings
+      monthlyTotal: 100,
+      yearToDate: 200,
+      fiscalYear: 2024,
+      amount: 10.5,
+      currency: "SAR",
+    }) as Record<string, unknown>;
+
+    expect(out.month).toBe("[REDACTED]");
+    expect(out.year).toBe("[REDACTED]");
+    expect(out.Month).toBe("[REDACTED]");
+    expect(out.Year).toBe("[REDACTED]");
+    expect(out.cvc2).toBe("[REDACTED]");
+    expect(out.cvv2).toBe("[REDACTED]");
+    expect(out.cid).toBe("[REDACTED]");
+    expect(out.monthlyTotal).toBe(100);
+    expect(out.yearToDate).toBe(200);
+    expect(out.fiscalYear).toBe(2024);
+    expect(out.amount).toBe(10.5);
+    expect(out.currency).toBe("SAR");
+  });
 });
 
 describe("idempotencyKey validation (CORE-2)", () => {

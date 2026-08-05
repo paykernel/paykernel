@@ -213,36 +213,40 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
     return acquired;
   }
 
-  // WEBHOOKS-4 / WEBHOOKS-1: terminal outcomes win before payload_hash_conflict so a
-  // completed/dead-lettered row redelivered with a mismatched hash (e.g. rawBody vs
-  // object hash footgun) still ACKs as already done / failed rather than permanent
-  // payload_conflict that never re-runs a terminal idempotent path.
+  // Terminal before hash / lease so completed redelivery with mismatched hash
+  // still ACKs as already done (not permanent payload_conflict).
   if (existing.status === "completed") {
     return { kind: "already_completed" };
   }
   if (existing.status === "dead_letter" || existing.status === "failed") {
     return { kind: "duplicate_failed" };
   }
-  if (existing.payloadHash !== input.payloadHash) {
-    return { kind: "payload_hash_conflict" };
-  }
-  if (existing.status === "claimed" && isLeaseActive(existing.leaseExpiresAt, clock.nowMs)) {
+
+  const hashMismatch = existing.payloadHash !== input.payloadHash;
+  const leaseActive =
+    existing.status === "claimed" &&
+    isLeaseActive(existing.leaseExpiresAt, clock.nowMs);
+
+  // Active lease: same hash → in_progress; different hash cannot supersede.
+  if (leaseActive) {
+    if (hashMismatch) {
+      return { kind: "payload_hash_conflict" };
+    }
     return { kind: "in_progress" };
   }
 
-  // pending + future availableAt → block claim (backoff). Expired lease reclaim
-  // is allowed even if availableAt is still in the future (crash recovery).
-  if (existing.status === "pending") {
+  // Idle non-terminal + same hash: honor pending backoff (not_available).
+  // Hash mismatch supersedes even during backoff so hash-source mistakes
+  // (raw string vs object) do not permanently stick paid redrive.
+  if (!hashMismatch && existing.status === "pending") {
     const availableMs = Date.parse(existing.availableAt);
     if (Number.isFinite(availableMs) && availableMs > clock.nowMs) {
       return { kind: "not_available" };
     }
   }
 
-  // pending (due) or expired lease → reclaim
-  // WEBHOOKS-1: only pending (handler retry path) burns an attempt. Expired
-  // claimed reclaim is crash/deploy recovery — keep attempts unchanged so
-  // maxAttempts tracks handler outcomes, not lease reclaim count.
+  // pending (due), expired lease, or idle hash supersede → reclaim
+  // WEBHOOKS-1: only pending burns an attempt; expired claimed keeps attempts.
   const payloadRef = input.payloadRef ?? existing.payloadRef;
   const nextAttempts =
     existing.status === "claimed" ? existing.attempts : existing.attempts + 1;
@@ -255,7 +259,8 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
     leaseOwner: input.owner,
     leaseExpiresAt: addMsIso(clock.nowMs, input.leaseMs),
     status: "claimed",
-    payloadHash: existing.payloadHash,
+    // Supersede stores the caller's hash when it differs.
+    payloadHash: input.payloadHash,
     createdAt: existing.createdAt,
     updatedAt: now,
     availableAt: now,
