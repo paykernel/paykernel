@@ -38,6 +38,14 @@ const ALL_STATES: ReadonlySet<SubmissionState> = new Set([
 ]);
 
 /**
+ * ROUTE-3: authentic expert-override eligibility objects produced only by
+ * {@link evaluateFallback}. Forged `{ allowed:true, expertOverride:true,
+ * reason:"expert_override:…" }` objects are rejected by
+ * {@link trySelectFallbackGateway} because they are not in this set.
+ */
+const AUTHENTIC_EXPERT_ELIGIBILITY = new WeakSet<object>();
+
+/**
  * True ONLY for states where the request was never accepted by a provider:
  * `not_submitted` | `pre_submission_failure`.
  *
@@ -70,12 +78,15 @@ export function evaluateFallback(input: {
   }
 
   if (isExpertUnsafeFallbackOverride(input.expertOverride)) {
-    return {
+    const eligibility: FallbackEligibility = {
       allowed: true,
       reason: `expert_override:${input.expertOverride.reason.trim()}`,
       submissionState,
       expertOverride: true,
     };
+    // ROUTE-3: brand genuine evaluateFallback expert results only.
+    AUTHENTIC_EXPERT_ELIGIBILITY.add(eligibility);
+    return eligibility;
   }
 
   return {
@@ -443,11 +454,14 @@ export function trySelectFallbackGateway(
   }
 
   // Re-validate submission safety — never trust forged allowed:true.
-  // Defense-in-depth: expert override requires both the flag AND the
-  // evaluateFallback reason prefix (forged { expertOverride: true } alone is denied).
+  // ROUTE-3: expert override requires authentic evaluateFallback object
+  // (WeakSet brand) plus flag + non-empty expert_override reason prefix.
+  // Forged { allowed:true, expertOverride:true, reason:"expert_override:…" }
+  // is denied — prefix alone is not sufficient.
   const state = eligibility.submissionState;
   const genuineExpertOverride =
     eligibility.expertOverride === true &&
+    AUTHENTIC_EXPERT_ELIGIBILITY.has(eligibility) &&
     typeof eligibility.reason === "string" &&
     eligibility.reason.startsWith("expert_override:") &&
     eligibility.reason.length > "expert_override:".length;

@@ -116,8 +116,11 @@ Still applied at select-time fallback:
 - `excludeGateways` (fallback excluded if listed)
 - Health of the fallback gateway
 - Input-level `requiredCapabilities` vs `gatewayCapabilities[fallback]` (fail-closed if missing)
+- **Rule-level** `requiredCapabilities` from nearly-matching rules (ROUTE-2) — fallback must satisfy them
 
-**Amount-range honesty (ROUTE-1):** if a non-excluded healthy rule matches all **non-amount** criteria but the input amount is **outside** that rule’s inclusive min/max (same currency), select-time fallback is **not** used — `NoRouteMatchError` is thrown. Unconstrained fallback must not silently accept amounts a configured rule already bounded. Cross-currency or non-amount criterion failures still allow fallback when configured.
+**Amount-range honesty (ROUTE-1):** if a non-excluded healthy rule matches all **non-amount** criteria but the input amount is **outside** that rule’s inclusive min/max (same currency), select-time fallback is **not** used — `NoRouteMatchError` is thrown. Unconstrained fallback must not silently accept amounts a configured rule already bounded. Range bounds without `amountCurrency` are also honesty violations (misconfigured money bounds). Cross-currency or non-amount criterion failures still allow fallback when configured.
+
+**Capability honesty (ROUTE-2):** if a non-excluded healthy rule matches non-capability criteria (including amount) and declares `requiredCapabilities` that the select-time fallback gateway lacks, fallback is **not** used.
 
 If no usable fallback is available, throws **`NoRouteMatchError`** (`code: "no_route_match"`). The library never invents a gateway id.
 

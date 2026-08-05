@@ -1205,6 +1205,78 @@ describe("PaymobGateway", () => {
       ]);
     });
 
+    it("does not FIFO-evict unknown fences under cache pressure (PAYMOB-3)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      // Seed an unknown fence via indeterminate network failure after POST
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        new Error("socket closed after gateway accepted request"),
+      );
+      const unknownParams = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_unknown_fence_under_pressure",
+      };
+      await expect(actionGateway.refundPayment(unknownParams)).rejects.toThrow(NetworkError);
+
+      // Fill the in-memory map to capacity with terminal completed entries.
+      // Only completed entries are FIFO-evictable — unknown must survive.
+      const cache = (actionGateway as unknown as {
+        idempotencyCache: Map<string, { fingerprint: string; createdAt: number; status?: string }>;
+      }).idempotencyCache;
+      const limit = 1_000;
+      // Keep the unknown entry; pad with completed until full
+      for (let i = 0; cache.size < limit; i++) {
+        cache.set(`refundPayment:pad_completed_${i}`, {
+          fingerprint: `fp_${i}`,
+          createdAt: Date.now(),
+          status: "completed",
+        });
+      }
+      expect(cache.size).toBe(limit);
+
+      // New key at capacity: must evict a completed pad, not the unknown fence
+      mockFetchSequence(
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 456, success: true, refunded_amount_cents: 1000 }),
+      );
+      await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 10,
+        currency: "SAR",
+        idempotencyKey: "refund_new_under_pressure",
+      });
+
+      // Unknown fence still blocks retry (no double-apply) — observable behavior,
+      // not private Map membership.
+      await expect(actionGateway.refundPayment(unknownParams)).rejects.toThrow(InvalidRequestError);
+    });
+
+    it("refuses new idempotency keys when cache is full of non-evictable fences (PAYMOB-3)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      const cache = (actionGateway as unknown as {
+        idempotencyCache: Map<string, { fingerprint: string; createdAt: number; status?: string }>;
+      }).idempotencyCache;
+      for (let i = 0; i < 1_000; i++) {
+        cache.set(`refundPayment:unknown_pad_${i}`, {
+          fingerprint: `ufp_${i}`,
+          createdAt: Date.now(),
+          status: "unknown",
+        });
+      }
+
+      await expect(actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 10,
+        currency: "SAR",
+        idempotencyKey: "refund_when_cache_full_unknown",
+      })).rejects.toThrow(/full of in-flight or unknown fences/i);
+      // Must not call Paymob (fail-closed before mutate)
+      expect(fetchCalls).toHaveLength(0);
+    });
+
     it("keeps idempotency keys blocked after Paymob 5xx responses on mutating calls", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
@@ -1405,6 +1477,73 @@ describe("PaymobGateway", () => {
         "https://ksa.paymob.com/api/acceptance/transactions/123456789",
       ]);
     });
+
+    it.each([
+      {
+        label: "capture when is_captured without positive captured_amount",
+        inquiry: {
+          id: 123,
+          amount_cents: 10000,
+          is_captured: true,
+          // captured_amount missing — terminal flag without total
+          currency: "SAR",
+        },
+        op: "capture" as const,
+      },
+      {
+        label: "refund when is_refunded without positive refunded_amount",
+        inquiry: {
+          id: 123,
+          amount_cents: 10000,
+          captured_amount: 10000,
+          is_refunded: true,
+          // refunded_amount_cents missing / 0
+          refunded_amount_cents: 0,
+          currency: "SAR",
+        },
+        op: "refund" as const,
+      },
+      {
+        label: "refund when is_captured without positive captured_amount",
+        inquiry: {
+          id: 123,
+          amount_cents: 10000,
+          is_captured: true,
+          currency: "SAR",
+        },
+        op: "refund" as const,
+      },
+    ])(
+      "PAYMOB-2: refuses remaining $label (no mutate POST)",
+      async ({ inquiry, op }) => {
+        const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+        mockFetchSequence(
+          jsonResponse({ token: "auth_token_123" }),
+          jsonResponse(inquiry),
+        );
+
+        if (op === "capture") {
+          await expect(
+            actionGateway.capturePayment({
+              gatewayPaymentId: "123456789",
+              amount: 10,
+              currency: "SAR",
+            }),
+          ).rejects.toThrow(/no remaining amount is available/i);
+        } else {
+          await expect(
+            actionGateway.refundPayment({
+              gatewayPaymentId: "123456789",
+            }),
+          ).rejects.toThrow(/no remaining amount is available/i);
+        }
+        // Fail-closed at remaining math — inquiry only, no capture/refund POST.
+        expect(fetchCalls.map((call) => call.url)).toEqual([
+          "https://ksa.paymob.com/api/auth/tokens",
+          "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        ]);
+      },
+    );
 
     it("rejects explicit action currency that differs from the transaction currency", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
@@ -1669,6 +1808,51 @@ describe("PaymobGateway", () => {
       expect(result.success).toBe(true);
     });
 
+    it("is_captured without positive captured_amount is not paid / not isPaidOutcome (PAYMOB-1)", async () => {
+      // is_captured true + missing captured_amount must not fall through to paid
+      const missingGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456789,
+          success: true,
+          pending: false,
+          is_auth: true,
+          is_capture: false,
+          is_captured: true,
+          amount_cents: 10000,
+          currency: "SAR",
+        }),
+      );
+      const missing = await missingGateway.getPayment({ gatewayPaymentId: "123456789" });
+      expect(missing.status).toBe("processing");
+      expect(missing.status).not.toBe("paid");
+      expect(isPaidOutcome(missing)).toBe(false);
+      expect(missing.outcome).toBe("requires_action");
+      // Must not invent full order amount as settled captured total
+      expect(missing.capturedAmount).toBeUndefined();
+
+      // is_captured true + captured_amount: 0
+      const zeroGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456790,
+          success: true,
+          pending: false,
+          is_captured: true,
+          captured_amount: 0,
+          amount_cents: 10000,
+          currency: "SAR",
+        }),
+      );
+      const zero = await zeroGateway.getPayment({ gatewayPaymentId: "123456790" });
+      expect(zero.status).toBe("processing");
+      expect(zero.status).not.toBe("paid");
+      expect(isPaidOutcome(zero)).toBe(false);
+      expect(zero.outcome).toBe("requires_action");
+    });
+
     it("rejects intention IDs for transaction lookup with a clear error", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
 
@@ -1813,6 +1997,33 @@ describe("PaymobGateway", () => {
       expect(sparse.status).toBe("partially_captured");
       expect(sparse.capturedAmount).toBe(50);
       expect(isPaidOutcome(sparse)).toBe(false);
+    });
+
+    it("maps pending capture mutation to pending and omits capturedAmount (PAYMOB-4)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        jsonResponse({
+          id: 123,
+          success: true,
+          pending: true,
+          captured_amount: 5000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+      });
+
+      expect(result.status).toBe("pending");
+      expect(result.outcome).toBe("requires_action");
+      expect(isPaidOutcome(result)).toBe(false);
+      // Symmetric with refund: do not ledger cumulative while pending
+      expect(result.capturedAmount).toBeUndefined();
     });
 
     it("uses transaction inquiry totals to map partial captures when capture response omits amount_cents", async () => {

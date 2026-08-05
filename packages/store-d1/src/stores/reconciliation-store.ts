@@ -62,7 +62,11 @@ UPDATE ${table} SET
   lease_owner = ?,
   lease_token = ?,
   lease_expires_at = ?,
-  attempts = attempts + 1,
+  -- STORES-1: scheduled burns an attempt; expired claimed reclaim does not
+  attempts = CASE
+    WHEN status = 'claimed' THEN attempts
+    ELSE attempts + 1
+  END,
   generation = generation + 1,
   updated_at = ?
 WHERE key = ?
@@ -364,14 +368,15 @@ export function createD1ReconciliationStore(
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processDue/claimDue can
-        // rediscover them after worker crash (attempts kept; lease cleared).
-        // Matches memory listDue releaseExpiredLease + webhook listRetryable.
+        // rediscover them after worker crash. STORES-1: restore unfinished claim
+        // attempt (floor 0) so crash/deploy thrash does not burn maxAttempts.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'scheduled',
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = ?
            WHERE status = 'claimed'
              AND lease_expires_at IS NOT NULL

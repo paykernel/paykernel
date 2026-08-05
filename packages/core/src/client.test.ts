@@ -1798,6 +1798,7 @@ describe('PaymentClient webhook error isolation', () => {
         });
 
         // secret_token matches → verify succeeds; card_auth_* → parse throws
+        // WEBHOOKS-1: parse-after-verify is InvalidRequestError (not forgery).
         try {
             await client.handleWebhook('moyasar', {
                 id: 'evt_card_auth',
@@ -1813,7 +1814,8 @@ describe('PaymentClient webhook error isolation', () => {
             });
             expect.unreachable('should have thrown on parse');
         } catch (error) {
-            expect(error).toBeInstanceOf(InvalidWebhookError);
+            expect(error).toBeInstanceOf(InvalidRequestError);
+            expect(error).not.toBeInstanceOf(InvalidWebhookError);
             expect((error as Error).message).toMatch(/card authentication|card_auth/i);
         }
         expect(onWebhookFailedCalled).toBe(false);

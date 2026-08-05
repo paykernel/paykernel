@@ -7,7 +7,10 @@
  * config.fallback is SELECT-TIME default only — not post-attempt recovery.
  */
 
-import { amountOutsideConfiguredRange } from "./amount-range";
+import {
+  amountInRange,
+  amountOutsideConfiguredRange,
+} from "./amount-range";
 import { NoRouteMatchError } from "./errors";
 import {
   costScore,
@@ -15,6 +18,7 @@ import {
   isGatewayHealthy,
   ruleMatches,
   ruleMatchesIgnoringAmount,
+  ruleMatchesIgnoringAmountAndCapabilities,
   stringsEqualCi,
 } from "./match";
 import type {
@@ -120,6 +124,23 @@ function selectImpl(
         input,
       );
     }
+    // ROUTE-2: capability honesty — do not use unconstrained select-time
+    // fallback when a nearly-matching rule requires capabilities the fallback
+    // gateway lacks (rule-level requiredCapabilities must not be ignored).
+    if (
+      hasRequiredCapabilitiesOnlyReject(
+        input,
+        rules,
+        exclude,
+        healthThreshold,
+        fallback,
+      )
+    ) {
+      throw new NoRouteMatchError(
+        "No routing rule matched and fallback gateway lacks required capabilities from matching rules",
+        input,
+      );
+    }
     return selectFallback(input, fallback, healthThreshold, exclude);
   }
 
@@ -144,6 +165,46 @@ function hasAmountRangeOnlyReject(
     if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
     if (!ruleMatchesIgnoringAmount(rule, input)) continue;
     if (amountOutsideConfiguredRange(input, rule.match)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when at least one non-excluded healthy rule matches all non-amount,
+ * non-capability criteria and declares requiredCapabilities that the
+ * select-time fallback gateway lacks (ROUTE-2).
+ *
+ * Unconstrained fallback must not silently drop rule-level capability bounds.
+ * When no fallback is configured this returns false (selectFallback throws).
+ */
+function hasRequiredCapabilitiesOnlyReject(
+  input: RoutingInput,
+  rules: readonly RoutingRule[],
+  exclude: ReadonlySet<string>,
+  healthThreshold: number,
+  fallback: string | undefined,
+): boolean {
+  if (fallback === undefined || fallback.length === 0) return false;
+  if (exclude.has(fallback.trim().toLowerCase())) return false;
+  if (!isGatewayHealthy(fallback, input, healthThreshold)) return false;
+
+  for (const rule of rules) {
+    if (exclude.has(rule.gateway.trim().toLowerCase())) continue;
+    if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
+    // Non-amount non-cap criteria (currency/country/…) must already match.
+    if (!ruleMatchesIgnoringAmountAndCapabilities(rule, input)) continue;
+    // Amount range on the nearly-matching rule must still pass (or be absent);
+    // amount honesty is handled separately by hasAmountRangeOnlyReject.
+    if (!amountInRange(input, rule.match)) continue;
+
+    const caps =
+      rule.match.requiredCapabilities ??
+      input.requiredCapabilities ??
+      undefined;
+    if (caps === undefined || caps.length === 0) continue;
+    if (!gatewayHasCapabilities(fallback, caps, input)) {
       return true;
     }
   }

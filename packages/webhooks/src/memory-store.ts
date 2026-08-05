@@ -280,18 +280,24 @@ export function createMemoryWebhookInboxStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("fail: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // WEBHOOKS-2: accept fail with matching token even after lease expiry.
+      // Soft-release-first would clear the token + restore attempts, making
+      // maxAttempts a no-op for hang/timeout handlers that still call fail.
+      // Crash reclaim (get/listRetryable) still soft-restores unfinished claims.
+      if (
+        existing.status !== "claimed" ||
+        existing.leaseToken !== input.leaseToken
+      ) {
         throw new StoreLeaseLostError("fail: lease token rejected");
       }
       const retryAfterMs = input.retryAfterMs ?? 0;
       const dead = input.deadLetter === true;
       const attempts =
         input.restoreAttempt === true
-          ? Math.max(0, rec.attempts - 1)
-          : rec.attempts;
+          ? Math.max(0, existing.attempts - 1)
+          : existing.attempts;
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: dead ? "dead_letter" : "pending",
         lastError: input.error,
         leaseToken: undefined,

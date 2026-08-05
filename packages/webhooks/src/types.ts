@@ -279,12 +279,13 @@ export type CreateWebhookInboxEngineOptions = {
    * Max **handler** attempts before dead-letter on durable_retry. Default: 5.
    * Must be a finite integer `>= 1` (constructor throws otherwise).
    *
-   * Counts handler outcomes (claim that reaches fail/complete under a live
-   * lease), **not** crash/deploy reclaims or parking claims:
+   * Counts handler outcomes (claim that reaches fail/complete), **not** pure
+   * crash/deploy reclaims or parking claims:
    * - each successful claim increments store `attempts`
    * - `ackAfterClaim` parking is free (`fail({ restoreAttempt: true })`)
-   * - soft-release of an expired `claimed` lease restores the unfinished attempt
-   *   so reclaim does not burn this budget (WEBHOOKS-1)
+   * - soft-release via get/listRetryable restores unfinished crash reclaim
+   * - **WEBHOOKS-2:** `fail` after lease expiry with matching token still
+   *   records the attempt so hang/timeout paths hit this budget
    * - provider redelivery while `availableAt` is in the future returns
    *   `not_available` / `scheduled_for_retry` (`reason: "not_available"`) and
    *   does not increment attempts

@@ -1199,6 +1199,7 @@ export class PayPalGateway extends BaseGateway {
 
     let status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
       hasCapture: Boolean(captureId),
+      hasAuthorization: Boolean(orderAuthorization),
       ...(effectiveFinalCapture !== undefined
         ? { finalCapture: effectiveFinalCapture }
         : {}),
@@ -1209,13 +1210,15 @@ export class PayPalGateway extends BaseGateway {
       );
     }
 
-    // Align ORDER.COMPLETED with getPayment: under-total multi-capture, open
-    // PARTIALLY_CAPTURED auth, and non-final slices → partially_captured (not paid).
-    if (raw.event_type === "CHECKOUT.ORDER.COMPLETED" && captureId) {
+    // Align ORDER.COMPLETED with getPayment for every branch:
+    // - capture(s) present → paid / partially_captured / refund aggregates
+    // - auth-only → authorized (PAYPAL-2; not approved)
+    // - bare COMPLETED without payments → processing (PAYPAL-1; not paid)
+    if (raw.event_type === "CHECKOUT.ORDER.COMPLETED") {
       // Build a minimal order snapshot for status mapping (cast avoids EOPT noise
       // on optional amount/purchase_units from the webhook resource shape).
       const orderLike = {
-        id: raw.resource.id ?? captureId,
+        id: raw.resource.id ?? captureId ?? "order",
         status: raw.resource.status ?? "COMPLETED",
         ...(raw.resource.amount !== undefined
           ? { amount: raw.resource.amount }
@@ -1224,15 +1227,22 @@ export class PayPalGateway extends BaseGateway {
           ? { purchase_units: raw.resource.purchase_units }
           : {}),
       } as PayPalOrderResponse;
-      status = this.mapPaymentResultStatus(
-        orderLike,
+      // Synthetic capture only when we have a capture id but nested list is absent
+      // (e.g. supplementary_data.related_ids.capture_id). Do not invent paid from
+      // bare COMPLETED without capture evidence.
+      const captureForMap =
         lastOrderCapture ??
-          (resourceFinalCapture !== undefined
+        (captureId
+          ? resourceFinalCapture !== undefined
             ? {
                 status: raw.resource.status ?? "COMPLETED",
                 final_capture: resourceFinalCapture,
               }
-            : { status: raw.resource.status ?? "COMPLETED" }),
+            : { status: raw.resource.status ?? "COMPLETED" }
+          : undefined);
+      status = this.mapPaymentResultStatus(
+        orderLike,
+        captureForMap,
         orderAuthorization,
         orderCaptures,
       );
@@ -2879,7 +2889,11 @@ export class PayPalGateway extends BaseGateway {
   private mapWebhookStatus(
     eventType: string,
     resourceStatus?: string,
-    options?: { hasCapture?: boolean; finalCapture?: boolean },
+    options?: {
+      hasCapture?: boolean;
+      hasAuthorization?: boolean;
+      finalCapture?: boolean;
+    },
   ): PaymentStatus | undefined {
     if (eventType === "PAYMENT.CAPTURE.REFUNDED") {
       const resourceMappedStatus = resourceStatus
@@ -2894,8 +2908,15 @@ export class PayPalGateway extends BaseGateway {
 
     // Order completed without a capture (e.g. AUTHORIZE-intent) must not look paid.
     // Prefer PAYMENT.CAPTURE.COMPLETED as the fulfillment signal (when final).
+    // PAYPAL-2: auth-only → authorized (align getPayment). PAYPAL-1: bare → processing.
     if (eventType === "CHECKOUT.ORDER.COMPLETED") {
-      return options?.hasCapture ? "paid" : "approved";
+      if (options?.hasCapture) {
+        return "paid";
+      }
+      if (options?.hasAuthorization) {
+        return "authorized";
+      }
+      return "processing";
     }
 
     // Non-final capture: COMPLETED resource with final_capture=false is only a
@@ -3009,7 +3030,17 @@ export class PayPalGateway extends BaseGateway {
       return this.mapResourceStatus(authorization.status);
     }
 
-    return this.mapStatus(order.status);
+    // PAYPAL-1: bare order COMPLETED without payments.captures / authorizations
+    // must not map to paid / isPaidOutcome. Fail-closed to processing so poll
+    // paths cannot fulfill on a partial/missing payments payload.
+    const mapped = this.mapStatus(order.status);
+    if (mapped === "paid") {
+      this.logger.warn(
+        "[PayPal] Order COMPLETED without captures or authorizations; refusing paid (processing)",
+      );
+      return "processing";
+    }
+    return mapped;
   }
 
   /**

@@ -227,6 +227,92 @@ describe("webhook store unit", () => {
     expect(soft?.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
   });
 
+  it("STORES-4: claim miss for free due pending repairs available_at and acquires", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    // Offset available_at due by Date.parse (09:00Z) but fails lexical TEXT vs Z now.
+    const availOffset = "2026-01-15T14:00:00+05:00";
+    const availZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    let claimAttempts = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT")) {
+          claimAttempts += 1;
+          if (claimAttempts === 1) return [];
+          return [
+            {
+              key: "evt-lex",
+              status: "claimed",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: "w",
+              lease_token: "lt_repaired",
+              lease_expires_at: new Date(clock.nowMs() + 1000).toISOString(),
+              attempts: 2,
+              generation: 2,
+              available_at: now,
+              first_received_at: availZ,
+              last_received_at: availZ,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: availZ,
+              updated_at: now,
+            },
+          ];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          return [
+            {
+              key: "evt-lex",
+              status: "pending",
+              payload_hash: "h1",
+              payload_ref: null,
+              gateway: null,
+              provider_event_id: null,
+              lease_owner: null,
+              lease_token: null,
+              lease_expires_at: null,
+              attempts: 1,
+              generation: 1,
+              available_at: availOffset,
+              first_received_at: availZ,
+              last_received_at: availZ,
+              completed_at: null,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: availZ,
+              updated_at: availZ,
+            },
+          ];
+        }
+        return [];
+      },
+      onExecute: () => ({ rowCount: 1 }),
+    });
+    const store = createPostgresWebhookInboxStore({ executor, clock });
+    const r = await store.claim({
+      key: "evt-lex",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("acquired");
+    expect(claimAttempts).toBe(2);
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("available_at") &&
+        c.sql.includes("lease_expires_at") &&
+        !c.sql.includes("ON CONFLICT"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.sql).toContain("status = 'pending'");
+    expect(repair!.params).toEqual(["evt-lex", availZ, null, now]);
+  });
+
   it("claim SQL template requires available_at for pending reclaim", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();
@@ -573,6 +659,8 @@ describe("reconciliation store unit", () => {
         c.sql.toLowerCase().includes("status = 'scheduled'"),
     );
     expect(soft).toBeDefined();
+    // STORES-1: soft-release restores unfinished attempt
+    expect(soft?.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
   });
 
   it("SQL-2: listDue canonicalizes offset input.now for TEXT lexical compares", async () => {
@@ -590,6 +678,7 @@ describe("reconciliation store unit", () => {
     );
     expect(soft).toBeDefined();
     expect(soft!.params[0]).toBe(canonicalNow);
+    expect(soft!.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
     const select = executor.calls.find(
       (c) => c.sql.includes("SELECT") && c.sql.includes("due_at <="),
     );

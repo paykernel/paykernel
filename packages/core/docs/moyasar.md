@@ -345,8 +345,14 @@ Partial refunds take precedence over partial capture when both amount fields app
 `requires_action` (open money story), not `succeeded`. `isPaidOutcome` is false either
 way (paid-like is `paid` only). On webhooks, Phase-7 dual-write also demotes
 `payment_paid` / `payment_captured` from `payment.succeeded` / `capture.completed` to
-`payment.processing` when status is amount-derived `partially_captured`, so type-only
-handlers cannot over-fulfill.
+`payment.processing` when domain status is **not** paid-like (`paid`) — including
+amount-derived `partially_captured` — so type-only handlers cannot over-fulfill from
+the envelope alone.
+
+**Incomplete paid snapshots:** When a 2xx body maps to `paid` but the money snapshot is
+incomplete (missing/non-finite `amount`, or missing/blank `currency`), the SDK demotes
+status to `processing` so `isPaidOutcome` stays false. Major-unit money fields are only
+published together with a non-empty currency.
 
 ## Capture Payment
 
@@ -427,7 +433,10 @@ const result = await client.voidPayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
   idempotencyKey: 'void-order-123',
 }, 'moyasar');
-// outcome === 'succeeded' only when provider status is voided (→ cancelled)
+// Provider confirmed voided → status cancelled, outcome succeeded (void complete).
+// Residual 2xx still paid (void not applied / outside window) → status paid,
+// outcome succeeded, isPaidOutcome true — money-honest residual, NOT void-complete.
+// Key void success on status === 'cancelled', not outcome alone.
 ```
 
 ## Callback / 3DS return
@@ -510,13 +519,14 @@ payment total. For `payment_captured` / `partially_captured`, amount prefers
 **captured**. Do not restock or ship from `event.amount` alone without also checking
 `status` and re-fetching when amounts are incomplete.
 
-**Phase-7 dual-write honesty:** When amount refinement yields `partially_captured`,
-`event.stableType` / `event.event.type` are demoted to `payment.processing` even if
-the Moyasar envelope was `payment_paid` or `payment_captured` (those would otherwise
-map to `payment.succeeded` / `capture.completed`). Provider-native `event.type` is
-unchanged. Full capture still dual-writes settled types. Incomplete refund snapshots
-(`status === refund_completed`, missing/zero/non-finite `refunded`) demote dual-write
-from `refund.completed` → `refund.pending`; proven full/partial refunds keep
+**Phase-7 dual-write honesty:** Settled dual-write (`payment.succeeded` /
+`capture.completed`) is kept only when domain status is paid-like (`paid`). When amount
+refinement yields `partially_captured` (or any other non-paid domain status),
+`event.stableType` / `event.event.type` are demoted to `payment.processing` even if the
+Moyasar envelope was `payment_paid` or `payment_captured`. Provider-native `event.type`
+is unchanged. Full settlement still dual-writes settled types. Incomplete refund
+snapshots (`status === refund_completed`, missing/zero/non-finite `refunded`) demote
+dual-write from `refund.completed` → `refund.pending`; proven full/partial refunds keep
 `refund.completed`.
 
 ### Unsupported: card authentication webhooks

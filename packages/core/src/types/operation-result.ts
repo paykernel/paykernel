@@ -275,7 +275,12 @@ export function paymentFromGatewayResult(
  *   {@link isPaidOutcome} stays false until status is paid-like (`paid` only).
  * - Buyer approval (`approved`, e.g. PayPal pre-capture) → `requires_action`
  *   (never `succeeded`; not paid-like).
- * - Card/hard declines → `declined`; cancelled/voided without force → `failed`.
+ * - Card/hard declines → `declined`; cancelled/voided without explicit
+ *   `outcome: succeeded` → `failed`. Intentional voids dual-write
+ *   `outcome: succeeded` + `status: cancelled` (CORE-2) and map as succeeded
+ *   (still not {@link isPaidOutcome}).
+ * - Partial capture: gateways may set `outcome: requires_action` with status
+ *   `partially_captured` (CORE-1); Phase-6 must not upgrade that to succeeded.
  * - Bare pending/processing without action still → `requires_action` so callers
  *   never fulfill on non-terminal state.
  */
@@ -292,7 +297,7 @@ export function inferOperationOutcome(
     }
 
     if (result.outcome !== undefined) {
-        // CORE-3: do not trust explicit outcome over gateway status — same
+        // Do not trust explicit outcome over gateway status — same
         // fail-closed family as coerceRefundOutcomeToGatewayStatus.
         return coercePaymentOutcomeToGatewayStatus(result.outcome, result);
     }
@@ -364,9 +369,14 @@ function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean
 }
 
 /**
- * CORE-3: keep Phase-6 payment outcome arms consistent with gateway status.
+ * Keep Phase-6 payment outcome arms consistent with gateway status.
  * Explicit `outcome: succeeded` must not invent a paid/settled op when status
- * is still pending/failed/cancelled (refund-style coerce parity).
+ * is still pending/failed (refund-style coerce parity).
+ *
+ * CORE-1: do not upgrade gateway-demoted `requires_action` on
+ * `partially_captured` (open capture story) back to `succeeded`.
+ * CORE-2: intentional void dual-writes `outcome: succeeded` + `status: cancelled`
+ * — preserve that as operation success (not charge paid; {@link isPaidOutcome} false).
  */
 function coercePaymentOutcomeToGatewayStatus(
     outcome: PaymentOperationOutcome,
@@ -379,8 +389,10 @@ function coercePaymentOutcomeToGatewayStatus(
         if (result.decline !== undefined || result.status === "failed") {
             return "declined";
         }
+        // CORE-2: successful void is outcome succeeded + status cancelled.
+        // Bare cancelled (no explicit outcome) still fails closed via infer.
         if (result.status === "cancelled") {
-            return "failed";
+            return "succeeded";
         }
         if (
             result.status === "pending" ||
@@ -389,11 +401,17 @@ function coercePaymentOutcomeToGatewayStatus(
         ) {
             return "requires_action";
         }
-        // residual nextAction on paid-like status: keep succeeded (CORE-4)
+        // residual nextAction on paid-like status: keep succeeded
         return "succeeded";
     }
     if (outcome === "requires_action") {
-        // CORE-4: explicit requires_action must not under-fulfill settled money.
+        // CORE-1: partial capture is open money — Paymob/Stripe demote to
+        // requires_action; do not upgrade via settled-status coerce.
+        if (result.status === "partially_captured") {
+            return "requires_action";
+        }
+        // Explicit requires_action must not under-fulfill fully settled money
+        // (paid / authorized / refunded / partially_refunded).
         if (result.success && isSettledSuccessStatus(result.status)) {
             return "succeeded";
         }

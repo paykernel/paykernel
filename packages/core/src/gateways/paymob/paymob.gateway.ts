@@ -225,6 +225,7 @@ interface PaymobAuthResponse {
 interface PaymobCaptureResponse {
   id?: number;
   success?: boolean;
+  pending?: boolean;
   message?: string;
   currency?: string;
   amount_cents?: number;
@@ -270,7 +271,12 @@ interface PaymobIdempotencyCacheEntry<R = unknown> {
   fingerprint: string;
   promise?: Promise<R>;
   createdAt: number;
-  status?: "unknown";
+  /**
+   * - in_progress: mutation outstanding (never FIFO-evict)
+   * - completed: terminal success result (evictable under pressure)
+   * - unknown: indeterminate post-mutate outcome (never FIFO-evict)
+   */
+  status?: "in_progress" | "completed" | "unknown";
 }
 
 interface PaymobNormalizedTransactionWebhook {
@@ -804,10 +810,14 @@ export class PaymobGateway extends BaseGateway {
           providerCapturedAmountCents !== undefined
             ? providerCapturedAmountCents
             : (resolvedAmount.capturedAmountCents ?? 0) + resolvedAmount.amountCents;
-        const status = this.mapCaptureStatus(data, success, {
-          transactionAmountCents: resolvedAmount.transactionAmountCents,
-          cumulativeCapturedAmountCents,
-        });
+        // PAYMOB-4: honor pending on capture mutation (symmetric with refund).
+        const status =
+          this.parseBoolean(data.pending) === true
+            ? "pending"
+            : this.mapCaptureStatus(data, success, {
+                transactionAmountCents: resolvedAmount.transactionAmountCents,
+                cumulativeCapturedAmountCents,
+              });
         // PAYMOB-2: prefer parent payment/txn id for gatewayId so later
         // parent-targeted ops (refund/void/get) keep working. Child capture
         // txn id (when distinct from the parent) is dual-written on captureId.
@@ -820,8 +830,14 @@ export class PaymobGateway extends BaseGateway {
           childCaptureId !== undefined && childCaptureId !== gatewayId
             ? childCaptureId
             : undefined;
-        const outcome = this.mapPaymobOutcome(status, success);
+        const outcome = this.mapPaymobOutcome(status, success, {
+          pending: this.parseBoolean(data.pending) === true,
+        });
 
+        // PAYMOB-4: never ledger cumulative captured while status is pending —
+        // align with refund path (pending omits totalRefunded until settled).
+        const publishCaptured =
+          status !== "pending" && status !== "failed";
         return applyOutcomeToGatewayResult(
           {
             gatewayId,
@@ -831,7 +847,7 @@ export class PaymobGateway extends BaseGateway {
             // Ledger/inventory: publish cumulative only when positive; zero is
             // honest for provider-reported 0 but never implies paid (PAYMOB-1).
             // Always dual-write currency with major-unit money fields.
-            ...(cumulativeCapturedAmountCents > 0
+            ...(publishCaptured && cumulativeCapturedAmountCents > 0
               ? {
                   capturedAmount: this.fromMinorUnits(
                     cumulativeCapturedAmountCents,
@@ -839,7 +855,7 @@ export class PaymobGateway extends BaseGateway {
                   ),
                   currency,
                 }
-              : cumulativeCapturedAmountCents === 0
+              : publishCaptured && cumulativeCapturedAmountCents === 0
                 ? { capturedAmount: 0, currency }
                 : {}),
             providerNativeStatus: success ? "success" : "failed",
@@ -1817,6 +1833,40 @@ export class PaymobGateway extends BaseGateway {
         [{ path: ["gatewayPaymentId"] }],
       );
     }
+
+    // PAYMOB-2: terminal current-state flags without a positive amount total
+    // mean money may already be fully moved but the cumulative is untrusted.
+    // Fail-closed: treat as no remaining (refuse over-capture / over-refund).
+    if (operation === "capture") {
+      const hasPositiveCaptured =
+        transaction.captured_amount !== undefined && transaction.captured_amount > 0;
+      if (transaction.is_captured === true && !hasPositiveCaptured) {
+        throw new InvalidRequestError(
+          "Paymob capture amount could not be resolved because no remaining amount is available",
+          [{ path: ["amount"] }],
+        );
+      }
+    } else {
+      const hasPositiveRefunded =
+        transaction.refunded_amount_cents !== undefined &&
+        transaction.refunded_amount_cents > 0;
+      if (transaction.is_refunded === true && !hasPositiveRefunded) {
+        throw new InvalidRequestError(
+          "Paymob refund amount could not be resolved because no remaining amount is available",
+          [{ path: ["amount"] }],
+        );
+      }
+      // is_captured without cumulative captured total: refund baseline unknown.
+      const hasPositiveCaptured =
+        transaction.captured_amount !== undefined && transaction.captured_amount > 0;
+      if (transaction.is_captured === true && !hasPositiveCaptured) {
+        throw new InvalidRequestError(
+          "Paymob refund amount could not be resolved because no remaining amount is available",
+          [{ path: ["amount"] }],
+        );
+      }
+    }
+
     const totalAvailableCents = operation === "refund"
       ? transaction.captured_amount && transaction.captured_amount > 0
         ? transaction.captured_amount
@@ -1915,11 +1965,12 @@ export class PaymobGateway extends BaseGateway {
    * - Full `refunded` / `partially_refunded` require a positive trusted
    *   `refunded_amount_cents` (API/inquiry). Webhooks strip that field; signed
    *   `is_refund` / `is_refunded` alone → incomplete `refund_completed`.
-   * - Full `paid` from a capture action requires positive `captured_amount`.
-   *   Signed `is_capture` + success without that total → `processing` (inquire),
-   *   never fail-open to `paid` + full `amount_cents` (partial capture risk).
-   * - Plain sale `success` (not capture/auth action) still maps `paid` — charge
-   *   amount is HMAC-covered `amount_cents`.
+   * - Full `paid` from a capture action or `is_captured` current-state requires
+   *   positive `captured_amount`. `is_capture` / `is_captured` + success without
+   *   that total → `processing` (inquire), never fail-open to `paid` + full
+   *   `amount_cents` (partial capture risk). Aligns with {@link mapCaptureStatus}.
+   * - Plain sale `success` (not capture/auth/`is_captured`) still maps `paid` —
+   *   charge amount is HMAC-covered `amount_cents`.
    */
   private mapTransactionStatus(data: {
     success?: boolean;
@@ -1982,10 +2033,14 @@ export class PaymobGateway extends BaseGateway {
       return "paid";
     }
 
-    // PAYMOB-1: signed is_capture + success without a trusted cumulative captured
-    // total cannot distinguish partial vs full capture. Fail-closed to processing
-    // (not paid + full amount_cents). Prefer transaction inquiry for money truth.
-    if (data.success === true && data.is_capture === true) {
+    // PAYMOB-1: capture action (`is_capture`) or current-state (`is_captured`)
+    // without a trusted positive cumulative total cannot distinguish partial vs
+    // full capture. Fail-closed to processing (not paid + full amount_cents).
+    // Aligns with mapCaptureStatus (positive cumulative required for paid).
+    if (
+      data.success === true &&
+      (data.is_capture === true || data.is_captured === true)
+    ) {
       return "processing";
     }
 
@@ -2798,15 +2853,20 @@ export class PaymobGateway extends BaseGateway {
       expiresAt: Date.now() + IDEMPOTENCY_CACHE_TTL_MS,
     };
 
-    if (this.idempotencyCache.size >= IDEMPOTENCY_CACHE_LIMIT) {
-      const oldestKey = this.idempotencyCache.keys().next().value;
-      if (oldestKey) {
-        this.idempotencyCache.delete(oldestKey);
-      }
+    // PAYMOB-3: never FIFO-evict in-flight or unknown fences (double-apply risk).
+    // Only drop terminal completed entries; if the map is full of non-evictable
+    // fences, refuse the new key fail-closed rather than re-enter an old key.
+    if (!this.idempotencyCache.has(cacheKey)) {
+      this.ensureIdempotencyCacheCapacity(operation);
     }
 
     let reservedStoredRecord = false;
     let keepLocalUnknownRecord = false;
+    const cacheEntry: PaymobIdempotencyCacheEntry<R> = {
+      fingerprint,
+      createdAt: Date.now(),
+      status: "in_progress",
+    };
     const promise = (async () => {
       const storedRecord = await this.reserveStoredIdempotencyRecord(cacheKey, inProgressRecord);
       if (storedRecord) {
@@ -2840,6 +2900,7 @@ export class PaymobGateway extends BaseGateway {
       reservedStoredRecord = true;
       return executor();
     })().then(async (result) => {
+      cacheEntry.status = "completed";
       await this.trySetStoredIdempotencyRecord(cacheKey, {
         fingerprint,
         status: "completed",
@@ -2876,12 +2937,32 @@ export class PaymobGateway extends BaseGateway {
       }
       throw error;
     });
-    this.idempotencyCache.set(cacheKey, {
-      fingerprint,
-      promise,
-      createdAt: Date.now(),
-    });
+    cacheEntry.promise = promise;
+    this.idempotencyCache.set(cacheKey, cacheEntry);
     return promise;
+  }
+
+  /**
+   * Free one slot when the in-memory map is at capacity.
+   * Only terminal completed entries are eligible; in-progress and unknown
+   * fences are retained so the same idempotencyKey cannot double-apply.
+   */
+  private ensureIdempotencyCacheCapacity(operation: string): void {
+    if (this.idempotencyCache.size < IDEMPOTENCY_CACHE_LIMIT) {
+      return;
+    }
+
+    for (const [key, entry] of this.idempotencyCache) {
+      if (entry.status === "completed") {
+        this.idempotencyCache.delete(key);
+        return;
+      }
+    }
+
+    throw new InvalidRequestError(
+      `Paymob ${operation} idempotency cache is full of in-flight or unknown fences; configure a durable idempotencyStore or retry after existing mutations settle`,
+      [{ path: ["idempotencyKey"] }],
+    );
   }
 
   private async reserveStoredIdempotencyRecord(

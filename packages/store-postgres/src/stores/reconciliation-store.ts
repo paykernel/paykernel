@@ -336,14 +336,16 @@ export function createPostgresReconciliationStore(
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processDue/claimDue can
-        // rediscover them after worker crash (attempts kept; lease cleared).
-        // Matches memory listDue releaseExpiredLease + webhook listRetryable.
+        // rediscover them after worker crash. STORES-1: restore unfinished claim
+        // attempt (floor 0) so crash/deploy thrash does not burn maxAttempts;
+        // next scheduled claim re-increments (net-zero vs unfinished work).
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'scheduled',
              lease_owner = NULL,
              lease_token = NULL,
              lease_expires_at = NULL,
+             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = $1
            WHERE status = 'claimed'
              AND lease_expires_at IS NOT NULL

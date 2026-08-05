@@ -6,6 +6,9 @@ import {
   webhookClaimTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,
+  webhookTimestampRepairTemplates,
+  classifyWebhookClaimMiss,
+  canonicalizeOptionalIsoTimestamp,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -31,6 +34,20 @@ import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { PostgresStoreOptions } from "../types";
 import { mapWebhookRow, newLeaseToken, resolveStoreContext } from "./shared";
 
+function webhookMissToResult(
+  kind: Exclude<ReturnType<typeof classifyWebhookClaimMiss>, "claimable">,
+  existing: WebhookInboxRecord,
+): ClaimWebhookResult {
+  if (kind === "not_available") {
+    return {
+      kind: "not_available",
+      record: existing,
+      availableAt: existing.availableAt,
+    };
+  }
+  return { kind, record: existing };
+}
+
 export function createPostgresWebhookInboxStore(
   options: PostgresStoreOptions,
 ): WebhookInboxStore {
@@ -39,6 +56,7 @@ export function createPostgresWebhookInboxStore(
   const claimTpl = webhookClaimTemplates(ctx.namespace).postgres;
   const completeTpl = webhookCompleteTemplates(ctx.namespace).postgres;
   const failTpl = webhookFailTemplates(ctx.namespace).postgres;
+  const repairTpl = webhookTimestampRepairTemplates(ctx.namespace).postgres;
 
   async function selectByKey(key: string): Promise<WebhookInboxRecord | undefined> {
     const rows = await ctx.getExecutor().query<Record<string, unknown>>(
@@ -91,28 +109,76 @@ export function createPostgresWebhookInboxStore(
         if (!existing) {
           throw new StoreUnavailableError("webhook claim: no row after claim attempt");
         }
-        // Terminal before hash; active-lease hash mismatch only → conflict.
-        // Idle supersede is handled by claim SQL (payload_hash update).
-        if (existing.status === "completed") {
-          return { kind: "already_completed", record: existing };
-        }
-        if (existing.status === "failed" || existing.status === "dead_letter") {
-          return { kind: "duplicate_failed", record: existing };
-        }
-        if (
-          existing.status === "claimed" &&
-          existing.payloadHash !== input.payloadHash
-        ) {
-          return { kind: "payload_hash_conflict", record: existing };
-        }
-        if (existing.status === "pending") {
-          return {
-            kind: "not_available",
-            record: existing,
+        // STORES-4: Date.parse classification — never freeze free due work as
+        // permanent not_available under lexical TEXT available_at mismatch.
+        const miss = classifyWebhookClaimMiss(
+          {
+            status: existing.status,
+            payloadHash: existing.payloadHash,
+            leaseExpiresAt: existing.leaseExpiresAt,
             availableAt: existing.availableAt,
+          },
+          input.payloadHash,
+          ctx.clock.nowMs(),
+        );
+        if (miss !== "claimable") {
+          return webhookMissToResult(miss, existing);
+        }
+
+        // Free due / reclaimable work; canonicalize timestamps and retry once.
+        const availableAtZ = canonicalizeIsoTimestamp(existing.availableAt, "availableAt");
+        const leaseZ =
+          canonicalizeOptionalIsoTimestamp(existing.leaseExpiresAt, "leaseExpiresAt") ??
+          null;
+        // params: key, availableAt, leaseExpiresAt, now
+        await ctx.getExecutor().execute(repairTpl.sql, [
+          input.key,
+          availableAtZ,
+          leaseZ,
+          now,
+        ]);
+
+        const retried = await ctx.getExecutor().query<Record<string, unknown>>(
+          claimTpl.sql,
+          [
+            input.key,
+            input.payloadHash,
+            payloadRef,
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+          ],
+        );
+        if (retried.length > 0) {
+          const record = mapWebhookRow(retried[0]!);
+          return {
+            kind: "acquired",
+            record,
+            leaseToken: record.leaseToken ?? leaseToken,
           };
         }
-        return { kind: "in_progress", record: existing };
+
+        const after = await selectByKey(input.key);
+        if (!after) {
+          throw new StoreUnavailableError("webhook claim: no row after timestamp repair");
+        }
+        const miss2 = classifyWebhookClaimMiss(
+          {
+            status: after.status,
+            payloadHash: after.payloadHash,
+            leaseExpiresAt: after.leaseExpiresAt,
+            availableAt: after.availableAt,
+          },
+          input.payloadHash,
+          ctx.clock.nowMs(),
+        );
+        if (miss2 === "claimable") {
+          throw new StoreUnavailableError(
+            "webhook claim: free due work failed after timestamp canonicalize; retry",
+          );
+        }
+        return webhookMissToResult(miss2, after);
       });
     },
 

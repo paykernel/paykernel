@@ -1,8 +1,13 @@
 /**
  * Telemetry redaction helpers built on core `redact`.
- * Layers operational-key restore for known core over-matches (OBS-1) and
- * attribute scrubbers for spans/metrics (OBS-2). Does not re-export core's
- * sink wrapper — this package owns the OBS restore path.
+ *
+ * **OBS-1 honesty:** this module is **package-owned**, not a pure re-export of
+ * core’s `createRedactingTelemetrySink`. It wraps core `redact()` and adds
+ * attribute-bag scrubbing for spans/metrics.
+ *
+ * **OBS-2 honesty:** `authorized` restore is **defense-in-depth**. Core already
+ * allow-lists `authorized` in `SAFE_KEY_ALLOWLIST` (substring `auth` does not
+ * redact it). The restore only fires if a future core change over-matches.
  */
 
 import {
@@ -13,9 +18,8 @@ import {
 export type { TelemetrySink };
 
 /**
- * Exact keys that core substring patterns over-match as sensitive but that are
- * operational payment-domain flags (OBS-1: pattern `auth` → `authorized`).
- * Values are restored after core redact when the original bag still holds them.
+ * Operational keys restored only if core ever marks them `[REDACTED]`.
+ * Core already allow-lists `authorized` — this set is belt-and-suspenders (OBS-2).
  */
 const OPERATIONAL_KEY_RESTORE = new Set(["authorized"]);
 
@@ -23,10 +27,11 @@ const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 6;
 
 /**
- * After core `redact`, restore known operational keys that were over-matched.
+ * After core `redact`, restore known operational keys **if** they were redacted.
+ * No-op when core already preserved them (current SAFE_KEY_ALLOWLIST behavior).
  * Recurses into plain objects only (same depth budget as core).
  */
-function restoreOperationalOverRedacts(
+function restoreOperationalKeysIfRedacted(
   original: unknown,
   redacted: unknown,
   depth = 0,
@@ -66,21 +71,21 @@ function restoreOperationalOverRedacts(
       typeof red[key] === "object" &&
       !Array.isArray(red[key])
     ) {
-      out[key] = restoreOperationalOverRedacts(origVal, red[key], depth + 1);
+      out[key] = restoreOperationalKeysIfRedacted(origVal, red[key], depth + 1);
     }
   }
   return out;
 }
 
 /**
- * Scrub a structured telemetry bag with the same model as logs, then restore
- * operational keys core over-redacts (e.g. `authorized`).
+ * Scrub a structured telemetry bag with core `redact()`, then defense-in-depth
+ * restore for operational keys (e.g. `authorized`) if ever over-redacted.
  * Prefer {@link createRedactingTelemetrySink} when wrapping a sink end-to-end.
  */
 export function redactTelemetryData(
   data: Record<string, unknown>,
 ): Record<string, unknown> {
-  return restoreOperationalOverRedacts(
+  return restoreOperationalKeysIfRedacted(
     data,
     redact(data),
   ) as Record<string, unknown>;
@@ -88,8 +93,8 @@ export function redactTelemetryData(
 
 /**
  * Redact span/metric attribute bags (string | number | boolean values only).
- * Sensitive keys become `"[REDACTED]"`; operational `authorized` is preserved (OBS-1/2).
- * Returns a new object; undefined input stays undefined.
+ * Sensitive keys become `"[REDACTED]"`; operational `authorized` is preserved
+ * (core allow-list + optional restore). Returns a new object; undefined input stays undefined.
  */
 export function redactAttributeBag(
   attributes?: Record<string, string | number | boolean>,
@@ -112,8 +117,8 @@ export function redactAttributeBag(
 }
 
 /**
- * Wrap a telemetry sink so every structured bag is redacted (with OBS-1 restore)
- * before reaching the underlying sink.
+ * Package-owned telemetry sink wrapper (OBS-1: **not** a pure core re-export).
+ * Scrubs every structured bag via {@link redactTelemetryData} before emit.
  */
 export function createRedactingTelemetrySink(sink: TelemetrySink): TelemetrySink {
   return {

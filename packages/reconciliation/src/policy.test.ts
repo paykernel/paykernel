@@ -298,11 +298,12 @@ describe("decideReconciliationPolicy", () => {
   });
 
   it("sparse expected + open incomplete provider is not mark_consistent", () => {
+    // Non-settling open states → manual_review. In-flight pending/processing
+    // covered separately (RECON-3 → retry_later).
     for (const status of [
       "authorized",
       "approved",
       "partially_captured",
-      "processing",
       "refunded",
       "partially_refunded",
       "refund_pending",
@@ -330,6 +331,61 @@ describe("decideReconciliationPolicy", () => {
       expect(d.safe).toBe(false);
       expect(d.action).not.toBe("mark_consistent");
     }
+  });
+
+  it("RECON-3: in-flight pending/processing consistent → retry_later not manual_review", () => {
+    for (const status of ["pending", "processing"] as const) {
+      for (const expected of [
+        undefined,
+        { status: "pending" as const },
+        { status: "processing" as const },
+      ]) {
+        const provider = buildProviderPaymentSnapshot({
+          gatewayPaymentId: "pi_inflight",
+          status,
+          amount: money("10.00", "USD"),
+          providerStatus: status,
+        });
+        const result: ReconciliationResult = {
+          outcome: "consistent",
+          provider,
+        };
+        const d = decideReconciliationPolicy(result, {
+          gateway: "stripe",
+          gatewayPaymentId: "pi_inflight",
+          ...(expected !== undefined ? { expected } : {}),
+        });
+        expect(d.action).toBe("retry_later");
+        expect(d.safe).toBe(false);
+        expect(d.action).not.toBe("manual_review");
+        expect(d.action).not.toBe("mark_consistent");
+      }
+    }
+  });
+
+  it("RECON-2: status-only local paid + provider refundedAmount is not mark_consistent safe", () => {
+    const paidWithRefund = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      refundedAmount: money("2.00", "USD"),
+      providerStatus: "succeeded",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: paidWithRefund,
+    };
+    // Status-only local paid (no refundedAmount field) — compare reports
+    // consistent on status, but policy must surface refund drift.
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "paid" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+    expect(d.action).toBe("manual_review");
   });
 
   it("RECON-2: indeterminate local + provider refund lifecycle is not mark_consistent safe", () => {
@@ -492,6 +548,30 @@ describe("shouldForbidReplacementCharge", () => {
       };
       expect(shouldForbidReplacementCharge(result, target)).toBe(true);
     }
+  });
+
+  it("RECON-1: manual_review_required forbids replacement even for terminal local", () => {
+    // Terminal failed/cancelled local + identity/lookup review must not re-charge
+    // (original may still settle or exist under another key).
+    for (const status of ["failed", "cancelled", "canceled"] as const) {
+      const result: ReconciliationResult = {
+        outcome: "manual_review_required",
+        reason: "identity conflict / incomplete keys",
+      };
+      expect(
+        shouldForbidReplacementCharge(result, {
+          gateway: "stripe",
+          expected: { status },
+        }),
+      ).toBe(true);
+    }
+    // Sparse expected under review also forbids.
+    expect(
+      shouldForbidReplacementCharge(
+        { outcome: "manual_review_required", reason: "no keys" },
+        { gateway: "stripe" },
+      ),
+    ).toBe(true);
   });
 
   it("RECON-1: consistent local+provider refund_pending forbids replacement charge", () => {

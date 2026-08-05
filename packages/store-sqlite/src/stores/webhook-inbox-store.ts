@@ -9,6 +9,10 @@ import {
   webhookClaimTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,
+  webhookTimestampRepairTemplates,
+  classifyWebhookClaimMiss,
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -43,6 +47,20 @@ const SELECT_COLS = `key, status, payload_hash, payload_ref, gateway, provider_e
               available_at, first_received_at, last_received_at, completed_at,
               last_error_sanitized, tenant_id, created_at, updated_at`;
 
+function webhookMissToResult(
+  kind: Exclude<ReturnType<typeof classifyWebhookClaimMiss>, "claimable">,
+  existing: WebhookInboxRecord,
+): ClaimWebhookResult {
+  if (kind === "not_available") {
+    return {
+      kind: "not_available" as const,
+      record: existing,
+      availableAt: existing.availableAt,
+    };
+  }
+  return { kind, record: existing };
+}
+
 export function createSqliteWebhookInboxStore(
   options: SqliteStoreOptions,
 ): WebhookInboxStore {
@@ -51,6 +69,7 @@ export function createSqliteWebhookInboxStore(
   const claimTpl = webhookClaimTemplates(ctx.namespace).sqlite;
   const completeTpl = webhookCompleteTemplates(ctx.namespace).sqlite;
   const failTpl = webhookFailTemplates(ctx.namespace).sqlite;
+  const repairTpl = webhookTimestampRepairTemplates(ctx.namespace).sqlite;
   const claimSteps = extractSqliteSteps(claimTpl.sql);
   const insertSql = claimSteps[0]!;
   const updateSql = claimSteps[1]!;
@@ -141,26 +160,81 @@ export function createSqliteWebhookInboxStore(
               "webhook claim: no row after claim attempt",
             );
           }
-          if (existing.status === "completed") {
-            return { kind: "already_completed" as const, record: existing };
-          }
-          if (existing.status === "failed" || existing.status === "dead_letter") {
-            return { kind: "duplicate_failed" as const, record: existing };
-          }
-          if (
-            existing.status === "claimed" &&
-            existing.payloadHash !== input.payloadHash
-          ) {
-            return { kind: "payload_hash_conflict" as const, record: existing };
-          }
-          if (existing.status === "pending") {
-            return {
-              kind: "not_available" as const,
-              record: existing,
+          // STORES-4: Date.parse classification — never freeze free due work as
+          // permanent not_available under lexical TEXT available_at mismatch.
+          const miss = classifyWebhookClaimMiss(
+            {
+              status: existing.status,
+              payloadHash: existing.payloadHash,
+              leaseExpiresAt: existing.leaseExpiresAt,
               availableAt: existing.availableAt,
+            },
+            input.payloadHash,
+            ctx.clock.nowMs(),
+          );
+          if (miss !== "claimable") {
+            return webhookMissToResult(miss, existing);
+          }
+
+          const availableAtZ = canonicalizeIsoTimestamp(
+            existing.availableAt,
+            "availableAt",
+          );
+          const leaseZ =
+            canonicalizeOptionalIsoTimestamp(existing.leaseExpiresAt, "leaseExpiresAt") ??
+            null;
+          // params: availableAt, leaseExpiresAt, key, now
+          exec.run(repairTpl.sql, [availableAtZ, leaseZ, input.key, now]);
+
+          const retried = exec.run(updateSql, [
+            input.payloadHash,
+            payloadRef,
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+            now,
+            input.key,
+            now,
+            input.payloadHash,
+            now,
+          ]);
+          if (retried.changes === 1) {
+            const record = selectByKey(input.key);
+            if (!record) {
+              throw new StoreUnavailableError(
+                "webhook claim: update succeeded but row missing",
+              );
+            }
+            return {
+              kind: "acquired" as const,
+              record,
+              leaseToken: record.leaseToken ?? leaseToken,
             };
           }
-          return { kind: "in_progress" as const, record: existing };
+
+          const after = selectByKey(input.key);
+          if (!after) {
+            throw new StoreUnavailableError(
+              "webhook claim: no row after timestamp repair",
+            );
+          }
+          const miss2 = classifyWebhookClaimMiss(
+            {
+              status: after.status,
+              payloadHash: after.payloadHash,
+              leaseExpiresAt: after.leaseExpiresAt,
+              availableAt: after.availableAt,
+            },
+            input.payloadHash,
+            ctx.clock.nowMs(),
+          );
+          if (miss2 === "claimable") {
+            throw new StoreUnavailableError(
+              "webhook claim: free due work failed after timestamp canonicalize; retry",
+            );
+          }
+          return webhookMissToResult(miss2, after);
         }, { mode: "immediate" });
       });
     },
@@ -235,7 +309,8 @@ export function createSqliteWebhookInboxStore(
         const statusTarget = dead ? "dead_letter" : "pending";
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
-        // params: statusTarget, lastError, availableAt, now, restoreAttemptFlag, key, leaseToken, now
+        // params: statusTarget, lastError, availableAt, now, restoreAttemptFlag, key, leaseToken
+        // WEBHOOKS-2: template matches token on claimed (no lease_expires_at > now).
         const restoreAttemptFlag = input.restoreAttempt === true ? 1 : 0;
         const result = ctx.getExecutor().run(failTpl.sql, [
           statusTarget,
@@ -245,7 +320,6 @@ export function createSqliteWebhookInboxStore(
           restoreAttemptFlag,
           input.key,
           input.leaseToken,
-          now,
         ]);
         if (result.changes === 0) {
           throw new StoreLeaseLostError(
@@ -280,7 +354,12 @@ export function createSqliteWebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(() => {
-        const now = input.now ?? clockNowIso(ctx.clock);
+        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
+        // Non-Z input.now written into available_at on soft-release would break ordering.
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0).

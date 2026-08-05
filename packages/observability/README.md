@@ -213,8 +213,8 @@ PAYMENT_SPAN_NAMES, createNoopTracer, spanNameForOperationType
 createOpenTelemetryBridge
 // Instrumentation
 withPaymentOperation, recordPaymentOperation
-// Redaction (core re-exports + helper)
-createRedactingTelemetrySink, redactTelemetryData
+// Redaction (package-owned on core redact — not pure re-exports; OBS-1)
+createRedactingTelemetrySink, redactTelemetryData, redactAttributeBag
 // OperationContext (core re-exports)
 createOperationContext, finalizeOperationContext, operationContextToTelemetryData, systemClock
 ```

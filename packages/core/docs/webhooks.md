@@ -146,10 +146,13 @@ JSON, register a **raw-body** parser for the webhook route only
    - On failure (`isVerified === false` or verify throws): `onWebhookFailed`
      runs, then the error is rethrown (`InvalidWebhookError` for failed checks).
 3. **Parse** the payload into a normalized `WebhookEvent` (only after verify succeeds).
-   - Parse failures throw `InvalidWebhookError` or `InvalidRequestError` and
-     **do not** call `onWebhookFailed`. Treat them as server/data-shape errors
-     (typically 4xx/5xx depending on your handler), not as “forged webhook”
-     alerts.
+   - Parse failures throw **`InvalidRequestError` only** (gateway
+     `InvalidWebhookError` from parse is reclassified) and **do not** call
+     `onWebhookFailed`. Treat them as server/data-shape errors — **not** forged
+     webhooks. With `@paykernel/webhooks` `processWithVerifier`, parse /
+     `InvalidRequestError` maps to `handler_failed { retryable: true }` (~5xx)
+     so authentic paid events redeliver; only verify-false `InvalidWebhookError`
+     / `{ ok: false }` maps to `invalid_webhook` (~400).
 4. `onWebhookVerified(event)` — fires **after** verify + parse succeed.
 
 ### Throw matrix (what happens when a webhook hook fails)

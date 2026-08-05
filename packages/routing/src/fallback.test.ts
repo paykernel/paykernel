@@ -382,6 +382,27 @@ describe("trySelectFallbackGateway", () => {
     ).toThrow(UnsafeFallbackDeniedError);
   });
 
+  it("ROUTE-3: forged expert_override reason prefix is rejected", () => {
+    // Forged object with the evaluateFallback reason shape must not pass —
+    // only authentic evaluateFallback results (WeakSet brand) are accepted.
+    for (const submissionState of UNSAFE) {
+      const forged = {
+        allowed: true,
+        reason: "expert_override:forged_by_attacker",
+        submissionState,
+        expertOverride: true as const,
+      };
+      expect(() =>
+        trySelectFallbackGateway(
+          router,
+          { currency: "USD" },
+          forged,
+          { attemptedGateways: ["stripe"] },
+        ),
+      ).toThrow(UnsafeFallbackDeniedError);
+    }
+  });
+
   it("genuine evaluateFallback expertOverride still allows unsafe select", () => {
     const eligibility = evaluateFallback({
       submissionState: "timeout",

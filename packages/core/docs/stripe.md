@@ -98,7 +98,7 @@ const session = await stripe.createCheckoutSession({
 });
 ```
 
-If you already store Stripe minor-unit amounts, `priceData.unitAmount` is also supported and is sent directly to Stripe as `unit_amount`. The gateway still runs the same minor-unit validations as converted amounts: three-decimal currencies must be divisible by 10, and charge maximums are enforced (no major-unit re-scaling). **Major-unit `priceData.amount` enforces the same charge maximums** as the `unitAmount` path.
+If you already store Stripe minor-unit amounts, `priceData.unitAmount` is also supported and is sent directly to Stripe as `unit_amount`. The gateway still runs the **same minor-unit validations** as converted amounts (no skipped money rules on the escape hatch): three-decimal currencies must be divisible by 10, **ISK/UGX (and other whole-unit specials with positive exponent) must be whole major units** (minor divisible by `10^exponent`, e.g. ISK `1000` ok / `1050` rejected), and charge maximums are enforced without re-scaling. **Major-unit `priceData.amount` enforces the same rules** via the shared post-scale path.
 Checkout line-item `priceData.amount` and `priceData.unitAmount` can be zero when Stripe accepts a zero-priced item, such as free trials or fully discounted subscription setup.
 
 ### Subscriptions

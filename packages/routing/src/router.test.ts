@@ -232,14 +232,77 @@ describe("21.1 inputs affect matching", () => {
       ],
       fallback: "paypal",
     });
-    // No capability map → rule fails → fallback
-    expect(router.select({ currency: "USD" }).gateway).toBe("paypal");
+    // ROUTE-2: no capability map → rule fails and fallback also lacks caps → throw
+    expect(() => router.select({ currency: "USD" })).toThrow(NoRouteMatchError);
     expect(
       router.select({
         currency: "USD",
         gatewayCapabilities: { stripe: { providerRecurring: true } },
       }).gateway,
     ).toBe("stripe");
+    // Fallback allowed only when it satisfies the rule-level requiredCapabilities
+    expect(
+      router.select({
+        currency: "USD",
+        gatewayCapabilities: {
+          stripe: { providerRecurring: false },
+          paypal: { providerRecurring: true },
+        },
+      }).gateway,
+    ).toBe("paypal");
+  });
+
+  it("ROUTE-1: amount min/max without amountCurrency blocks select-time fallback", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          amountMin: "100.00",
+          // missing amountCurrency — misconfigured money bound
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    // Rule cannot match (amountInRange fails closed) but non-amount criteria
+    // match — unconstrained fallback must not bypass the intended bound.
+    expect(() =>
+      router.select({
+        currency: "USD",
+        amount: { amount: "50.00", currency: "USD" },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("ROUTE-2: select-time fallback honors rule-level requiredCapabilities", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          requiredCapabilities: ["refunds"],
+        }).to("stripe"),
+      ],
+      fallback: "paypal",
+    });
+    // Nearly-matching rule requires refunds; fallback lacks them → no route
+    expect(() =>
+      router.select({
+        currency: "USD",
+        gatewayCapabilities: {
+          stripe: { refunds: false },
+          paypal: { payments: true },
+        },
+      }),
+    ).toThrow(NoRouteMatchError);
+    // Fallback has the rule-level caps → allowed
+    const d = router.select({
+      currency: "USD",
+      gatewayCapabilities: {
+        stripe: { refunds: false },
+        paypal: { refunds: true },
+      },
+    });
+    expect(d.gateway).toBe("paypal");
+    expect(d.usedFallback).toBe(true);
   });
 
   it("health filters unhealthy gateways at select time", () => {

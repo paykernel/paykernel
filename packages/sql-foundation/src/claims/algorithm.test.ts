@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   classifyReconciliationClaimMiss,
+  classifyWebhookClaimMiss,
   decideIdempotencyReserve,
   decideLeaseMutation,
   decideReconciliationClaim,
@@ -17,6 +18,7 @@ import {
   webhookClaimTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,
+  webhookTimestampRepairTemplates,
   type ClaimTemplateSet,
 } from "./templates";
 import { createSchemaNamespace } from "../schema/namespace";
@@ -553,7 +555,130 @@ describe("decideReconciliationClaim", () => {
     expect(reclaim.kind).toBe("acquired");
     if (reclaim.kind === "acquired") {
       expect(reclaim.generation).toBe(3);
+      // STORES-1: expired claimed reclaim keeps attempts (crash recovery)
+      expect(reclaim.attempts).toBe(2);
     }
+
+    // scheduled reclaim still burns an attempt (handler retry path)
+    const scheduledRetry = decideReconciliationClaim({
+      key: "r",
+      owner: "w",
+      leaseMs: 1000,
+      newLeaseToken: "t3",
+      clock: { nowMs },
+      existing: {
+        ...base,
+        status: "scheduled",
+        attempts: 2,
+      },
+    });
+    expect(scheduledRetry.kind).toBe("acquired");
+    if (scheduledRetry.kind === "acquired") {
+      expect(scheduledRetry.attempts).toBe(3);
+    }
+  });
+});
+
+describe("classifyWebhookClaimMiss (STORES-4)", () => {
+  it.each([
+    {
+      label: "pending due (offset lexical free work)",
+      existing: {
+        status: "pending" as const,
+        payloadHash: "h1",
+        // Due by Date.parse (09:00Z) but fails lexical TEXT compare vs Z now.
+        availableAt: "2026-01-15T14:00:00+05:00",
+      },
+      hash: "h1",
+      expected: "claimable" as const,
+    },
+    {
+      label: "pending future availableAt",
+      existing: {
+        status: "pending" as const,
+        payloadHash: "h1",
+        availableAt: "2026-01-15T12:30:00.000Z",
+      },
+      hash: "h1",
+      expected: "not_available" as const,
+    },
+    {
+      label: "pending hash supersede during backoff",
+      existing: {
+        status: "pending" as const,
+        payloadHash: "h-old",
+        availableAt: "2026-01-15T12:30:00.000Z",
+      },
+      hash: "h-new",
+      expected: "claimable" as const,
+    },
+    {
+      label: "claimed expired lease free for reclaim",
+      existing: {
+        status: "claimed" as const,
+        payloadHash: "h1",
+        availableAt: "2026-01-15T11:00:00.000Z",
+        leaseExpiresAt: "2026-01-15T11:30:00.000Z",
+      },
+      hash: "h1",
+      expected: "claimable" as const,
+    },
+    {
+      label: "claimed active lease in progress",
+      existing: {
+        status: "claimed" as const,
+        payloadHash: "h1",
+        availableAt: "2026-01-15T11:00:00.000Z",
+        leaseExpiresAt: "2026-01-15T12:30:00.000Z",
+      },
+      hash: "h1",
+      expected: "in_progress" as const,
+    },
+    {
+      label: "completed terminal",
+      existing: {
+        status: "completed" as const,
+        payloadHash: "h1",
+        availableAt: "2026-01-15T11:00:00.000Z",
+      },
+      hash: "h1",
+      expected: "already_completed" as const,
+    },
+    {
+      label: "dead_letter terminal",
+      existing: {
+        status: "dead_letter" as const,
+        payloadHash: "h1",
+        availableAt: "2026-01-15T11:00:00.000Z",
+      },
+      hash: "h1",
+      expected: "duplicate_failed" as const,
+    },
+    {
+      label: "active claimed hash conflict",
+      existing: {
+        status: "claimed" as const,
+        payloadHash: "h-old",
+        availableAt: "2026-01-15T11:00:00.000Z",
+        leaseExpiresAt: "2026-01-15T12:30:00.000Z",
+      },
+      hash: "h-new",
+      expected: "payload_hash_conflict" as const,
+    },
+    {
+      // WEBHOOKS-3/4: idle expired claimed supersedes hash — not permanent conflict.
+      label: "expired claimed hash supersede",
+      existing: {
+        status: "claimed" as const,
+        payloadHash: "h-old",
+        availableAt: "2026-01-15T11:00:00.000Z",
+        leaseExpiresAt: "2026-01-15T11:30:00.000Z",
+      },
+      hash: "h-new",
+      expected: "claimable" as const,
+    },
+  ])("classifies $label as $expected", ({ existing, hash, expected }) => {
+    expect(classifyWebhookClaimMiss(existing, hash, nowMs)).toBe(expected);
   });
 });
 
@@ -782,6 +907,11 @@ describe("dialect claim templates", () => {
     expect(rec.postgres.sql).toContain("UPDATE");
     expect(rec.sqlite.sql).toContain("UPDATE");
     expect(rec.postgres.params).not.toEqual(rec.sqlite.params);
+    // STORES-1: expired claimed reclaim keeps attempts
+    expect(rec.postgres.sql).toMatch(
+      /WHEN\s+"?[\w.]+"?\.status\s*=\s*'claimed'\s+THEN\s+"?[\w.]+"?\.attempts/i,
+    );
+    expect(rec.sqlite.sql).toMatch(/WHEN\s+status\s*=\s*'claimed'\s+THEN\s+attempts/i);
 
     // SQL-1: timestamp repair free-lease fence (never overwrite active winner lease).
     const repair = reconciliationTimestampRepairTemplates(ns);
@@ -799,6 +929,19 @@ describe("dialect claim templates", () => {
     }
     expect(repair.postgres.params).toEqual(["key", "dueAt", "leaseExpiresAt", "now"]);
     expect(repair.sqlite.params).toEqual(["dueAt", "leaseExpiresAt", "key", "now"]);
+
+    // STORES-4: webhook timestamp repair free-lease fence
+    const whRepair = webhookTimestampRepairTemplates(ns);
+    for (const frag of [whRepair.postgres, whRepair.sqlite]) {
+      expect(frag.sql).toContain("available_at");
+      expect(frag.sql).toContain("lease_expires_at");
+      expect(frag.sql).toContain("status = 'pending'");
+      expect(frag.sql).toMatch(/lease_expires_at IS NULL/i);
+      expect(frag.sql).toMatch(/lease_expires_at\s*<=/i);
+      expect(frag.sql).toContain("NOT IN ('completed', 'failed', 'dead_letter')");
+    }
+    expect(whRepair.postgres.params).toEqual(["key", "availableAt", "leaseExpiresAt", "now"]);
+    expect(whRepair.sqlite.params).toEqual(["availableAt", "leaseExpiresAt", "key", "now"]);
   });
 
   it("never leaves unvalidated table placeholders like raw user input", () => {
@@ -816,6 +959,8 @@ describe("dialect claim templates", () => {
 
     const whc = webhookCompleteTemplates();
     expect(whc.postgres.sql).toContain("status = 'claimed'");
+    // Complete still requires unexpired lease (side-effect commit fence).
+    expect(whc.postgres.sql).toMatch(/lease_expires_at\s*>/i);
     const whf = webhookFailTemplates();
     expect(whf.postgres.params).toContain("lastError");
     expect(whf.postgres.params).toContain("restoreAttemptFlag");
@@ -824,6 +969,10 @@ describe("dialect claim templates", () => {
     expect(whf.sqlite.sql).toContain("last_error_sanitized");
     expect(whf.postgres.sql).toContain("attempts");
     expect(whf.sqlite.sql).toContain("attempts");
+    // WEBHOOKS-2: fail matches token on claimed only — not lease_expires_at > now.
+    expect(whf.postgres.sql).toContain("lease_token = $2");
+    expect(whf.postgres.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(whf.sqlite.sql).not.toMatch(/lease_expires_at\s*>/i);
     // Must never write the non-existent bare column name.
     expect(whf.postgres.sql).not.toMatch(/\blast_error\s*=/);
     expect(whf.sqlite.sql).not.toMatch(/\blast_error\s*=/);

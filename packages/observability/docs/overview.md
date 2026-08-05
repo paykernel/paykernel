@@ -13,7 +13,7 @@ Make production payment behavior **observable** without coupling the core SDK (o
 | **Metrics** | Portable `PaymentMetrics` counters/histograms (`createInMemoryPaymentMetrics`, `createNoopPaymentMetrics`) |
 | **Spans** | Duck-typed `PaymentTracer` + `PAYMENT_SPAN_NAMES` |
 | **Instrumentation** | `withPaymentOperation` / `recordPaymentOperation` compose context + metrics + spans + redacted telemetry |
-| **Redaction** | Same model as logs — `createRedactingTelemetrySink` / `redactTelemetryData` (core `redact()`) |
+| **Redaction** | Same model as logs — package-owned `createRedactingTelemetrySink` / `redactTelemetryData` on core `redact()` (not a pure re-export; OBS-1) |
 | **Optional OTEL** | `createOpenTelemetryBridge(injectedApi)` — **no** hard `@opentelemetry/*` on the package root |
 
 Core remains free of OpenTelemetry. Metrics-only paths do **not** require `@opentelemetry/api`.
@@ -42,7 +42,7 @@ See monorepo policy: [`docs/workspace-boundaries.md`](../../../docs/workspace-bo
 ## Design rules
 
 1. **Core stays free of OTEL** — bridge lives here, duck-typed, injected.
-2. **Redaction** — structured telemetry bags use core `redact()` via `createRedactingTelemetrySink` (same allow-list as logs).
+2. **Redaction** — structured telemetry bags use core `redact()` via this package’s `createRedactingTelemetrySink` (same allow-list as logs; package-owned, not a pure re-export).
 3. **Portable duration** — `Clock.nowMs()` / `systemClock` (no `node:perf_hooks`).
 4. **Optional peer** — metrics and redacting telemetry work without OTEL installed.
 5. **No secret labels** — metric attributes and span attributes must not carry secrets/PII/raw payloads.
@@ -87,7 +87,7 @@ Domain packages (webhooks / reconciliation / adapters)
       (inject ports at the app layer when you want metrics/spans)
 ```
 
-Core types (`OperationContext`, `TelemetrySink`, `createRedactingTelemetrySink`) live in `@paykernel/core` and are re-exported here so apps can depend on this package alone for the diagnostics path. Core docs: [`packages/core/docs/telemetry.md`](../../core/docs/telemetry.md).
+Core types (`OperationContext`, `TelemetrySink`) live in `@paykernel/core` and are re-exported here. `createRedactingTelemetrySink` / `redactTelemetryData` are **package-owned** implementations on core `redact()` (OBS-1 honesty — not pure re-exports). Core also exports its own sink wrapper for gateway context. Core docs: [`packages/core/docs/telemetry.md`](../../core/docs/telemetry.md).
 
 ## Docs in this package
 

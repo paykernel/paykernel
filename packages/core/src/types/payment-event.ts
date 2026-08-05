@@ -416,10 +416,11 @@ function canonicalize(value: unknown): unknown {
  * strings are **not** JSON-parsed before redaction/stringify. Therefore
  * `hashWebhookPayload(rawBodyString)` and `hashWebhookPayload(parsedObject)`
  * are **not** interchangeable even when the string is JSON of that object —
- * mixing them in the webhook inbox claim path causes permanent
- * `payload_conflict`. Prefer a single source: gateway `event.payloadHash`
- * when set (e.g. `computePayloadHash: true` on the **parsed** `rawPayload`),
- * or always hash the same object shape the gateway used.
+ * mixing them on an **active lease** yields `payload_conflict`; idle pending
+ * rows **supersede** the hash (WEBHOOKS-3/4 — not a permanent stuck conflict).
+ * Prefer a single source: gateway `event.payloadHash` when set
+ * (e.g. `computePayloadHash: true` on the **parsed** `rawPayload`), or always
+ * hash the same object shape the gateway used.
  */
 export function hashWebhookPayload(raw: unknown): string {
   const redacted = redactWebhookPayloadSecrets(raw);

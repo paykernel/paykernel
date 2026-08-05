@@ -146,11 +146,13 @@ export type WebhookInboxRecord = {
    * Handler attempt budget counter. Each successful `claim` acquire increments by 1
    * unless restored:
    * - `fail({ restoreAttempt: true })` undoes parking claims (`ackAfterClaim`)
-   * - soft-release of an **expired** `claimed` lease restores the unfinished claim
-   *   so crash/deploy reclaim does not burn engine `maxAttempts` (WEBHOOKS-1)
+   * - soft-release of an **expired** `claimed` lease (via get/listRetryable only)
+   *   restores the unfinished claim so pure crash/deploy reclaim does not burn
+   *   engine `maxAttempts`
    *
-   * Engine `maxAttempts` is max **handler** attempts (outcomes via fail/complete),
-   * not claim/crash reclaim count.
+   * Engine `maxAttempts` is max **handler** attempts (outcomes via fail/complete).
+   * **WEBHOOKS-2:** `fail` with a matching token succeeds even after lease expiry
+   * so hang/timeout handlers still record an attempt (do not soft-restore first).
    */
   attempts: number;
   lastError?: string | undefined;
@@ -313,7 +315,14 @@ export interface WebhookInboxStore extends WithTransaction {
 
   /**
    * Record sanitized failure; optionally dead-letter or schedule retry.
-   * **Requires active `leaseToken`.** Stale/wrong → {@link StoreLeaseLostError}.
+   * **Requires matching `leaseToken`** on a claimed row. Stale/wrong →
+   * {@link StoreLeaseLostError}.
+   *
+   * **WEBHOOKS-2:** implementations SHOULD accept a matching token even when
+   * the lease has expired (do not soft-release-then-reject). That lets hang/
+   * timeout handlers record an attempt so engine `maxAttempts` is effective.
+   * Soft-restore of unfinished attempts remains on get/listRetryable only.
+   *
    * Sets `availableAt` from `retryAfterMs` (claim gate + list filter).
    * When `restoreAttempt: true`, decrements `attempts` by 1 (floor 0).
    */

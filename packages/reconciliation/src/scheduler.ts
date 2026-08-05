@@ -490,11 +490,27 @@ function normalizeHandlerDisposition(
   };
 }
 
-/** Extract gateway segment from `recon:gateway:id` keys. */
+/**
+ * Extract gateway segment for maxInFlightByGateway (RECON-4).
+ *
+ * Supports:
+ * - Canonical `recon:{gateway}:{id}` from {@link deriveReconciliationJobKey}
+ * - App-supplied `{gateway}:{id}` shorthand (first non-empty segment)
+ *
+ * Keys without a gateway segment map to `"unknown"` (shared uncapped bucket
+ * unless the app sets `maxInFlightByGateway.unknown`).
+ */
 function gatewayFromKey(key: string): string {
-  const parts = key.split(":");
+  const parts = key.split(":").filter((p) => p.length > 0);
+  if (parts.length === 0) return "unknown";
+  // Canonical: recon:gateway:id
   if (parts[0] === "recon" && parts.length >= 3 && parts[1]) {
     return parts[1];
+  }
+  // App-supplied gateway:id (or gateway:id:extra) — first segment is gateway.
+  // Do not treat bare `recon` / `recon:` as a gateway name.
+  if (parts[0] !== "recon" && parts.length >= 2 && parts[0]) {
+    return parts[0];
   }
   return "unknown";
 }

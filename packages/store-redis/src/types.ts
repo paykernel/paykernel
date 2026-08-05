@@ -25,10 +25,11 @@ export type RedisStoreOptions = {
   /** Key namespace / hash-tag options. */
   keys?: KeyOptions;
   /**
-   * When set (>0), terminal **webhook/recon** records may get Redis EXPIRE after
-   * complete/fail. **Completed idempotency fences never EXPIRE** (REDIS-1): silent
-   * eviction would allow re-reserve and double mutation. Use `deleteExpired` for
-   * intentional idempotency cleanup. Default (unset/0) is safe for all stores.
+   * When set (>0), terminal **webhook dead_letter / recon failed|manual_review**
+   * records may get Redis EXPIRE after fail/markManualReview.
+   * **Completed fences never EXPIRE** (REDIS-1 idempotency + STORES-5 webhook/recon):
+   * silent eviction re-opens claim and can reprocess paid / re-run recon.
+   * Use `deleteExpired` for intentional cleanup. Default (unset/0) is safe.
    */
   retentionTtlMs?: number;
 };

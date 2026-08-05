@@ -168,12 +168,14 @@ const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   // VERIFY ONLY — no fulfill / onWebhookVerified money work (WEBHOOKS-2).
   verifyAndNormalize: async (raw) => {
-    // Let throws propagate. processWithVerifier classifies (WEBHOOKS-1/4/6):
-    // - InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
+    // Let throws propagate. processWithVerifier classifies (WEBHOOKS-1/5/6):
+    // - InvalidWebhookError (verify-false only) / ok:false → invalid_webhook (~400 forgery)
+    // - InvalidRequestError / post-verify parse → handler_failed { retryable: true }
+    //   (~5xx; signature-valid paid events must redeliver — never permanent 400)
     // - RateLimitError / TypeError / NetworkError / unknown Error →
     //   handler_failed { retryable: true } (~5xx; redeliver paid events)
     // - Permanent structure GatewayApiError → handler_failed { retryable: false }
-    // Never map infrastructure throws to ok:false (that stops redelivery).
+    // Never map infrastructure/parse throws to ok:false (that stops redelivery).
     const event = await client.handleWebhook(
       "stripe",
       raw.body,
@@ -196,7 +198,7 @@ const outcome = await engine.processWithVerifier({
   },
 });
 // Signature forgery / ok:false → { outcome: "invalid_webhook" } — never claims
-// Verify infra / unknown throw → { outcome: "handler_failed", retryable: true }
+// Parse / InvalidRequestError / verify infra / unknown → handler_failed retryable
 ```
 
 ### Gateway-only verify
@@ -375,7 +377,8 @@ const durableEngine = createWebhookInboxEngine({
 - `maxAttempts` is max **handler** attempts before `dead_letter` on `durable_retry` (default 5). Must be a finite integer **`>= 1`** (constructor throws otherwise).
 - Each successful store `claim` acquire increments `attempts`.
 - The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
-- **Crash reclaim (WEBHOOKS-1):** soft-release of an expired `claimed` lease restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget — only handler outcomes (fail without restore / complete path) consume it.
+- **Crash reclaim:** soft-release of an expired `claimed` lease (via get/listRetryable) restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget.
+- **WEBHOOKS-2 (lease timeout / hang):** `store.fail` with a matching token succeeds even after lease expiry so handler hang/timeout still records an attempt. Soft-release alone must not make `maxAttempts` a no-op — poison/long handlers eventually dead-letter.
 - `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry { reason: "not_available" }`. Adapters should map this to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
 - `listRetryable` only returns rows with `availableAt <= now` (same gate). Soft-release on list/get/claim restores unfinished claim attempts.
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
@@ -449,10 +452,10 @@ type WebhookProcessingOutcome =
 | `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work; optional timing fields | **200 only if a worker runs `processRetryable`** |
 | `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff; includes `availableAt` / `retryAfterMs` when known | **200** if durable worker will re-drive; else **5xx** |
 | `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran; exposes `availableAt` / `retryAfterMs` | **5xx** (provider redelivery) unless a durable scheduler owns the row |
-| `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown throw (WEBHOOKS-1); may retry | 5xx (provider redelivery) |
+| `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown/parse/`InvalidRequestError` throw (WEBHOOKS-1/5); may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail / permanent verify structure (WEBHOOKS-6) | 200 or 4xx per policy (do not infinite-retry forever) |
-| `payload_conflict` | Same key, different hash **while lease active** (idle rows supersede — WEBHOOKS-3) | 409 / 400 — not silent 200 |
-| `invalid_webhook` | Bad input, `{ ok: false }`, or `InvalidWebhookError` forgery only (not verify transport throws) | 400 |
+| `payload_conflict` | Same key, different hash **while lease active only** (idle pending supersedes and reclaims — not permanent; WEBHOOKS-3/4) | 409 / 400 while lease held — not silent 200; redeliver after expiry with correct hash |
+| `invalid_webhook` | Bad input, `{ ok: false }`, or verify-false `InvalidWebhookError` only (not parse / `InvalidRequestError`) | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 

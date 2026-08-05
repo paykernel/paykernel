@@ -75,6 +75,10 @@ const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
  * `refund_completed` / `refunded`) and `setup_completed` so recovery cannot
  * complete as mark_consistent while money state is still incomplete or
  * setup-only (no capture settled).
+ *
+ * RECON-3: `pending` / `processing` remain in this set (forbid mark_consistent)
+ * but policy routes them to `retry_later` (still settling) rather than
+ * `manual_review` (ops park / dead-letter risk).
  */
 const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "authorized",
@@ -89,6 +93,15 @@ const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "refund_completed",
   "setup_completed",
   "reversed",
+]);
+
+/**
+ * RECON-3: provider still settling — consistent sparse/indeterminate local
+ * should reschedule (`retry_later`), not dead-letter via `manual_review`.
+ */
+const IN_FLIGHT_SETTLING_PROVIDER_STATUSES = new Set<string>([
+  "pending",
+  "processing",
 ]);
 
 /**
@@ -137,6 +150,10 @@ function isAuthHoldLocal(local: LocalPaymentSnapshot | undefined): boolean {
 
 function isOpenIncompleteProvider(status: string): boolean {
   return OPEN_INCOMPLETE_PROVIDER_STATUSES.has(status);
+}
+
+function isInFlightSettlingProvider(status: string): boolean {
+  return IN_FLIGHT_SETTLING_PROVIDER_STATUSES.has(status);
 }
 
 function isOpenMoneyLocal(local: LocalPaymentSnapshot | undefined): boolean {
@@ -252,14 +269,17 @@ function maySafeUpdateToFailed(
  * Decide what the application should do after a reconciliation result.
  *
  * Rules:
- * - consistent → mark_consistent (only when not sparse+open-provider incomplete)
+ * - consistent → mark_consistent (only when not sparse+open-provider incomplete,
+ *   and not paid-like provider with non-zero refundedAmount — RECON-2)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
  *   (RECON-2: not when provider.refundedAmount is non-zero)
  * - local pending/indeterminate + provider definitive failed + identity-bound →
  *   update_local_to_failed (RECON-1: not when capturedAmount/refundedAmount non-zero)
- * - sparse/indeterminate local + open incomplete provider (auth/approved/partial) →
- *   manual_review (never mark_consistent safe:true — surface capture work)
+ * - sparse/indeterminate local + in-flight provider (`pending`/`processing`) →
+ *   retry_later (RECON-3 — still settling; do not park/dead-letter)
+ * - sparse/indeterminate local + other open incomplete provider (auth/approved/
+ *   partial/refund lifecycle) → manual_review (never mark_consistent safe:true)
  * - local `authorized` / `partially_captured` → paid is **never** safe auto-upgrade
  *   (apply_drift_review) — capture totals / final_capture may still be incomplete
  * - gatewayPaymentId mismatch (target vs provider) → never safe paid/failed upgrade
@@ -328,7 +348,18 @@ export function decideReconciliationPolicy(
             "Provider status is failed/cancelled but capturedAmount or refundedAmount is non-zero — refuse safe update_local_to_failed; funds may have moved",
         };
       }
-      // Sparse / indeterminate expected + open incomplete provider must not
+      // RECON-3: in-flight pending/processing while local is sparse/indeterminate
+      // → retry_later (still settling). Do not manual_review / dead-letter.
+      if (
+        isIndeterminateLocal(local) &&
+        isInFlightSettlingProvider(result.provider.status)
+      ) {
+        return {
+          action: "retry_later",
+          safe: false,
+        };
+      }
+      // Sparse / indeterminate expected + other open incomplete provider must not
       // complete recovery as mark_consistent — capture/fulfillment may remain.
       if (
         isIndeterminateLocal(local) &&
@@ -339,6 +370,16 @@ export function decideReconciliationPolicy(
           safe: false,
           reason:
             "Provider is in open/incomplete money state while local expected is sparse or indeterminate — surface capture/fulfillment work; do not mark consistent",
+        };
+      }
+      // RECON-2: status-only local paid matching provider paid must not ignore
+      // non-zero provider.refundedAmount — refuse safe mark_consistent (refund drift).
+      if (providerPaidWithRefunds(result.provider)) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider is paid-like but refundedAmount is non-zero — refuse safe mark_consistent; surface refund drift for review",
         };
       }
       return {
@@ -492,12 +533,14 @@ export const decideReconciliationAction = decideReconciliationPolicy;
  * - result is `ambiguous_match` (never pick-first then re-charge)
  * - result is `provider_not_found` (original may still settle or exist)
  * - result is `temporarily_unavailable` (unknown provider state)
+ * - result is `manual_review_required` (RECON-1 — original may still settle
+ *   or identity/lookup is incomplete; never re-charge while under review)
  * - local expected is missing/indeterminate **or** any open money state
  *   (`authorized` / `approved` / partial / `paid` / refunded /
  *   `refund_pending` / `refund_failed` / `refund_completed` / setup, etc.)
  *
- * Only terminal failed/cancelled locals without ambiguous/not-found outcomes
- * leave room for an application-level re-attempt after review.
+ * Only terminal failed/cancelled locals without ambiguous/not-found/review
+ * outcomes leave room for an application-level re-attempt after review.
  */
 export function shouldForbidReplacementCharge(
   result: ReconciliationResult,
@@ -506,6 +549,9 @@ export function shouldForbidReplacementCharge(
   if (result.outcome === "ambiguous_match") return true;
   if (result.outcome === "provider_not_found") return true;
   if (result.outcome === "temporarily_unavailable") return true;
+  // RECON-1: forbid re-charge while lookup/identity requires manual review
+  // (terminal local alone must not open a second createPayment).
+  if (result.outcome === "manual_review_required") return true;
   if (isOpenMoneyLocal(target.expected)) {
     // Open or already-settled local money: never create a second charge while
     // the original intent may still settle or already holds funds.

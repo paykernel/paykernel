@@ -195,10 +195,10 @@ switch (decision.action) {
 | -------- | ------ | ---- |
 | `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set; **not** when `provider.refundedAmount` is non-zero (RECON-2) |
 | `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound); **not** when `capturedAmount` or `refundedAmount` is non-zero (RECON-1 — funds may have moved; escalate to manual_review / apply_drift_review) |
-| `mark_consistent` | `true` | Consistent snapshot without upgrade path and **not** sparse local + open incomplete provider |
+| `mark_consistent` | `true` | Consistent snapshot without upgrade path; **not** sparse local + open incomplete provider; **not** paid-like provider with non-zero `refundedAmount` (RECON-2 — surface refund drift) |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
-| `retry_later` | `false` | Temporarily unavailable (reschedule lookup; never invent failed) |
-| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work) |
+| `retry_later` | `false` | Temporarily unavailable (reschedule lookup; never invent failed); **sparse/indeterminate local + in-flight provider `pending`/`processing`** (RECON-3 — still settling) |
+| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; paid-like + non-zero refunds; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work; not in-flight pending/processing) |
 | `do_not_create_replacement` | `false` | **All** retryable `provider_not_found` (incl. terminal failed/cancelled local — RECON-2); never recreate while original may still settle |
 
 ### Replacement charge rule
@@ -214,6 +214,7 @@ Returns `true` when:
 - `result.outcome === "ambiguous_match"`, or
 - `result.outcome === "provider_not_found"` (original may still settle), or
 - `result.outcome === "temporarily_unavailable"`, or
+- `result.outcome === "manual_review_required"` (RECON-1 — never re-charge while under review), or
 - local expected is missing/indeterminate **or** any open money state
   (`pending` / `processing` / `authorized` / `approved` / partial / `paid` /
   `refunded` / `refund_pending` / `refund_failed` / `refund_completed` / setup), or

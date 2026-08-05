@@ -421,6 +421,54 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(call!.sql).toContain("lease_expires_at >");
     expect(call!.params).toContain(now);
   });
+
+  it("STORES-3: listDue canonicalizes offset input.now for soft-release and select", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const canonicalNow = "2026-01-15T12:00:00.000Z";
+    const offsetNow = "2026-01-15T14:00:00+02:00";
+    const executor = createScriptedExecutor({
+      onRun: () => ({ changes: 0 }),
+      onQuery: () => [],
+    });
+    const store = createDoReconciliationStore({ executor, clock });
+    await store.listDue({ now: offsetNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(canonicalNow);
+    // STORES-1: soft-release restores unfinished attempt
+    expect(soft!.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("SELECT") && c.sql.includes("scheduled"),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(canonicalNow);
+  });
+});
+
+describe("listRetryable now canonical (STORES-2)", () => {
+  it("canonicalizes offset input.now for soft-release and select", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const canonicalNow = "2026-01-15T12:00:00.000Z";
+    const offsetNow = "2026-01-15T14:00:00+02:00";
+    const executor = createScriptedExecutor({
+      onRun: () => ({ changes: 0 }),
+      onQuery: () => [],
+    });
+    const store = createDoWebhookInboxStore({ executor, clock });
+    await store.listRetryable({ now: offsetNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(canonicalNow);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("SELECT") && c.sql.includes("pending"),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(canonicalNow);
+  });
 });
 
 describe("withTransaction honesty (SHARED-1 / DO)", () => {

@@ -27,6 +27,7 @@ import {
   InsufficientFundsError,
   InvalidRequestError,
   isMoney,
+  isPaidLikePaymentStatus,
   minorAmountToNumber,
   moneyToMajorNumber,
   NetworkError,
@@ -351,11 +352,15 @@ function errorSummary(err: unknown): MockRequestRecord["error"] {
 
 /**
  * True when a resolved gateway result should settle the mock money ledger.
- * Non-success outcomes (failed / indeterminate / requires_action / declined)
- * must not mutate captured/refunded/void state even if fallback computed them.
+ *
+ * TESTKIT-3: do **not** settle on bare `outcome === "succeeded"` — auth holds,
+ * voids, and partial captures also use succeeded while money semantics differ.
+ * Non-success Phase 6 outcomes never mutate captured/refunded/void state.
+ * Domain status decides: paid / partially_captured (capture), cancelled (void),
+ * authorized (auth hold), refunded / partially_refunded. Prefer `isPaidOutcome`
+ * for fulfillment assertions; this helper only gates mock ledger mutations.
  */
 function isLedgerSettlingResult(result: GatewayPaymentResult): boolean {
-  if (result.outcome === "succeeded") return true;
   if (
     result.outcome === "failed" ||
     result.outcome === "indeterminate" ||
@@ -364,8 +369,7 @@ function isLedgerSettlingResult(result: GatewayPaymentResult): boolean {
   ) {
     return false;
   }
-  // Legacy results without Phase 6 outcome: only settle paid-like / known
-  // post-settlement statuses (never pending/processing from success:true alone).
+  // Domain status — never pending/processing from success:true or outcome alone.
   return (
     result.status === "paid" ||
     result.status === "partially_captured" ||
@@ -668,6 +672,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       base.authorizationId = result.authorizationId;
     }
     if (result.amount !== undefined) base.amount = result.amount;
+    // Always publish currency with major-unit amount fields (incomplete-money fail-closed).
+    if (result.currency !== undefined) base.currency = result.currency;
     if (result.fee !== undefined) base.fee = result.fee;
     if (result.capturedAmount !== undefined) {
       base.capturedAmount = result.capturedAmount;
@@ -699,25 +705,48 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     if ("result" in step && step.result) {
       next = { ...next, ...step.result };
     }
-    // Re-seal Phase 6 identity after partial merges (unless caller set outcome).
-    if (next.outcome === undefined || next.references === undefined) {
-      const sealed = withPhase6Outcome(
-        next,
-        next.outcome ?? paymentStatusToOperationOutcome(next.status),
-        next.reconciliationRequired === true
-          ? { reconciliationRequired: true }
-          : undefined,
-      );
-      // Preserve explicit reconciliationRequired / decline from overrides
-      if (next.reconciliationRequired === true) {
-        sealed.reconciliationRequired = true;
-      }
-      if (next.decline !== undefined) {
-        sealed.decline = next.decline;
-      }
-      return sealed;
+    // Currency must travel with major-unit amount fields.
+    if (
+      next.currency === undefined &&
+      base.currency !== undefined &&
+      (next.amount !== undefined ||
+        next.capturedAmount !== undefined ||
+        next.refundedAmount !== undefined ||
+        next.fee !== undefined)
+    ) {
+      next.currency = base.currency;
     }
-    return next;
+    // TESTKIT-1: re-seal Phase 6 identity after merges. Status overrides must
+    // not leave a stale outcome/references dual-write (e.g. status failed with
+    // leftover outcome succeeded). Explicit step.result.outcome wins.
+    const statusOverridden =
+      (step.status !== undefined && step.status !== base.status) ||
+      ("result" in step &&
+        step.result?.status !== undefined &&
+        step.result.status !== base.status);
+    const outcomeExplicit =
+      "result" in step && step.result?.outcome !== undefined
+        ? step.result.outcome
+        : undefined;
+    const sealedOutcome =
+      outcomeExplicit ??
+      (statusOverridden
+        ? paymentStatusToOperationOutcome(next.status)
+        : (next.outcome ?? paymentStatusToOperationOutcome(next.status)));
+    const sealed = withPhase6Outcome(
+      next,
+      sealedOutcome,
+      next.reconciliationRequired === true
+        ? { reconciliationRequired: true }
+        : undefined,
+    );
+    if (next.reconciliationRequired === true) {
+      sealed.reconciliationRequired = true;
+    }
+    if (next.decline !== undefined) {
+      sealed.decline = next.decline;
+    }
+    return sealed;
   }
 
   function ensurePaymentLedger(
@@ -733,15 +762,23 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       const state = payments.get(key)!;
       state.status = result.status;
       if (result.capturedAmount !== undefined) {
-        state.capturedAmountMinor = majorToMinor(
-          result.capturedAmount,
-          currency,
+        // TESTKIT-4: clamp scripted captured to charge total
+        state.capturedAmountMinor = Math.max(
+          0,
+          Math.min(
+            majorToMinor(result.capturedAmount, currency),
+            state.amountMinor,
+          ),
         );
       }
       if (result.refundedAmount !== undefined) {
-        state.refundedAmountMinor = majorToMinor(
-          result.refundedAmount,
-          currency,
+        // TESTKIT-4: clamp scripted refunded to captured total
+        state.refundedAmountMinor = Math.max(
+          0,
+          Math.min(
+            majorToMinor(result.refundedAmount, currency),
+            state.capturedAmountMinor,
+          ),
         );
       }
       return;
@@ -758,15 +795,18 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     let capturedMinor: number;
     if (result.capturedAmount !== undefined) {
       capturedMinor = majorToMinor(result.capturedAmount, currency);
-    } else if (result.status === "paid") {
+    } else if (isPaidLikePaymentStatus(result.status)) {
       capturedMinor = amountMinor;
     } else {
       capturedMinor = 0;
     }
-    const refundedMinor =
+    // TESTKIT-4: never let scripted captured/refunded exceed charge / captured.
+    capturedMinor = Math.max(0, Math.min(capturedMinor, amountMinor));
+    let refundedMinor =
       result.refundedAmount !== undefined
         ? majorToMinor(result.refundedAmount, currency)
         : 0;
+    refundedMinor = Math.max(0, Math.min(refundedMinor, capturedMinor));
     payments.set(key, {
       amountMinor,
       currency,
@@ -1127,19 +1167,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             logger.info("createPayment idempotent join in-flight", {
               idempotencyKey: idemKey,
             });
-            try {
-              return { ...(await pending.promise) };
-            } catch (err) {
-              // Dual-timeout caches provider success before throwing; prefer cache.
-              if (idempotencyResults.has(idemKey)) {
-                const cached = idempotencyResults.get(idemKey)!;
-                if (cached.fingerprint !== requestFingerprint) {
-                  throw fingerprintConflictError(idemKey);
-                }
-                return { ...cached.result };
-              }
-              throw err;
-            }
+            // TESTKIT-2: concurrent joiners must observe the same settlement as
+            // the primary (including dual-timeout NetworkError). Do not convert
+            // a rejection into cached provider success mid-flight — that trains
+            // false concurrent symmetry. Sequential retry after the primary
+            // settles hits the top-level idempotency cache instead.
+            return { ...(await pending.promise) };
           }
         }
 
@@ -1163,17 +1196,18 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             // fallback builds result shape only — does NOT write paid/authorized ledger.
             // Success / processing / terminal failure write after resolve; dual-timeout
             // provider-side paid goes through ledgerOnProviderSuccess only.
+            const currencyCode = params.currency.toUpperCase();
             const result = await resolvePaymentOutcome(
               outcome,
               () => {
                 const status: PaymentStatus =
                   !capture && capabilities.authorization ? "authorized" : "paid";
                 return {
-                  ...defaultPaymentResult(id, status, major, name),
+                  ...defaultPaymentResult(id, status, major, name, currencyCode),
                   rawResponse: {
                     mock: true,
                     amountMinor: minor,
-                    currency: params.currency.toUpperCase(),
+                    currency: currencyCode,
                     exponent: getCurrencyExponent(params.currency),
                   },
                 };
@@ -1188,32 +1222,54 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 dualProviderResult = withId;
                 const dualMajor = withId.amount ?? major;
                 const dualMinor = majorToMinor(dualMajor, params.currency);
-                // Auth-only provider success: 0 capture + authorized
-                const authOnly = withId.status === "authorized";
-                const dualCapturedMajor = authOnly
-                  ? 0
-                  : (withId.capturedAmount ?? withId.amount ?? major);
+                const dualStatus =
+                  withId.status ??
+                  (!capture && capabilities.authorization
+                    ? "authorized"
+                    : "paid");
+                // TESTKIT-3: settle capture money from paid-domain status /
+                // explicit capturedAmount — not bare outcome===succeeded.
+                // Auth-only / non-paid → 0 capture. Partial without amount → 0.
+                let dualCapturedMinor = 0;
+                if (withId.capturedAmount !== undefined) {
+                  dualCapturedMinor = Math.max(
+                    0,
+                    Math.min(
+                      majorToMinor(withId.capturedAmount, params.currency),
+                      dualMinor,
+                    ),
+                  );
+                } else if (isPaidLikePaymentStatus(dualStatus)) {
+                  dualCapturedMinor = dualMinor;
+                }
                 payments.set(pid, {
                   amountMinor: dualMinor,
                   currency: params.currency,
-                  status: withId.status ?? (authOnly ? "authorized" : "paid"),
-                  capturedAmountMinor: authOnly
-                    ? 0
-                    : majorToMinor(dualCapturedMajor, params.currency),
+                  status: dualStatus,
+                  capturedAmountMinor: dualCapturedMinor,
                   refundedAmountMinor: 0,
-                  authorized: authOnly,
+                  authorized: dualStatus === "authorized",
                 });
-                // Cache before throw so retries never double-charge
+                // Cache before throw so sequential retries never double-charge
                 if (idemKey && requestFingerprint && withId.gatewayId) {
                   cacheIdempotentResult(idemKey, requestFingerprint, withId);
                 }
               },
             );
 
-            // Prefer stable id from fallback when scripted result omitted gatewayId
-            const finalResult = !result.gatewayId
+            // Prefer stable id from fallback when scripted result omitted gatewayId.
+            // Always publish currency with major-unit amounts (incomplete-money fail-closed).
+            const withId = !result.gatewayId
               ? { ...result, gatewayId: id }
               : result;
+            const finalResult: GatewayPaymentResult =
+              withId.currency === undefined &&
+              (withId.amount !== undefined ||
+                withId.capturedAmount !== undefined ||
+                withId.refundedAmount !== undefined ||
+                withId.fee !== undefined)
+                ? { ...withId, currency: currencyCode }
+                : withId;
 
             if (finalResult.success || finalResult.status === "processing") {
               ensurePaymentLedger(id, params, finalResult, { major, minor });
@@ -1344,9 +1400,11 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   nextStatus,
                   amountMajor,
                   name,
+                  state.currency,
                 ),
                 capturedAmount: capturedMajor,
                 amount: amountMajor,
+                currency: state.currency,
               };
             },
             signal,
@@ -1358,6 +1416,24 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
 
           if (applyLedger && isLedgerSettlingResult(result)) {
             applyLedger();
+            // TESTKIT-1: ledger is source of truth after successful capture.
+            // Scripted result overrides must not desync reported money/status
+            // from the settled ledger (dual-write honesty).
+            const publicState = toPublicPaymentState(state!);
+            return withPhase6Outcome(
+              {
+                ...result,
+                status: publicState.status,
+                amount: publicState.amount,
+                currency: publicState.currency,
+                capturedAmount: publicState.capturedAmount,
+                refundedAmount: publicState.refundedAmount,
+              },
+              paymentStatusToOperationOutcome(publicState.status),
+              result.reconciliationRequired === true
+                ? { reconciliationRequired: true }
+                : undefined,
+            );
           }
           return result;
         }),
@@ -1539,6 +1615,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 "cancelled",
                 undefined,
                 name,
+                state.currency,
               );
             },
             signal,
@@ -1549,6 +1626,18 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
 
           if (applyLedger && isLedgerSettlingResult(result)) {
             applyLedger();
+            // TESTKIT-1: re-assert ledger status after void (no money amounts).
+            return withPhase6Outcome(
+              {
+                ...result,
+                status: "cancelled",
+                currency: state?.currency ?? result.currency,
+              },
+              "succeeded",
+              result.reconciliationRequired === true
+                ? { reconciliationRequired: true }
+                : undefined,
+            );
           }
           return result;
         });
@@ -1576,7 +1665,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 publicState.status,
                 publicState.amount,
                 name,
+                publicState.currency,
               ),
+              currency: publicState.currency,
               capturedAmount: publicState.capturedAmount,
               refundedAmount: publicState.refundedAmount,
             };

@@ -135,9 +135,12 @@ export async function withRetry<T>(
         throw error;
       }
 
-      const delay = options.getRetryDelayMs
+      const rawDelay = options.getRetryDelayMs
         ? options.getRetryDelayMs(error, attempt)
         : defaultRetryDelayMs(error, attempt, config);
+      // MONEY-5: custom getRetryDelayMs can return NaN / negative / ∞ and hang
+      // or break setTimeout; always sanitize before sleep / onRetry.
+      const delay = sanitizeRetryDelayMs(rawDelay, config);
 
       options.onRetry?.(error, attempt, delay);
       await new Promise((resolve) => setTimeout(resolve, delay));
@@ -145,4 +148,17 @@ export async function withRetry<T>(
   }
 
   throw lastError;
+}
+
+/**
+ * MONEY-5: clamp custom / default delay to a finite non-negative sleep.
+ * Invalid values (NaN, negative, ±∞, non-number) become 0 so retries still
+ * progress; oversized values share the Retry-After high ceiling.
+ */
+function sanitizeRetryDelayMs(delay: unknown, config: RetryConfig): number {
+  if (typeof delay !== "number" || !Number.isFinite(delay) || delay < 0) {
+    return 0;
+  }
+  const ceiling = Math.max(config.maxDelayMs, RETRY_AFTER_MAX_MS);
+  return Math.min(delay, ceiling);
 }

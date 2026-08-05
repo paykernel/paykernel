@@ -201,6 +201,7 @@ if (eligibility.allowed) {
 - Merges `attemptedGateways` into exclusions (plus `input.excludeGateways`)
 - Reuses pure `router.select` with exclusions — still **select-only**
 - Throws if the only available gateway was already attempted
+- **ROUTE-3:** expert-override eligibility must come from `evaluateFallback` (object identity brand). Forged `{ allowed: true, expertOverride: true, reason: "expert_override:…" }` objects are rejected — the reason prefix alone is not sufficient.
 
 ## App responsibility
 

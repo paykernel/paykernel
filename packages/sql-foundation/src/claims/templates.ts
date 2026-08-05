@@ -334,15 +334,21 @@ export function reconciliationClaimTemplates(
   const t = table(LOGICAL_TABLES.reconciliationJobs, namespace);
   const intent =
     "Atomic claim when due: conditional UPDATE only; reclaim expired lease; " +
-    "increment generation/attempts; no insert on claim.";
+    "generation++; attempts++ only for scheduled reclaim (STORES-1: expired claimed keeps attempts); " +
+    "no insert on claim.";
 
+  // STORES-1: scheduled burns an attempt; expired claimed reclaim does not
+  // (crash/deploy thrash must not exhaust maxAttempts without provider work).
   const postgresSql = `
 UPDATE ${t} SET
   status = 'claimed',
   lease_owner = $2,
   lease_token = $3,
   lease_expires_at = $4,
-  attempts = attempts + 1,
+  attempts = CASE
+    WHEN ${t}.status = 'claimed' THEN ${t}.attempts
+    ELSE ${t}.attempts + 1
+  END,
   generation = generation + 1,
   updated_at = $5
 WHERE key = $1
@@ -362,7 +368,10 @@ UPDATE ${t} SET
   lease_owner = ?,
   lease_token = ?,
   lease_expires_at = ?,
-  attempts = attempts + 1,
+  attempts = CASE
+    WHEN status = 'claimed' THEN attempts
+    ELSE attempts + 1
+  END,
   generation = generation + 1,
   updated_at = ?
 WHERE key = ?
@@ -459,6 +468,72 @@ WHERE key = ?
       dialect: "generic",
       sql: `-- Portable recon timestamp repair (SQL-1 free-lease fence; see reconciliationTimestampRepairTemplates).`,
       params: ["key", "dueAt", "leaseExpiresAt", "now"],
+      intent,
+    },
+  };
+}
+
+/**
+ * Timestamp canonicalize repair after {@link classifyWebhookClaimMiss} === `claimable`.
+ *
+ * **STORES-4 fence:** only mutates free/expired-lease or pending rows.
+ * Never overwrite an active winner's `lease_expires_at` from a stale SELECT snapshot.
+ * Adapters bind canonical available_at/lease + now; then retry claim once.
+ */
+export function webhookTimestampRepairTemplates(
+  namespace?: ResolvedSchemaNamespace,
+): ClaimTemplateSet {
+  const t = table(LOGICAL_TABLES.webhookInbox, namespace);
+  const intent =
+    "STORES-4: canonicalize available_at/lease_expires_at only when pending " +
+    "or lease free/expired; never clobber active claim lease.";
+
+  // params: key, availableAt, leaseExpiresAt, now
+  const postgresSql = `
+UPDATE ${t} SET
+  available_at = $2,
+  lease_expires_at = $3
+WHERE key = $1
+  AND status NOT IN ('completed', 'failed', 'dead_letter')
+  AND (
+    status = 'pending'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= $4
+  )
+`.trim();
+
+  // params: availableAt, leaseExpiresAt, key, now
+  const sqliteSql = `
+UPDATE ${t} SET
+  available_at = ?,
+  lease_expires_at = ?
+WHERE key = ?
+  AND status NOT IN ('completed', 'failed', 'dead_letter')
+  AND (
+    status = 'pending'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= ?
+  )
+`.trim();
+
+  return {
+    intent,
+    postgres: {
+      dialect: "postgres",
+      sql: postgresSql,
+      params: ["key", "availableAt", "leaseExpiresAt", "now"],
+      intent,
+    },
+    sqlite: {
+      dialect: "sqlite",
+      sql: sqliteSql,
+      params: ["availableAt", "leaseExpiresAt", "key", "now"],
+      intent,
+    },
+    generic: {
+      dialect: "generic",
+      sql: `-- Portable webhook timestamp repair (STORES-4 free-lease fence; see webhookTimestampRepairTemplates).`,
+      params: ["key", "availableAt", "leaseExpiresAt", "now"],
       intent,
     },
   };
@@ -606,8 +681,13 @@ WHERE key = ?
  */
 export function webhookFailTemplates(namespace?: ResolvedSchemaNamespace): ClaimTemplateSet {
   const t = table(LOGICAL_TABLES.webhookInbox, namespace);
+  // WEBHOOKS-2: matching lease_token on claimed is enough — do NOT require
+  // lease_expires_at > now. Hang/timeout handlers must still record attempts
+  // after expiry so maxAttempts is effective (memory-store parity). Soft-release
+  // via get/listRetryable clears token first; that path still rejects correctly.
   const intent =
-    "Atomic webhook fail: requires active lease; set pending/dead_letter + sanitized last_error only; " +
+    "Atomic webhook fail: matching lease_token on claimed (WEBHOOKS-2: allowed after expiry); " +
+    "set pending/dead_letter + sanitized last_error only; " +
     "optional restoreAttempt (0|1) decrements attempts for non-handler parking releases.";
 
   // statusTarget bound as param ($3 / ?) must be 'pending' or 'dead_letter' (adapter-validated).
@@ -626,11 +706,10 @@ UPDATE ${t} SET
 WHERE key = $1
   AND lease_token = $2
   AND status = 'claimed'
-  AND lease_expires_at IS NOT NULL
-  AND lease_expires_at > $6
 RETURNING key, status, generation
 `.trim();
 
+  // params: statusTarget, lastError, availableAt, now, restoreAttemptFlag, key, leaseToken
   const sqliteSql = `
 UPDATE ${t} SET
   status = ?,
@@ -644,8 +723,6 @@ UPDATE ${t} SET
 WHERE key = ?
   AND lease_token = ?
   AND status = 'claimed'
-  AND lease_expires_at IS NOT NULL
-  AND lease_expires_at > ?
 `.trim();
 
   return {
@@ -675,13 +752,12 @@ WHERE key = ?
         "restoreAttemptFlag",
         "key",
         "leaseToken",
-        "now",
       ],
       intent,
     },
     generic: {
       dialect: "generic",
-      sql: `-- Portable webhook fail: conditional UPDATE by lease_token + sanitized error + optional restoreAttempt.`,
+      sql: `-- Portable webhook fail: conditional UPDATE by lease_token + sanitized error + optional restoreAttempt (WEBHOOKS-2: token match after expiry ok).`,
       params: [
         "key",
         "leaseToken",

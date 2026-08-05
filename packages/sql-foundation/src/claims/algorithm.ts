@@ -271,6 +271,89 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
   return acquired;
 }
 
+/**
+ * Classification of an empty webhook claim RETURNING / 0-row UPDATE.
+ *
+ * Pure Date.parse temporal rules (same as {@link decideWebhookClaim}).
+ * When the pure decision would acquire (`claimable`), SQL adapters MUST NOT
+ * map the miss to permanent `not_available` — that freezes paid redrive forever
+ * under lexical TEXT `available_at` mismatch (STORES-4). Prefer canonicalize+retry
+ * or a retryable error so pollers can reclaim.
+ *
+ * **STORES-4:** timestamp-repair UPDATE after `claimable` MUST be free-lease fenced
+ * (`status = pending` OR `lease_expires_at` null/expired). Never overwrite an
+ * active winner's lease from a stale SELECT snapshot. Use
+ * `webhookTimestampRepairTemplates` (or equivalent WHERE).
+ */
+export type WebhookClaimMissKind =
+  | "already_completed"
+  | "duplicate_failed"
+  | "payload_hash_conflict"
+  | "in_progress"
+  | "not_available"
+  | "claimable";
+
+export type WebhookClaimMissSnapshot = {
+  status: string;
+  payloadHash: string;
+  leaseExpiresAt?: string | undefined | null;
+  availableAt: string;
+};
+
+/**
+ * @param existing - Row selected after empty claim RETURNING (adapters throw when missing).
+ * @param inputPayloadHash - Caller's payload hash (for supersede vs conflict).
+ * @param nowMs - Claim clock epoch ms.
+ */
+export function classifyWebhookClaimMiss(
+  existing: WebhookClaimMissSnapshot,
+  inputPayloadHash: string,
+  nowMs: number,
+): WebhookClaimMissKind {
+  if (existing.status === "completed") {
+    return "already_completed";
+  }
+  if (existing.status === "failed" || existing.status === "dead_letter") {
+    return "duplicate_failed";
+  }
+
+  const hashMismatch = existing.payloadHash !== inputPayloadHash;
+  // Mirror decideWebhookClaim: conflict only under an *active* lease.
+  // Idle/expired claimed + different hash is supersede (claimable) — WEBHOOKS-3/4.
+  const leaseActive =
+    existing.status === "claimed" &&
+    isLeaseActive(existing.leaseExpiresAt, nowMs);
+
+  if (leaseActive) {
+    if (hashMismatch) {
+      return "payload_hash_conflict";
+    }
+    return "in_progress";
+  }
+
+  if (existing.status === "claimed") {
+    // Free/expired lease — pure rules reclaim (any hash; supersede on mismatch).
+    return "claimable";
+  }
+
+  if (existing.status === "pending") {
+    // Hash supersede is always claimable even during backoff.
+    if (hashMismatch) {
+      return "claimable";
+    }
+    const availableMs = Date.parse(existing.availableAt);
+    if (Number.isFinite(availableMs) && availableMs > nowMs) {
+      return "not_available";
+    }
+    // Due, unparseable, or non-canonical form that Date.parse still treats as due.
+    return "claimable";
+  }
+
+  // Unknown status — do not freeze as not_available; treat as claimable so
+  // adapters retry rather than strand paid events.
+  return "claimable";
+}
+
 // ─── Reconciliation claim ────────────────────────────────────────────────────
 
 export type ReconciliationExistingSnapshot = {
@@ -332,11 +415,16 @@ export function decideReconciliationClaim(
     return { kind: "not_due" };
   }
 
+  // STORES-1: scheduled / handler-retry burns an attempt; expired claimed reclaim
+  // keeps attempts (crash/deploy thrash must not exhaust maxAttempts without work).
+  const nextAttempts =
+    existing.status === "claimed" ? existing.attempts : existing.attempts + 1;
+
   return {
     kind: "acquired",
     action: "update",
     generation: existing.generation + 1,
-    attempts: existing.attempts + 1,
+    attempts: nextAttempts,
     leaseToken: input.newLeaseToken,
     leaseOwner: input.owner,
     leaseExpiresAt: addMsIso(clock.nowMs, input.leaseMs),

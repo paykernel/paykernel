@@ -150,7 +150,7 @@ await scheduler.processDue({
 
 `leaseLost` counts fencing rejections on complete/fail/markManualReview (another worker owns the lease) — these are **not** counted as business reschedules or dead-letters.
 
-`maxInFlightByGateway` is a **per-processDue call** filter using the gateway segment of keys shaped `recon:{gateway}:{id}`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others within the call. Applications should also bound global worker concurrency and per-provider rate limits (see [batch.md](./batch.md)).
+`maxInFlightByGateway` is a **per-processDue call** filter using the gateway segment of keys shaped `recon:{gateway}:{id}` (canonical) or app-supplied `{gateway}:{id}` (RECON-4). Keys without a parseable gateway segment map to `"unknown"`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others within the call. Applications should also bound global worker concurrency and per-provider rate limits (see [batch.md](./batch.md)).
 
 ### Re-scheduling terminal jobs
 

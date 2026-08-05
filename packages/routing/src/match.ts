@@ -46,6 +46,31 @@ export function ruleMatchesIgnoringAmount(
   rule: RoutingRule,
   input: RoutingInput,
 ): boolean {
+  if (!ruleMatchesIgnoringAmountAndCapabilities(rule, input)) {
+    return false;
+  }
+  // Rule-level requiredCapabilities, or input-level when rule omits them.
+  const caps =
+    rule.match.requiredCapabilities ??
+    input.requiredCapabilities ??
+    undefined;
+  if (caps !== undefined && caps.length > 0) {
+    if (!gatewayHasCapabilities(rule.gateway, caps, input)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Non-amount, non-capability criteria only (currency/country/method/tenant/…).
+ * Used by select-time capability honesty (ROUTE-2) so unconstrained fallback
+ * cannot ignore rule-level `requiredCapabilities` when those rules otherwise match.
+ */
+export function ruleMatchesIgnoringAmountAndCapabilities(
+  rule: RoutingRule,
+  input: RoutingInput,
+): boolean {
   const m = rule.match;
 
   if (m.currency !== undefined) {
@@ -74,19 +99,10 @@ export function ruleMatchesIgnoringAmount(
     }
   }
 
-  // ROUTE-2: merchantPreference hard filter is case-insensitive (trim).
+  // merchantPreference hard filter is case-insensitive (trim).
   if (m.merchantPreference !== undefined) {
     if (input.merchantPreference === undefined) return false;
     if (!stringsEqualCi(m.merchantPreference, input.merchantPreference)) {
-      return false;
-    }
-  }
-
-  // Rule-level requiredCapabilities, or input-level when rule omits them.
-  const caps =
-    m.requiredCapabilities ?? input.requiredCapabilities ?? undefined;
-  if (caps !== undefined && caps.length > 0) {
-    if (!gatewayHasCapabilities(rule.gateway, caps, input)) {
       return false;
     }
   }

@@ -16,6 +16,7 @@ import {
   assertNoSecretsInEnvelope,
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
+import { isPaidOutcome } from "../../types/operation-result";
 import { MoyasarGateway } from "./moyasar.gateway";
 import { InMemoryIdempotencyStore } from "../../utils/idempotency";
 import { money } from "../../utils/money";
@@ -486,11 +487,64 @@ describe("MoyasarGateway", () => {
       // Paid-like + missing amount demotes; omit coerced-0 majors (MOYASAR-1).
       expect(result.status).toBe("processing");
       expect(result.status).not.toBe("paid");
+      expect(isPaidOutcome(result)).toBe(false);
       expect(result.amount).toBeUndefined();
       expect(result.capturedAmount).toBeUndefined();
       expect(result.fee).toBe(2.5);
       expect(result.refundedAmount).toBe(0);
       expect(result.currency).toBe("SAR");
+    });
+
+    it("fail-closes currency-stripped paid after 2xx (MOYASAR-1 incomplete money)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          fee: 250,
+          captured: 10000,
+          currency: "",
+        }),
+      );
+
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      // Currency-stripped paid must not keep isPaidOutcome (same class as
+      // missing amount). No major-unit money fields without currency.
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.currency).toBeUndefined();
+      expect(result.amount).toBeUndefined();
+      expect(result.fee).toBeUndefined();
+      expect(result.capturedAmount).toBeUndefined();
+      expect(result.refundedAmount).toBeUndefined();
+    });
+
+    it("fail-closes missing currency on paid getPayment (MOYASAR-1)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: 10000,
+          currency: "   ",
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("processing");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.currency).toBeUndefined();
+      expect(result.amount).toBeUndefined();
     });
 
     it("accepts Money amount input for createPayment (bigint minor conversion)", async () => {
@@ -1252,8 +1306,9 @@ describe("MoyasarGateway", () => {
       expect(voided.success).toBe(true);
     });
 
-    it("voidPayment does not force succeeded when provider status is not voided (MOYASAR-5)", async () => {
-      // Residual 2xx body still paid — must not force operation-succeeded.
+    it("voidPayment residual paid is money-honest (not void-complete) (MOYASAR-2)", async () => {
+      // Residual 2xx body still paid — forceOutcome is skipped; natural paid
+      // maps to outcome succeeded. Callers must key void-complete on cancelled.
       mockFetchJson(paymentResponse({ status: "paid" }));
 
       const notVoided = await createGateway().voidPayment({
@@ -1262,10 +1317,12 @@ describe("MoyasarGateway", () => {
       });
 
       expect(notVoided.status).toBe("paid");
-      // Natural map for paid is succeeded; force path is skipped but paid still
-      // maps succeeded. The regression is void forcing on non-void statuses that
-      // would otherwise be failed (e.g. cancelled from non-void source).
+      expect(notVoided.status).not.toBe("cancelled");
       expect(notVoided.outcome).toBe("succeeded");
+      // Money-honest residual: still settled funds, not void success.
+      expect(isPaidOutcome(notVoided)).toBe(true);
+      expect(notVoided.amount).toBe(100);
+      expect(notVoided.currency).toBe("SAR");
     });
 
     it("voidPayment does not force succeeded on failed residual body (MOYASAR-5)", async () => {
@@ -2032,6 +2089,31 @@ describe("MoyasarGateway", () => {
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
       expect(event.type).toBe("payment_paid");
+      expect(event.provider?.eventType).toBe("payment_paid");
+    });
+
+    it("demotes payment_paid dual-write when domain status is not paid-like (MOYASAR-3)", () => {
+      // Envelope payment_paid maps to payment.succeeded, but provider status
+      // authorized is not paid-like — dual-write must not settle from type alone.
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_paid_auth_mismatch",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "authorized",
+          amount: 10000,
+          currency: "SAR",
+          captured: 0,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("authorized");
+      expect(event.type).toBe("payment_paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
       expect(event.provider?.eventType).toBe("payment_paid");
     });
 

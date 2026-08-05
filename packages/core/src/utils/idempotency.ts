@@ -81,7 +81,12 @@ function cloneUnknown(value: unknown): unknown {
     try {
       return JSON.parse(JSON.stringify(value));
     } catch {
-      return value;
+      // MONEY-4: never fall back to a shared live reference — callers mutating
+      // `result` would poison the in-memory fence / store entry.
+      throw new Error(
+        "Idempotency result is not cloneable (structuredClone and JSON both failed); " +
+          "refusing to store or return a shared mutable reference",
+      );
     }
   }
 }
@@ -273,15 +278,32 @@ function encodeCanonicalMoneyFingerprint(m: {
 }
 
 /**
+ * Fingerprint parse options for number/string amount bags that carry a sibling
+ * `exponent` (MONEY-1). Without this, `{ amount: 10, currency: "USD", exponent: 0 }`
+ * (10 minors) collides with ISO-scale `{ amount: 10, currency: "USD" }` (1000).
+ */
+function fingerprintOptsForSiblingExponent(
+  exponent: unknown,
+): typeof FINGERPRINT_MONEY_OPTS & { exponent?: number } {
+  if (typeof exponent === "number" && Number.isInteger(exponent) && exponent >= 0) {
+    return { ...FINGERPRINT_MONEY_OPTS, exponent };
+  }
+  return FINGERPRINT_MONEY_OPTS;
+}
+
+/**
  * Try to normalize an amount+currency pair to canonical Money major-unit form.
  * Returns undefined when the value cannot be parsed as money (caller falls back
  * to structural encoding).
  *
- * - `number` / decimal `string` amounts use the sibling `currency`.
+ * - `number` / decimal `string` amounts use the sibling `currency` **and**
+ *   sibling bag `exponent` when present (MONEY-1) so scale overrides do not
+ *   false-match ISO re-parses.
  * - Nested {@link Money} under `amount` is re-validated via its own currency
  *   **and stored `exponent`** (MONEY-1) so
  *   `money(10,"USD",{exponent:0})` (10 minors) does not collide with
- *   `{ amount: 10, currency: "USD" }` (1000 minors).
+ *   `{ amount: 10, currency: "USD" }` (1000 minors). Nested Money.exponent wins
+ *   over a sibling bag exponent.
  * - Only when the sibling currency matches (case-insensitive) do we collapse.
  * - On currency mismatch, returns undefined so structural encoding keeps the
  *   nested Money currency distinct from the sibling.
@@ -289,10 +311,15 @@ function encodeCanonicalMoneyFingerprint(m: {
 function tryCanonicalAmountCurrency(
   amount: unknown,
   currency: string,
+  siblingExponent?: unknown,
 ): { amount: string; currency: string; exponent?: number } | undefined {
   try {
     if (typeof amount === "number" || typeof amount === "string") {
-      const m = money(amount, currency, FINGERPRINT_MONEY_OPTS);
+      const m = money(
+        amount,
+        currency,
+        fingerprintOptsForSiblingExponent(siblingExponent),
+      );
       return canonicalMoneyFingerprintShape(m);
     }
     if (isMoney(amount)) {
@@ -381,6 +408,8 @@ function stableStringify(value: unknown): string {
     const canonical = tryCanonicalAmountCurrency(
       record.amount,
       record.currency,
+      // MONEY-1: number/string bags may carry sibling exponent for scale override.
+      record.exponent,
     );
     if (canonical) {
       source = {
@@ -388,9 +417,8 @@ function stableStringify(value: unknown): string {
         amount: canonical.amount,
         currency: canonical.currency,
       };
-      // MONEY-1: surface non-ISO exponent on the bag so nested Money scale
-      // overrides remain part of the fingerprint (and drop stale exponent when
-      // the canonical form is ISO-default).
+      // MONEY-1: surface non-ISO exponent on the bag so scale overrides remain
+      // part of the fingerprint (and drop stale exponent when ISO-default).
       if (canonical.exponent !== undefined) {
         source = { ...source, exponent: canonical.exponent };
       } else if (Object.prototype.hasOwnProperty.call(source, "exponent")) {

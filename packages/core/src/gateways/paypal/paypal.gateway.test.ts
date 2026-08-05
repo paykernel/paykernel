@@ -935,7 +935,7 @@ describe('PayPalGateway', () => {
             })).toBe(false);
         });
 
-        it('should map CHECKOUT.ORDER.COMPLETED without a capture to approved (not paid)', () => {
+        it('should map CHECKOUT.ORDER.COMPLETED auth-only to authorized (PAYPAL-2; not approved/paid)', () => {
             const payload = {
                 id: 'WH-order-completed-no-capture',
                 event_type: 'CHECKOUT.ORDER.COMPLETED',
@@ -969,9 +969,50 @@ describe('PayPalGateway', () => {
 
             const event = gateway.parseWebhookEvent(payload);
 
-            expect(event.status).toBe('approved');
+            // Align with getPayment authorized hold — not buyer-approved, not paid.
+            expect(event.status).toBe('authorized');
+            expect(event.status).not.toBe('approved');
+            expect(event.status).not.toBe('paid');
             expect(event.gatewayPaymentId).toBe('order-auth-only');
             expect(event.amount).toBe(25);
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-auth-only',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('CHECKOUT.ORDER.COMPLETED bare (no captures/auth) is not paid (PAYPAL-1)', () => {
+            const payload = {
+                id: 'WH-order-completed-bare',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-bare-completed',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '30.00',
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('processing');
+            expect(event.status).not.toBe('paid');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-bare-completed',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
         });
 
         it('should use authorization resource id when AUTHORIZATION.CAPTURED has no capture id', () => {
@@ -4674,15 +4715,34 @@ describe('PayPalGateway', () => {
             expect(result.amount).toBe(55);
         });
 
+        it('bare COMPLETED order without captures is not isPaidOutcome (PAYPAL-1)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-BARE-COMPLETED',
+                status: 'COMPLETED',
+                // No purchase_units.payments.captures / authorizations
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-BARE-COMPLETED',
+            });
+
+            expect(result.status).toBe('processing');
+            expect(result.status).not.toBe('paid');
+            expect(result.outcome).not.toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
         describe('getPaymentStatus', () => {
-            it('should return status for order', async () => {
+            it('bare COMPLETED order without captures is not paid (PAYPAL-1)', async () => {
                 globalThis.fetch = createMockFetch({
                     id: 'ORDER-123',
                     status: 'COMPLETED',
                 });
 
                 const status = await gateway.getPaymentStatus('ORDER-123');
-                expect(status).toBe('paid');
+                // Fail-closed: order COMPLETED without payments.captures must not look settled.
+                expect(status).toBe('processing');
+                expect(status).not.toBe('paid');
             });
 
             it('should return status for capture IDs returned as capturePayment gatewayId', async () => {

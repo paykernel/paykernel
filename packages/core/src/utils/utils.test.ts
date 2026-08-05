@@ -201,6 +201,51 @@ describe("withRetry", () => {
     expect(delays[1]!).toBeGreaterThanOrEqual(0);
     expect(delays[1]!).toBeLessThanOrEqual(200);
   });
+
+  it("sanitizes custom getRetryDelayMs NaN/negative/∞/oversized (MONEY-5)", async () => {
+    const delays: number[] = [];
+    let attempts = 0;
+    const originalSetTimeout = globalThis.setTimeout;
+    // @ts-expect-error test stub
+    globalThis.setTimeout = ((fn: () => void, _ms?: number) =>
+      originalSetTimeout(fn, 0)) as typeof setTimeout;
+
+    try {
+      const runOnce = async (getDelay: () => number) => {
+        let n = 0;
+        await withRetry(
+          async () => {
+            n++;
+            if (n === 1) throw new Error("transient");
+            return "ok";
+          },
+          {
+            isRetryable: () => true,
+            config: { maxAttempts: 2, baseDelayMs: 100, maxDelayMs: 5_000 },
+            getRetryDelayMs: getDelay,
+            onRetry: (_e, _a, delayMs) => {
+              delays.push(delayMs);
+            },
+          },
+        );
+        attempts += n;
+      };
+      await runOnce(() => Number.NaN);
+      await runOnce(() => -50);
+      await runOnce(() => Number.POSITIVE_INFINITY);
+      await runOnce(() => 999_999_999);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+
+    expect(delays).toHaveLength(4);
+    // NaN / negative / non-finite → 0; finite oversized clamped to high ceiling
+    expect(delays[0]).toBe(0);
+    expect(delays[1]).toBe(0);
+    expect(delays[2]).toBe(0);
+    expect(delays[3]).toBe(120_000);
+    expect(attempts).toBe(8);
+  });
 });
 
 describe("parseRetryAfterSeconds", () => {
@@ -504,6 +549,22 @@ describe("redact", () => {
     expect(out.amount).toBe(10);
   });
 
+  it("redacts secret-shaped leaves under non-sensitive keys (MONEY-3)", () => {
+    const out = redact({
+      note: "sk_live_51HxExampleSecretKeyValue",
+      detail: "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+      webhookHint: "whsec_abc123XYZ",
+      safeNote: "order shipped",
+      amount: 10,
+    }) as Record<string, unknown>;
+
+    expect(out.note).toBe("[REDACTED]");
+    expect(out.detail).toBe("[REDACTED]");
+    expect(out.webhookHint).toBe("[REDACTED]");
+    expect(out.safeNote).toBe("order shipped");
+    expect(out.amount).toBe(10);
+  });
+
   it("redacts bare month/year card expiry and CVC aliases (MONEY-4)", () => {
     const out = redact({
       // Moyasar source card fields
@@ -534,6 +595,69 @@ describe("redact", () => {
     expect(out.fiscalYear).toBe(2024);
     expect(out.amount).toBe(10.5);
     expect(out.currency).toBe("SAR");
+  });
+});
+
+describe("CreateCheckoutSession image URL schemes (CORE-3)", () => {
+  it("rejects non-http(s) product image URLs", async () => {
+    const { CreateCheckoutSessionParamsSchema } = await import(
+      "../types/validation"
+    );
+    const base = {
+      successUrl: "https://example.com/ok",
+      lineItems: [
+        {
+          quantity: 1,
+          priceData: {
+            currency: "usd",
+            productData: {
+              name: "Widget",
+              images: ["javascript:alert(1)"],
+            },
+            unitAmount: 100,
+          },
+        },
+      ],
+    };
+    expect(CreateCheckoutSessionParamsSchema.safeParse(base).success).toBe(
+      false,
+    );
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        ...base,
+        lineItems: [
+          {
+            quantity: 1,
+            priceData: {
+              currency: "usd",
+              productData: {
+                name: "Widget",
+                images: ["https://cdn.example.com/p.png"],
+              },
+              unitAmount: 100,
+            },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe("InMemoryIdempotencyStore clone fail-closed (MONEY-4)", () => {
+  it("refuses to store non-cloneable result graphs", () => {
+    const store = new InMemoryIdempotencyStore();
+    // structuredClone fails on functions; JSON.stringify fails on cycles → throw
+    // (plain cycles alone are cloneable via structuredClone)
+    const uncloneable: Record<string, unknown> = { fn: () => {} };
+    uncloneable.self = uncloneable;
+    expect(() =>
+      store.set("k_uncloneable", {
+        status: "completed",
+        fingerprint: "fp",
+        createdAt: Date.now(),
+        result: uncloneable,
+      }),
+    ).toThrow(/not cloneable/);
   });
 });
 
@@ -947,6 +1071,41 @@ describe("fingerprintParams", () => {
     // Economically identical ISO forms still match.
     expect(fingerprintParams(money("10.00", "USD"))).toBe(
       fingerprintParams({ amount: 10, currency: "USD" }),
+    );
+  });
+
+  it("preserves sibling exponent on number/string amount bags (MONEY-1)", () => {
+    // number bag with exponent:0 → 10 minors; bare ISO bag → 1000 minors
+    const numberExp0 = fingerprintParams({
+      amount: 10,
+      currency: "USD",
+      exponent: 0,
+    });
+    const numberIso = fingerprintParams({ amount: 10, currency: "USD" });
+    expect(numberExp0).not.toBe(numberIso);
+
+    // string bag with sibling exponent must not drop scale either
+    const stringExp0 = fingerprintParams({
+      amount: "10",
+      currency: "USD",
+      exponent: 0,
+      orderId: "ord_scale",
+    });
+    const stringIso = fingerprintParams({
+      amount: "10",
+      currency: "USD",
+      orderId: "ord_scale",
+    });
+    expect(stringExp0).not.toBe(stringIso);
+
+    // number bag + exponent matches nested Money with same scale override
+    expect(
+      fingerprintParams({ amount: 10, currency: "USD", exponent: 0 }),
+    ).toBe(
+      fingerprintParams({
+        amount: money(10, "USD", { exponent: 0 }),
+        currency: "USD",
+      }),
     );
   });
 });

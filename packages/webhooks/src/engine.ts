@@ -198,32 +198,54 @@ function outcomeInvalidWebhook(reason?: string): WebhookProcessingOutcome {
 }
 
 /**
- * WEBHOOKS-1 / WEBHOOKS-4: forgery-class verify failures only.
+ * WEBHOOKS-1: forgery-class verify failures only.
  *
  * Reserved for explicit signature / authenticity failures — typically
  * `InvalidWebhookError` from `PaymentClient.handleWebhook` when verify returns
- * false. Do **not** put transport, rate-limit, TypeError, or unknown throws
- * here (those must be 5xx-class so providers redeliver paid events).
+ * false. Do **not** put transport, rate-limit, TypeError, unknown throws, or
+ * **post-verify parse** errors here (those must be 5xx-class so providers
+ * redeliver paid events).
+ *
+ * Core `handleWebhook` throws `InvalidRequestError` for parse-after-verify
+ * (never `InvalidWebhookError`). If a custom verifier still wraps parse as
+ * `InvalidWebhookError`, message heuristics below refuse forgery classification
+ * for parse-shaped messages.
  *
  * Explicit `{ ok: false }` from `verifyAndNormalize` is handled separately
  * (never throws).
  */
 function isForgeryClassVerifyError(err: unknown): boolean {
   if (err === null || err === undefined || typeof err !== "object") return false;
-  const e = err as { name?: unknown; code?: unknown };
+  const e = err as { name?: unknown; code?: unknown; message?: unknown };
   const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
-  if (name === "invalidwebhookerror") return true;
-  if (code === "invalid_webhook") return true;
-  return false;
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+
+  const looksLikeWebhookInvalid =
+    name === "invalidwebhookerror" || code === "invalid_webhook";
+  if (!looksLikeWebhookInvalid) return false;
+
+  // Defense-in-depth: parse-stage misclassification must not stop redelivery.
+  if (
+    message.includes("webhook parse failed") ||
+    message.includes("parse failed") ||
+    message.startsWith("webhook parse")
+  ) {
+    return false;
+  }
+  return true;
 }
 
 /**
- * WEBHOOKS-6: permanent (non-retryable) verify/normalize failures that are
- * **not** forgery — e.g. structural `GatewayApiError` ("Invalid webhook payload"),
- * explicit `retryable: false`, or definite 4xx (except 429).
+ * WEBHOOKS-5 / WEBHOOKS-6: permanent (non-retryable) verify/normalize failures
+ * that are **not** forgery — e.g. structural `GatewayApiError` ("Invalid webhook
+ * payload"), or explicit `retryable: false`.
  *
- * Map to `handler_failed { retryable: false }` (not infinite 5xx, not forgery 400).
+ * **Not permanent:** post-verify `InvalidRequestError` / parse failures
+ * (WEBHOOKS-5) — treat as retryable so authentic paid events redeliver.
+ *
+ * Map permanent cases to `handler_failed { retryable: false }` (not infinite
+ * 5xx, not forgery 400).
  */
 function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   if (err === null || err === undefined || typeof err !== "object") return false;
@@ -246,7 +268,21 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   if (name === "ratelimiterror" || code === "rate_limit_exceeded") return false;
   if (typeof e.statusCode === "number" && e.statusCode === 429) return false;
 
-  // Permanent payload / parse structure failures (PayPal coerceWebhookPayload etc.).
+  // WEBHOOKS-5: post-verify parse / request-shape errors must stay retryable so
+  // signature-valid paid events redeliver (new event types, thin payloads, skew).
+  // Only treat as permanent when clearly client-config (explicit retryable:false).
+  if (name === "invalidrequesterror" || code === "invalid_request") {
+    return false;
+  }
+  // Parse-shaped messages on other types also stay retryable (mis-wrapped parse).
+  if (
+    message.includes("webhook parse failed") ||
+    message.includes("parse failed:")
+  ) {
+    return false;
+  }
+
+  // Permanent payload / structure failures at verify boundary (PayPal coerce etc.).
   if (
     name === "gatewayapierror" ||
     code === "gateway_api_error" ||
@@ -282,11 +318,11 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
     return false;
   }
 
-  // Definite client errors (config, validation) — retrying will not help.
-  // Exclude rate limit (handled above) and leave network/5xx to fail-open.
+  // Remaining definite client-config 4xx (e.g. GatewayNotConfiguredError).
+  // Exclude forgery (handled first), InvalidRequestError / parse (above),
+  // rate limit (above). Leave network/5xx to fail-open.
   if (typeof e.statusCode === "number") {
     if (e.statusCode >= 400 && e.statusCode < 500 && e.statusCode !== 429) {
-      // InvalidWebhookError is forgery (handled first); other 4xx → permanent.
       if (!isForgeryClassVerifyError(err)) return true;
     }
   }
@@ -295,26 +331,27 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
 }
 
 /**
- * WEBHOOKS-1 / WEBHOOKS-4: classify verify/normalize throws.
+ * WEBHOOKS-1 / WEBHOOKS-5: classify verify/normalize throws.
  *
  * Policy (fail-open for paid redelivery):
- * 1. Forgery (`InvalidWebhookError` / `INVALID_WEBHOOK`) → `invalid_webhook`
- * 2. Permanent non-retryable (structure GatewayApiError, 4xx, `retryable:false`)
- *    → `handler_failed { retryable: false }`
- * 3. **Everything else** (NetworkError, RateLimitError, TypeError, 5xx,
- *    Timeout, unknown Error, onWebhookVerified throws) →
- *    `handler_failed { retryable: true }` (map to HTTP 5xx)
+ * 1. Forgery (`InvalidWebhookError` / `INVALID_WEBHOOK` from verify-false only)
+ *    → `invalid_webhook`
+ * 2. Permanent non-retryable (structure GatewayApiError, clear config 4xx,
+ *    `retryable:false`) → `handler_failed { retryable: false }`
+ * 3. **Everything else** including post-verify `InvalidRequestError` / parse,
+ *    NetworkError, RateLimitError, TypeError, 5xx, Timeout, unknown Error,
+ *    onWebhookVerified throws → `handler_failed { retryable: true }` (HTTP 5xx)
  *
  * Callers should map retryable `handler_failed` to 5xx so providers redeliver.
  * Reserve forgery-class outcomes only for explicit verify-false / signature
- * failures / `{ ok: false }` — never for unknown throws.
+ * failures / `{ ok: false }` — never for parse or unknown throws.
  */
 function classifyVerifyThrow(
   err: unknown,
 ): "forgery" | "permanent" | "retryable" {
   if (isForgeryClassVerifyError(err)) return "forgery";
   if (isPermanentNonRetryableVerifyError(err)) return "permanent";
-  // Fail-open: RateLimitError, TypeError, NetworkError, generic Error, etc.
+  // Fail-open: InvalidRequestError (parse), RateLimitError, TypeError, etc.
   return "retryable";
 }
 
@@ -661,15 +698,18 @@ export function createWebhookInboxEngine(
     try {
       await args.handler(ctx);
     } catch (err) {
-      // Stale renew / lease lost during handler → retryable; skip fail() with dead token.
-      // Only real fencing errors (StoreLeaseLostError / name), not bare code:"lease_lost".
-      if (isStoreLeaseLostError(err)) {
-        return outcomeHandlerFailed(true);
-      }
+      // WEBHOOKS-2: do not skip store.fail on lease-lost-from-renew. Stores accept
+      // fail with a matching token even after lease expiry so the handler attempt
+      // counts toward maxAttempts (soft-release alone must not erase the budget).
+      // Only real fencing errors (StoreLeaseLostError / name), not bare code.
+      const leaseLostFromHandler = isStoreLeaseLostError(err);
+      const failureError = leaseLostFromHandler
+        ? new Error("handler lease lost (renew/timeout)")
+        : err;
 
-      const nonRetry = isNonRetryable(err);
+      const nonRetry = !leaseLostFromHandler && isNonRetryable(err);
       const budgetDeadLetter = shouldDeadLetter(
-        err,
+        failureError,
         currentRecord.attempts,
         maxAttempts,
         mode,
@@ -692,7 +732,7 @@ export function createWebhookInboxEngine(
       } = {
         key: args.key,
         leaseToken: currentToken,
-        error: sanitize(err),
+        error: sanitize(failureError),
       };
       if (deadLetter) {
         failInput.deadLetter = true;
@@ -704,21 +744,27 @@ export function createWebhookInboxEngine(
         await store.fail(failInput);
       } catch (failErr) {
         if (isStoreLeaseLostError(failErr)) {
-          // WEBHOOKS-3: preserve non-retryable / dead-letter intent when fail
-          // loses the lease (soft-release cleared the token after expiry).
-          // Returning retryable:true forever spins poison paid webhooks under
-          // provider redelivery / processRetryable.
-          if (deadLetter || nonRetry) {
-            await bestEffortDeadLetterAfterLeaseLost({
-              key: args.key,
-              payloadHash: currentRecord.payloadHash,
-              payloadRef: currentRecord.payloadRef,
-              owner: args.owner,
-              leaseMs: args.leaseMs,
-              error: sanitize(err),
-              forceDeadLetter: deadLetter,
-            });
+          // WEBHOOKS-2 / WEBHOOKS-3: token already cleared (foreign reclaim or
+          // soft-release). Best-effort re-claim + fail so maxAttempts / non-retry
+          // intent still apply — never spin forever as bare retryable.
+          const recovered = await bestEffortRecordFailAfterLeaseLost({
+            key: args.key,
+            payloadHash: currentRecord.payloadHash,
+            payloadRef: currentRecord.payloadRef,
+            owner: args.owner,
+            leaseMs: args.leaseMs,
+            error: sanitize(failureError),
+            forceDeadLetter: deadLetter || nonRetry,
+            priorAttempts: currentRecord.attempts,
+          });
+          if (recovered.terminal || deadLetter || nonRetry) {
             return outcomeHandlerFailed(false);
+          }
+          if (mode === "durable_retry") {
+            return outcomeScheduledForRetry(
+              "handler_retry",
+              timingFromRetryAfterMs(defaultRetryAfterMs, clock.nowMs()),
+            );
           }
           return outcomeHandlerFailed(true);
         }
@@ -754,11 +800,13 @@ export function createWebhookInboxEngine(
   }
 
   /**
-   * WEBHOOKS-3: after fail() lease_lost with dead-letter / non-retry intent,
-   * soft-release left the row pending. Best-effort re-claim + fail(deadLetter)
-   * so poison rows reach a terminal state instead of spinning forever.
+   * WEBHOOKS-2 / WEBHOOKS-3: after fail() lease_lost, soft-release or a peer
+   * may have cleared the token. Best-effort re-claim + fail so:
+   * - non-retry / maxAttempts exhaustion reaches `dead_letter`
+   * - retryable handler outcomes still record (attempt budget advances)
+   * rather than spinning forever with soft-restored attempts.
    */
-  async function bestEffortDeadLetterAfterLeaseLost(args: {
+  async function bestEffortRecordFailAfterLeaseLost(args: {
     key: WebhookEventKey;
     payloadHash: string;
     payloadRef?: string | undefined;
@@ -766,7 +814,8 @@ export function createWebhookInboxEngine(
     leaseMs: number;
     error: string;
     forceDeadLetter: boolean;
-  }): Promise<void> {
+    priorAttempts: number;
+  }): Promise<{ terminal: boolean }> {
     try {
       const claimInput: {
         key: string;
@@ -785,31 +834,41 @@ export function createWebhookInboxEngine(
       }
       const reclaim = await store.claim(claimInput);
       if (reclaim.kind === "already_completed" || reclaim.kind === "duplicate_failed") {
-        return;
+        return { terminal: true };
       }
       if (reclaim.kind !== "acquired") {
-        return;
+        return { terminal: false };
       }
+      // Reclaim increments attempts when status was pending after soft-release.
+      // Use the higher of prior claim attempts and reclaimed counter for budget.
+      const attemptsForBudget = Math.max(
+        args.priorAttempts,
+        reclaim.record.attempts,
+      );
+      const exhaust =
+        mode === "durable_retry" && attemptsForBudget >= maxAttempts;
+      const deadLetter = args.forceDeadLetter || exhaust;
       const failInput: {
         key: WebhookEventKey;
         leaseToken: LeaseToken;
         error: string;
         deadLetter?: boolean;
+        retryAfterMs?: number;
       } = {
         key: args.key,
         leaseToken: reclaim.leaseToken,
         error: args.error,
       };
-      // Prefer terminal dead_letter when original intent was dead-letter;
-      // for non-retry without deadLetter, still leave pending but surface
-      // non-retryable to the caller (HTTP ACK). forceDeadLetter covers both
-      // NonRetryableHandlerError default and maxAttempts exhaustion.
-      if (args.forceDeadLetter) {
+      if (deadLetter) {
         failInput.deadLetter = true;
+      } else {
+        failInput.retryAfterMs = defaultRetryAfterMs;
       }
       await store.fail(failInput);
+      return { terminal: deadLetter };
     } catch {
-      // Best-effort only — outcome already non-retryable to the adapter.
+      // Best-effort only.
+      return { terminal: args.forceDeadLetter };
     }
   }
 
@@ -998,11 +1057,11 @@ export function createWebhookInboxEngine(
     try {
       verified = await input.verifyAndNormalize(input.raw);
     } catch (err) {
-      // WEBHOOKS-1 / WEBHOOKS-4: fail-open on verify throws.
-      // Forgery class (InvalidWebhookError) → invalid_webhook (~400).
+      // WEBHOOKS-1 / WEBHOOKS-5: fail-open on verify throws.
+      // Forgery (verify-false InvalidWebhookError only) → invalid_webhook (~400).
       // Permanent structure/config → handler_failed non-retryable.
-      // RateLimitError / TypeError / NetworkError / unknown / onWebhookVerified
-      // throws → handler_failed retryable (~5xx) so paid events redeliver.
+      // InvalidRequestError / parse / RateLimitError / TypeError / NetworkError /
+      // unknown / onWebhookVerified → handler_failed retryable (~5xx).
       // Explicit ok:false is the other forgery path (below) — never claim.
       const kind = classifyVerifyThrow(err);
       if (kind === "forgery") {
@@ -1117,7 +1176,7 @@ export function createWebhookInboxEngine(
         } catch (failErr) {
           if (isStoreLeaseLostError(failErr)) {
             // WEBHOOKS-3: dead-letter intent must not become forever-retryable.
-            await bestEffortDeadLetterAfterLeaseLost({
+            await bestEffortRecordFailAfterLeaseLost({
               key: rec.key,
               payloadHash,
               payloadRef: rec.payloadRef,
@@ -1126,6 +1185,7 @@ export function createWebhookInboxEngine(
               error:
                 "missing payloadRef: cannot redrive durable webhook without stored envelope/event",
               forceDeadLetter: true,
+              priorAttempts: claim.record.attempts,
             });
             items.push({
               key: rec.key,

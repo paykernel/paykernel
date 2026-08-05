@@ -982,9 +982,10 @@ export class MoyasarGateway extends BaseGateway {
           )) as MoyasarPaymentResponse | MoyasarErrorResponse;
 
           const payment = data as MoyasarPaymentResponse;
-          // MOYASAR-5: force operation-succeeded only when provider confirms voided
-          // (maps to cancelled). Never force succeeded on paid/authorized/etc.
-          // residual 2xx bodies.
+          // MOYASAR-2/5: force operation-succeeded only when provider confirms
+          // voided (→ cancelled). Residual 2xx still paid keeps natural
+          // paid/succeeded (money-honest: isPaidOutcome true) — callers must
+          // key void-complete on status === cancelled, not outcome alone.
           return this.mapPaymentResponse(payment, {
             ...(payment.status === "voided"
               ? { forceOutcome: "succeeded" as const }
@@ -1180,13 +1181,13 @@ export class MoyasarGateway extends BaseGateway {
     };
 
     const attached = attachPaymentEvent(legacy, { computePayloadHash: true });
-    // Amount-derived partially_captured must not dual-write payment.succeeded /
-    // capture.completed (type-only over-fulfill). Align with Stripe/PayPal demotion
-    // and isPaidOutcome (partial is not paid-like).
+    // MOYASAR-3: payment_paid / payment_captured map to settled dual-write from
+    // envelope type alone — demote when domain status is not paid-like (paid).
+    // Covers amount-derived partially_captured and any other non-paid domain.
     // Incomplete refund_completed must not dual-write refund.completed —
-    // type-only handlers would over-settle without proven refunded amount (MOYASAR-1).
+    // type-only handlers would over-settle without proven refunded amount.
     return this.demoteIncompleteRefundWebhookDualWrite(
-      this.demotePartialCaptureWebhookDualWrite(attached),
+      this.demoteNonPaidSettledWebhookDualWrite(attached),
     );
   }
 
@@ -1308,22 +1309,28 @@ export class MoyasarGateway extends BaseGateway {
         ? payment.refunded
         : undefined;
 
-    // Paid-like without a finite amount snapshot: demote so isPaidOutcome stays
-    // false (Stripe/Paymob fail-closed pattern). Finite 0 is legitimate only for
-    // non-paid paths (e.g. verified → setup_completed).
-    if (status === "paid" && amountMinor === undefined) {
+    // MOYASAR-1: publish currency together with any major-unit money fields.
+    // Resolve before demotion so missing/blank currency is part of the
+    // incomplete-money check (same fail-closed class as missing amount).
+    const currency =
+      typeof payment.currency === "string" && payment.currency.trim().length > 0
+        ? payment.currency.trim().toUpperCase()
+        : undefined;
+
+    // Paid-like without a complete money snapshot (finite amount + currency):
+    // demote so isPaidOutcome stays false. Finite 0 is legitimate only for
+    // non-paid paths (e.g. verified → setup_completed). Currency-stripped paid
+    // must not fulfill without amount/currency verification.
+    if (
+      status === "paid" &&
+      (amountMinor === undefined || currency === undefined)
+    ) {
       status = "processing";
     }
 
     const outcome =
       options.forceOutcome ??
       this.mapMoyasarOutcome(status, nextAction, redirectUrl);
-
-    // MOYASAR-1: publish currency together with any major-unit money fields.
-    const currency =
-      typeof payment.currency === "string" && payment.currency.trim().length > 0
-        ? payment.currency.trim().toUpperCase()
-        : undefined;
 
     const moneyFields =
       currency !== undefined
@@ -1773,18 +1780,21 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * When domain status is amount-derived `partially_captured`, demote Phase-7
-   * dual-write from `payment.succeeded` / `capture.completed` → `payment.processing`
-   * so type-only fulfillment matches `isPaidOutcome` (open money story).
+   * When Phase-7 dual-write claims settled money (`payment.succeeded` /
+   * `capture.completed`) but domain status is **not** paid-like (`paid`), demote
+   * dual-write to `payment.processing` so type-only fulfillment matches
+   * `isPaidOutcome` (MOYASAR-3).
    *
    * Moyasar envelope types `payment_paid` / `payment_captured` map to settled
-   * stable types before amount refinement; this mirrors Stripe
-   * `payment_intent.succeeded` + partial and PayPal non-final capture demotion.
+   * stable types from the envelope alone — before amount refinement can yield
+   * `partially_captured` or other non-paid domain statuses. Mirrors Stripe
+   * incomplete-settled demotion and PayPal non-final capture demotion.
    */
-  private demotePartialCaptureWebhookDualWrite(
+  private demoteNonPaidSettledWebhookDualWrite(
     event: WebhookEvent,
   ): WebhookEvent {
-    if (event.status !== "partially_captured" || !event.event || !event.provider) {
+    // Paid-like domain is `paid` only — keep settled dual-write.
+    if (event.status === "paid" || !event.event || !event.provider) {
       return event;
     }
 

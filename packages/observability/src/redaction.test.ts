@@ -66,7 +66,7 @@ describe("createRedactingTelemetrySink (A3)", () => {
     expect(data.token).toBe("[REDACTED]");
   });
 
-  it("preserves operational authorized flag (OBS-1)", () => {
+  it("preserves operational authorized flag (core allow-list + package sink)", () => {
     const seen: Array<Record<string, unknown> | undefined> = [];
     const sink: TelemetrySink = {
       emit(_event, data) {
@@ -98,18 +98,19 @@ describe("redactTelemetryData", () => {
     expect((out.nested as Record<string, unknown>).safe).toBe("ok");
   });
 
-  it("restores authorized after core auth over-match (OBS-1)", () => {
+  it("keeps authorized (core SAFE_KEY_ALLOWLIST; restore is defense-in-depth) (OBS-2)", () => {
     const out = redactTelemetryData({
       authorized: false,
       nested: { authorized: true, token: "x" },
     });
+    // Core already allow-lists `authorized`; restore is a no-op today.
     expect(out.authorized).toBe(false);
     expect((out.nested as Record<string, unknown>).authorized).toBe(true);
     expect((out.nested as Record<string, unknown>).token).toBe("[REDACTED]");
   });
 });
 
-describe("redactAttributeBag (OBS-2)", () => {
+describe("redactAttributeBag", () => {
   it("redacts sensitive labels and keeps authorized/gateway", () => {
     const out = redactAttributeBag({
       gateway: "stripe",

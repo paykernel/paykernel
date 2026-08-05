@@ -102,12 +102,23 @@ const SENSITIVE_EXACT_KEYS = new Set(["month", "year"]);
 /**
  * Opaque string values that look like PANs (13–19 digits, optional spaces/dashes).
  * Matched only on string leaves so free-form blobs do not leak card numbers under
- * non-sensitive keys (MONEY-2).
+ * non-sensitive keys.
  */
 const PAN_LIKE_STRING = /^[\d\s-]{13,23}$/;
 
+/**
+ * Secret-shaped leaves under non-sensitive keys (MONEY-3): API keys, webhook
+ * secrets, bearer tokens. Matched on string leaves only so free-form notes
+ * cannot leak live credentials when logged under keys like `note` / `detail`.
+ */
+const SECRET_SHAPED_STRING =
+  /^(?:sk_(?:live|test)_|rk_(?:live|test)_|pk_(?:live|test)_|whsec_|Bearer\s+\S)/i;
+
 function isOpaqueSensitiveString(value: string): boolean {
   const trimmed = value.trim();
+  if (SECRET_SHAPED_STRING.test(trimmed)) {
+    return true;
+  }
   if (trimmed.length < 13 || trimmed.length > 23) {
     return false;
   }

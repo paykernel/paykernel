@@ -536,7 +536,8 @@ const StripeCheckoutLineItemSchema = z.object({
         productData: z.object({
             name: z.string().min(1),
             description: z.string().optional(),
-            images: z.array(z.string().url()).optional(),
+            // CORE-3: product images must be http(s) only (reject javascript:/data:/file:).
+            images: z.array(HttpOrHttpsUrlSchema("Image URL must be a valid http or https URL")).optional(),
         }),
         /**
          * Amount in major currency units (`number | Money`); converted to Stripe

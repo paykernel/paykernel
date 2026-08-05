@@ -279,8 +279,8 @@ describe.skipIf(!live)("integration: recon fail lease expiry fence (R7/R9)", () 
   }, 60_000);
 });
 
-describe.skipIf(!live)("integration: webhook fail lease expiry fence (B6)", () => {
-  it("claim, expire lease (FakeClock), fail → StoreLeaseLostError", async () => {
+describe.skipIf(!live)("integration: webhook fail after lease expiry (WEBHOOKS-2)", () => {
+  it("claim, expire lease (FakeClock), fail with matching token → pending + attempt kept", async () => {
     const { port, close } = await createLivePort();
     const prefix = uniqueKeyPrefix("whfail");
     try {
@@ -299,22 +299,24 @@ describe.skipIf(!live)("integration: webhook fail lease expiry fence (B6)", () =
       expect(a.kind).toBe("acquired");
       if (a.kind !== "acquired") return;
       clock.advance(2_000);
+      // WEBHOOKS-2: hang/timeout path must still record fail after expiry.
+      await store.fail({
+        key: "evt_fail_exp",
+        leaseToken: a.leaseToken,
+        error: "too_late",
+        retryAfterMs: 5_000,
+      });
+      const after = await store.get("evt_fail_exp");
+      expect(after?.status).toBe("pending");
+      expect(after?.attempts).toBe(a.record.attempts);
+      // Wrong token still lease_lost
       await expect(
         store.fail({
           key: "evt_fail_exp",
           leaseToken: a.leaseToken,
-          error: "too_late",
-          retryAfterMs: 5_000,
+          error: "stale",
         }),
       ).rejects.toBeInstanceOf(StoreLeaseLostError);
-      // Recovery: expired lease reclaim still works
-      const b = await store.claim({
-        key: "evt_fail_exp",
-        payloadHash: "h1",
-        owner: "w2",
-        leaseMs: 30_000,
-      });
-      expect(b.kind).toBe("acquired");
     } finally {
       await close();
     }

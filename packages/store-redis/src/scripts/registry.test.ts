@@ -52,13 +52,24 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     );
   });
 
-  it("webhook fail requires unexpired lease (parity with complete)", () => {
+  it("STORES-5: webhook/recon complete never EXPIREs completed fences", () => {
+    const wh = REDIS_SCRIPT_REGISTRY.webhookInbox.complete;
+    const recon = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
+    for (const complete of [wh, recon]) {
+      expect(complete).not.toMatch(/redis\.call\(\s*['"]EXPIRE['"]/i);
+      expect(complete).toMatch(/redis\.call\(\s*['"]PERSIST['"]/i);
+      expect(complete).toContain("'completed'");
+    }
+  });
+
+  it("webhook fail accepts matching token after expiry (WEBHOOKS-2; complete still fences)", () => {
     const fail = REDIS_SCRIPT_REGISTRY.webhookInbox.fail;
     const complete = REDIS_SCRIPT_REGISTRY.webhookInbox.complete;
-    expect(fail).toContain("lease_expires_ms");
     expect(fail).toContain("lease_lost");
-    // Same fence as complete: exp <= nowMs → lease_lost
-    expect(fail).toContain("exp <= nowMs");
+    expect(fail).toContain("lease_token");
+    // WEBHOOKS-2: hang/timeout handlers record attempts after lease expiry.
+    // Complete remains fenced on unexpired lease (side-effect commit boundary).
+    expect(fail).not.toContain("exp <= nowMs");
     expect(complete).toContain("exp <= nowMs");
   });
 

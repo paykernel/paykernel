@@ -30,14 +30,19 @@ import {
 | Export | Role |
 | --- | --- |
 | `TelemetrySink` | `{ emit?(event, data?) }` — optional structured sink |
-| `createRedactingTelemetrySink(sink)` | Package-owned wrap: core `redact()` **plus** operational-key restore (e.g. `authorized`). Prefer this over core’s sink for observability paths (OBS-2 honesty). |
-| `redactTelemetryData(data)` | One-shot scrub via core `redact()` + operational restore |
-| `redactAttributeBag(attrs)` | Span/metric attribute scrubber (same model) |
+| `createRedactingTelemetrySink(sink)` | **Package-owned** wrap (OBS-1: not a pure core re-export). Uses core `redact()` + defense-in-depth operational restore. Prefer this for observability paths. |
+| `redactTelemetryData(data)` | One-shot scrub via core `redact()` + optional operational restore |
+| `redactAttributeBag(attrs)` | Span/metric attribute scrubber (package-owned; same model) |
 
-> **OBS-2:** Core also exports a `createRedactingTelemetrySink`. This package’s
-> version is **not** a pure re-export — it restores operational keys core
-> over-matches (`authorized`). `withPaymentOperation` uses **this** package’s
-> wrapper so telemetry bags keep operational flags.
+> **OBS-1:** Core also exports a `createRedactingTelemetrySink`. This package’s
+> version is **not** a pure re-export — it is implemented here so metrics/spans
+> can share package-owned scrubbing. `withPaymentOperation` uses **this**
+> package’s wrapper.
+>
+> **OBS-2:** Core already allow-lists `authorized` in `SAFE_KEY_ALLOWLIST`, so
+> substring `auth` does **not** redact that flag today. The operational-key
+> restore for `authorized` is **defense-in-depth** only (no-op when core
+> preserves the value). Do not document it as “fixing a core over-match.”
 
 ### Redacting sink
 

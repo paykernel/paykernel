@@ -247,7 +247,11 @@ function stripeMaximumAmount(currency: string): number {
 
 /**
  * Validate a Stripe minor-unit integer (already scaled). Applies three-decimal
- * divisible-by-10 rules and optional charge max limits. Does not re-scale major units.
+ * divisible-by-10 rules, ISK/UGX whole-major-unit enforcement, and optional
+ * charge max limits. Does not re-scale major units.
+ *
+ * Used by both `toStripeAmount` (post-scale) and checkout `priceData.unitAmount`
+ * (caller already in minor units) so escape-hatch paths cannot skip money rules.
  */
 function assertStripeMinorUnitAmount(
   stripeAmount: number,
@@ -277,6 +281,20 @@ function assertStripeMinorUnitAmount(
     throw new InvalidRequestError(
       `Stripe ${normalized.toUpperCase()} minor-unit amounts must be divisible by 10 (three-decimal currencies use 0-padding; e.g. 1.234 becomes invalid — use 1.230 which is 1230)`,
     );
+  }
+
+  // ISK/UGX (and other whole-unit-only with exp > 0): Stripe requires whole major
+  // units even though the API uses a two-decimal representation. Minor must be
+  // divisible by 10^exponent (e.g. 1000 ok for 10.00 ISK; 1050 rejected).
+  // Zero-decimal codes (exp 0) are already whole majors as integers.
+  const exponent = stripeCurrencyExponent(normalized);
+  if (STRIPE_WHOLE_UNIT_ONLY_CURRENCIES.has(normalized) && exponent > 0) {
+    const scale = 10 ** exponent;
+    if (stripeAmount % scale !== 0) {
+      throw new InvalidRequestError(
+        `Stripe ${normalized.toUpperCase()} amounts must be whole currency units`,
+      );
+    }
   }
 
   const maxAmount = stripeMaximumAmount(normalized);
@@ -337,18 +355,8 @@ function toStripeAmount(
     throw error;
   }
 
-  // ISK/UGX (and zero-decimal set): Stripe requires whole major units.
-  // Zero-decimal (exp 0) is already whole after precision reject; ISK/UGX use
-  // exp 2 but still require whole major units (minor divisible by 10^exp).
-  if (STRIPE_WHOLE_UNIT_ONLY_CURRENCIES.has(normalized) && exponent > 0) {
-    const scale = 10n ** BigInt(exponent);
-    if (minor % scale !== 0n) {
-      throw new InvalidRequestError(
-        `Stripe ${normalized.toUpperCase()} amounts must be whole currency units`,
-      );
-    }
-  }
-
+  // Whole-unit (ISK/UGX), three-decimal, and charge-max rules live in
+  // assertStripeMinorUnitAmount so major-unit and unitAmount paths share them.
   let stripeAmount: number;
   try {
     stripeAmount = minorAmountToNumber(minor);
@@ -2501,16 +2509,22 @@ export class StripeGateway extends BaseGateway {
 
   /**
    * When domain status is `processing` on `payment_intent.succeeded` (incomplete
-   * settled snapshot), demote Phase-7 dual-write from `payment.succeeded` →
-   * `payment.processing` so type-only fulfillment matches isPaidOutcome.
-   * Partial capture is already demoted in webhook-event-map; this covers the
-   * fail-closed incomplete-settled arm (STRIPE-1).
+   * settled snapshot — missing amount_received / amount_captured), demote
+   * Phase-7 dual-write from `payment.succeeded` → `payment.processing` so
+   * type-only fulfillment matches isPaidOutcome (STRIPE-3).
+   *
+   * Partial capture (`partially_captured`) is demoted in webhook-event-map;
+   * incomplete-settled `processing` is not always mapped there, so the gateway
+   * fail-closes dual-write here. Also demotes `partially_captured` if the map
+   * left `payment.succeeded` (belt-and-suspenders money honesty).
    */
   private demoteIncompleteSettledWebhookDualWrite(
     event: WebhookEvent,
   ): WebhookEvent {
+    const openMoney =
+      event.status === "processing" || event.status === "partially_captured";
     if (
-      event.status !== "processing" ||
+      !openMoney ||
       event.type !== "payment_intent.succeeded" ||
       event.stableType !== "payment.succeeded" ||
       !event.event ||

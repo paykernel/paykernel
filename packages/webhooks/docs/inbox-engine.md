@@ -22,10 +22,11 @@ Verification/normalization is **injected** (`processWithVerifier` or `PaymentCli
 `handleWebhook` / `verifyAndNormalize`; fulfill in `handler` or
 `processRetryable` after claim — never inside verify when using the inbox.
 
-**WEBHOOKS-1:** verify throws → fail-open `handler_failed { retryable: true }`
-except `InvalidWebhookError` / `{ ok: false }` (forgery) and permanent structure
-errors. Idle hash mismatch **supersedes** (WEBHOOKS-3); active lease conflict stays
-`payload_conflict`.
+**WEBHOOKS-1 / WEBHOOKS-5:** verify throws → fail-open `handler_failed { retryable: true }`
+except verify-false `InvalidWebhookError` / `{ ok: false }` (forgery) and permanent
+structure errors. Post-verify parse / `InvalidRequestError` is **retryable** (not
+`invalid_webhook`). Idle hash mismatch **supersedes** (WEBHOOKS-3/4 — not permanent
+`payload_conflict`); active lease conflict stays `payload_conflict`.
 
 ## Modes (10.3)
 

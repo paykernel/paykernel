@@ -66,6 +66,50 @@ describe("createReconciliationScheduler (A3)", () => {
     ).toBe("recon:stripe:pi_1");
   });
 
+  it("RECON-4: maxInFlightByGateway parses gateway from recon: and gateway: keys", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const runAt = new Date(clock.nowMs()).toISOString();
+
+    // Canonical recon:gateway:id
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_a" },
+      runAt,
+      reason: "a",
+    });
+    // App-supplied gateway:id shorthand
+    await scheduler.schedule({
+      key: "paypal:ORDER-1",
+      target: { gateway: "paypal", gatewayPaymentId: "ORDER-1" },
+      runAt,
+      reason: "b",
+    });
+    await scheduler.schedule({
+      key: "paypal:ORDER-2",
+      target: { gateway: "paypal", gatewayPaymentId: "ORDER-2" },
+      runAt,
+      reason: "c",
+    });
+
+    const handled: string[] = [];
+    await scheduler.processDue({
+      maxInFlightByGateway: { stripe: 1, paypal: 1 },
+      handler: async (job) => {
+        handled.push(job.key);
+        return { disposition: "complete" as const };
+      },
+    });
+
+    // One stripe (canonical) + one paypal (shorthand) under per-gateway caps
+    expect(handled).toHaveLength(2);
+    expect(handled.some((k) => k.includes("stripe"))).toBe(true);
+    expect(handled.some((k) => k.startsWith("paypal:"))).toBe(true);
+    // Second paypal remains scheduled (cap 1)
+    const remaining = await store.get("paypal:ORDER-2");
+    expect(remaining?.status).toBe("scheduled");
+  });
+
   it("failAndReschedule uses backoff and sets dueAt", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });

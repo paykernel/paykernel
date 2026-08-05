@@ -79,7 +79,8 @@ Lease expiry / process death while claimed is treated like abandon: another work
 - Row exists with `status: "claimed"` (or equivalent active lease).
 - `leaseToken` / `leaseOwner` / `leaseExpiresAt` set; `attempts` incremented by claim.
 - Handler has **not** been entered.
-- On lease expiry, soft-release restores that unfinished attempt (WEBHOOKS-1) so reclaim does not burn `maxAttempts` before a real handler outcome.
+- On lease expiry without a handler outcome, soft-release (get/listRetryable) restores that unfinished attempt so pure crash/deploy reclaim does not burn `maxAttempts` before a real handler outcome.
+- If the handler ran and called `fail` after expiry (WEBHOOKS-2), the matching token still records the attempt — `maxAttempts` remains effective for hang/timeout paths.
 
 ### Handler
 

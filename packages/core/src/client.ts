@@ -716,20 +716,24 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     }
 
     // ── Stage: parse (separate from verify; do not call onWebhookFailed) ────
+    // WEBHOOKS-1: after successful verify, never throw InvalidWebhookError.
+    // Forgery-class errors stop provider redelivery (~400). Parse/shape failures
+    // on authentic payloads must surface as InvalidRequestError so inbox engines
+    // map them to retryable/server outcomes and paid events redeliver.
     let event: WebhookEvent;
     try {
       event = gw.parseWebhookEvent(payload);
     } catch (error) {
-      if (
-        error instanceof InvalidWebhookError ||
-        error instanceof InvalidRequestError
-      ) {
+      if (error instanceof InvalidRequestError) {
         throw error;
       }
-      throw new InvalidWebhookError(
-        `Webhook parse failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
+      const detail =
+        error instanceof Error ? error.message : String(error);
+      // Reclassify gateway InvalidWebhookError / unknown throws as parse errors.
+      throw new InvalidRequestError(
+        error instanceof InvalidWebhookError
+          ? detail
+          : `Webhook parse failed: ${detail}`,
       );
     }
 

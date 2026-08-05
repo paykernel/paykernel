@@ -107,6 +107,8 @@ If `capture: false` is used without `authIntegrationId` and without a per-reques
 
 Paymob does not expose native idempotency keys for capture, refund, void, or Intention creation. If a network failure, Paymob 5xx response, **or HTTP 200 with an empty/malformed body** (missing/invalid `success`, missing refund id, non-boolean success that cannot be coerced) happens after the SDK sends one of those mutating requests, the SDK marks that `idempotencyKey` outcome as unknown and blocks automatic replay. Reconcile via a verified Paymob callback, transaction inquiry, or the Paymob dashboard before issuing a new mutation. String `"true"`/`"false"` success values and string minor-unit money fields on mutation responses are coerced when present.
 
+The process-local idempotency map (limit 1000) **never FIFO-evicts in-flight or unknown fences** under pressure — only terminal completed entries are dropped. If the map is full of non-evictable fences, new keys are refused fail-closed rather than risk double-apply. Prefer a durable `idempotencyStore` before you approach that limit.
+
 > ⚠️ **Serverless / edge deployments:** the built-in idempotency cache is an
 > in-memory `Map` that lives per isolate and is wiped frequently on platforms
 > like AWS Lambda, Vercel, Cloudflare Workers, and Google Cloud Run, so it
@@ -139,7 +141,11 @@ If `amount` is omitted, the SDK first retrieves the Paymob transaction and sends
 
 When an explicit `amount` is provided, the SDK still retrieves the transaction first to verify the requested currency matches Paymob's transaction currency and that the requested amount does not exceed the remaining capturable balance.
 
+**Remaining-balance fail-closed:** when inquiry reports terminal `is_captured` / `is_refunded` without a positive cumulative amount field, the SDK refuses remaining capture/refund math (no remaining) rather than understating moved money and over-applying.
+
 **Capture ids (PAYMOB-2):** `result.gatewayId` is always the **parent** payment/transaction id you passed in (`gatewayPaymentId`), so later refund/void/get stay parent-targeted. When Paymob returns a distinct child capture transaction id, it is dual-written on `captureId` / `references.relatedIds.captureId` only.
+
+**Pending capture:** when Paymob returns `pending: true` on a capture mutation, the result has `status: 'pending'` / `outcome: 'requires_action'` and **omits `capturedAmount`** (symmetric with pending refunds omitting `totalRefunded`).
 
 ## Void Payment
 
@@ -218,7 +224,8 @@ Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paym
 - Amount-only refunds without a signed refund flag are ignored.
 - `is_refund` / `is_void` are trusted only when they are the HMAC source (the corresponding `is_refunded` / `is_voided` field is absent). When both are present, only the signed current-state flag is used.
 - Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs and can map full/partial `refunded` / `partially_captured` when amounts are present.
-- **`capturePayment` fail-closed:** success without a positive cumulative captured total maps to `processing` (not `paid` / not `isPaidOutcome`). When the provider omits `captured_amount`, the SDK estimates cumulative as inquiry prior + this request amount — it does **not** treat response `amount_cents` as this-op (that field may be the order total).
+- **`getPayment` / inquiry fail-closed (PAYMOB-1):** `is_captured` (or signed `is_capture`) **without** a positive cumulative `captured_amount` maps to `processing` (not `paid` / not `isPaidOutcome`). Aligns with `capturePayment` / `mapCaptureStatus`. Prefer `isPaidOutcome(result)` after inquiry.
+- **`capturePayment` fail-closed:** success without a positive cumulative captured total maps to `processing` (not `paid` / not `isPaidOutcome`). When the provider omits `captured_amount`, the SDK estimates cumulative as inquiry prior + this request amount — it does **not** treat response `amount_cents` as this-op (that field may be the order total). Pending capture mutations map to `pending` and omit `capturedAmount`.
 
 > **Phase 7 dual-write:** Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid. Redirect callbacks remain demoted to `payment.processing`.
 
@@ -228,7 +235,8 @@ Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paym
   `outcome === 'succeeded'` or `success: true` alone. Auth holds (`authorized`)
   dual-write `outcome: 'succeeded'` (hold placed) but are **not** paid-like.
   Partial captures dual-write `outcome: 'requires_action'` (open money story) with
-  status `partially_captured` and `isPaidOutcome` false.
+  status `partially_captured` and `isPaidOutcome` false. Inquiry `is_captured`
+  without positive `captured_amount` is `processing` / not paid-like.
 - **Inquiry `success` missing is fail-closed:** transaction inquiry defaults
   missing `success` to **false** (mutations require a boolean/`"true"`/`"false"`
   success and treat other missing/invalid bodies after HTTP 200 as indeterminate).

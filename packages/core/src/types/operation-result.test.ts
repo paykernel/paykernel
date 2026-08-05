@@ -423,6 +423,57 @@ describe("operation-result helpers", () => {
     expect(isPaidOutcome(voided)).toBe(false);
   });
 
+  it("CORE-1: Phase-6 preserves partial-capture requires_action (no upgrade to succeeded)", () => {
+    // Gateways (Paymob/Stripe) demote partially_captured → requires_action.
+    const partial = baseResult({
+      success: true,
+      status: "partially_captured",
+      outcome: "requires_action",
+      amount: 5,
+      currency: "USD",
+      capturedAmount: 5,
+    });
+    expect(inferOperationOutcome(partial)).toBe("requires_action");
+    expect(mapGatewayResultToOperationResult(partial).outcome).toBe(
+      "requires_action",
+    );
+    expect(isPaidOutcome(partial)).toBe(false);
+    expect(isRequiresActionOutcome(partial)).toBe(true);
+
+    // Paid + residual requires_action still upgrades (settled money wins).
+    const paidWithAction = baseResult({
+      success: true,
+      status: "paid",
+      outcome: "requires_action",
+    });
+    expect(inferOperationOutcome(paidWithAction)).toBe("succeeded");
+    expect(isPaidOutcome(paidWithAction)).toBe(true);
+  });
+
+  it("CORE-2: successful void (outcome succeeded + status cancelled) is not failed", () => {
+    const voided = baseResult({
+      success: true,
+      status: "cancelled",
+      outcome: "succeeded",
+    });
+    expect(inferOperationOutcome(voided)).toBe("succeeded");
+    const op = mapGatewayResultToOperationResult(voided);
+    expect(op.outcome).toBe("succeeded");
+    if (op.outcome === "succeeded") {
+      expect(op.payment.status).toBe("cancelled");
+    }
+    // Not a charge settlement — fulfillment gate stays closed.
+    expect(isPaidOutcome(voided)).toBe(false);
+    expect(isPaidOutcome(op)).toBe(false);
+
+    // Bare cancelled without force still fails closed.
+    expect(
+      inferOperationOutcome(
+        baseResult({ success: true, status: "cancelled" }),
+      ),
+    ).toBe("failed");
+  });
+
   it("toPaymentErrorLike fills defaults and optional statusCode", () => {
     expect(toPaymentErrorLike({ message: "x" })).toEqual({
       name: "PaymentError",

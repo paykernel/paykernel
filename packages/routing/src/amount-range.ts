@@ -115,13 +115,15 @@ export function amountInRange(
 }
 
 /**
- * True only when the rule has amount bounds, the input amount is resolvable
- * in the **same** currency as the rule, and the amount is outside inclusive
- * min/max. Cross-currency, missing amount, or invalid decimals return false
- * (those are not "amount-range honesty" violations for select-time fallback).
+ * True when select-time fallback would dishonestly bypass configured amount
+ * bounds (ROUTE-1):
+ * - Rule has amount min/max **without** `amountCurrency` (misconfigured bound)
+ * - Or input amount is resolvable in the **same** currency and outside
+ *   inclusive min/max
  *
- * Used by select-time fallback (ROUTE-1) so unconstrained fallback cannot
- * accept amounts that a matching rule already bounded.
+ * Cross-currency, missing amount, or invalid decimals return false when the
+ * rule currency is present (those are not amount-range honesty violations —
+ * fallback may still apply for non-matching criteria).
  */
 export function amountOutsideConfiguredRange(
   input: RoutingInput,
@@ -138,7 +140,10 @@ export function amountOutsideConfiguredRange(
       ? String(match.amountCurrency).trim()
       : "";
   if (!ruleCurrency) {
-    return false;
+    // ROUTE-1: amount min/max without amountCurrency is a misconfigured money
+    // bound. Treat as an honesty violation so select-time fallback cannot
+    // silently accept amounts the rule intended to constrain.
+    return true;
   }
 
   const resolved = resolveInputAmount(input);

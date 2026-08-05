@@ -207,12 +207,14 @@ export function paymentStatusToOperationOutcome(
 /**
  * Synthetic payment result with Phase 6 dual-write (`outcome` + `references`).
  * Deprecated `success` is set from outcome via core helpers.
+ * When `amount` is set, pass `currency` so major-unit snapshots are complete.
  */
 export function defaultPaymentResult(
   gatewayId: string,
   status: PaymentStatus,
   amount?: number,
   gateway: string = "mock",
+  currency?: string,
 ): GatewayPaymentResult {
   const outcome = paymentStatusToOperationOutcome(status);
   const base: Parameters<typeof applyOutcomeToGatewayResult>[0] = {
@@ -224,6 +226,9 @@ export function defaultPaymentResult(
   };
   if (amount !== undefined) {
     base.amount = amount;
+  }
+  if (currency !== undefined) {
+    base.currency = currency;
   }
   return applyOutcomeToGatewayResult(base, outcome);
 }

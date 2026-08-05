@@ -1202,6 +1202,117 @@ describe("mockGateway", () => {
     ).rejects.toThrow(/fingerprint_conflict/);
   });
 
+  it("capture scripted money overrides cannot desync ledger dual-write (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      capturePayment: [
+        {
+          outcome: "succeeded",
+          result: {
+            // Forged money — must not win over ledger-derived capture total
+            capturedAmount: 999,
+            amount: 999,
+            status: "paid",
+          },
+        },
+      ],
+    });
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 40,
+      capture: false,
+    });
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(0);
+
+    const cap = await g.capturePayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 15,
+      currency: "USD",
+    });
+    // Ledger remaining math settled 15; reported result must match
+    expect(cap.status).toBe("partially_captured");
+    expect(cap.capturedAmount).toBe(15);
+    expect(cap.amount).toBe(40);
+    expect(cap.currency).toBe("USD");
+    expect(isPaidOutcome(cap)).toBe(false);
+    const state = g.getPaymentState(pay.gatewayId)!;
+    expect(state.capturedAmount).toBe(15);
+    expect(state.status).toBe("partially_captured");
+  });
+
+  it("scripted capture status failed does not settle ledger (TESTKIT-3)", async () => {
+    const g = mockGateway({
+      capturePayment: [
+        {
+          outcome: "succeeded",
+          // Status override demotes — bare outcome succeeded must not settle
+          status: "failed",
+        },
+      ],
+    });
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 25,
+      capture: false,
+    });
+    const cap = await g.capturePayment({ gatewayPaymentId: pay.gatewayId });
+    expect(cap.status).toBe("failed");
+    expect(isPaidOutcome(cap)).toBe(false);
+    const state = g.getPaymentState(pay.gatewayId)!;
+    expect(state.capturedAmount).toBe(0);
+    expect(state.status).toBe("authorized");
+  });
+
+  it("ensurePaymentLedger clamps scripted captured/refunded to charge total (TESTKIT-4)", async () => {
+    const g = mockGateway({
+      createPayment: [
+        {
+          outcome: "succeeded",
+          result: {
+            amount: 10,
+            currency: "USD",
+            capturedAmount: 500,
+            refundedAmount: 400,
+            status: "paid",
+          },
+        },
+      ],
+    });
+    const r = await g.createPayment(baseCreate);
+    expect(r.status).toBe("paid");
+    const state = g.getPaymentState(r.gatewayId)!;
+    // Captured cannot exceed charge total (10); refunded cannot exceed captured
+    expect(state.amount).toBe(10);
+    expect(state.capturedAmount).toBe(10);
+    expect(state.refundedAmount).toBe(10);
+  });
+
+  it("concurrent dual-timeout joiners all reject (TESTKIT-2 no false symmetry)", async () => {
+    const g = mockGateway({
+      createPayment: [{ outcome: "provider_ok_client_timeout", latencyMs: 5 }],
+    });
+    const params = {
+      amount: 12,
+      currency: "USD" as const,
+      callbackUrl: "https://ex.test/cb",
+      idempotencyKey: "dual-join-key",
+    };
+    const results = await Promise.allSettled([
+      g.createPayment(params),
+      g.createPayment(params),
+    ]);
+    // Both concurrent callers see NetworkError — not one success / one throw
+    expect(results.every((r) => r.status === "rejected")).toBe(true);
+    for (const r of results) {
+      expect((r as PromiseRejectedResult).reason).toBeInstanceOf(NetworkError);
+    }
+    const side = g.getLastProviderSideSuccess();
+    expect(side?.gatewayId).toBeTruthy();
+    // Sequential retry after settle returns cached provider success (no double charge)
+    const retry = await g.createPayment(params);
+    expect(retry.gatewayId).toBe(side!.gatewayId);
+    expect(isPaidOutcome(retry)).toBe(true);
+  });
+
   it("economically equivalent Money vs number amount shares fingerprint (TESTKIT-1)", async () => {
     const g = mockGateway();
     const a = await g.createPayment({

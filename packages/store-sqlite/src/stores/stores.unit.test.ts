@@ -332,7 +332,8 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     const row = listed.find((r) => r.key === "abandoned-job");
     expect(row).toBeDefined();
     expect(row?.status).toBe("scheduled");
-    expect(row?.attempts).toBe(1);
+    // STORES-1: soft-release restores unfinished claim attempt (floor 0)
+    expect(row?.attempts).toBe(0);
     expect(row?.leaseToken).toBeUndefined();
   });
 
@@ -569,6 +570,112 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     if (reclaim.kind === "acquired") {
       expect(reclaim.leaseToken).not.toBe(first.leaseToken);
       expect(reclaim.record.generation).toBeGreaterThan(first.record.generation);
+      // STORES-1/WEBHOOKS-1: expired claimed reclaim keeps attempts
+      expect(reclaim.record.attempts).toBe(first.record.attempts);
+    }
+  });
+
+  it("STORES-2: listRetryable canonicalizes offset input.now", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const claimed = await store.claim({
+      key: "canon-now-evt",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    clock.advance(2_000);
+    // Offset form of the advanced clock instant (14:00+02:00 == 12:00:02Z after advance)
+    const offsetNow = "2026-01-15T14:00:02+02:00";
+    const listed = await store.listRetryable({ now: offsetNow });
+    const row = listed.find((r) => r.key === "canon-now-evt");
+    expect(row).toBeDefined();
+    expect(row?.status).toBe("pending");
+    // Soft-release must write canonical Z available_at (not the offset form).
+    expect(row?.availableAt).toBe("2026-01-15T12:00:02.000Z");
+  });
+
+  it("STORES-4: claim repairs non-canonical available_at and acquires", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const first = await store.claim({
+      key: "lex-avail",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 5_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    await store.fail({
+      key: "lex-avail",
+      leaseToken: first.leaseToken,
+      error: "retry",
+      retryAfterMs: 0,
+    });
+    // Due by Date.parse (09:00Z) but fails lexical TEXT compare vs Z now (12:00Z).
+    executor.run(
+      `UPDATE payment_webhook_inbox SET available_at = ? WHERE key = ?`,
+      ["2026-01-15T14:00:00+05:00", "lex-avail"],
+    );
+    const again = await store.claim({
+      key: "lex-avail",
+      payloadHash: "h1",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("acquired");
+    if (again.kind === "acquired") {
+      expect(again.record.availableAt).toBe("2026-01-15T12:00:00.000Z");
+    }
+  });
+
+  it("STORES-1: listDue soft-release restores attempt; reclaim of claimed keeps attempts", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    await store.schedule({
+      key: "recon-thrash",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt,
+    });
+    const c1 = await store.claim({
+      key: "recon-thrash",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(c1.kind).toBe("acquired");
+    if (c1.kind !== "acquired") return;
+    expect(c1.record.attempts).toBe(1);
+
+    clock.advance(2_000);
+    const due = await store.listDue({ now: new Date(clock.nowMs()).toISOString() });
+    const soft = due.find((r) => r.key === "recon-thrash");
+    expect(soft?.status).toBe("scheduled");
+    // Soft-release restored unfinished attempt.
+    expect(soft?.attempts).toBe(0);
+
+    const c2 = await store.claim({
+      key: "recon-thrash",
+      owner: "w_new",
+      leaseMs: 1_000,
+    });
+    expect(c2.kind).toBe("acquired");
+    if (c2.kind !== "acquired") return;
+    expect(c2.record.attempts).toBe(1);
+
+    // Direct reclaim of expired claimed (no soft-release) also keeps attempts.
+    clock.advance(2_000);
+    const c3 = await store.claim({
+      key: "recon-thrash",
+      owner: "w3",
+      leaseMs: 5_000,
+    });
+    expect(c3.kind).toBe("acquired");
+    if (c3.kind === "acquired") {
+      expect(c3.record.attempts).toBe(1);
     }
   });
 

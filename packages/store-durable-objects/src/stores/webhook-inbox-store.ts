@@ -8,6 +8,10 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyWebhookClaimMiss,
+  webhookTimestampRepairTemplates,
 } from "@paykernel/sql-foundation";
 import type {
   ClaimWebhookInput,
@@ -33,6 +37,20 @@ import {
   newLeaseToken,
   resolveStoreContext,
 } from "./shared";
+
+function webhookMissToResult(
+  kind: Exclude<ReturnType<typeof classifyWebhookClaimMiss>, "claimable">,
+  existing: WebhookInboxRecord,
+): ClaimWebhookResult {
+  if (kind === "not_available") {
+    return {
+      kind: "not_available" as const,
+      record: existing,
+      availableAt: existing.availableAt,
+    };
+  }
+  return { kind, record: existing };
+}
 
 /**
  * Single-statement atomic claim.
@@ -89,6 +107,7 @@ export function createDoWebhookInboxStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.webhookInbox, ctx.namespace);
   const claimTpl = claimSql(table);
+  const repairTpl = webhookTimestampRepairTemplates(ctx.namespace).sqlite;
 
   function selectByKey(key: string): WebhookInboxRecord | undefined {
     const rows = ctx.getExecutor().query<Record<string, unknown>>(
@@ -138,26 +157,70 @@ export function createDoWebhookInboxStore(
         if (!existing) {
           throw new StoreUnavailableError("webhook claim: no row after claim attempt");
         }
-        if (existing.status === "completed") {
-          return { kind: "already_completed" as const, record: existing };
-        }
-        if (existing.status === "failed" || existing.status === "dead_letter") {
-          return { kind: "duplicate_failed" as const, record: existing };
-        }
-        if (
-          existing.status === "claimed" &&
-          existing.payloadHash !== input.payloadHash
-        ) {
-          return { kind: "payload_hash_conflict" as const, record: existing };
-        }
-        if (existing.status === "pending") {
-          return {
-            kind: "not_available" as const,
-            record: existing,
+        // STORES-4: never freeze free due work as permanent not_available.
+        const miss = classifyWebhookClaimMiss(
+          {
+            status: existing.status,
+            payloadHash: existing.payloadHash,
+            leaseExpiresAt: existing.leaseExpiresAt,
             availableAt: existing.availableAt,
+          },
+          input.payloadHash,
+          ctx.clock.nowMs(),
+        );
+        if (miss !== "claimable") {
+          return webhookMissToResult(miss, existing);
+        }
+
+        const availableAtZ = canonicalizeIsoTimestamp(existing.availableAt, "availableAt");
+        const leaseZ =
+          canonicalizeOptionalIsoTimestamp(existing.leaseExpiresAt, "leaseExpiresAt") ??
+          null;
+        ctx.getExecutor().run(repairTpl.sql, [availableAtZ, leaseZ, input.key, now]);
+
+        const retried = ctx.getExecutor().query<Record<string, unknown>>(
+          claimTpl,
+          [
+            input.key,
+            input.payloadHash,
+            payloadRef,
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+            now,
+            now,
+          ],
+        );
+        if (retried.length > 0) {
+          const record = mapWebhookRow(retried[0]!);
+          return {
+            kind: "acquired" as const,
+            record,
+            leaseToken: record.leaseToken ?? leaseToken,
           };
         }
-        return { kind: "in_progress" as const, record: existing };
+
+        const after = selectByKey(input.key);
+        if (!after) {
+          throw new StoreUnavailableError("webhook claim: no row after timestamp repair");
+        }
+        const miss2 = classifyWebhookClaimMiss(
+          {
+            status: after.status,
+            payloadHash: after.payloadHash,
+            leaseExpiresAt: after.leaseExpiresAt,
+            availableAt: after.availableAt,
+          },
+          input.payloadHash,
+          ctx.clock.nowMs(),
+        );
+        if (miss2 === "claimable") {
+          throw new StoreUnavailableError(
+            "webhook claim: free due work failed after timestamp canonicalize; retry",
+          );
+        }
+        return webhookMissToResult(miss2, after);
       });
     },
 
@@ -236,6 +299,7 @@ export function createDoWebhookInboxStore(
         const statusTarget = dead ? "dead_letter" : "pending";
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
 
+        // WEBHOOKS-2: matching token on claimed is enough (accept after lease expiry).
         const restoreAttemptFlag = input.restoreAttempt === true ? 1 : 0;
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
           `UPDATE ${table} SET
@@ -250,8 +314,6 @@ export function createDoWebhookInboxStore(
            WHERE key = ?
              AND lease_token = ?
              AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > ?
            RETURNING key, status, generation`,
           [
             statusTarget,
@@ -261,7 +323,6 @@ export function createDoWebhookInboxStore(
             restoreAttemptFlag,
             input.key,
             input.leaseToken,
-            now,
           ],
         );
         if (rows.length === 0) {
@@ -297,7 +358,12 @@ export function createDoWebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(() => {
-        const now = input.now ?? clockNowIso(ctx.clock);
+        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
+        // Non-Z input.now written into available_at on soft-release would break ordering.
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0).

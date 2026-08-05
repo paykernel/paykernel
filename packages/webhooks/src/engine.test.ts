@@ -267,7 +267,7 @@ describe("WEBHOOKS-3 fail lease_lost preserves non-retryable intent", () => {
       payloadHash: "h",
       event: { id: "evt_lease_lost_dl" },
       handler: async () => {
-        // Expire lease before handler returns so fail() soft-releases → lease_lost
+        // Expire lease before handler returns; fail accepts matching token (WEBHOOKS-2)
         clock.advance(2_000);
         throw new NonRetryableHandlerError("poison forever");
       },
@@ -275,8 +275,96 @@ describe("WEBHOOKS-3 fail lease_lost preserves non-retryable intent", () => {
 
     expect(outcome).toEqual({ outcome: "handler_failed", retryable: false });
     const rec = await store.get("stripe:evt_lease_lost_dl");
-    // Best-effort re-claim + dead_letter should terminal the row.
+    // fail with expired matching token → dead_letter (or best-effort reclaim).
     expect(rec?.status).toBe("dead_letter");
+  });
+});
+
+describe("WEBHOOKS-2 lease-timeout maxAttempts", () => {
+  it("handler throw after lease expiry records attempt and eventually hits maxAttempts", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const maxAttempts = 3;
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      maxAttempts,
+      defaultLeaseMs: 1_000,
+      defaultRetryAfterMs: 0,
+      clock,
+    });
+
+    let runs = 0;
+    for (let i = 1; i <= maxAttempts; i++) {
+      const o = await engine.processVerified({
+        gateway: "stripe",
+        providerEventId: "evt_lease_timeout_budget",
+        payloadHash: "h",
+        event: { id: "evt_lease_timeout_budget" },
+        handler: async () => {
+          runs++;
+          // Simulate hang past lease then fail — must count toward maxAttempts.
+          clock.advance(2_000);
+          throw new Error(`timeout fail #${i}`);
+        },
+      });
+      if (i < maxAttempts) {
+        expect(o).toMatchObject({
+          outcome: "scheduled_for_retry",
+          reason: "handler_retry",
+        });
+        const rec = await store.get("stripe:evt_lease_timeout_budget");
+        expect(rec?.status).toBe("pending");
+        expect(rec?.attempts).toBe(i);
+      } else {
+        expect(o).toEqual({ outcome: "handler_failed", retryable: false });
+        const rec = await store.get("stripe:evt_lease_timeout_budget");
+        expect(rec?.status).toBe("dead_letter");
+        expect(rec?.attempts).toBe(maxAttempts);
+      }
+    }
+    expect(runs).toBe(maxAttempts);
+  });
+
+  it("renew lease_lost after expiry still records fail toward maxAttempts", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const maxAttempts = 2;
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      maxAttempts,
+      defaultLeaseMs: 1_000,
+      defaultRetryAfterMs: 0,
+      clock,
+    });
+
+    let runs = 0;
+    for (let i = 1; i <= maxAttempts; i++) {
+      const o = await engine.processVerified({
+        gateway: "stripe",
+        providerEventId: "evt_renew_timeout_budget",
+        payloadHash: "h",
+        event: { id: "evt_renew_timeout_budget" },
+        handler: async (ctx) => {
+          runs++;
+          clock.advance(2_000);
+          await ctx.renew(10_000);
+        },
+      });
+      if (i < maxAttempts) {
+        expect(o).toMatchObject({
+          outcome: "scheduled_for_retry",
+          reason: "handler_retry",
+        });
+      } else {
+        expect(o).toEqual({ outcome: "handler_failed", retryable: false });
+        expect((await store.get("stripe:evt_renew_timeout_budget"))?.status).toBe(
+          "dead_letter",
+        );
+      }
+    }
+    expect(runs).toBe(maxAttempts);
   });
 });
 
@@ -852,6 +940,45 @@ describe("processWithVerifier", () => {
     expect(o.outcome).toBe("invalid_webhook");
     expect(store.size).toBe(0);
   });
+
+  // WEBHOOKS-1 / WEBHOOKS-5: post-verify parse / structure errors must redeliver
+  // (retryable handler_failed), never permanent invalid_webhook / forgery.
+  it.each([
+    {
+      label: "InvalidRequestError 4xx (parse after verify)",
+      name: "InvalidRequestError",
+      code: "INVALID_REQUEST",
+      message: "Webhook parse failed: unknown event type",
+      statusCode: 400,
+    },
+    {
+      label: "mis-wrapped parse as InvalidWebhookError (message says parse)",
+      name: "InvalidWebhookError",
+      code: "INVALID_WEBHOOK",
+      message: "Webhook parse failed: thin event shape",
+    },
+  ] as const)(
+    "$label → retryable not invalid_webhook (WEBHOOKS-1/5)",
+    async ({ name, code, message, ...rest }) => {
+      const store = createMemoryWebhookInboxStore();
+      const engine = createWebhookInboxEngine({ store, mode: "inline" });
+      const err = new Error(message);
+      err.name = name;
+      (err as Error & { code?: string }).code = code;
+      if ("statusCode" in rest && rest.statusCode !== undefined) {
+        (err as Error & { statusCode?: number }).statusCode = rest.statusCode;
+      }
+      const o = await engine.processWithVerifier({
+        raw: {},
+        verifyAndNormalize: async () => {
+          throw err;
+        },
+        handler: async () => {},
+      });
+      expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+      expect(store.size).toBe(0);
+    },
+  );
 
   it("permanent GatewayApiError structure → non-retryable handler_failed (WEBHOOKS-6)", async () => {
     const store = createMemoryWebhookInboxStore();

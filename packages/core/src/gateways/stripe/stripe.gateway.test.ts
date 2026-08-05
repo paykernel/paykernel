@@ -1229,7 +1229,9 @@ describe("StripeGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
-    it("should fail closed when amount_received is missing on payment_intent.succeeded", () => {
+    it("STRIPE-3: incomplete settled (no amount_received) dual-write is payment.processing not payment.succeeded", () => {
+      // payment_intent.succeeded with no settled snapshot must demote domain
+      // status and Phase-7 dual-write (type-only handlers would over-fulfill).
       const event = gateway.parseWebhookEvent({
         id: "evt_pi_missing_received",
         type: "payment_intent.succeeded",
@@ -1240,6 +1242,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 10000,
+            // amount_received / amount_captured intentionally omitted
             currency: "usd",
             metadata: {},
           },
@@ -1247,15 +1250,15 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      // Domain status fail-closed (incomplete settled).
       expect(event.status).toBe("processing");
       expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("partially_captured");
       expect(event.amount).toBe(100); // authorized amount only (display)
-      // STRIPE-1: dual-write must not promote incomplete settled to payment.succeeded
-      // (type-only handlers would over-fulfill on auth amount alone).
+      expect(event.type).toBe("payment_intent.succeeded");
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
     });
 
     it("should use amount_captured fallback when amount_received is missing", () => {
@@ -3047,6 +3050,96 @@ describe("StripeGateway", () => {
       "Stripe KWD minor-unit amounts must be divisible by 10",
     );
   });
+
+  it.each([
+    // ISK is Stripe two-decimal special but whole-major only: 1050 = 10.50 ISK
+    {
+      label: "ISK fractional unitAmount",
+      priceData: {
+        currency: "ISK",
+        productData: { name: "Item" },
+        unitAmount: 1050,
+      },
+      message: "Stripe ISK amounts must be whole currency units",
+    },
+    {
+      label: "UGX fractional unitAmount",
+      priceData: {
+        currency: "UGX",
+        productData: { name: "Item" },
+        unitAmount: 50, // 0.50 UGX — not a whole unit
+      },
+      message: "Stripe UGX amounts must be whole currency units",
+    },
+    {
+      label: "ISK fractional major-unit amount",
+      priceData: {
+        currency: "ISK",
+        productData: { name: "Item" },
+        amount: 10.5,
+      },
+      message: "Stripe ISK amounts must be whole currency units",
+    },
+  ] as const)(
+    "STRIPE-1: rejects $label on checkout line item",
+    async ({ priceData, message }) => {
+      await expect(
+        gateway.createCheckoutSession({
+          successUrl: "https://success",
+          cancelUrl: "https://cancel",
+          lineItems: [{ priceData, quantity: 1 }],
+        }),
+      ).rejects.toThrow(message);
+    },
+  );
+
+  it.each([
+    {
+      label: "whole-unit ISK unitAmount",
+      currency: "ISK",
+      unitAmount: 1000, // 10.00 ISK
+      expected: "1000",
+    },
+    {
+      label: "zero-decimal JPY unitAmount",
+      currency: "JPY",
+      unitAmount: 500, // whole majors
+      expected: "500",
+    },
+  ] as const)(
+    "STRIPE-1: accepts $label and posts unit_amount=$expected",
+    async ({ currency, unitAmount, expected }) => {
+      let capturedBody = "";
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        capturedBody = opts.body as string;
+        return createMockResponse({
+          id: "cs_whole_unit",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/whole-unit",
+        });
+      }) as unknown as typeof fetch;
+
+      await gateway.createCheckoutSession({
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        lineItems: [
+          {
+            priceData: {
+              currency,
+              productData: { name: `${currency} item` },
+              unitAmount,
+            },
+            quantity: 1,
+          },
+        ],
+      });
+      expect(
+        new URLSearchParams(capturedBody).get(
+          "line_items[0][price_data][unit_amount]",
+        ),
+      ).toBe(expected);
+    },
+  );
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Apple Pay Simulation Tests

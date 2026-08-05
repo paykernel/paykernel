@@ -224,7 +224,11 @@ local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], newToken}
 `.trim();
 
-/** KEYS[1]=record KEYS[2]=dueIndex ARGV: nowMs, nowIso, leaseToken, logicalKey, retentionTtlSec */
+/**
+ * KEYS[1]=record KEYS[2]=dueIndex ARGV: nowMs, nowIso, leaseToken, logicalKey, retentionTtlSec
+ * retentionTtlSec is accepted for call-site parity but **ignored** (STORES-5):
+ * completed recon fences must not EXPIRE into re-acquirable empty keys.
+ */
 export const RECON_COMPLETE_LUA = `
 local rec = KEYS[1]
 local idx = KEYS[2]
@@ -232,7 +236,8 @@ local nowMs = tonumber(ARGV[1])
 local nowIso = ARGV[2]
 local leaseToken = ARGV[3]
 local logicalKey = ARGV[4]
-local retentionTtlSec = tonumber(ARGV[5]) or 0
+-- ARGV[5] retentionTtlSec intentionally unused for completed (STORES-5)
+local _retentionTtlSec = tonumber(ARGV[5]) or 0
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -265,9 +270,9 @@ redis.call('HSET', rec,
   'updated_at', nowIso
 )
 redis.call('ZREM', idx, logicalKey)
-if retentionTtlSec > 0 then
-  redis.call('EXPIRE', rec, retentionTtlSec)
-end
+-- STORES-5: never EXPIRE completed recon fences (re-open → re-claim completed work).
+-- retentionTtlSec accepted for API parity but ignored; use deleteExpired for cleanup.
+redis.call('PERSIST', rec)
 return {'ok'}
 `.trim();
 

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   amountInRange,
+  amountOutsideConfiguredRange,
   compareDecimalAmounts,
   resolveInputAmount,
 } from "./amount-range";
@@ -107,6 +108,23 @@ describe("amountInRange money-safe", () => {
       amountInRange(
         { amount: { amount: "50", currency: "USD" } },
         { amountMin: "10", amountMax: "100" },
+      ),
+    ).toBe(false);
+  });
+
+  it("ROUTE-1: amountOutsideConfiguredRange true when range lacks amountCurrency", () => {
+    // Misconfigured money bounds must surface as honesty violations so
+    // select-time fallback cannot silently accept unconstrained amounts.
+    expect(
+      amountOutsideConfiguredRange(
+        { amount: { amount: "50", currency: "USD" } },
+        { amountMin: "10", amountMax: "100" },
+      ),
+    ).toBe(true);
+    expect(
+      amountOutsideConfiguredRange(
+        { amount: { amount: "50", currency: "USD" } },
+        { amountMin: "10", amountMax: "100", amountCurrency: "USD" },
       ),
     ).toBe(false);
   });
