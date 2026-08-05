@@ -3,7 +3,7 @@
 **Package:** `@paykernel/store-postgres`  
 **Path:** `packages/store-postgres`  
 **Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
-**Foundation:** private [`@paykernel/internal-sql-store`](../../../internal/sql-store/docs/relational-foundation.md)
+**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (private shim: `internal/sql-store`)
 
 This package is the **first production storage adapter**. It implements durable, multi-host-safe **idempotency**, **webhook inbox**, and **reconciliation** stores against a shared PostgreSQL cluster.
 

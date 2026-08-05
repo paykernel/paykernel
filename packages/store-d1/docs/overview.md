@@ -3,7 +3,7 @@
 **Package:** `@paykernel/store-d1`  
 **Path:** `packages/store-d1`  
 **Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
-**Foundation:** private [`@paykernel/internal-sql-store`](../../../internal/sql-store/docs/relational-foundation.md) (dialect **`sqlite`**)
+**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**; private shim: `internal/sql-store`)
 
 This package is the **multi-host Workers-native D1** production storage adapter for **shared** Cloudflare D1 databases. It implements durable **idempotency**, **webhook inbox**, and **reconciliation** stores via the **Workers/Pages D1 binding**.
 

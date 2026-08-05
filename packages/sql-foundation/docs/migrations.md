@@ -1,6 +1,6 @@
 # Migrations (Phase 11)
 
-**Package:** `@paykernel/internal-sql-store`  
+**Package:** `@paykernel/sql-foundation`  
 **API:** `migrate`, `verifySchema`, `MIGRATIONS`, `CURRENT_SCHEMA_VERSION`  
 **Overview:** [relational-foundation.md](./relational-foundation.md)
 
@@ -9,12 +9,13 @@
 ## Policy (non-negotiable)
 
 1. **Explicit invocation only.** Call `migrate(executor, { dialect, namespace })` from install scripts, operator tooling, or adapter setup docs.
-2. **Never auto-run on package import.** Importing `@paykernel/internal-sql-store` does not touch a database (covered by `import-no-migrate.test.ts`).
+2. **Never auto-run on package import.** Importing `@paykernel/sql-foundation` does not touch a database (covered by `import-no-migrate.test.ts`).
 3. **Never auto-run on production store construction.** Creating a store adapter must not apply DDL as a side effect.
 4. **Append-only versions.** Do not renumber migrations that may already be applied in the field.
 5. **Dialect-honest SQL.** Share intent; provide `postgres` / `sqlite` bodies when syntax diverges. Do not pretend dialects are identical.
 6. **Validated identifiers only.** Table qualification goes through `createSchemaNamespace` / known logical tables — never raw user table names.
 7. **Bound params** for user values when migrations need them; DDL identifiers are validated before quoting.
+8. **Serialize multi-host migrate.** See [Concurrent migrate](#concurrent-migrate-n10) — no portable advisory lock.
 
 ---
 
@@ -67,6 +68,8 @@ DDL is dialect-tagged:
 
 Metadata: `MIGRATION_001` in `MIGRATIONS` (append-only array).
 
+Index names use `indexLabel(qualifiedTable)` (keeps the **end** of long names so long `tablePrefix` values do not collide shared suffixes like `_lease_expires` across tables). Colliding index names fail closed at SQL build time rather than silently skipping via `IF NOT EXISTS`.
+
 ---
 
 ## `migrate(executor, options)`
@@ -76,7 +79,7 @@ import {
   migrate,
   createSchemaNamespace,
   type SqlExecutor,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 
 const executor: SqlExecutor = {
   async execute(sql, params) {
@@ -108,6 +111,19 @@ const result = await migrate(executor, {
 5. Return which versions were newly applied vs already present.
 
 Failures throw `MigrationError` (`code: "migration_error"`).
+
+### Concurrent migrate (N10)
+
+`migrate()` does **not** acquire a portable cross-dialect advisory lock.
+
+| Concern | Residual honesty |
+| ------- | ---------------- |
+| Why no lock? | Cheap portable locks are not available on every supported dialect/executor. PostgreSQL has `pg_advisory_lock`; SQLite/D1/generic executors do not share an equivalent that this package can require without driver-specific branching and false safety. |
+| Ops requirement | **Serialize migrate across hosts** — one migrator job, deploy lock, leader election, or operator procedure. Do not run concurrent `migrate()` from multiple app instances as a substitute for ops control. |
+| Foundation v1 | DDL is `CREATE TABLE/INDEX IF NOT EXISTS` and the ledger uses PK `version`. Concurrent runs are *usually* fail-closed or no-ops, but the **version INSERT after multi-statement DDL can still race** (two hosts both observe “not applied”, both run DDL, one INSERT wins / one fails). |
+| Future migrations | **Non-idempotent DDL inherits this window.** When appending migrations that rename/drop/alter, concurrent migrate is **not** safe even if v1 happened to tolerate races. |
+
+Adapters may wrap `migrate()` with dialect-specific locks (e.g. Postgres `pg_advisory_lock`) at the adapter boundary if desired; the foundation stays dialect-honest and portable.
 
 ### `SqlExecutor`
 
@@ -145,6 +161,7 @@ Does **not** apply migrations.
 | `DIALECT_SAMPLES`                          | Dialect sample payloads            |
 | `import-no-migrate.test.ts`                | Import does not migrate            |
 | `migrate.test.ts`                          | Apply / idempotent re-run / ledger |
+| `namespace.test.ts` / `definitions.test.ts`| Prefix length + index-label uniqueness |
 
 Adapters should add multi-connection and real-driver migration tests in Phase 12+.
 
@@ -152,8 +169,8 @@ Adapters should add multi-connection and real-driver migration tests in Phase 12
 
 ## Operator checklist
 
-1. Validate namespace config for the environment (prefix / schema / tenant).
-2. Run `migrate` against a maintenance connection with DDL privileges.
+1. Validate namespace config for the environment (prefix / schema / tenant). `tablePrefix` must leave room for the longest logical table (`payment_reconciliation_jobs`, 27 chars) under identifier max 63 → safe max prefix **36** (`MAX_SAFE_TABLE_PREFIX_LENGTH`).
+2. Run `migrate` against a maintenance connection with DDL privileges — **one host / serialized**.
 3. Run `verifySchema` in deploy health checks if desired.
 4. Never grant application workers blind DDL if policy forbids it — split migrator role from runtime role.
 5. On upgrade, deploy code that understands new schema **after** or **with** explicit migrate (document order per adapter).

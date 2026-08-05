@@ -26,7 +26,7 @@ Choosing the wrong adapter (or overclaiming scope) creates silent cross-host rac
 | **Memory is NON-PRODUCTION** | `MEMORY_STORAGE_ADAPTER_MANIFEST` is test-only (`single-process` + `ephemeral`). |
 | **Matrix cells must match manifests** | If a cell would overclaim, this guide uses the **weaker honest** value and names the limitation. |
 
-Machine-readable guarantees live on each adapter’s manifest constant (validated by `assertStorageAdapterManifest` from `@paykernel/testkit`). Shared contract language: [packages/testkit/docs/store-contracts.md](../packages/testkit/docs/store-contracts.md) §7.
+Machine-readable guarantees live on each adapter’s manifest constant (validated by `assertStorageAdapterManifest` from `@paykernel/testkit`). Shared contract language: [packages/testkit/docs/store-contracts.md](../packages/testkit/docs/store-contracts.md) §7. Relational adapters share schemas/claim templates via publishable **`@paykernel/sql-foundation`** (not the private `@paykernel/internal-sql-store` shim). Store interfaces are dual-owned across domain packages, `@paykernel/store-contracts`, and testkit re-exports — inject production adapters at the app layer.
 
 **Frozen selection matrix (tests + agents):**
 

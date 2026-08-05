@@ -1,6 +1,6 @@
 # Atomic claims (Phase 11)
 
-**Package:** `@paykernel/internal-sql-store`  
+**Package:** `@paykernel/sql-foundation`  
 **Contracts:** [store-contracts.md](../../../packages/testkit/docs/store-contracts.md)  
 **Foundation:** [relational-foundation.md](./relational-foundation.md)
 
@@ -95,7 +95,7 @@ import {
   webhookClaimTemplates,
   reconciliationClaimTemplates,
   pickClaimTemplate,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 
 const ns = createSchemaNamespace({ tablePrefix: "pay_" });
 const set = idempotencyReserveTemplates(ns);

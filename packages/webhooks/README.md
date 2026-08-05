@@ -48,15 +48,24 @@ const outcome = await engine.processVerified({
 });
 
 // Map outcome → HTTP in YOUR framework adapter — not inside this package.
+// Engine is HTTP-agnostic; policy below is recommended, not hardcoded.
 switch (outcome.outcome) {
   case "processed":
   case "duplicate_completed":
     // typically 200
     break;
   case "already_processing":
+    // typically 5xx / 409 + Retry-After so the provider redelivers
+    break;
   case "scheduled_for_retry":
+    // Policy choice (engine never picks HTTP):
+    // - 200 when durable claim/fail is already persisted and a worker will run
+    //   (ackAfterClaim / intentional durable ACK) — provider need not redeliver
+    // - 5xx when you want provider redelivery as the retry mechanism
+    break;
   case "handler_failed":
-    // typically 5xx / retry per provider policy — never silent-ACK failures
+    // retryable: typically 5xx; non-retryable: 200 or 4xx per policy
+    // never silent-ACK uncertain/failed work without a real worker design
     break;
   case "payload_conflict":
   case "invalid_webhook":
@@ -77,6 +86,8 @@ const engine = createWebhookInboxEngine({ store, mode: "inline", clock });
 ```
 
 (`@paykernel/webhooks` does **not** depend on testkit — import memory stores only from test code.)
+
+**Dual memory-store honesty:** this package keeps a **non-exported** in-package `memory-store` for engine unit tests (not on the public surface). Testkit ships a separate `createMemoryWebhookInboxStore` for app tests and conformance. Both are **test-only / NON-PRODUCTION** and can drift on SQL-fencing nuances; production apps must inject durable adapters (`@paykernel/store-*`) that pass `runWebhookInboxStoreConformanceSuite`.
 
 ### With injected verifier
 
@@ -110,6 +121,7 @@ const outcome = await engine.processWithVerifier({
 Mode is fixed at `createWebhookInboxEngine` construction. Process methods never switch modes implicitly.
 `processRetryable` is valid **only** on `durable_retry` engines (throws on `inline`).
 `ackAfterClaim` is valid **only** with `durable_retry` (constructor throws otherwise).
+`defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / call throws otherwise; default remains 30s).
 
 **Default `processRetryable` materialization:** if `payloadRef` is a
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
@@ -172,6 +184,8 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 **Status honesty:** the public `WebhookInboxStatus` union still includes `failed` for 0.x/custom-store compatibility, but the engine and official adapters only write `pending` | `claimed` | `completed` | `dead_letter` (fail → `pending` or `dead_letter`).
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
+
+**Envelope honesty:** the engine serializes `envelope` with `JSON.stringify` and does **not** force-redact it. Prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) before `processVerified`; otherwise secrets can land in `payloadRef`.
 
 Durable adapters must pass testkit `runWebhookInboxStoreConformanceSuite`.
 

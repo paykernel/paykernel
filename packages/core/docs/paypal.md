@@ -350,8 +350,15 @@ app.post('/webhooks/paypal', async (req) => {
 | `CHECKOUT.PAYMENT-APPROVAL.REVERSED` | `cancelled` |
 | `PAYMENT.AUTHORIZATION.CREATED` | `authorized` |
 | `PAYMENT.AUTHORIZATION.CAPTURED` | `paid` (see note: capture id may be missing; auth id is not refundable) |
-| `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | `partially_captured` |
+| `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | `partially_captured` (stable dual-write **`payment.processing`** — not `capture.completed` / `payment.succeeded`; do not fulfill remaining auth) |
 | `PAYMENT.AUTHORIZATION.VOIDED` | `cancelled` |
 | `PAYMENT.REFUND.PENDING` | `refund_pending` |
 | `PAYMENT.REFUND.COMPLETED` | `refunded` (stable dual-write `refund.completed`) |
 | `PAYMENT.REFUND.FAILED` | `refund_failed` |
+
+> **Partial authorization capture:** `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` normalizes
+> status to `partially_captured` and dual-writes stable type **`payment.processing`**
+> (not `capture.completed`). `isPaidOutcome` is false. Type-only fulfillment must not treat
+> partial auth capture as full settlement — capture remaining funds or wait for a full
+> capture / `PAYMENT.CAPTURE.COMPLETED` / `PAYMENT.AUTHORIZATION.CAPTURED` signal and
+> amount checks.

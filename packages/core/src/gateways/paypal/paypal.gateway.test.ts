@@ -1200,6 +1200,38 @@ describe('PayPalGateway', () => {
             assertNoSecretsInEnvelope(envelope);
         });
 
+        it('Phase 7 dual-write: AUTHORIZATION.PARTIALLY_CAPTURED → payment.processing (not capture.completed)', () => {
+            const payload = {
+                id: 'WH-auth-partial-capture',
+                event_type: 'PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED',
+                create_time: '2024-06-15T14:30:00Z',
+                resource_type: 'authorization',
+                resource: {
+                    id: 'AUTH-PARTIAL-1',
+                    status: 'PARTIALLY_CAPTURED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.type).toBe('PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED');
+            expect(event.status).toBe('partially_captured');
+            expect(event.stableType).toBe('payment.processing');
+            expect(event.stableType).not.toBe('capture.completed');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(event.event?.type).toBe('payment.processing');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'AUTH-PARTIAL-1',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
         it('Phase 7 dual-write: refund events → refund.*', () => {
             const refunded = gateway.parseWebhookEvent({
                 id: 'WH-refund-done',

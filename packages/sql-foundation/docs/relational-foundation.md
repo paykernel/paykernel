@@ -1,8 +1,8 @@
 # Relational foundation (Phase 11)
 
-**Package:** `@paykernel/internal-sql-store` (`internal/sql-store`)  
-**Status:** **Private** monorepo package — not published to npm  
-**Contracts (Phase 9):** [`packages/testkit/docs/store-contracts.md`](../../../packages/testkit/docs/store-contracts.md)
+**Package:** `@paykernel/sql-foundation` (`packages/sql-foundation`)  
+**Status:** **Publishable** public package (npm). Private monorepo shim: `internal/sql-store` → `@paykernel/internal-sql-store` (thin re-export of this package; never published).  
+**Contracts (Phase 9):** [`packages/testkit/docs/store-contracts.md`](../../../packages/testkit/docs/store-contracts.md) · production contract types also in [`@paykernel/store-contracts`](../../store-contracts)
 
 This document describes the shared **relational foundation** used by durable adapters (Phase 12+). Related package docs:
 
@@ -111,7 +111,7 @@ Primary keys: business `key` for the three domain tables; `version` for migratio
 
 | Input          | Validation                                                                                          |
 | -------------- | --------------------------------------------------------------------------------------------------- |
-| `tablePrefix`  | `[A-Za-z0-9_]+`, max 63; prefixed logical names must remain valid identifiers                       |
+| `tablePrefix`  | `[A-Za-z0-9_]+`; safe max **36** (`MAX_SAFE_TABLE_PREFIX_LENGTH` = 63 − longest logical `payment_reconciliation_jobs` 27). Every foundation table is checked — not only short samples. |
 | `sqlSchema`    | Strict identifier `^[A-Za-z_][A-Za-z0-9_]*$`, max 63; rejects quotes, dots, spaces, `;`, `--`, `/*` |
 | `tenantColumn` | `true` → `tenant_id`; custom string → validated identifier; `false`/omitted → disabled              |
 | Logical table  | Must be one of `ALL_LOGICAL_TABLES` — unknown names refused                                         |
@@ -124,7 +124,7 @@ import {
   resolveTableName,
   resolveUnqualifiedTableName,
   quoteIdentifier,
-} from "@paykernel/internal-sql-store";
+} from "@paykernel/sql-foundation";
 
 const ns = createSchemaNamespace({
   tablePrefix: "pay_",
@@ -262,8 +262,8 @@ Docs: [adapter overview](../../../packages/store-durable-objects/docs/overview.m
 
 Recommended adapter responsibilities (all Phase 12+ relational adapters):
 
-1. Depend on `@paykernel/internal-sql-store` via workspace (private).
-2. Implement `IdempotencyStore` / `WebhookInboxStore` / `ReconciliationStore` from **testkit** (and webhooks dual `WebhookInboxStore` assignability where relevant).
+1. Depend on **`@paykernel/sql-foundation`** at runtime (publishable; not private `internal/*`). Optional workspace shim `@paykernel/sql-foundation` is a thin re-export only — adapters must not list it as a published runtime dependency.
+2. Implement `IdempotencyStore` / `WebhookInboxStore` / `ReconciliationStore` from **`@paykernel/store-contracts`** (testkit re-exports for BC + conformance; webhooks dual-owns `WebhookInboxStore` assignability where relevant).
 3. Use `createSchemaNamespace` + claim templates + row codecs.
 4. Expose **explicit** migrate/verify entry points (CLI or documented setup); never on import.
 5. Declare an honest `StorageAdapterManifest` (coordination scope, durability, strong claims only with engine-level ops).
@@ -271,7 +271,7 @@ Recommended adapter responsibilities (all Phase 12+ relational adapters):
 
 **Dependency matrix:**
 
-| Package                                | May depend on sql-store?                                                          |
+| Package                                | May depend on `@paykernel/sql-foundation`?                                        |
 | -------------------------------------- | --------------------------------------------------------------------------------- |
 | `packages/core`                        | **No**                                                                            |
 | `packages/webhooks`                    | **No** (storage injected)                                                         |

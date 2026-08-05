@@ -2,10 +2,13 @@
 
 **Date (UTC):** 2026-08-03  
 **Gate kind:** Final adversarial re-gate after remediation  
-**Package under review:** `@paykernel/internal-sql-store` (`internal/sql-store`, **private**)  
+**Package under review (historical):** `@paykernel/internal-sql-store` (`internal/sql-store`, **private** at gate time)  
+**Current package name:** public **`@paykernel/sql-foundation`** (`packages/sql-foundation`); `internal/sql-store` remains a private thin re-export shim  
 **Monorepo peers:** `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/testkit`  
 **Reviewer stance:** fail-closed (missing evidence = blocking; implementer claims re-verified independently)  
 **Verdict:** **PASS**
+
+> **Name honesty (post-gate):** this historical report names the private Phase 11 package. Runtime adapters now depend on publishable `@paykernel/sql-foundation`. See package [README](../README.md).
 
 > Baseline pointer copy: [`packages/core/docs/baseline/phase-11-gate-report.md`](../../../packages/core/docs/baseline/phase-11-gate-report.md)
 

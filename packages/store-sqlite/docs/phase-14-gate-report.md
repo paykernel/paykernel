@@ -48,7 +48,7 @@ Phase 14 local/embedded **single-host** SQLite adapter is **complete and green**
 | Three createSqlite\* factories + bundle | **PASS** | `createSqliteIdempotencyStore`, `createSqliteWebhookInboxStore`, `createSqliteReconciliationStore`, `createSqliteStores` (+ per-driver `createBunSqliteStores` / `createNodeSqliteStores` / `createBetterSqlite3Stores`) |
 | Injectable clock / FakeClock | **PASS** | `StoreClock` + `createSystemClock` / `clockNowIso` / `clockAddMsIso`; conformance injects `createFakeClock()`; unit test “FakeClock controls lease reclaim” |
 | Explicit migrate only; never on import | **PASS** | `import-no-migrate.test.ts`; factories do not migrate; only `migrateSqliteAdapter` / `verifySqliteAdapterSchema` |
-| Uses internal/sql-store foundation | **PASS** | Depends on `@paykernel/internal-sql-store`; sqlite claim templates + migrate/verify + namespace |
+| Uses internal/sql-store foundation | **PASS** | Depends on `@paykernel/sql-foundation` (was `@paykernel/internal-sql-store` at early gate); sqlite claim templates + migrate/verify + namespace |
 | Docs complete (incl. 14.5) | **PASS** | overview, claims, crash-boundaries, deployment-limits, drivers, guarantees, migrations, testing + README + CHANGELOG |
 | Phase 0–13 safety net still green | **PASS** | 1437 pass across full suite including postgres/redis adapters |
 | Boundaries; no illegal deps | **PASS** | `check:boundaries` OK; core/webhooks do not depend on adapter-sqlite; redis does not depend on sql-store |

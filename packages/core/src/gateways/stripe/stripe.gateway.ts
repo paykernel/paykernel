@@ -1757,7 +1757,9 @@ export class StripeGateway extends BaseGateway {
               ? "refunded"
               : "partially_refunded";
         } else {
-          status = "refunded";
+          // Incomplete snapshot: do not fail-open to full `refunded`. Align with
+          // mapStripeRefundWebhookStatus → refund_completed when totals incomplete.
+          status = "refund_completed";
         }
         break;
       }

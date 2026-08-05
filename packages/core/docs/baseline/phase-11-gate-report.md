@@ -2,11 +2,12 @@
 
 **Date (UTC):** 2026-08-03  
 **Gate kind:** Final adversarial re-gate after remediation  
-**Package:** `@paykernel/internal-sql-store` (`internal/sql-store`, private)  
+**Package (historical):** `@paykernel/internal-sql-store` (`internal/sql-store`, private at gate time)  
+**Current package:** public **`@paykernel/sql-foundation`** (`packages/sql-foundation`); `internal/sql-store` is a thin re-export shim  
 **Reviewer stance:** fail-closed (missing evidence = blocking)  
 **Verdict:** **PASS**
 
-> **Primary detailed report:** [`internal/sql-store/docs/phase-11-gate-report.md`](../../../../internal/sql-store/docs/phase-11-gate-report.md)  
+> **Primary detailed report:** [`packages/sql-foundation/docs/phase-11-gate-report.md`](../../sql-foundation/docs/phase-11-gate-report.md) (historical gate; name honesty note at top)  
 > This baseline copy mirrors the gate outcome for monorepo convention under `packages/core/docs/baseline/`.
 
 ## Verdict summary

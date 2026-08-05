@@ -171,7 +171,8 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 
 | Gateway | Native type | Stable | Notes |
 |---------|-------------|--------|-------|
-| Stripe | `payment_intent.succeeded` | `payment.succeeded` | |
+| Stripe | `payment_intent.succeeded` (full / status `paid`) | `payment.succeeded` | Default map when not partial |
+| Stripe | `payment_intent.succeeded` + status `partially_captured` | **`payment.processing`** | Partial capture dual-write demotion; aligns with `isPaidOutcome` / Paymob |
 | Stripe | `payment_intent.payment_failed` | `payment.failed` | |
 | Stripe | `payment_intent.canceled` | `payment.cancelled` | |
 | Stripe | `checkout.session.completed` + `payment_status=paid` | `payment.succeeded` | Needs context |
@@ -183,6 +184,7 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Moyasar | `payment_failed` / `payment_faild` | `payment.failed` | Typo normalized by gateway |
 | Moyasar | `payment_authorized` | `payment.authorized` | |
 | PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded` |
+| PayPal | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | **`payment.processing`** | Status `partially_captured`; **not** `capture.completed` / `payment.succeeded` — open capture story |
 | PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` | |
 | PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource; capture id via `rel: up` / related_ids |
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
@@ -200,6 +202,12 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 fulfill when money is captured should handle `capture.completed` (and may still
 inspect normalized `WebhookEvent.status === 'paid'` during migration).
 
+**PayPal partial auth capture:** `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED`
+dual-writes **`payment.processing`** with domain status `partially_captured` —
+never `capture.completed` or `payment.succeeded`. Aligns with Paymob partial
+dual-write and `isPaidOutcome` (paid-only). Do not fulfill remaining authorized
+amount on this event alone; use amount-aware capture completion signals.
+
 **Paymob redirect vs processed:** Native type is the distinguisher. Browser/query
 redirect callbacks parse as `TRANSACTION_RESPONSE` and dual-write
 `payment.processing` even when status is `paid` or flags say success — so
@@ -207,11 +215,14 @@ fulfill-on-`payment.succeeded` handlers never ship from redirect alone. Use the
 processed backend notification (`type: 'TRANSACTION'`) or transaction inquiry
 as the sole fulfillment source of truth.
 
-**Paymob partial capture:** Domain status `partially_captured` dual-writes
-`payment.processing`, not `payment.succeeded`. That matches
+**Stripe / Paymob partial capture:** Domain status `partially_captured` dual-writes
+`payment.processing`, not `payment.succeeded`. Stripe still emits native
+`payment_intent.succeeded` for partial captures; the mapper consults
+`context.status` and demotes the stable type. That matches
 `isPaidOutcome` / paid-like helpers (partial capture is excluded). Type-only
 handlers that fulfill solely on `payment.succeeded` will not over-fulfill
 partials; amount-aware logic still needed for partial inventory/settlement.
+Fulfill only with status `paid` or `isPaidOutcome`.
 
 **Paymob amount-only refunds:** Prefer `status` / amount-derived signals over bare
 `success` flags. When Paymob sends `refunded_amount_cents > 0` without `is_refund`

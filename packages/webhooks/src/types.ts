@@ -210,7 +210,10 @@ export type CreateWebhookInboxEngineOptions = {
   mode: WebhookProcessingMode;
   /** Default lease owner string. Default: `"webhook-worker"`. */
   owner?: string;
-  /** Default lease duration in ms. Default: 30_000. */
+  /**
+   * Default lease duration in ms. Default: 30_000.
+   * Must be a finite number `> 0` (constructor throws otherwise).
+   */
   defaultLeaseMs?: number;
   /**
    * Max **handler** attempts before dead-letter on durable_retry. Default: 5.

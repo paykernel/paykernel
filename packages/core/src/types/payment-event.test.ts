@@ -334,6 +334,31 @@ describe("mapProviderEventTypeToStable tables", () => {
         }),
       ).toBe("refund.completed");
     });
+
+    it("payment_intent.succeeded + partially_captured → payment.processing", () => {
+      expect(
+        mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+          status: "partially_captured",
+        }),
+      ).toBe("payment.processing");
+      // case-insensitive status
+      expect(
+        mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+          status: "Partially_Captured",
+        }),
+      ).toBe("payment.processing");
+    });
+
+    it("payment_intent.succeeded + paid / no status → payment.succeeded", () => {
+      expect(
+        mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+          status: "paid",
+        }),
+      ).toBe("payment.succeeded");
+      expect(
+        mapProviderEventTypeToStable("stripe", "payment_intent.succeeded"),
+      ).toBe("payment.succeeded");
+    });
   });
 
   describe("moyasar", () => {
@@ -411,6 +436,25 @@ describe("mapProviderEventTypeToStable tables", () => {
           status: "approved",
         }),
       ).toBe("payment.processing");
+    });
+
+    it("partial auth capture dual-writes payment.processing; full auth capture stays capture.completed", () => {
+      expect(
+        mapProviderEventTypeToStable(
+          "paypal",
+          "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED",
+        ),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable(
+          "paypal",
+          "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED",
+          { status: "partially_captured" },
+        ),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paypal", "PAYMENT.AUTHORIZATION.CAPTURED"),
+      ).toBe("capture.completed");
     });
   });
 

@@ -17,7 +17,8 @@
  *   `payment.succeeded` / `capture.completed` — use `payment.processing` and wait
  *   for the processed `TRANSACTION` webhook (or inquiry).
  * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
- *   `payment.processing`, not `payment.succeeded`.
+ *   `payment.processing`, not `payment.succeeded` (Paymob flags/status and Stripe
+ *   `payment_intent.succeeded` dual-write when context.status is partially_captured).
  *
  * Cross-gateway: domain status `approved` (PayPal buyer pre-capture) is never
  * mapped to `payment.succeeded` on status-only fallbacks — use `payment.processing`.
@@ -79,8 +80,9 @@ export type ProviderEventMapContext = {
 
 /**
  * Direct Stripe event.type → stable map for unambiguous events.
- * Status-dependent cases (checkout.session.completed, refunds) are handled
- * in {@link mapStripeEventType}.
+ * Status-dependent cases (checkout.session.completed, refunds,
+ * payment_intent.succeeded partial capture) are handled in
+ * {@link mapStripeEventType}.
  */
 export const STRIPE_EVENT_TYPE_MAP: Readonly<
   Record<string, StablePaymentEventType>
@@ -157,6 +159,17 @@ function mapStripeEventType(
     }
     // complete without paid — not a stable success
     return "provider.unmapped";
+  }
+
+  // Partial capture: domain status is partially_captured but Stripe still emits
+  // payment_intent.succeeded. Demote dual-write to payment.processing so type-only
+  // fulfillment matches isPaidOutcome (partial is not paid-like). Full paid keeps
+  // STRIPE_EVENT_TYPE_MAP → payment.succeeded.
+  if (providerEventType === "payment_intent.succeeded") {
+    const status = (context?.status ?? "").toLowerCase();
+    if (status === "partially_captured") {
+      return "payment.processing";
+    }
   }
 
   if (
@@ -253,6 +266,11 @@ function mapMoyasarEventType(
  * Fulfillment apps that previously keyed off status `paid` should switch on
  * `capture.completed` **or** treat it as money-settled. We deliberately do
  * **not** silently rename it to `payment.succeeded` (different semantic arm).
+ *
+ * **Partial auth capture:** `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` →
+ * `payment.processing` (not `capture.completed` / `payment.succeeded`). Domain
+ * status stays `partially_captured`; type-only fulfillment must not over-ship
+ * (aligns with Paymob partial dual-write + `isPaidOutcome` paid-only).
  */
 export const PAYPAL_EVENT_TYPE_MAP: Readonly<
   Record<string, StablePaymentEventType>
@@ -268,7 +286,8 @@ export const PAYPAL_EVENT_TYPE_MAP: Readonly<
   "PAYMENT.AUTHORIZATION.CREATED": "payment.authorized",
   "PAYMENT.AUTHORIZATION.VOIDED": "payment.cancelled",
   "PAYMENT.AUTHORIZATION.CAPTURED": "capture.completed",
-  "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED": "capture.completed",
+  // Partial capture is an open money story — not full settlement type
+  "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED": "payment.processing",
   "CHECKOUT.ORDER.APPROVED": "payment.processing",
   "CHECKOUT.PAYMENT-APPROVAL.REVERSED": "payment.cancelled",
   // Customer disputes (when present)
@@ -294,6 +313,7 @@ function mapPayPalEventType(
     return "provider.unmapped";
   }
 
+  // PARTIALLY_CAPTURED → payment.processing via PAYPAL_EVENT_TYPE_MAP (not full settlement).
   const direct = PAYPAL_EVENT_TYPE_MAP[providerEventType];
   if (direct !== undefined) {
     return direct;

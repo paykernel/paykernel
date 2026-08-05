@@ -117,11 +117,19 @@ Paymob does not expose native idempotency keys for capture, refund, void, or Int
 
 ## Capture Payment
 
+> ⚠️ **Multi-worker footgun:** Paymob has **no** native idempotency for capture /
+> refund / void. Without a shared `paymob.idempotencyStore` **and** a stable
+> `idempotencyKey` on each mutation, concurrent workers or network retries can
+> **double-capture / double-refund / double-void**. Process-local cache only
+> protects a single isolate. See [Idempotency notes](#create-payment) above and
+> [behavioral contracts](./behavioral-contracts.md#1-operations-safe-to-retry).
+
 ```typescript
 const result = await client.capturePayment({
   gatewayPaymentId: '123456789', // Paymob transaction ID
   amount: 100,
   currency: 'SAR',
+  idempotencyKey: 'capture-order-123', // required for safe retries
 }, 'paymob');
 ```
 
@@ -193,6 +201,20 @@ The SDK verifies transaction processed callbacks, saved-card token callbacks, an
 Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). Transaction callbacks can normalize to `partially_refunded` or `partially_captured` when Paymob includes partial amount fields (including `refunded_amount_cents` alone without `is_refunded`, and `captured_amount` even when `is_auth` is still true), including callbacks that send numeric or boolean fields as strings. When `captured_amount > 0`, refund completeness is compared against `captured_amount` (not the original auth `amount_cents`), so a full refund of a partial capture maps to `refunded` rather than `partially_refunded`.
 
 > **Phase 7 dual-write / amount-only refunds / partial capture:** Amount-only refunds (`refunded_amount_cents > 0` without `is_refund` / `is_refunded`) dual-write `WebhookEvent.status` of `refunded` / `partially_refunded` **and** `PaymentEvent.type` / `stableType` of **`refund.completed`** — never `payment.succeeded`. Bare `success: true` is not treated as paid when status or refund amounts indicate a refund. Sticky `is_auth` with **full** `captured_amount` dual-writes `payment.succeeded` (status `paid`), not `payment.authorized`. **Partial** capture (`status: partially_captured` or `0 < captured_amount < amount_cents`) dual-writes **`payment.processing`**, not `payment.succeeded` — aligned with `isPaidOutcome` excluding partial capture. Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid.
+
+### Operation outcomes (`getPayment` / capture)
+
+- **`isPaidOutcome(result)` is mandatory for fulfillment** — never fulfill on
+  `outcome === 'succeeded'` or `success: true` alone. Auth holds (`authorized`)
+  dual-write `outcome: 'succeeded'` (hold placed) but are **not** paid-like.
+  Partial captures dual-write `outcome: 'requires_action'` (open money story) with
+  status `partially_captured` and `isPaidOutcome` false.
+- **Inquiry `success` missing is fail-closed:** transaction inquiry defaults
+  missing `success` to **false** (mutations already `requireBoolean`). Paid /
+  authorized paths cannot invent success when Paymob omits the field; status maps
+  to non-paid (`failed` / declined outcome) unless amount/flag-derived refund
+  or void state applies.
+
 
 ## Supported Regions
 

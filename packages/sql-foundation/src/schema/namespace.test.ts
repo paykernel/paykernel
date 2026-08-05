@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import {
   createSchemaNamespace,
+  LONGEST_LOGICAL_TABLE_NAME_LENGTH,
+  MAX_IDENTIFIER_LENGTH,
+  MAX_SAFE_TABLE_PREFIX_LENGTH,
   resolveTableName,
   resolveUnqualifiedTableName,
   SchemaNamespaceError,
@@ -8,7 +11,7 @@ import {
   validateTablePrefix,
   quoteIdentifier,
 } from "./namespace";
-import { LOGICAL_TABLES } from "./tables";
+import { ALL_LOGICAL_TABLES, LOGICAL_TABLES } from "./tables";
 
 describe("SchemaNamespaceConfig validation", () => {
   it("accepts empty config (defaults)", () => {
@@ -75,6 +78,44 @@ describe("SchemaNamespaceConfig validation", () => {
   it("validateIdentifier rejects invalid starts", () => {
     expect(() => validateIdentifier("1abc", "x")).toThrow(SchemaNamespaceError);
     expect(() => validateIdentifier("-abc", "x")).toThrow(SchemaNamespaceError);
+  });
+
+  it("safe max prefix is 63 minus longest logical table (payment_reconciliation_jobs=27)", () => {
+    expect(LOGICAL_TABLES.reconciliationJobs.length).toBe(27);
+    expect(LOGICAL_TABLES.idempotency.length).toBe(19);
+    expect(LONGEST_LOGICAL_TABLE_NAME_LENGTH).toBe(27);
+    expect(MAX_SAFE_TABLE_PREFIX_LENGTH).toBe(MAX_IDENTIFIER_LENGTH - 27);
+    expect(MAX_SAFE_TABLE_PREFIX_LENGTH).toBe(36);
+  });
+
+  it("rejects prefix that fits short tables but exceeds longest logical table", () => {
+    // Regression: sampling only payment_idempotency accepted prefixes that later
+    // failed resolveUnqualifiedTableName for payment_reconciliation_jobs.
+    const prefix = "p".repeat(37);
+    expect(prefix.length + LOGICAL_TABLES.idempotency.length).toBeLessThanOrEqual(
+      MAX_IDENTIFIER_LENGTH,
+    );
+    expect(prefix.length + LOGICAL_TABLES.reconciliationJobs.length).toBeGreaterThan(
+      MAX_IDENTIFIER_LENGTH,
+    );
+    expect(() => validateTablePrefix(prefix)).toThrow(SchemaNamespaceError);
+    expect(() => createSchemaNamespace({ tablePrefix: prefix })).toThrow(SchemaNamespaceError);
+    // Upper edge of the old undersampled band
+    expect(() => validateTablePrefix("x".repeat(44))).toThrow(SchemaNamespaceError);
+  });
+
+  it("accepts max safe prefix and resolves every logical table", () => {
+    const prefix = "a".repeat(MAX_SAFE_TABLE_PREFIX_LENGTH);
+    expect(validateTablePrefix(prefix)).toBe(prefix);
+    const ns = createSchemaNamespace({ tablePrefix: prefix });
+    for (const logical of ALL_LOGICAL_TABLES) {
+      const physical = resolveUnqualifiedTableName(logical, ns);
+      expect(physical.length).toBeLessThanOrEqual(MAX_IDENTIFIER_LENGTH);
+      expect(physical).toBe(`${prefix}${logical}`);
+    }
+    expect(
+      resolveUnqualifiedTableName(LOGICAL_TABLES.reconciliationJobs, ns).length,
+    ).toBe(MAX_IDENTIFIER_LENGTH);
   });
 });
 

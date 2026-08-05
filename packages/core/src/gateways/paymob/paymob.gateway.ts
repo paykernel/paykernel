@@ -1307,8 +1307,11 @@ export class PaymobGateway extends BaseGateway {
         const transaction = this.normalizeApiTransactionResponse(data, "transaction inquiry");
         const moneyCurrency = this.resolveMoneyCurrency(transaction, "transaction inquiry");
         const status = this.mapTransactionStatus(transaction);
+        // Fail-closed: missing success must not look paid. Mutations use
+        // requireBoolean; inquiry defaults false so mapPaymobOutcome declines
+        // and mapTransactionStatus cannot treat uncertain success as paid.
         const successFlag =
-          typeof transaction.success === "boolean" ? transaction.success : true;
+          typeof transaction.success === "boolean" ? transaction.success : false;
         const outcome = this.mapPaymobOutcome(status, successFlag, {
           pending: this.parseBoolean(transaction.pending) === true,
         });
@@ -1644,6 +1647,13 @@ export class PaymobGateway extends BaseGateway {
    * Map Paymob transaction flags + status to Phase 6 outcome.
    * Intention/pending checkout → requires_action; success txn → succeeded;
    * declined → declined. Never invent paid on pending.
+   *
+   * **Fulfillment honesty:** `outcome === "succeeded"` is **not** paid alone.
+   * Auth holds and refunds may dual-write `succeeded` (hold placed / money
+   * returned) while {@link isPaidOutcome} stays false unless status is `paid`.
+   * Partial captures dual-write `requires_action` (open money story). Prefer
+   * `isPaidOutcome(result)` or `status === "paid"` — never fulfill on bare
+   * `outcome === "succeeded"` / `success: true`.
    */
   private mapPaymobOutcome(
     status: PaymentStatus,
@@ -1653,7 +1663,7 @@ export class PaymobGateway extends BaseGateway {
     if (options.pending === true) {
       return "requires_action";
     }
-    if (!success || status === "failed") {
+    if (status === "failed") {
       return "declined";
     }
     if (status === "pending" || status === "processing") {
@@ -1663,7 +1673,19 @@ export class PaymobGateway extends BaseGateway {
       // Void sets outcome explicitly; inquiry of a voided txn is not a charge success.
       return "failed";
     }
-    // paid | authorized | partially_* | refunded
+    // Partial capture is open money — not outcome-succeeded (type dual-write uses processing).
+    if (status === "partially_captured") {
+      return "requires_action";
+    }
+    // Refunds may still be operation-succeeded without success flag; never isPaidOutcome.
+    if (status === "refunded" || status === "partially_refunded") {
+      return "succeeded";
+    }
+    // Missing/false success: fail-closed for charge settlement (paid/auth).
+    if (!success) {
+      return "declined";
+    }
+    // paid | authorized | setup_completed | other success-flag paths
     return "succeeded";
   }
 

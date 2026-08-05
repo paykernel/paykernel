@@ -103,6 +103,7 @@ Lease expiry / process death while claimed is treated like abandon: another work
 ### Engine notes
 
 - `durable_retry` + `ackAfterClaim`: claim then intentional release to pending returns `scheduled_for_retry` without handler — that is **not** a crash; workers must run `processRetryable`. A crash after claim but before that release leaves the row claimed until expiry/reclaim.
+- Residual: if park `fail({ restoreAttempt: true })` hits `StoreLeaseLostError` (lease/clock skew), engine returns `scheduled_for_retry` without restoring the attempt budget — parking claim may remain burned. See [webhook-inbox.md §6](./webhook-inbox.md#6-modes-inline-vs-durable_retry).
 
 ---
 

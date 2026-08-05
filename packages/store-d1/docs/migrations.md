@@ -1,7 +1,7 @@
 # Migrations (explicit only)
 
 **Package:** `@paykernel/store-d1`  
-**Foundation:** `@paykernel/internal-sql-store` dialect **`sqlite`**
+**Foundation:** `@paykernel/sql-foundation` dialect **`sqlite`**
 
 ---
 
@@ -11,7 +11,7 @@
 2. **Never** migrate inside default `createD1PaymentStores` / `createD1Stores`.
 3. Operators and tests call `migrateD1Adapter` explicitly.
 4. DDL must **not** wrap statements in `BEGIN`/`COMMIT` for the D1 apply path.
-5. Dialect is **`sqlite`** via `@paykernel/internal-sql-store` (statement-split foundation SQL).
+5. Dialect is **`sqlite`** via `@paykernel/sql-foundation` (statement-split foundation SQL).
 
 Import-time and factory no-migrate behavior is covered by `import-no-migrate.test.ts`.
 

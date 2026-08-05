@@ -110,7 +110,7 @@ Foundation schema stores lease and audit timestamps as **TEXT ISO-8601** strings
 
 ## Atomic claims
 
-- Reserve/claim: single-statement Postgres templates from `@paykernel/internal-sql-store` (`INSERT ON CONFLICT DO UPDATE … WHERE … RETURNING` / conditional `UPDATE … RETURNING`).
+- Reserve/claim: single-statement Postgres templates from `@paykernel/sql-foundation` (`INSERT ON CONFLICT DO UPDATE … WHERE … RETURNING` / conditional `UPDATE … RETURNING`).
 - Mutators (`complete`, `fail`, `renew`, …): conditional `UPDATE … WHERE lease_token = $n` — zero rows → `StoreLeaseLostError`.
 - `listDue` / batch paths may use `FOR UPDATE SKIP LOCKED` **only** for multi-worker fairness over durable rows. Advisory locks are never the only durable record of work.
 

@@ -68,6 +68,20 @@ const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_RETRY_AFTER_MS = 5_000;
 
+/**
+ * Lease duration must be a finite number of milliseconds strictly greater than 0.
+ * `leaseMs <= 0` would yield an immediately expired lease (complete loses fencing;
+ * successful handlers map to retryable handler_failed).
+ */
+function assertPositiveLeaseMs(value: number, label: string): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(
+      `createWebhookInboxEngine: ${label} must be a finite number > 0 (got ${String(value)})`,
+    );
+  }
+  return value;
+}
+
 const systemClock: EngineClock = {
   nowMs: () => Date.now(),
 };
@@ -123,8 +137,13 @@ export function computePayloadHash(raw: unknown): string {
 // ─── Envelope → payloadRef ───────────────────────────────────────────────────
 
 /**
- * Serialize a sanitized envelope for `payloadRef` storage.
- * Objects are JSON-stringified; strings used as-is; never stores undefined.
+ * Serialize an envelope for `payloadRef` storage.
+ *
+ * Objects are `JSON.stringify`'d as-is; strings are used as-is; never stores
+ * undefined. **No forced redaction** — the engine does not strip secrets from
+ * `envelope`. Callers must pass a sanitized snapshot
+ * (`toPersistedPaymentEventEnvelope` from `@paykernel/core`) or strip secrets
+ * before claim / processVerified.
  */
 function envelopeToPayloadRef(envelope: unknown): string | undefined {
   if (envelope === undefined || envelope === null) return undefined;
@@ -265,7 +284,10 @@ export function createWebhookInboxEngine(
   }
 
   const defaultOwner = options.owner ?? DEFAULT_OWNER;
-  const defaultLeaseMs = options.defaultLeaseMs ?? DEFAULT_LEASE_MS;
+  const defaultLeaseMs = assertPositiveLeaseMs(
+    options.defaultLeaseMs ?? DEFAULT_LEASE_MS,
+    "defaultLeaseMs",
+  );
   const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
   const defaultRetryAfterMs = options.defaultRetryAfterMs ?? DEFAULT_RETRY_AFTER_MS;
   const engineAckAfterClaim = options.ackAfterClaim === true;
@@ -303,7 +325,10 @@ export function createWebhookInboxEngine(
 
     const renew = async (leaseMs?: number): Promise<void> => {
       // Prefer caller's ms, else this claim's leaseMs (not only engine default).
-      const ms = leaseMs ?? args.leaseMs;
+      const ms = assertPositiveLeaseMs(
+        leaseMs ?? args.leaseMs,
+        leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
+      );
       const result = await store.renew({
         key: args.key,
         leaseToken: currentToken,
@@ -446,7 +471,10 @@ export function createWebhookInboxEngine(
     }
 
     const owner = input.owner ?? defaultOwner;
-    const leaseMs = input.leaseMs ?? defaultLeaseMs;
+    const leaseMs = assertPositiveLeaseMs(
+      input.leaseMs ?? defaultLeaseMs,
+      input.leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
+    );
     const payloadRef = envelopeToPayloadRef(input.envelope);
 
     const claimInput: {
@@ -505,7 +533,9 @@ export function createWebhookInboxEngine(
         });
       } catch (err) {
         if (isStoreLeaseLostError(err)) {
-          // Claim already persisted; another worker may own the lease.
+          // Token dead before restoreAttempt applied (clock/lease skew): claim
+          // already persisted; may leave parking attempt burned. No safe
+          // tokenless restore — return scheduled_for_retry, not business failure.
           return outcomeScheduledForRetry();
         }
         throw err;
@@ -513,7 +543,8 @@ export function createWebhookInboxEngine(
       return outcomeScheduledForRetry();
     }
 
-    // Handler required path — validated before claim.
+    // Unreachable under normal control flow: missing handler is rejected before
+    // claim when !ackAfterClaim. Kept solely for TypeScript narrowing / defense.
     const handler = input.handler;
     if (!handler) {
       return outcomeInvalidWebhook(
@@ -573,7 +604,10 @@ export function createWebhookInboxEngine(
 
     const limit = input.limit ?? 10;
     const owner = input.owner ?? defaultOwner;
-    const leaseMs = input.leaseMs ?? defaultLeaseMs;
+    const leaseMs = assertPositiveLeaseMs(
+      input.leaseMs ?? defaultLeaseMs,
+      input.leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
+    );
     const pending = await store.listRetryable({ limit });
 
     const items: ProcessRetryableResult["items"] = [];
@@ -644,7 +678,10 @@ export function createWebhookInboxEngine(
     return store.renew({
       key,
       leaseToken,
-      leaseMs: leaseMs ?? defaultLeaseMs,
+      leaseMs: assertPositiveLeaseMs(
+        leaseMs ?? defaultLeaseMs,
+        leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
+      ),
     });
   }
 

@@ -41,6 +41,14 @@ paykernel/
 
 Root `package.json` is private (`paykernel`) and is never published. Workspaces: `["packages/*", "internal/*"]`. Publishable surface: `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may publish on their own cadence). Internal packages (e.g. `internal/sql-store`) are **never** published.
 
+**Name / ownership honesty:**
+
+| Topic | Fact |
+| --- | --- |
+| Observability folder | Repo path `packages/observability` publishes as **`@paykernel/opentelemetry`** (npm name ≠ directory name). |
+| Store interface dual ownership | `WebhookInboxStore` / `ReconciliationStore` are dual-owned: domain packages (`webhooks` / `reconciliation`), slim **`@paykernel/store-contracts`**, and testkit re-exports for BC + conformance. Structural assignability is frozen in tests; apps inject production adapters, not domain memory stores. |
+| SQL foundation rename | Public package is **`@paykernel/sql-foundation`**. `@paykernel/internal-sql-store` is a private thin re-export only. |
+
 **Redis is optional infrastructure.** The SDK does not require Redis. PostgreSQL, Turso remote, Cloudflare D1, or partitioned Durable Objects adapters can satisfy Phase 9 contracts. Core and webhooks never depend on Redis clients or `store-redis`.
 
 **SQLite is single-host only.** Local file SQLite (`store-sqlite`) must never be advertised as multi-host or multi-region coordination. One database file → one durable filesystem authority. Core and webhooks never depend on `store-sqlite`. Root entry of the adapter must not import `bun:sqlite` / `node:sqlite` / `better-sqlite3`.
@@ -163,7 +171,7 @@ Build a graph from workspace package names referenced in dependency fields (incl
 
 Any workspace package whose directory is under `internal/` or `packages/internal/` must have `"private": true`.
 
-**Phase 11 example:** `internal/sql-store` is `@paykernel/internal-sql-store` with `"private": true` and `"paymentsSdk": { "privateInternal": true }`. It is the private shared foundation for relational adapters. Core and webhooks must not depend on it; **`store-postgres` (Phase 12), `store-sqlite` (Phase 14), `store-turso` (Phase 15), `store-d1` (Phase 16), and `store-durable-objects` (Phase 17) may**. **`store-redis` must not**.
+**Phase 11 foundation:** publishable **`@paykernel/sql-foundation`** (`packages/sql-foundation`) is the shared relational foundation for adapters. **`internal/sql-store`** is `@paykernel/internal-sql-store` with `"private": true` and `"paymentsSdk": { "privateInternal": true }` — a **thin re-export shim** only (never published). Core and webhooks must not depend on either. **`store-postgres` (Phase 12), `store-sqlite` (Phase 14), `store-turso` (Phase 15), `store-d1` (Phase 16), and `store-durable-objects` (Phase 17) depend on `@paykernel/sql-foundation` at runtime** (not private `internal/*`). **`store-redis` must not** depend on sql-foundation.
 
 ## Negative examples (must fail the checker)
 
@@ -209,11 +217,12 @@ export * from "./types";
 ```
 
 ```jsonc
-// packages/store-redis/package.json — FORBIDDEN (no sql-store)
+// packages/store-redis/package.json — FORBIDDEN (no sql-foundation / sql-store)
 {
   "name": "@paykernel/store-redis",
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+    // also forbidden: "@paykernel/internal-sql-store"
   },
 }
 ```
@@ -237,21 +246,23 @@ export * from "./types";
 ```
 
 ```jsonc
-// packages/core/package.json — FORBIDDEN (core must not depend on sql-store)
+// packages/core/package.json — FORBIDDEN (core must not depend on sql-foundation)
 {
   "name": "@paykernel/core",
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+    // also forbidden: "@paykernel/internal-sql-store"
   },
 }
 ```
 
 ```jsonc
-// packages/webhooks/package.json — FORBIDDEN (webhooks must not depend on sql-store)
+// packages/webhooks/package.json — FORBIDDEN (webhooks must not depend on sql-foundation)
 {
   "name": "@paykernel/webhooks",
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+    // also forbidden: "@paykernel/internal-sql-store"
   },
 }
 ```
@@ -399,7 +410,10 @@ import { describe, it, expect } from "bun:test";
     "./drizzle": "./dist/drizzle.js",
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {
@@ -427,6 +441,9 @@ import { describe, it, expect } from "bun:test";
     "./node-redis": "./dist/node-redis.js",
   },
   "dependencies": {
+    "@paykernel/store-contracts": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {
@@ -453,7 +470,10 @@ import { describe, it, expect } from "bun:test";
     "./better-sqlite3": "./dist/better-sqlite3.js",
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {
@@ -476,7 +496,10 @@ import { describe, it, expect } from "bun:test";
     // NO "./sync"
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {
@@ -498,7 +521,10 @@ import { describe, it, expect } from "bun:test";
     ".": "./dist/index.js",
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {
@@ -523,7 +549,10 @@ import { describe, it, expect } from "bun:test";
     ".": "./dist/index.js",
   },
   "dependencies": {
-    "@paykernel/internal-sql-store": "workspace:*",
+    "@paykernel/store-contracts": "workspace:*",
+    "@paykernel/sql-foundation": "workspace:*",
+  },
+  "devDependencies": {
     "@paykernel/testkit": "workspace:*",
   },
   "peerDependencies": {

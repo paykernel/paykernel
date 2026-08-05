@@ -361,3 +361,49 @@ describe("processRetryable default envelope unwrap", () => {
     expect(seen).toBe("opaque-ref-token");
   });
 });
+
+describe("leaseMs / defaultLeaseMs validation", () => {
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY] as const)(
+    "defaultLeaseMs=%s throws at construction",
+    (defaultLeaseMs) => {
+      const store = createMemoryWebhookInboxStore();
+      expect(() =>
+        createWebhookInboxEngine({
+          store,
+          mode: "inline",
+          defaultLeaseMs,
+        }),
+      ).toThrow(/defaultLeaseMs/);
+    },
+  );
+
+  it("per-call leaseMs <= 0 throws on processVerified before claim", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    await expect(
+      engine.processVerified({
+        gateway: "stripe",
+        providerEventId: "evt_bad_lease",
+        payloadHash: "h",
+        leaseMs: 0,
+        handler: async () => {},
+      }),
+    ).rejects.toThrow(/leaseMs/);
+    expect(store.size).toBe(0);
+  });
+
+  it("default and explicit positive lease accepted", () => {
+    const store = createMemoryWebhookInboxStore();
+    expect(() =>
+      createWebhookInboxEngine({ store, mode: "inline" }),
+    ).not.toThrow();
+    expect(() =>
+      createWebhookInboxEngine({
+        store,
+        mode: "inline",
+        defaultLeaseMs: 30_000,
+      }),
+    ).not.toThrow();
+  });
+});
+

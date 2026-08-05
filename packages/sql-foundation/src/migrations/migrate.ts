@@ -175,6 +175,14 @@ function selectDialectSql(
  * Apply pending migrations. Idempotent: already-applied versions are skipped.
  *
  * **Never** call from package top-level import or production constructors by default.
+ *
+ * ## Concurrency / multi-host
+ *
+ * No portable cross-dialect advisory lock (Postgres `pg_advisory_lock` is not
+ * available on SQLite / D1 / generic executors). **Serialize migrate across
+ * hosts** (single migrator job or deploy lock). v1 DDL is mostly
+ * `IF NOT EXISTS`, but version INSERT after multi-statement DDL can race and
+ * future non-idempotent migrations inherit that window.
  */
 export async function migrate(
   executor: SqlExecutor,

@@ -34,8 +34,13 @@ export function uuidV4FromGetRandomValues(
 
 /**
  * Resolve a portable CryptoProvider from `globalThis.crypto` when available.
- * Falls back to a `getRandomValues` polyfill only when no Web Crypto exists
- * (rare in modern runtimes; sufficient for tests / UUID generation).
+ *
+ * When Web Crypto is absent, falls back to a `Math.random`-based
+ * `getRandomValues` polyfill (**not cryptographically strong**). That path is
+ * for tests and constrained sandboxes only. On production edge runtimes that
+ * lack `globalThis.crypto`, inject a real {@link CryptoProvider} via
+ * `createPaymentRuntime({ crypto })` / client `runtime.crypto` rather than
+ * relying on this fallback.
  */
 export function resolveDefaultCrypto(): CryptoProvider {
   const g =

@@ -119,6 +119,15 @@ Root workspaces: `["packages/*", "internal/*"]`. Production adapters live under 
 
 **Redis is optional infrastructure.** PostgreSQL alone can satisfy Phase 9 store contracts. Do not introduce Redis solely because this monorepo ships an adapter.
 
+### Naming and dual-ownership honesty
+
+| Topic | Detail |
+| --- | --- |
+| **Observability package name** | Folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Install/import `@paykernel/opentelemetry`, not a folder-shaped name. |
+| **SQL foundation package name** | Public **`@paykernel/sql-foundation`**. Private `@paykernel/internal-sql-store` is a thin re-export of the same surface (never publish). |
+| **Store interface dual ownership** | `WebhookInboxStore` and `ReconciliationStore` appear in domain packages (`@paykernel/webhooks`, `@paykernel/reconciliation`), in slim **`@paykernel/store-contracts`**, and via testkit re-exports. Assignability is CI-frozen. Domain packages also keep **non-exported** memory stores for package tests that can drift from testkit — production apps use `@paykernel/store-*` adapters. |
+| **IdempotencyStore name collision** | Core may expose a simpler/legacy `IdempotencyStore` shape for gateway-side keys; lease-aware Phase 9/store-contracts `IdempotencyStore` is the durable multi-host contract. Do not conflate them. |
+
 **SQLite is single-host.** Local file SQLite (`store-sqlite`) must never be advertised as multi-host or multi-region coordination. For multi-host SQL, use PostgreSQL, **Turso remote** (`store-turso`), **Cloudflare D1** (`store-d1`), or **partitioned Durable Objects** (`store-durable-objects`) — do not conflate those with local SQLite.
 
 **Turso is multi-host remote.** Shared remote Turso / libSQL only for production multi-host claims. Subpaths: `/serverless`, `/libsql` only — **no** `/sync`; do not advertise untested embedded-replica local-first.
@@ -530,7 +539,7 @@ const stores = createDoPaymentStores({
 - **Observability** depends on core only (`workspace:*`). Optional peer `@opentelemetry/api` (never a hard dep in core). Must not depend on testkit, webhooks, reconciliation, routing, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export). Root import works without OTEL installed.
 - **Routing** depends on core only (`workspace:*`). Select-only (never mutates payments). Must not depend on testkit, webhooks, reconciliation, observability, adapters, Redis, or `@paykernel/sql-foundation` (or private internal re-export). App composes `decision.gateway` into `PaymentClient`.
 - **Testkit** depends on core and may depend on webhooks and reconciliation (engine/domain integration / structural assignability proofs). Does not require sql-store for Phase 9 contracts.
-- **`@paykernel/sql-foundation` (or private internal re-export)** is private shared foundation for relational adapters (Phase 12+). Must not depend on core or the webhooks/reconciliation engines. Not published.
+- **`@paykernel/sql-foundation`** is the **publishable** shared relational foundation for adapters (Phase 11+). Must not depend on core or the webhooks/reconciliation engines. **`@paykernel/internal-sql-store`** (`internal/sql-store`) is a private thin re-export only — never published; production adapters depend on `@paykernel/sql-foundation` at runtime.
 - **`store-postgres`** runtime deps: store-contracts + sql-foundation (testkit dev-only); must not be depended on by core/webhooks; must not depend on other store adapters.
 - **`store-redis`** runtime deps: store-contracts only (testkit dev-only); must not depend on sql-foundation, core, webhooks, or other store adapters; must not be depended on by core/webhooks.
 - **`store-sqlite`** runtime deps: store-contracts + sql-foundation (testkit dev-only); single-host only; root imports no SQLite drivers.

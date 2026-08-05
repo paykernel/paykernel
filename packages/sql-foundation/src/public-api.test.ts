@@ -26,6 +26,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "TABLE_PRIMARY_KEYS",
   // namespace
   "MAX_IDENTIFIER_LENGTH",
+  "LONGEST_LOGICAL_TABLE_NAME_LENGTH",
+  "MAX_SAFE_TABLE_PREFIX_LENGTH",
   "IDENTIFIER_PATTERN",
   "TABLE_PREFIX_PATTERN",
   "SchemaNamespaceError",
@@ -68,6 +70,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "listMigrationVersions",
   "checksumMigrationSql",
   "buildFoundationMigrationSql",
+  "indexLabel",
+  "INDEX_LABEL_MAX",
   "FOUNDATION_SQL_POSTGRES",
   "FOUNDATION_SQL_SQLITE",
   "FOUNDATION_SQL_PORTABLE",

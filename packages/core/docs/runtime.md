@@ -57,8 +57,35 @@ Helpers:
 | `mergePaymentRuntime(base, partial?)` | Overlay partial fields |
 | `paymentRuntimeFromContext(ctx)` | Project runtime fields from `GatewayContext` |
 | `systemClock` | Default wall clock |
-| `resolveDefaultCrypto` | Web Crypto provider resolution |
+| `resolveDefaultCrypto` | Web Crypto provider resolution (see fallback note) |
 | `uuidV4FromGetRandomValues` | UUID v4 from `getRandomValues` only |
+
+#### `resolveDefaultCrypto` and the `Math.random` fallback
+
+`resolveDefaultCrypto()` prefers `globalThis.crypto` (Web Crypto). If
+`getRandomValues` is missing, it falls back to a **non-cryptographic**
+`Math.random` polyfill for UUID / random bytes. That fallback is acceptable
+for unit tests and rare constrained sandboxes only.
+
+**Production / edge:** when the runtime may lack Web Crypto (unusual on modern
+Node 18+, Bun, Deno, and Workers — but possible on exotic hosts), inject an
+explicit `CryptoProvider`:
+
+```ts
+const client = createPaymentClient({
+  gateways: { /* … */ },
+  runtime: {
+    crypto: {
+      randomUUID: () => crypto.randomUUID(),
+      getRandomValues: (a) => crypto.getRandomValues(a),
+      // subtle optional
+    },
+  },
+});
+```
+
+Do not rely on the `Math.random` path for lease tokens, UUIDs, or any
+security-sensitive randomness in production.
 
 **Never** put API keys, webhook secrets, DB handles, request objects, or PII on
 `PaymentRuntime` / `GatewayContext`.

@@ -3,7 +3,7 @@
 **Package:** `@paykernel/store-turso`  
 **Path:** `packages/store-turso`  
 **Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
-**Foundation:** private [`@paykernel/internal-sql-store`](../../../internal/sql-store/docs/relational-foundation.md) (dialect **`sqlite`**)
+**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**; private shim: `internal/sql-store`)
 
 This package is the **multi-host remote SQLite-compatible** production storage adapter for **shared** Turso Cloud / libSQL remote databases. It implements durable **idempotency**, **webhook inbox**, and **reconciliation** stores.
 

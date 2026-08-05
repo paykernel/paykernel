@@ -548,7 +548,9 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      expect(event.status).toBe("refunded");
+      // Incomplete snapshot (no refunded / amount_refunded): fail-closed, not full refunded
+      expect(event.status).toBe("refund_completed");
+      expect(event.status).not.toBe("refunded");
       expect(event.gatewayPaymentId).toBe("pi_from_charge");
       expect(event.gatewayObjectId).toBe("ch_123");
       expect(event.amount).toBe(25);
@@ -960,6 +962,11 @@ describe("StripeGateway", () => {
 
       expect(event.status).toBe("partially_captured");
       expect(event.amount).toBe(60);
+      // Phase 7 dual-write: partial ≠ payment.succeeded (Paymob parity)
+      expect(event.type).toBe("payment_intent.succeeded");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
     });
 
     it("should omit currency when Stripe omits it on the webhook object", () => {
@@ -1146,6 +1153,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 1000,
+            amount_received: 1000,
             currency: "usd",
             metadata: { paymentId: "internal_123" },
           },
@@ -1154,6 +1162,7 @@ describe("StripeGateway", () => {
       });
 
       expect(event.type).toBe("payment_intent.succeeded");
+      expect(event.status).toBe("paid");
       expect(event.schemaVersion).toBe("1");
       expect(event.stableType).toBe("payment.succeeded");
       expect(event.event?.schemaVersion).toBe("1");

@@ -1,7 +1,7 @@
 # Migrations — SQLite adapter
 
 **Package:** `@paykernel/store-sqlite`  
-**Foundation:** `@paykernel/internal-sql-store` dialect **`sqlite`**  
+**Foundation:** `@paykernel/sql-foundation` dialect **`sqlite`**  
 **Policy:** Explicit migrate only — **never** on package import or default `create*Stores` construction.
 
 ---
@@ -34,7 +34,7 @@ const check = await verifySqliteAdapterSchema(executor, {
 
 ## What runs
 
-- SQL from `@paykernel/internal-sql-store` foundation migration builders (`buildFoundationMigrationSql` / dialect sqlite).
+- SQL from `@paykernel/sql-foundation` foundation migration builders (`buildFoundationMigrationSql` / dialect sqlite).
 - Versioned schema for idempotency, webhook inbox, and reconciliation tables (lease columns, generation, ISO timestamps as TEXT, etc.).
 - Idempotent apply: re-running migrate on an already-current schema is safe.
 

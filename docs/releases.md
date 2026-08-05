@@ -18,7 +18,8 @@ How this monorepo versions packages, generates release notes, publishes to npm w
 | Turso adapter     | `packages/store-turso`    | `@paykernel/store-turso`      | Public; Phase 15 multi-host remote Turso/libSQL — **may publish separately** from core |
 | Cloudflare D1 adapter | `packages/store-d1` | `@paykernel/store-d1` | Public; Phase 16 multi-host Workers D1 — **may publish separately** from core |
 | Cloudflare DO adapter | `packages/store-durable-objects` | `@paykernel/store-durable-objects` | Public; Phase 17 multi-host partitioned SQLite-backed DO — **may publish separately** from core |
-| SQL foundation    | `internal/sql-store`        | `@paykernel/internal-sql-store` | **`private: true` — never published** (Phase 11)                      |
+| SQL foundation    | `packages/sql-foundation`   | `@paykernel/sql-foundation` | Public; Phase 11 relational foundation (schemas, migrations, claim templates) |
+| SQL foundation shim | `internal/sql-store`      | `@paykernel/internal-sql-store` | **`private: true` — never published** (thin re-export of sql-foundation) |
 | Monorepo root     | `.`                         | `paykernel`       | `private: true` — never published                                     |
 
 Versioning is **independent** (`fixed: []`, `linked: []` in `.changeset/config.json`). The private monorepo root and **all packages under `internal/*`** are never versioned for npm or published (Changesets skips `"private": true` packages). Each public package under `packages/*` has its own version and `CHANGELOG.md`. Internal packages may keep an in-repo `CHANGELOG.md` for history only — they are **not** npm release units.

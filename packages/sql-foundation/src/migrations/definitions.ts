@@ -5,6 +5,59 @@
  * (adapters may map to TIMESTAMPTZ later). payload_hash: TEXT consistently.
  */
 
+import { MAX_IDENTIFIER_LENGTH } from "../schema/namespace";
+
+/**
+ * Max chars from a qualified table name embedded in index identifiers.
+ * Full index name is `idx_{label}_{suffix}`; longest suffix today is
+ * `lease_expires` (14) → `idx_` + 40 + `_` + 14 = 59 ≤ 63.
+ */
+export const INDEX_LABEL_MAX = 40;
+
+/**
+ * Build a stable, collision-resistant fragment for index names from a
+ * qualified table reference.
+ *
+ * When the cleaned name exceeds {@link INDEX_LABEL_MAX}, the **end** is kept
+ * (not the start). Long shared prefixes otherwise collapsed distinct tables
+ * (`payment_idempotency` vs `payment_reconciliation_jobs`) into the same
+ * label, and `CREATE INDEX IF NOT EXISTS` silently skipped later indexes.
+ */
+export function indexLabel(qualified: string): string {
+  const cleaned = qualified
+    .replace(/"/g, "")
+    .replace(/\./g, "_")
+    .replace(/[^A-Za-z0-9_]/g, "_");
+  if (cleaned.length <= INDEX_LABEL_MAX) {
+    return cleaned;
+  }
+  return cleaned.slice(-INDEX_LABEL_MAX);
+}
+
+function pushCreateIndex(
+  statements: string[],
+  usedIndexNames: Set<string>,
+  qualifiedTable: string,
+  suffix: string,
+  columns: string,
+): void {
+  const label = indexLabel(qualifiedTable);
+  const name = `idx_${label}_${suffix}`;
+  if (name.length > MAX_IDENTIFIER_LENGTH) {
+    throw new Error(
+      `index name exceeds max identifier length ${MAX_IDENTIFIER_LENGTH}: ${name}`,
+    );
+  }
+  if (usedIndexNames.has(name)) {
+    throw new Error(
+      `index name collision: ${name} for table ${qualifiedTable} ` +
+        `(distinct tables collapsed under long prefix/schema; shorten tablePrefix)`,
+    );
+  }
+  usedIndexNames.add(name);
+  statements.push(`CREATE INDEX IF NOT EXISTS ${name} ON ${qualifiedTable} (${columns})`);
+}
+
 /**
  * Build CREATE TABLE + indexes for the four logical tables.
  * `q` qualifies a logical table name (validated identifiers only).
@@ -20,6 +73,7 @@ export function buildFoundationMigrationSql(
   const mig = q("payment_storage_migrations");
 
   const statements: string[] = [];
+  const usedIndexNames = new Set<string>();
 
   statements.push(
     `
@@ -45,13 +99,9 @@ CREATE TABLE IF NOT EXISTS ${idem} (
 )`.trim(),
   );
 
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(idem)}_lease_expires ON ${idem} (lease_expires_at)`,
-  );
-  statements.push(`CREATE INDEX IF NOT EXISTS idx_${indexLabel(idem)}_status ON ${idem} (status)`);
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(idem)}_tenant ON ${idem} (tenant_id)`,
-  );
+  pushCreateIndex(statements, usedIndexNames, idem, "lease_expires", "lease_expires_at");
+  pushCreateIndex(statements, usedIndexNames, idem, "status", "status");
+  pushCreateIndex(statements, usedIndexNames, idem, "tenant", "tenant_id");
 
   statements.push(
     `
@@ -81,21 +131,11 @@ CREATE TABLE IF NOT EXISTS ${inbox} (
 )`.trim(),
   );
 
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(inbox)}_lease_expires ON ${inbox} (lease_expires_at)`,
-  );
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(inbox)}_available ON ${inbox} (available_at)`,
-  );
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(inbox)}_status ON ${inbox} (status)`,
-  );
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(inbox)}_tenant ON ${inbox} (tenant_id)`,
-  );
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(inbox)}_payload_hash ON ${inbox} (payload_hash)`,
-  );
+  pushCreateIndex(statements, usedIndexNames, inbox, "lease_expires", "lease_expires_at");
+  pushCreateIndex(statements, usedIndexNames, inbox, "available", "available_at");
+  pushCreateIndex(statements, usedIndexNames, inbox, "status", "status");
+  pushCreateIndex(statements, usedIndexNames, inbox, "tenant", "tenant_id");
+  pushCreateIndex(statements, usedIndexNames, inbox, "payload_hash", "payload_hash");
 
   statements.push(
     `
@@ -121,16 +161,10 @@ CREATE TABLE IF NOT EXISTS ${recon} (
 )`.trim(),
   );
 
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(recon)}_lease_expires ON ${recon} (lease_expires_at)`,
-  );
-  statements.push(`CREATE INDEX IF NOT EXISTS idx_${indexLabel(recon)}_due ON ${recon} (due_at)`);
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(recon)}_status ON ${recon} (status)`,
-  );
-  statements.push(
-    `CREATE INDEX IF NOT EXISTS idx_${indexLabel(recon)}_tenant ON ${recon} (tenant_id)`,
-  );
+  pushCreateIndex(statements, usedIndexNames, recon, "lease_expires", "lease_expires_at");
+  pushCreateIndex(statements, usedIndexNames, recon, "due", "due_at");
+  pushCreateIndex(statements, usedIndexNames, recon, "status", "status");
+  pushCreateIndex(statements, usedIndexNames, recon, "tenant", "tenant_id");
 
   statements.push(
     `
@@ -151,14 +185,6 @@ CREATE TABLE IF NOT EXISTS ${mig} (
   }
 
   return statements.join(";\n") + ";";
-}
-
-function indexLabel(qualified: string): string {
-  return qualified
-    .replace(/"/g, "")
-    .replace(/\./g, "_")
-    .replace(/[^A-Za-z0-9_]/g, "_")
-    .slice(0, 40);
 }
 
 function defaultQualify(logical: string): string {

@@ -2,6 +2,8 @@
 
 Portable **payment metrics**, **span instrumentation**, and an **optional OpenTelemetry bridge** for [`@paykernel/core`](https://www.npmjs.com/package/@paykernel/core).
 
+> **Package name:** this folder is `packages/observability` in the monorepo; the published npm name is **`@paykernel/opentelemetry`**. Always install/import `@paykernel/opentelemetry`.
+
 > **Portable.** No Node-only imports. No hard `@opentelemetry/*` dependency on the package root. Runtime: Bun / Node ≥ 18 / Deno / Workers (Web APIs). Depends only on `@paykernel/core`.
 
 ## Explicit guarantees

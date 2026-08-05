@@ -66,6 +66,8 @@ if (op.outcome === 'succeeded' && op.payment.status === 'paid') {
   await fulfillOrder(op.payment.references.providerObjectId);
 }
 // Auth hold: outcome can be 'succeeded' with status 'authorized' — isPaidOutcome is false
+// Partial capture (Paymob): outcome may be 'requires_action' with status
+// 'partially_captured' — still not isPaidOutcome; never fulfill remaining auth
 ```
 
 **Requires action (3DS / redirect):**

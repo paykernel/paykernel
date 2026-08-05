@@ -36,6 +36,7 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 - **getPayment:** always retryable on transient errors.
 - **capture / refund / void:** deliberately **not** wrapped in `withRetry`. Moyasar has **no native** mutation idempotency. Configure `moyasar.idempotencyStore` and pass `idempotencyKey` so **your** retries are safe (completed results cached; in-progress / unknown refuse a second apply; definite 4xx clear the reservation). See [moyasar.md — Idempotency](./moyasar.md#idempotency-for-refunds-captures-and-voids).
 - Without a store, an `idempotencyKey` on mutations is **ignored** (warn-logged) and the mutation runs unguarded.
+- **Multi-worker production:** shared `idempotencyStore` + key are **required** to avoid double-capture / double-refund / double-void across processes. In-memory store is single-process only; store is intentionally optional at the API layer but unsafe to omit under concurrency.
 
 #### PayPal
 
@@ -48,6 +49,7 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 - Safe GETs / inquiries use `withRetry` with `isPaymobRetryableError`.
 - Mutations (create intention, capture, refund, void) are **not** auto-retried with `withRetry`. They go through an idempotency guard when `idempotencyKey` is provided (process-local cache by default; optional shared `paymob.idempotencyStore`).
 - After a network / indeterminate 5xx-style failure on a keyed mutation, the key is marked **unknown** and further automatic replay with that key is blocked until you reconcile. See [paymob.md](./paymob.md).
+- **Multi-worker / serverless:** configure a shared `paymob.idempotencyStore` and pass `idempotencyKey` on every capture/refund/void. Without both, concurrent workers can double-mutate; the SDK does not hard-require the store (product-optional) but production multi-worker without it is a known footgun.
 
 #### Stripe
 
@@ -231,7 +233,7 @@ Use these as **signals**, still re-check amount/currency and your business rules
 
 ### Critical integrator rules (current product meaning)
 
-1. **`success: true` is not “paid”.** Creates/captures can return `success: true` with `status: 'pending'`, `authorized`, or `approved` (API-ok ≠ settled). **Fulfill only on paid-like settlement:** **`paid` only** (runtime `PAID_LIKE_PAYMENT_STATUSES`). Prefer Phase 6 **`isPaidOutcome(result)`**, which requires `outcome === 'succeeded'` **and** status `paid` (**`authorized` and `approved` are excluded**). Checking `status === 'paid'` is also valid; do **not** fulfill on bare `success`, auth holds, or PayPal buyer approval alone. See [operation-results.md](./operation-results.md).
+1. **`success: true` is not “paid”.** Creates/captures can return `success: true` with `status: 'pending'`, `authorized`, `partially_captured`, or `approved` (API-ok ≠ settled). **Fulfill only on paid-like settlement:** **`paid` only** (runtime `PAID_LIKE_PAYMENT_STATUSES`). Prefer Phase 6 **`isPaidOutcome(result)`**, which requires `outcome === 'succeeded'` **and** status `paid` (**`authorized`, `approved`, and partial captures are excluded**). Checking `status === 'paid'` is also valid; do **not** fulfill on bare `success`, bare `outcome === 'succeeded'`, auth holds, partial captures, or PayPal buyer approval alone. See [operation-results.md](./operation-results.md).
 2. **Indeterminate is not failure.** Timeouts or ambiguous outcomes after a mutation may have been accepted must use `outcome: 'indeterminate'` + `reconciliationRequired: true` — never treat as a definitive decline without reconciliation.
 3. **Prefer verified webhooks** (or a fresh `getPayment`) over browser redirects for fulfillment.
 4. **Partial statuses** (`partially_captured`, `partially_refunded`) require amount-aware business logic; do not assume full capture or full refund.

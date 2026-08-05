@@ -80,6 +80,8 @@ Inject any `ReconciliationStore` (testkit `createMemoryReconciliationStore` in t
 
 (`@paykernel/reconciliation` does **not** depend on testkit — import memory stores only from test code.)
 
+**Dual memory-store honesty:** this package keeps a **non-exported** in-package memory store for domain unit tests. Testkit ships a separate `createMemoryReconciliationStore`. Both are **test-only / NON-PRODUCTION** and can drift vs durable SQL fencing; production apps inject `@paykernel/store-*` adapters that pass `runReconciliationStoreConformanceSuite`.
+
 ### 3. Batch with concurrency limit
 
 ```typescript

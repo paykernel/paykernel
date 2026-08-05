@@ -331,11 +331,17 @@ Partial refunds take precedence over partial capture when both amount fields app
 
 Moyasar payments are typically auto-captured by default. Set `capture: false` on `createPayment` to send Moyasar `source.manual: true`, then capture the authorized payment later (token / encrypted Apple Pay / Samsung Pay only — not DPAN or STC Pay).
 
+> ⚠️ **Multi-worker footgun:** Moyasar has **no** native idempotency for capture /
+> refund / void. Configure a shared `moyasar.idempotencyStore` and pass
+> `idempotencyKey` on every mutation or concurrent workers / retries can
+> double-apply. See [Idempotency for refunds, captures, and voids](#idempotency-for-refunds-captures-and-voids).
+
 ```typescript
 const result = await client.capturePayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
   amount: 100, // Optional: Capture partial amount if supported
   currency: 'SAR', // Required whenever amount is provided
+  idempotencyKey: 'capture-order-123',
 }, 'moyasar');
 ```
 

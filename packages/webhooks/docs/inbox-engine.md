@@ -37,7 +37,7 @@ Store claim `not_available` (pending, `availableAt` in future) → `scheduled_fo
 
 ## Lean record vs 10.2 fields
 
-See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads.
+See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. The engine **does not** force-redact `envelope` before `JSON.stringify` — use core `toPersistedPaymentEventEnvelope` (or strip secrets) before process.
 
 ## Crash boundaries (10.6)
 

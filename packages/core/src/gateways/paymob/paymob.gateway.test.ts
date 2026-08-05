@@ -23,6 +23,7 @@ import {
 } from "../../types/payment-event";
 import type { Logger } from "../../utils/logger";
 import { money } from "../../utils/money";
+import { isPaidOutcome } from "../../types/operation-result";
 
 const PAYMOB_TEST_CONFIG: PaymobConfig = {
   secretKey: "sk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
@@ -811,8 +812,11 @@ describe("PaymobGateway", () => {
         amount_cents: 5000,
       });
       expect(typeof captureBody.transaction_id).toBe("number");
-      expect(result.outcome).toBe("succeeded");
+      // Partial capture is open money — not outcome-succeeded / not isPaidOutcome
+      expect(result.status).toBe("partially_captured");
+      expect(result.outcome).toBe("requires_action");
       expect(result.success).toBe(true);
+      expect(isPaidOutcome(result)).toBe(false);
       expect(result.references?.providerObjectId).toBe("123");
       expect(captureBody.auth_token).toBeUndefined();
     });
@@ -1501,6 +1505,69 @@ describe("PaymobGateway", () => {
       await expect(actionGateway.getPaymentStatus("123456789")).resolves.toBe("paid");
     });
 
+    it("inquiry missing success is fail-closed (not paid / not isPaidOutcome)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456789,
+          // success omitted — must not default true
+          pending: false,
+          amount_cents: 10000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      expect(result.status).toBe("failed");
+      expect(result.outcome).toBe("declined");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.success).toBe(false);
+    });
+
+    it("authorized inquiry is not isPaidOutcome (hold may be outcome-succeeded)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456789,
+          success: true,
+          pending: false,
+          is_auth: true,
+          is_capture: false,
+          is_captured: false,
+          amount_cents: 10000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      expect(result.status).toBe("authorized");
+      expect(result.outcome).toBe("succeeded");
+      expect(isPaidOutcome(result)).toBe(false);
+    });
+
+    it("partially_captured inquiry is not isPaidOutcome and not outcome-succeeded", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456789,
+          success: true,
+          pending: false,
+          amount_cents: 10000,
+          captured_amount: 4000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      expect(result.status).toBe("partially_captured");
+      expect(result.outcome).toBe("requires_action");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.success).toBe(true);
+    });
+
     it("rejects intention IDs for transaction lookup with a clear error", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
 
@@ -1557,6 +1624,8 @@ describe("PaymobGateway", () => {
 
       expect(result.status).toBe("partially_captured");
       expect(result.capturedAmount).toBe(40);
+      expect(result.outcome).toBe("requires_action");
+      expect(isPaidOutcome(result)).toBe(false);
     });
 
     it("uses transaction inquiry totals to map partial captures when capture response omits amount_cents", async () => {

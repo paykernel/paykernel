@@ -4,7 +4,12 @@
  * Mirrors Phase 9 testkit semantics (atomic claim, lease fencing, generation
  * rotation) so engine tests stay independent of `@paykernel/testkit`.
  *
- * ⚠️ Do not use in production payment paths.
+ * **Dual surface:** testkit ships its own `createMemoryWebhookInboxStore`. The
+ * two implementations are intentional for package isolation and **can drift**
+ * on SQL-fencing nuances. Neither is production. Apps inject durable
+ * `@paykernel/store-*` adapters.
+ *
+ * ⚠️ Do not use in production payment paths. Not exported from public index.
  */
 
 import {

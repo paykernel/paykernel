@@ -75,7 +75,7 @@ Phase 16 **Cloudflare D1 multi-host Workers** adapter is **complete and green**.
 ```text
 package.json exports → "." only
 paymentsSdk           → portable:false, runtime:"cloudflare-only"
-dist/index.js         → @paykernel/internal-sql-store, @paykernel/testkit only
+dist/index.js         → @paykernel/sql-foundation, @paykernel/store-contracts (testkit dev; historical gate named internal-sql-store)
                        (no static import of bun:sqlite / better-sqlite3 / cloudflare:workers / libsql)
 src production graph  → public-api walk excludes test-utils/ and *.test.ts
 mock D1               → src/test-utils/mock-d1.ts only (test-only bun:sqlite)

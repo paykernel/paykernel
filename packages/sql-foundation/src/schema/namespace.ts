@@ -12,6 +12,25 @@ import { ALL_LOGICAL_TABLES } from "./tables";
 export const MAX_IDENTIFIER_LENGTH = 63;
 
 /**
+ * Longest canonical logical table name length.
+ * Used so `tablePrefix` validation fails closed for every real foundation table
+ * (not only a short sample like `payment_idempotency`).
+ *
+ * Currently `payment_reconciliation_jobs` (27 chars).
+ */
+export const LONGEST_LOGICAL_TABLE_NAME_LENGTH = ALL_LOGICAL_TABLES.reduce(
+  (max, name) => (name.length > max ? name.length : max),
+  0,
+);
+
+/**
+ * Max `tablePrefix` length that keeps every `{prefix}{logical}` within
+ * {@link MAX_IDENTIFIER_LENGTH}. Safe max today: 63 − 27 = 36.
+ */
+export const MAX_SAFE_TABLE_PREFIX_LENGTH =
+  MAX_IDENTIFIER_LENGTH - LONGEST_LOGICAL_TABLE_NAME_LENGTH;
+
+/**
  * Strict SQL identifier: letter/underscore start, then alphanumerics/underscore.
  * Rejects dots, quotes, semicolons, spaces, and injection fragments.
  */
@@ -28,6 +47,8 @@ export type SchemaNamespaceConfig = {
   /**
    * Physical table name prefix, e.g. `"pay_"`.
    * Validated: `[A-Za-z0-9_]+`, max length, non-empty when provided.
+   * Must leave room for the longest logical table
+   * (`payment_reconciliation_jobs`, 27 chars) under {@link MAX_IDENTIFIER_LENGTH}.
    */
   tablePrefix?: string;
   /**
@@ -92,11 +113,20 @@ export function validateIdentifier(value: string, field: string): string {
 
 /**
  * Validate table prefix fragment (no dots; allows trailing underscore).
+ *
+ * Fail-closed: every foundation logical table must resolve to a valid
+ * identifier under {@link MAX_IDENTIFIER_LENGTH}. Sampling only a short table
+ * (e.g. `payment_idempotency`) previously accepted prefixes that later failed
+ * `resolveUnqualifiedTableName` for `payment_reconciliation_jobs`.
  */
 export function validateTablePrefix(value: string): string {
   assertNonEmptyString(value, "tablePrefix");
-  if (value.length > MAX_IDENTIFIER_LENGTH) {
-    throw new SchemaNamespaceError(`tablePrefix exceeds max length ${MAX_IDENTIFIER_LENGTH}`);
+  if (value.length > MAX_SAFE_TABLE_PREFIX_LENGTH) {
+    throw new SchemaNamespaceError(
+      `tablePrefix length ${value.length} exceeds safe max ${MAX_SAFE_TABLE_PREFIX_LENGTH} ` +
+        `(MAX_IDENTIFIER_LENGTH ${MAX_IDENTIFIER_LENGTH} − longest logical table ` +
+        `${LONGEST_LOGICAL_TABLE_NAME_LENGTH} chars)`,
+    );
   }
   if (!TABLE_PREFIX_PATTERN.test(value)) {
     throw new SchemaNamespaceError(
@@ -106,17 +136,19 @@ export function validateTablePrefix(value: string): string {
   if (/[;'"\\.\s]/.test(value) || value.includes("--") || value.includes("/*")) {
     throw new SchemaNamespaceError("tablePrefix contains forbidden characters");
   }
-  // Prefixed logical names must remain valid identifiers.
-  const sample = `${value}payment_idempotency`;
-  if (sample.length > MAX_IDENTIFIER_LENGTH) {
-    throw new SchemaNamespaceError(
-      `tablePrefix + logical table name exceeds max identifier length ${MAX_IDENTIFIER_LENGTH}`,
-    );
-  }
-  if (!IDENTIFIER_PATTERN.test(sample)) {
-    throw new SchemaNamespaceError(
-      "tablePrefix must yield a valid identifier when prepended to logical table names",
-    );
+  // Prefixed logical names for EVERY foundation table must remain valid identifiers.
+  for (const logical of ALL_LOGICAL_TABLES) {
+    const physical = `${value}${logical}`;
+    if (physical.length > MAX_IDENTIFIER_LENGTH) {
+      throw new SchemaNamespaceError(
+        `tablePrefix + logical table name ${JSON.stringify(logical)} exceeds max identifier length ${MAX_IDENTIFIER_LENGTH}`,
+      );
+    }
+    if (!IDENTIFIER_PATTERN.test(physical)) {
+      throw new SchemaNamespaceError(
+        "tablePrefix must yield a valid identifier when prepended to logical table names",
+      );
+    }
   }
   return value;
 }

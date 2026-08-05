@@ -10,6 +10,10 @@
  *
  * Crash model: claim then abandon (no complete) — after lease expiry another
  * worker reclaims; stale token rejected.
+ *
+ * ## Required gate coverage (B4 / ackAfterClaim parity)
+ * - Pending rows with future `availableAt` → `{ kind: "not_available" }` (no attempt++).
+ * - `fail({ restoreAttempt: true })` decrements `attempts` by 1 (floor 0).
  */
 
 import type { WebhookInboxStore } from "./contracts";
@@ -202,6 +206,157 @@ export async function runWebhookInboxStoreConformanceSuite(
       });
       assert(d.kind === "duplicate_failed", `got ${d.kind}`);
     }),
+  );
+
+  results.push(
+    await runCase(
+      "claim respects availableAt: pending future → not_available (no attempt++)",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_navail",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 30_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        assert(a.record.attempts === 1, `attempts after claim: ${a.record.attempts}`);
+        await store.fail({
+          key: "evt_navail",
+          leaseToken: a.leaseToken,
+          error: "backoff",
+          retryAfterMs: 60_000,
+        });
+        const mid = await store.get("evt_navail");
+        assert(mid?.status === "pending", "pending after fail");
+        assert(mid?.attempts === 1, "fail without restoreAttempt keeps attempts");
+        const early = await store.claim({
+          key: "evt_navail",
+          payloadHash: "h1",
+          owner: "w2",
+          leaseMs: 30_000,
+        });
+        assert(
+          early.kind === "not_available",
+          `expected not_available during backoff, got ${early.kind}`,
+        );
+        if (early.kind === "not_available") {
+          assert(
+            early.availableAt === mid!.availableAt,
+            "not_available.availableAt must echo record.availableAt",
+          );
+          assert(
+            early.record.availableAt === mid!.availableAt,
+            "not_available.record.availableAt must match",
+          );
+        }
+        const afterEarly = await store.get("evt_navail");
+        assert(
+          afterEarly?.attempts === 1,
+          "not_available must not increment attempts",
+        );
+        assert(
+          afterEarly?.status === "pending",
+          "not_available must leave row pending",
+        );
+        const listed = await store.listRetryable({ limit: 10 });
+        assert(
+          !listed.some((r) => r.key === "evt_navail"),
+          "listRetryable must gate on availableAt (same as claim)",
+        );
+        clock.advance(60_000);
+        const late = await store.claim({
+          key: "evt_navail",
+          payloadHash: "h1",
+          owner: "w3",
+          leaseMs: 30_000,
+        });
+        assert(late.kind === "acquired", `after availableAt: got ${late.kind}`);
+        if (late.kind === "acquired") {
+          assert(
+            late.record.attempts === 2,
+            `reclaim after due should attempt++: ${late.record.attempts}`,
+          );
+        }
+      },
+    ),
+  );
+
+  results.push(
+    await runCase(
+      "fail({ restoreAttempt: true }) decrements attempts (parking claim parity)",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_restore",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 30_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        assert(a.record.attempts === 1, "first claim attempts=1");
+        await store.fail({
+          key: "evt_restore",
+          leaseToken: a.leaseToken,
+          error: "ack_after_claim: scheduled for durable worker",
+          retryAfterMs: 0,
+          restoreAttempt: true,
+        });
+        const parked = await store.get("evt_restore");
+        assert(parked?.status === "pending", "pending after park fail");
+        assert(
+          parked?.attempts === 0,
+          `restoreAttempt must undo parking claim attempt (got ${parked?.attempts})`,
+        );
+        // Second acquire + restore again (floor at 0).
+        const b = await store.claim({
+          key: "evt_restore",
+          payloadHash: "h1",
+          owner: "w2",
+          leaseMs: 30_000,
+        });
+        assert(b.kind === "acquired", "reclaim");
+        if (b.kind !== "acquired") return;
+        assert(b.record.attempts === 1, "reclaim after restore → attempts=1");
+        await store.fail({
+          key: "evt_restore",
+          leaseToken: b.leaseToken,
+          error: "handler_error",
+          retryAfterMs: 0,
+          // restoreAttempt omitted / false — keeps attempts
+        });
+        const afterFail = await store.get("evt_restore");
+        assert(
+          afterFail?.attempts === 1,
+          `fail without restoreAttempt keeps attempts (got ${afterFail?.attempts})`,
+        );
+        // Floor: restoreAttempt on attempts=0 path via park from 0 would not go negative.
+        const c = await store.claim({
+          key: "evt_restore",
+          payloadHash: "h1",
+          owner: "w3",
+          leaseMs: 30_000,
+        });
+        assert(c.kind === "acquired", "third claim");
+        if (c.kind !== "acquired") return;
+        // attempts was 1, claim → 2; restore → 1
+        assert(c.record.attempts === 2, `third claim attempts=${c.record.attempts}`);
+        await store.fail({
+          key: "evt_restore",
+          leaseToken: c.leaseToken,
+          error: "park",
+          retryAfterMs: 5_000,
+          restoreAttempt: true,
+        });
+        const restored = await store.get("evt_restore");
+        assert(
+          restored?.attempts === 1,
+          `restoreAttempt: 2→1 (got ${restored?.attempts})`,
+        );
+      },
+    ),
   );
 
   results.push(

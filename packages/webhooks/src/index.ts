@@ -66,3 +66,5 @@ export type {
 
 // Test-only memory store is NOT exported from the public surface intentionally.
 // Import from source in package tests only; durable adapters live in Phase 11+.
+// Dual with testkit createMemoryWebhookInboxStore (also NON-PRODUCTION); can drift —
+// apps must use production @paykernel/store-* adapters, never these memory stores.

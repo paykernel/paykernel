@@ -78,7 +78,7 @@ Phase 17 **multi-host partitioned Cloudflare SQLite-backed Durable Object** adap
 ```text
 package.json exports → "." only
 paymentsSdk           → portable:false, runtime:"cloudflare-only"
-dist/index.js         → @paykernel/internal-sql-store, @paykernel/testkit only
+dist/index.js         → @paykernel/sql-foundation, @paykernel/store-contracts (testkit dev; historical gate named internal-sql-store)
                        (no static import of bun:sqlite / better-sqlite3 / cloudflare:workers / libsql)
 src production graph  → public-api walk excludes test-utils/ and *.test.ts
 mock DO SQL           → src/test-utils/mock-do-sql.ts only (test-only bun:sqlite)

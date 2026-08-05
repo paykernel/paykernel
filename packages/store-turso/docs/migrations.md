@@ -1,7 +1,7 @@
 # Migrations — Turso adapter
 
 **Helpers:** `migrateTursoAdapter`, `verifyTursoAdapterSchema`  
-**Foundation:** [`internal/sql-store` migrations](../../../internal/sql-store/docs/migrations.md)  
+**Foundation:** [`@paykernel/sql-foundation` migrations](../../sql-foundation/docs/migrations.md)  
 **Dialect:** **`sqlite`** (sql-store foundation schema + sqlite claim templates)
 
 ## Policy (non-negotiable)

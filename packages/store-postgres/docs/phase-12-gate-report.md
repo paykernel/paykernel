@@ -47,7 +47,7 @@ Phase 12 PostgreSQL production adapter is **complete and green**. Independent re
 
 | Requirement | Verdict | Evidence |
 | --- | --- | --- |
-| Uses internal/sql-store foundation (templates / migrate / namespace) | **PASS** | Depends on `@paykernel/internal-sql-store`; templates + `migrate`/`verifySchema` + `resolveTableName` / `createSchemaNamespace` |
+| Uses internal/sql-store foundation (templates / migrate / namespace) | **PASS** | Depends on `@paykernel/sql-foundation` (was `@paykernel/internal-sql-store` at early gate); templates + `migrate`/`verifySchema` + `resolveTableName` / `createSchemaNamespace` |
 | Explicit migrations; never auto on import | **PASS** | `import-no-migrate.test.ts`; factories do not migrate; only `migratePostgresAdapter` |
 | Injectable clock for conformance | **PASS** | `StoreClock` / `createSystemClock` / `clockNowIso`; FakeClock in conformance + multi-connection tests; `now` bound into claim SQL |
 | Prepared statements; validated identifiers | **PASS** | `$n` params throughout; table names via `resolveTableName` + identifier validation; public-api rejects bad `tablePrefix` / `sqlSchema` |

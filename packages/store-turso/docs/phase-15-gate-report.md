@@ -74,7 +74,7 @@ Phase 15 **Turso / libSQL multi-host** adapter is **complete and green**. Indepe
 
 ```text
 package.json exports → ".", "./serverless", "./libsql"  (no "./sync")
-dist/index.js        → @paykernel/internal-sql-store, @paykernel/testkit only
+dist/index.js        → @paykernel/sql-foundation, @paykernel/store-contracts (testkit dev; historical gate named internal-sql-store)
                        (no static import of @tursodatabase/* or @libsql/*)
 drivers              → duck-typed client surfaces; optional peers loaded by consumer
 src root graph       → public-api walk excludes drivers/, serverless.ts, libsql.ts subpath entries
