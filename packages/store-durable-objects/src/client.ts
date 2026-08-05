@@ -78,6 +78,14 @@ import { DO_STORAGE_ADAPTER_MANIFEST } from "./manifest";
 import { PaymentsStoreObject } from "./object/payments-store-object";
 import { withMappedErrors } from "./errors";
 
+/** Worker-stub stores cannot offer multi-mutation atomicity across DO boundaries. */
+const WORKER_CLIENT_TX_UNSUPPORTED =
+  "Worker-client withTransaction is not supported: Durable Object stores cannot provide cross-object multi-mutation atomicity. Use single-statement claims, or withTransaction on in-object stores (createDo*Store / PaymentsStoreObject).";
+
+function rejectWorkerClientTransaction(): never {
+  throw new StoreUnsupportedFeatureError(WORKER_CLIENT_TX_UNSUPPORTED);
+}
+
 const DEFAULT_LIST_LIMIT = 100;
 
 function resolveStub(
@@ -283,9 +291,8 @@ function createIdempotencyClient(
         }),
       );
     },
-    async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
-      // Cross-object transactions are not supported.
-      return await fn();
+    async withTransaction<T>(_fn: () => Promise<T> | T): Promise<T> {
+      return rejectWorkerClientTransaction();
     },
   };
 }
@@ -344,8 +351,8 @@ function createWebhookClient(
         }),
       );
     },
-    async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
-      return await fn();
+    async withTransaction<T>(_fn: () => Promise<T> | T): Promise<T> {
+      return rejectWorkerClientTransaction();
     },
   };
 }
@@ -424,8 +431,8 @@ function createReconciliationClient(
         }),
       );
     },
-    async withTransaction<T>(fn: () => Promise<T> | T): Promise<T> {
-      return await fn();
+    async withTransaction<T>(_fn: () => Promise<T> | T): Promise<T> {
+      return rejectWorkerClientTransaction();
     },
   };
 }

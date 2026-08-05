@@ -30,8 +30,8 @@ await migrateD1Adapter(env.PAYMENTS_DB);
 
 const stores = createD1PaymentStores({
   db: env.PAYMENTS_DB,
-  // Optional: read-after-write under D1 read replication
-  // session: "first-primary",
+  // Defaults to session: "first-primary" when db.withSession exists (safe RAW
+  // under D1 read replication). Opt out with session: false.
 });
 
 const r = await stores.idempotency.reserve({

@@ -404,14 +404,20 @@ export function trySelectFallbackGateway(
     );
   }
 
-  const attempted = new Set<string>([
-    ...(options?.attemptedGateways ?? []),
-    ...(input.excludeGateways ?? []),
-  ]);
+  // ROUTE-1: attempted/exclude gateway ids compared case-insensitively.
+  const attempted = new Set<string>(
+    [...(options?.attemptedGateways ?? []), ...(input.excludeGateways ?? [])]
+      .map((g) => g.trim().toLowerCase())
+      .filter(Boolean),
+  );
 
   const selectInput: RoutingInput = { ...input };
   if (attempted.size > 0) {
-    selectInput.excludeGateways = Object.freeze([...attempted]);
+    // Pass original casing through; router.select lowercases for comparison.
+    selectInput.excludeGateways = Object.freeze([
+      ...(options?.attemptedGateways ?? []),
+      ...(input.excludeGateways ?? []),
+    ]);
   }
 
   // router.select honors excludeGateways for both rules and select-time fallback.
@@ -431,7 +437,7 @@ export function trySelectFallbackGateway(
     throw err;
   }
 
-  if (attempted.has(decision.gateway)) {
+  if (attempted.has(decision.gateway.trim().toLowerCase())) {
     throw new UnsafeFallbackDeniedError(
       "Post-attempt fallback denied: no alternate gateway available",
       {

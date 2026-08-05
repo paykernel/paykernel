@@ -20,6 +20,7 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { TursoExecutor } from "../executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -56,7 +57,11 @@ export function resolveStoreContext(options: TursoStoreOptions): ResolvedStoreCo
     withStoreTransaction: async <T>(fn: () => Promise<T> | T): Promise<T> => {
       const outer = active;
       if (typeof outer.transaction !== "function") {
-        return await fn();
+        // Fail closed: never pretend multi-mutation atomicity without a real TX
+        // (SHARED-1). Prefer single-statement UPSERT/RETURNING.
+        throw new StoreUnsupportedFeatureError(
+          "withTransaction: TursoExecutor.transaction is not available; refusing silent no-op. Prefer single-statement claims or an executor that supports interactive transactions.",
+        );
       }
       return outer.transaction(async (tx) => {
         const prev = active;

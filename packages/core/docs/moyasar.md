@@ -210,7 +210,8 @@ const result = await client.createPayment({
 | **Capture window** | Capture before the issuer auth hold expires. **mada** authorizations are typically capturable for up to **14 days**; other schemes follow issuer rules. If the hold lapses, Moyasar may still report `authorized` while the issuer has released funds — re-fetch before capturing and handle capture failures |
 | **Void window** | Void authorized (uncaptured) payments while the hold is active. For already-**paid**/auto-captured payments, Moyasar may allow void only within a short settlement window (commonly ~**2 hours**); after that use refund |
 | **Verified status** | Moyasar `verified` is a zero-amount card **setup/verification**, not an authorization hold — mapped to SDK `setup_completed` |
-| **Partial statuses** | Refund completeness uses a **captured baseline** when `captured > 0`, else authorization `amount`: `refunded > 0 && refunded < baseline` → `partially_refunded`; `refunded >= baseline && baseline > 0` → `refunded` (so full refund of a partial capture is `refunded`); partial capture maps to `partially_captured` |
+| **Partial statuses** | Refund completeness uses a **captured baseline** when `captured > 0`, else authorization `amount`: `refunded > 0 && refunded < baseline` → `partially_refunded`; `refunded >= baseline && baseline > 0` → `refunded` (so full refund of a partial capture is `refunded`); provider `refunded` with **missing/zero** `refunded` amount → `refund_completed` (fail-closed, not full `refunded`); partial capture maps to `partially_captured` |
+| **Webhook money fields** | Refund/capture events set `event.amount` from cumulative `refunded` / `captured` (not always the payment total). Incomplete refunds without a `refunded` field omit `amount` rather than inventing the full total |
 | **Callback URL** | Moyasar requires it for card/token sources. When omitting `callbackUrl` (STC Pay, etc.) or using Moyasar-only fields (`splits`), pass the second arg `'moyasar'` or call `client.gateway('moyasar').createPayment(...)` |
 | **STC Pay Confirmation** | Do not browser-redirect to `source.transaction_url`; `redirectUrl` is undefined for STC Pay, so collect the OTP and call `confirmStcPayOtp` |
 | **Sandbox** | `sandbox` config is ignored; test/live is determined by the secret key prefix |
@@ -295,10 +296,10 @@ const result = await client.createPayment({
 | `paid` | `paid` |
 | `authorized` | `authorized` |
 | `verified` | `setup_completed` (card setup / zero-amount verification — **not** an auth hold) |
-| `captured` | `paid` |
+| `captured` | `paid` (or `partially_captured` when amount-derived) |
 | `failed` | `failed` |
 | `abandoned` | `failed` |
-| `refunded` | `refunded` |
+| `refunded` | `refunded` when `refunded` amount covers baseline; **`refund_completed`** when amount is missing/zero (incomplete snapshot — not full `refunded`) |
 | `voided` | `cancelled` |
 | *(unmapped string)* | `failed` (logged warning; fail-closed for fulfillment) |
 
@@ -319,13 +320,24 @@ when present on the payment (create/get/capture/refund responses and webhooks):
 |-----------|------------|
 | `refunded > 0` and `refunded < refundBaseline` | `partially_refunded` |
 | `refunded >= refundBaseline` and `refundBaseline > 0` | `refunded` |
+| Provider status `refunded` but `refunded` amount missing/zero/non-finite | `refund_completed` (fail-closed; **not** full `refunded`) |
 | `captured > 0` and `captured < amount` (auth/paid family) | `partially_captured` |
 
 **Refund baseline:** `refundBaseline = captured > 0 ? captured : amount`. Full refund of a
 partial capture (e.g. `amount=10000`, `captured=3000`, `refunded=3000`) maps to `refunded`,
 not `partially_refunded`. When `captured` is 0/absent, completeness uses authorization `amount`.
 
+**Incomplete refund snapshots:** Never treat provider `refunded` alone as full money
+reversal. Without a positive finite `refunded` amount that covers the baseline, the SDK
+returns `refund_completed` so handlers that key only on `status === 'refunded'` do not
+fully reverse inventory/accounting from a thin payload. Prefer re-fetching with
+`getPayment` when amounts are missing.
+
 Partial refunds take precedence over partial capture when both amount fields apply.
+
+**Partial capture outcome:** `partially_captured` maps to operation outcome
+`requires_action` (open money story), not `succeeded`. `isPaidOutcome` is false either
+way (paid-like is `paid` only).
 
 ## Capture Payment
 
@@ -360,10 +372,11 @@ Moyasar's refund endpoint does not accept a reason field — any `reason` on the
 params is ignored for Moyasar.
 
 `refundPayment` returns `GatewayRefundResult`. On HTTP success, `result.status` is
-**`completed`** when the payment reflects a refund (full or partial: `refunded > 0`
-or provider/resolved status `refunded` / `partially_refunded`), not only when Moyasar's
-string status is exactly `refunded`. Payment lookup/webhook status uses the amount-
-derived mapping above (`partially_refunded` / `refunded`).
+**`completed`** when the payment reflects a refund (full, partial, or incomplete
+snapshot: `refunded > 0` or resolved status `refunded` / `partially_refunded` /
+`refund_completed`, or provider string `refunded`). Payment lookup/webhook **payment**
+status uses the amount-derived mapping above (`partially_refunded` / `refunded` /
+`refund_completed` for incomplete money).
 
 ```typescript
 const result = await client.refundPayment({
@@ -450,6 +463,7 @@ app.post('/webhooks/moyasar', async (req) => {
 
   console.log(event.status);          // 'paid', 'failed', 'partially_refunded', etc.
   console.log(event.type);            // 'payment_paid', 'payment_failed', etc.
+  console.log(event.amount);          // refunded/captured slice for those events — not always payment total
   console.log(event.paymentId);       // metadata.paymentId, or metadata.orderId fallback
   console.log(event.gatewayPaymentId); // Moyasar payment ID
   console.log(event.livemode);        // true/false when payload includes `live`
@@ -462,6 +476,13 @@ Moyasar currently documents failed payment webhooks as `payment_faild`; the SDK 
 
 When the webhook envelope includes a boolean `live` field, the SDK sets
 `event.livemode` to that value so you can distinguish test vs production events.
+
+**Webhook money fields:** For `payment_refunded` / refund-like statuses, `event.amount`
+is the cumulative **refunded** major amount when present (including `0`). Incomplete
+refunds that omit `refunded` leave `event.amount` undefined rather than inventing the
+payment total. For `payment_captured` / `partially_captured`, amount prefers
+**captured**. Do not restock or ship from `event.amount` alone without also checking
+`status` and re-fetching when amounts are incomplete.
 
 ### Unsupported: card authentication webhooks
 

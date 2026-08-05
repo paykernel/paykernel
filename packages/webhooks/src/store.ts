@@ -178,7 +178,8 @@ export type ClaimWebhookInput = {
  * - `in_progress` — active lease held by another worker
  * - `payload_hash_conflict` — same key, different body hash
  * - `not_available` — pending but `availableAt` is still in the future (backoff);
- *   must **not** increment attempts; engine maps to `scheduled_for_retry`
+ *   must **not** increment attempts; engine maps to
+ *   `scheduled_for_retry { reason: "not_available" }`
  */
 export type ClaimWebhookResult =
   | { kind: "acquired"; record: WebhookInboxRecord; leaseToken: LeaseToken }

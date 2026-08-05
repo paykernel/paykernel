@@ -175,6 +175,42 @@ function errorNameForTelemetry(error: unknown): string {
   return "unknown";
 }
 
+/**
+ * Sanitize exceptions for span export: name (+ optional code) only.
+ * Never forward raw Error.message / stack (may carry tokens or card fragments).
+ */
+export function sanitizeExceptionForSpan(error: unknown): {
+  name: string;
+  code?: string;
+} {
+  if (error instanceof Error) {
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : undefined;
+    return code !== undefined
+      ? { name: error.name || "Error", code }
+      : { name: error.name || "Error" };
+  }
+  if (typeof error === "string") {
+    return { name: "Error" };
+  }
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "name" in error &&
+    typeof (error as { name?: unknown }).name === "string"
+  ) {
+    const name = (error as { name: string }).name || "Error";
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : undefined;
+    return code !== undefined ? { name, code } : { name };
+  }
+  return { name: "unknown" };
+}
+
 function emitRedactedOperationTelemetry(
   telemetry: TelemetrySink | undefined,
   event: string,
@@ -211,7 +247,8 @@ function finalizeSpan(
   span.setAttribute("durationMs", durationMs);
 
   if (thrown !== undefined) {
-    span.recordException?.(thrown);
+    // Never recordException(raw Error) — message/stack can carry secrets.
+    span.recordException?.(sanitizeExceptionForSpan(thrown));
     // Status message uses Error.name only — never message (secrets risk).
     if (thrown instanceof Error && thrown.name.length > 0) {
       span.end({ code: "error", message: thrown.name });
@@ -288,8 +325,11 @@ export async function withPaymentOperation<T>(
       }
     }
   }
+  // Thrown errors are ambiguous at the transport boundary (timeout after submit,
+  // network drop mid-flight). Default to indeterminate — never invent definitive
+  // failed. Callers may override via contextPatch when the failure is known-final.
   if (thrown !== undefined && patch.normalizedOutcome === undefined) {
-    patch.normalizedOutcome = "failed";
+    patch.normalizedOutcome = "indeterminate";
   }
 
   const finished = finalizeOperationContext(context, patch);

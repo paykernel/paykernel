@@ -927,6 +927,44 @@ describe("MoyasarGateway", () => {
       expect(result.refundedAmount).toBe(100);
     });
 
+    it("maps provider refunded + zero refunded amount to refund_completed (not full refunded)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 10000,
+          refunded: 0,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("refund_completed");
+      expect(result.status).not.toBe("refunded");
+      expect(result.refundedAmount).toBe(0);
+      expect(result.outcome).toBe("succeeded");
+    });
+
+    it("maps provider refunded + missing refunded amount to refund_completed", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "refunded",
+          amount: 10000,
+          captured: 10000,
+          refunded: undefined,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("refund_completed");
+      expect(result.status).not.toBe("refunded");
+    });
+
     it("uses authorization amount as refund baseline when captured is 0", async () => {
       mockFetchJson(
         paymentResponse({
@@ -992,6 +1030,9 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("partially_captured");
       expect(result.capturedAmount).toBe(30);
+      // Open money story: not operation-succeeded (MOYASAR-5); still not paid-like.
+      expect(result.outcome).toBe("requires_action");
+      expect(result.outcome).not.toBe("succeeded");
     });
 
     it("requires currency for partial refunds instead of defaulting to SAR", async () => {
@@ -1514,6 +1555,12 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("partially_refunded");
+      // Money field is refunded slice, not full payment total (MOYASAR-1).
+      expect(event.amount).toBe(25);
+      expect(event.event?.type).toBe("refund.completed");
+      if (event.event?.type === "refund.completed") {
+        expect(event.event.refund.amount).toBe(25);
+      }
     });
 
     it("maps full refund of partial capture on webhooks to refunded (captured baseline)", () => {
@@ -1533,6 +1580,89 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("refunded");
+      expect(event.amount).toBe(30);
+    });
+
+    it("maps provider refunded + zero refunded amount on webhooks to refund_completed", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_123",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "refunded",
+          amount: 10000,
+          currency: "SAR",
+          refunded: 0,
+          captured: 10000,
+        },
+      });
+
+      expect(event.status).toBe("refund_completed");
+      expect(event.status).not.toBe("refunded");
+      // Explicit zero refunded is honest money (not full payment total).
+      expect(event.amount).toBe(0);
+    });
+
+    it("maps provider refunded + missing refunded amount on webhooks to refund_completed without inventing total", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_123",
+        type: "payment_refunded",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "refunded",
+          amount: 10000,
+          currency: "SAR",
+          // refunded omitted
+        },
+      });
+
+      expect(event.status).toBe("refund_completed");
+      expect(event.status).not.toBe("refunded");
+      // Incomplete: do not surface payment total as refund money field.
+      expect(event.amount).toBeUndefined();
+    });
+
+    it("uses captured amount on capture webhooks (not authorization total)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_123",
+        type: "payment_captured",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "captured",
+          amount: 10000,
+          currency: "SAR",
+          captured: 4000,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.amount).toBe(40);
+    });
+
+    it("uses full captured amount on payment_paid when captured is present", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_123",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+        },
+      });
+
+      expect(event.status).toBe("paid");
+      expect(event.amount).toBe(100);
     });
 
     it("maps unmapped provider statuses to failed (fail-closed)", () => {

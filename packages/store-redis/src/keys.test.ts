@@ -3,6 +3,7 @@ import {
   DEFAULT_KEY_PREFIX,
   DEFAULT_SCHEMA_VERSION,
   formatHashTag,
+  logicalKeyFromRecordKey,
   recordKey,
   reconciliationDueIndexKey,
   resolveKeyDesign,
@@ -69,5 +70,38 @@ describe("recordKey / indexes", () => {
 
   it("formatHashTag wraps body", () => {
     expect(formatHashTag("tenantA")).toBe("{tenantA}");
+  });
+});
+
+describe("logicalKeyFromRecordKey (REDIS-1)", () => {
+  it("preserves composite logical keys with colons (webhook gateway:eventId)", () => {
+    const d = resolveKeyDesign();
+    const logical = "stripe:evt_123";
+    const redisKey = recordKey(d, "whinbox", logical);
+    expect(redisKey).toBe("psdk:v1:whinbox:stripe:evt_123");
+    // Broken pop() would yield only "evt_123" and orphan ZSET members.
+    expect(redisKey.split(":").pop()).toBe("evt_123");
+    expect(logicalKeyFromRecordKey(d, "whinbox", redisKey)).toBe(logical);
+  });
+
+  it("works with tenant and cluster hash-tag layouts", () => {
+    const tenant = resolveKeyDesign({ tenantId: "acme" });
+    const k1 = recordKey(tenant, "recon", "job:part:a");
+    expect(logicalKeyFromRecordKey(tenant, "recon", k1)).toBe("job:part:a");
+
+    const cluster = resolveKeyDesign({ tenantId: "acme", clusterKeys: true });
+    const k2 = recordKey(cluster, "whinbox", "gw:id");
+    expect(k2).toBe("psdk:v1:{acme}:whinbox:gw:id");
+    expect(logicalKeyFromRecordKey(cluster, "whinbox", k2)).toBe("gw:id");
+  });
+
+  it("returns undefined for index keys and wrong store segment", () => {
+    const d = resolveKeyDesign();
+    expect(logicalKeyFromRecordKey(d, "whinbox", webhookRetryIndexKey(d))).toBe(
+      undefined,
+    );
+    expect(
+      logicalKeyFromRecordKey(d, "whinbox", recordKey(d, "recon", "x")),
+    ).toBe(undefined);
   });
 });

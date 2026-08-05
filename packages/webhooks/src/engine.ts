@@ -33,7 +33,10 @@
  * Modes are fixed at construction (`inline` | `durable_retry`).
  */
 
-import { hashWebhookPayload } from "@paykernel/core";
+import {
+  hashWebhookPayload,
+  redactWebhookPayloadSecrets,
+} from "@paykernel/core";
 import { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";
 import { sanitizeWebhookError } from "./sanitize";
 import {
@@ -53,6 +56,7 @@ import type {
   ProcessVerifiedInput,
   ProcessWithVerifierInput,
   SanitizeErrorFn,
+  ScheduledForRetryReason,
   WebhookHandler,
   WebhookHandlerContext,
   WebhookInboxEngine,
@@ -82,6 +86,30 @@ function assertPositiveLeaseMs(value: number, label: string): number {
   return value;
 }
 
+/**
+ * maxAttempts: finite integer >= 1 (handler budget; 0 would dead-letter immediately).
+ */
+function assertMaxAttempts(value: number, label: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value < 1) {
+    throw new Error(
+      `createWebhookInboxEngine: ${label} must be a finite integer >= 1 (got ${String(value)})`,
+    );
+  }
+  return value;
+}
+
+/**
+ * defaultRetryAfterMs: finite number >= 0 (0 = immediate retry eligibility).
+ */
+function assertNonNegativeRetryMs(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(
+      `createWebhookInboxEngine: ${label} must be a finite number >= 0 (got ${String(value)})`,
+    );
+  }
+  return value;
+}
+
 const systemClock: EngineClock = {
   nowMs: () => Date.now(),
 };
@@ -105,8 +133,10 @@ function outcomeAlreadyProcessing(
   return { outcome: "already_processing" };
 }
 
-function outcomeScheduledForRetry(): WebhookProcessingOutcome {
-  return { outcome: "scheduled_for_retry" };
+function outcomeScheduledForRetry(
+  reason: ScheduledForRetryReason,
+): WebhookProcessingOutcome {
+  return { outcome: "scheduled_for_retry", reason };
 }
 
 function outcomeHandlerFailed(retryable: boolean): WebhookProcessingOutcome {
@@ -139,11 +169,12 @@ export function computePayloadHash(raw: unknown): string {
 /**
  * Serialize an envelope for `payloadRef` storage.
  *
- * Objects are `JSON.stringify`'d as-is; strings are used as-is; never stores
- * undefined. **No forced redaction** — the engine does not strip secrets from
- * `envelope`. Callers must pass a sanitized snapshot
- * (`toPersistedPaymentEventEnvelope` from `@paykernel/core`) or strip secrets
- * before claim / processVerified.
+ * - **Objects / arrays:** deep-redacted via core `redactWebhookPayloadSecrets`
+ *   (known secret keys → `"[REDACTED]"`) then `JSON.stringify`. Prefer also
+ *   passing `toPersistedPaymentEventEnvelope` so raw signatures never enter.
+ * - **Strings:** stored as-is (opaque refs / pre-serialized tokens). Callers
+ *   must not put secrets in plain string envelopes.
+ * - Never stores undefined / empty string.
  */
 function envelopeToPayloadRef(envelope: unknown): string | undefined {
   if (envelope === undefined || envelope === null) return undefined;
@@ -151,7 +182,7 @@ function envelopeToPayloadRef(envelope: unknown): string | undefined {
     return envelope.length > 0 ? envelope : undefined;
   }
   try {
-    return JSON.stringify(envelope);
+    return JSON.stringify(redactWebhookPayloadSecrets(envelope));
   } catch {
     return undefined;
   }
@@ -288,8 +319,14 @@ export function createWebhookInboxEngine(
     options.defaultLeaseMs ?? DEFAULT_LEASE_MS,
     "defaultLeaseMs",
   );
-  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
-  const defaultRetryAfterMs = options.defaultRetryAfterMs ?? DEFAULT_RETRY_AFTER_MS;
+  const maxAttempts = assertMaxAttempts(
+    options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
+    "maxAttempts",
+  );
+  const defaultRetryAfterMs = assertNonNegativeRetryMs(
+    options.defaultRetryAfterMs ?? DEFAULT_RETRY_AFTER_MS,
+    "defaultRetryAfterMs",
+  );
   const engineAckAfterClaim = options.ackAfterClaim === true;
   const clock: EngineClock = options.clock ?? systemClock;
   const sanitize: SanitizeErrorFn =
@@ -405,7 +442,7 @@ export function createWebhookInboxEngine(
         return outcomeHandlerFailed(false);
       }
       if (mode === "durable_retry") {
-        return outcomeScheduledForRetry();
+        return outcomeScheduledForRetry("handler_retry");
       }
       return outcomeHandlerFailed(true);
     }
@@ -477,6 +514,14 @@ export function createWebhookInboxEngine(
     );
     const payloadRef = envelopeToPayloadRef(input.envelope);
 
+    // WEBHOOKS-2: refuse durable park without a materializable payload — otherwise
+    // processRetryable stubs `{ key, payloadHash }` and dead-letters after ACK.
+    if (ackAfterClaim && payloadRef === undefined) {
+      return outcomeInvalidWebhook(
+        "envelope is required for ackAfterClaim (durable workers need a payloadRef)",
+      );
+    }
+
     const claimInput: {
       key: string;
       payloadHash: string;
@@ -507,7 +552,8 @@ export function createWebhookInboxEngine(
         return outcomeHandlerFailed(false);
       case "not_available":
         // Backoff: provider redelivery during availableAt window must not burn attempts.
-        return outcomeScheduledForRetry();
+        // Distinct reason so adapters can 5xx (provider redelivery) instead of silent 200.
+        return outcomeScheduledForRetry("not_available");
       case "acquired":
         break;
       default: {
@@ -536,11 +582,11 @@ export function createWebhookInboxEngine(
           // Token dead before restoreAttempt applied (clock/lease skew): claim
           // already persisted; may leave parking attempt burned. No safe
           // tokenless restore — return scheduled_for_retry, not business failure.
-          return outcomeScheduledForRetry();
+          return outcomeScheduledForRetry("parked");
         }
         throw err;
       }
-      return outcomeScheduledForRetry();
+      return outcomeScheduledForRetry("parked");
     }
 
     // Unreachable under normal control flow: missing handler is rejected before
@@ -713,7 +759,7 @@ function mapClaimKindToOutcome(
     case "duplicate_failed":
       return outcomeHandlerFailed(false);
     case "not_available":
-      return outcomeScheduledForRetry();
+      return outcomeScheduledForRetry("not_available");
     default: {
       const _e: never = claim;
       return outcomeInvalidWebhook(String(_e));

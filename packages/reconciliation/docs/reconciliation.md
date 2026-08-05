@@ -192,10 +192,10 @@ switch (decision.action) {
 
 | `action` | `safe` | When |
 | -------- | ------ | ---- |
-| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized`); status-only drift pending→paid |
-| `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` |
+| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set |
+| `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound) |
 | `mark_consistent` | `true` | Consistent snapshot without upgrade path |
-| `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, etc.) |
+| `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
 | `retry_later` | `false` | Temporarily unavailable / retryable not-found (when not forbidding replacement) |
 | `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs |
 | `do_not_create_replacement` | `false` | Not-found / incomplete lookup while local is indeterminate |

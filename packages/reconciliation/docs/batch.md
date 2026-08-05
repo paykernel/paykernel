@@ -99,7 +99,7 @@ Keep target↔result correlation in application code if you need it (generator y
 | `scheduler.claimDue` / `processDue` | Durable multi-host workers; crash-safe leases |
 | Both | Online check + schedule stragglers that need retry |
 
-`processDue({ maxInFlightByGateway })` bounds claims within one processDue invocation for keys `recon:{gateway}:{id}`. Still set **global** worker parallelism and **per-provider** HTTP limits outside this package.
+`processDue({ maxInFlightByGateway })` bounds claims within one processDue invocation for keys `recon:{gateway}:{id}`. Handler must return an explicit `{ disposition: "complete" | "retry" | "manual_review" }` — void is fail-closed to retry so policy `retry_later` cannot silently complete. Still set **global** worker parallelism and **per-provider** HTTP limits outside this package.
 
 ---
 

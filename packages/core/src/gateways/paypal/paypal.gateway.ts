@@ -19,7 +19,11 @@ import {
   type RefundOperationOutcome,
 } from "../../types/operation-result";
 import type { PayPalWebhookPayload, WebhookEvent, } from "../../types/webhook.types";
-import { attachPaymentEvent } from "../../types/payment-event";
+import {
+  attachPaymentEvent,
+  paymentFromWebhookEvent,
+  PAYMENT_EVENT_SCHEMA_VERSION,
+} from "../../types/payment-event";
 import type { PayPalConfig } from "../../types/config.types";
 import type { HooksManager } from "../../hooks/hooks.manager";
 import {
@@ -75,6 +79,31 @@ class PayPalApiError extends GatewayApiError {
 // PayPal API Response Types
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/** Capture / authorization resource as embedded on a PayPal order. */
+type PayPalEmbeddedCapture = {
+  id: string;
+  status: string;
+  amount: {
+    currency_code: string;
+    value: string;
+  };
+  /** When false, capture is non-final (more may follow on the same auth). */
+  final_capture?: boolean;
+  create_time?: string;
+  update_time?: string;
+};
+
+type PayPalEmbeddedAuthorization = {
+  id: string;
+  status: string;
+  amount: {
+    currency_code: string;
+    value: string;
+  };
+  create_time?: string;
+  update_time?: string;
+};
+
 interface PayPalOrderResponse {
   id: string;
   status: string;
@@ -83,6 +112,8 @@ interface PayPalOrderResponse {
     currency_code: string;
     value: string;
   };
+  /** Present on authorization-capture API responses (Payments v2 capture object). */
+  final_capture?: boolean;
   message?: string;
   name?: string;
   details?: Array<{
@@ -100,26 +131,8 @@ interface PayPalOrderResponse {
       value: string;
     };
     payments?: {
-      captures?: Array<{
-        id: string;
-        status: string;
-        amount: {
-          currency_code: string;
-          value: string;
-        };
-        create_time?: string;
-        update_time?: string;
-      }>;
-      authorizations?: Array<{
-        id: string;
-        status: string;
-        amount: {
-          currency_code: string;
-          value: string;
-        };
-        create_time?: string;
-        update_time?: string;
-      }>;
+      captures?: Array<PayPalEmbeddedCapture>;
+      authorizations?: Array<PayPalEmbeddedAuthorization>;
     };
   }>;
 }
@@ -144,6 +157,7 @@ type PayPalPaymentResource = {
   id: string;
   status: string;
   amount: PayPalMoney;
+  final_capture?: boolean;
   supplementary_data?: {
     related_ids?: {
       order_id?: string;
@@ -190,10 +204,14 @@ const PAYPAL_ORDER_ID_MAX_LENGTH = 256;
 const PAYPAL_REFUND_NOTE_MAX_LENGTH = 255;
 const PAYPAL_WEBHOOK_ID_MAX_LENGTH = 50;
 /**
- * Maximum age of `paypal-transmission-time` accepted for webhook verification.
- * Older transmissions are rejected to limit replay risk.
+ * Soft age threshold for `paypal-transmission-time`. Transmissions older than
+ * this still proceed to PayPal signature verify (post-outage retries) but log a
+ * warning. Far-future timestamps beyond this window are hard-rejected (clock skew).
+ * Replay protection relies on PayPal verify + merchant `event.id` dedupe.
  */
-const PAYPAL_WEBHOOK_MAX_AGE_MS = 15 * 60 * 1000;
+const PAYPAL_WEBHOOK_MAX_AGE_MS = 72 * 60 * 60 * 1000;
+/** Age at which we start warning about late deliveries (still accepted for verify). */
+const PAYPAL_WEBHOOK_WARN_AGE_MS = 15 * 60 * 1000;
 /** Heuristic for unknown resource statuses that appear terminal (fail-closed). */
 const PAYPAL_TERMINAL_RESOURCE_STATUS_PATTERN =
   /FAIL|DENIED|DECLIN|CANCEL|VOID|EXPIR|REJECT|ERROR|ABORT|BLOCK/i;
@@ -333,17 +351,30 @@ export class PayPalGateway extends BaseGateway {
 
         this.assertOrderResponse(data, "get payment");
 
-        // Prefer the last capture when multiple exist (most recent partial/full capture).
-        const capture = this.preferLastCapture(
-          data.purchase_units?.[0]?.payments?.captures,
-        );
+        const captures = data.purchase_units?.[0]?.payments?.captures;
+        // Prefer the last capture for captureId / refund target (most recent).
+        const capture = this.preferLastCapture(captures);
         const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
         const purchaseUnitAmount = data.purchase_units?.[0]?.amount;
-        const amount = capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
-        const status = this.mapPaymentResultStatus(data, capture, authorization);
-        const amountMajor = amount
-          ? this.parseAmount(amount, "get payment")
-          : undefined;
+        const status = this.mapPaymentResultStatus(
+          data,
+          capture,
+          authorization,
+          captures,
+        );
+        // Aggregate multi-capture money; do not report last-slice only as total.
+        const aggregatedCaptured = this.sumSuccessfulCaptureAmounts(
+          captures,
+          "get payment",
+        );
+        const singleAmount =
+          capture?.amount ?? authorization?.amount ?? purchaseUnitAmount;
+        const amountMajor =
+          aggregatedCaptured !== undefined
+            ? aggregatedCaptured
+            : singleAmount
+              ? this.parseAmount(singleAmount, "get payment")
+              : undefined;
         return this.mapPayPalPaymentResult({
           gatewayId: data.id,
           orderId: data.id,
@@ -356,6 +387,9 @@ export class PayPalGateway extends BaseGateway {
             ? { authorizationId: authorization.id }
             : {}),
           ...(amountMajor !== undefined ? { amount: amountMajor } : {}),
+          ...(aggregatedCaptured !== undefined
+            ? { capturedAmount: aggregatedCaptured }
+            : {}),
         });
       }, isRetryableError);
     }, GetPaymentParamsSchema);
@@ -534,11 +568,14 @@ export class PayPalGateway extends BaseGateway {
         // PayPal API defaults final_capture to false. SDK product defaults:
         // - full capture (no amount): true (capture remaining balance and close auth)
         // - partial (amount set): false unless paypalFinalCapture === true
+        let requestFinalCapture = true;
         if (isAuthorizationCapture) {
           if (p.amount !== undefined) {
-            body.final_capture = p.paypalFinalCapture === true;
+            requestFinalCapture = p.paypalFinalCapture === true;
+            body.final_capture = requestFinalCapture;
           } else {
-            body.final_capture = p.paypalFinalCapture ?? true;
+            requestFinalCapture = p.paypalFinalCapture ?? true;
+            body.final_capture = requestFinalCapture;
           }
         }
 
@@ -566,6 +603,7 @@ export class PayPalGateway extends BaseGateway {
             id: data.id,
             status: data.status,
             amount: data.amount,
+            final_capture: data.final_capture,
           }
           : this.preferLastCapture(
             data.purchase_units?.[0]?.payments?.captures,
@@ -573,17 +611,38 @@ export class PayPalGateway extends BaseGateway {
 
         this.assertPaymentResource(capture, "capture payment");
 
-        const status = capture
+        let status = capture
           ? this.mapResourceStatus(capture.status)
           : this.mapStatus(data.status);
+
+        // Non-final auth captures must not look fully settled (isPaidOutcome false).
+        // Prefer response final_capture when PayPal echoes it; else request intent.
+        const responseFinalCapture =
+          typeof capture.final_capture === "boolean"
+            ? capture.final_capture
+            : typeof data.final_capture === "boolean"
+              ? data.final_capture
+              : undefined;
+        const isFinalCapture =
+          responseFinalCapture !== undefined
+            ? responseFinalCapture
+            : requestFinalCapture;
+        if (status === "paid" && isFinalCapture === false) {
+          status = "partially_captured";
+        }
 
         // PayPal can return HTTP 200 with capture status PENDING (echeck, review).
         // success remains true for pending API outcomes via requires_action dual-write;
         // callers must require outcome succeeded + status paid before fulfill.
         // Terminal failed statuses set success:false (outcome declined).
+        // partially_captured is operation-succeeded but not isPaidOutcome.
         if (status === "pending") {
           this.logger.warn(
             "[PayPal] Capture returned pending status; do not fulfill until status is paid (webhook or poll)",
+          );
+        } else if (status === "partially_captured") {
+          this.logger.warn(
+            "[PayPal] Capture is non-final (final_capture=false); do not fulfill remaining auth — status is partially_captured, not paid",
           );
         }
 
@@ -880,7 +939,8 @@ export class PayPalGateway extends BaseGateway {
    * objects are still accepted but log a warning — verification may fail.
    *
    * Also rejects `paypal-transmission-time` values that are unparseable or
-   * older than 15 minutes (replay protection).
+   * far in the future (clock skew). Aged transmissions soft-accept with a warn
+   * and still call PayPal verify (dedupe by `event.id` required).
    *
    * Certificate URLs are allowlisted to HTTPS hosts under `*.paypal.com` before
    * any verify API call.
@@ -997,8 +1057,12 @@ export class PayPalGateway extends BaseGateway {
     // Resolved before status mapping so CHECKOUT.ORDER.COMPLETED is only
     // treated as paid when a capture is present (not auth-only completed orders).
     const captureId = this.extractWebhookCaptureId(raw);
+    const resourceFinalCapture = this.readResourceFinalCapture(raw.resource);
     const status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
       hasCapture: Boolean(captureId),
+      ...(resourceFinalCapture !== undefined
+        ? { finalCapture: resourceFinalCapture }
+        : {}),
     });
     if (!status) {
       throw new InvalidRequestError(
@@ -1056,7 +1120,10 @@ export class PayPalGateway extends BaseGateway {
       event.currency = webhookAmount.currency_code.toUpperCase();
     }
 
-    return attachPaymentEvent(event, { computePayloadHash: true });
+    const attached = attachPaymentEvent(event, { computePayloadHash: true });
+    // Non-final CAPTURE.COMPLETED must not dual-write capture.completed (fulfillment
+    // type). Demote to payment.processing so type-only handlers match isPaidOutcome.
+    return this.demotePartialCaptureWebhookDualWrite(attached);
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1252,6 +1319,7 @@ export class PayPalGateway extends BaseGateway {
     captureId?: string | undefined;
     authorizationId?: string | undefined;
     amount?: number | undefined;
+    capturedAmount?: number | undefined;
     redirectUrl?: string | undefined;
     providerNativeStatus?: string | undefined;
     forceOutcome?: PaymentOperationOutcome | undefined;
@@ -1273,6 +1341,9 @@ export class PayPalGateway extends BaseGateway {
           ? { authorizationId: input.authorizationId }
           : {}),
         ...(input.amount !== undefined ? { amount: input.amount } : {}),
+        ...(input.capturedAmount !== undefined
+          ? { capturedAmount: input.capturedAmount }
+          : {}),
         ...(input.providerNativeStatus !== undefined
           ? { providerNativeStatus: input.providerNativeStatus }
           : {}),
@@ -1568,6 +1639,12 @@ export class PayPalGateway extends BaseGateway {
     idempotencyKey: string | undefined,
     maxLength: number,
   ): string {
+    if (idempotencyKey === undefined) {
+      // Ephemeral IDs do not protect app-level retries after crash/timeout.
+      this.logger.warn(
+        "[PayPal] No idempotencyKey provided; generated ephemeral PayPal-Request-Id. App-level retries after crash/timeout can double-mutate — prefer a stable UUID idempotencyKey on every create/capture/refund/void.",
+      );
+    }
     const requestId = idempotencyKey ?? this.runtime.randomUUID();
 
     if (requestId.length > maxLength) {
@@ -1577,6 +1654,25 @@ export class PayPalGateway extends BaseGateway {
     }
 
     return requestId;
+  }
+
+  /**
+   * Optional `webhookMaxAgeMs` on config (soft-documented; not on base interface)
+   * clamps far-future rejection. Soft path always allows aged transmissions to
+   * reach PayPal verify.
+   */
+  private getWebhookMaxAgeMs(): number {
+    const configured = (this.paypalConfig as PayPalConfig & {
+      webhookMaxAgeMs?: number;
+    }).webhookMaxAgeMs;
+    if (
+      typeof configured === "number" &&
+      Number.isFinite(configured) &&
+      configured > 0
+    ) {
+      return configured;
+    }
+    return PAYPAL_WEBHOOK_MAX_AGE_MS;
   }
 
   private static isValidWebhookId(webhookId: string): boolean {
@@ -1628,15 +1724,18 @@ export class PayPalGateway extends BaseGateway {
     }
 
     const ageMs = this.clock.nowMs() - transmissionMs;
-    if (ageMs > PAYPAL_WEBHOOK_MAX_AGE_MS) {
+    const maxAgeMs = this.getWebhookMaxAgeMs();
+
+    // Soft path: aged transmissions still proceed to PayPal signature verify so
+    // post-outage / long retries are not dropped. Merchants must dedupe event.id.
+    if (ageMs > PAYPAL_WEBHOOK_WARN_AGE_MS) {
       this.logger.warn(
-        `[PayPal] Webhook header rejected: transmission_time is older than ${PAYPAL_WEBHOOK_MAX_AGE_MS / 60_000} minutes (ageMs=${ageMs})`,
+        `[PayPal] Webhook transmission_time is aged (ageMs=${ageMs}); accepting for PayPal verify — dedupe by event.id required`,
       );
-      return false;
     }
 
-    // Reject far-future timestamps (clock skew / malformed clocks). Allow a small skew.
-    if (ageMs < -PAYPAL_WEBHOOK_MAX_AGE_MS) {
+    // Reject far-future timestamps (clock skew / malformed clocks).
+    if (ageMs < -maxAgeMs) {
       this.logger.warn(
         "[PayPal] Webhook header rejected: transmission_time is too far in the future",
       );
@@ -2197,8 +2296,11 @@ export class PayPalGateway extends BaseGateway {
 
     const mapped = statusMap[status];
     if (!mapped) {
-      this.logger.warn(`[PayPal] Unmapped refund status: ${status}`);
-      return "pending";
+      // Fail-closed: unknown refund status must not look pending-success.
+      this.logger.warn(
+        `[PayPal] Unmapped refund status: ${status} (mapped to failed)`,
+      );
+      return "failed";
     }
     return mapped;
   }
@@ -2206,7 +2308,7 @@ export class PayPalGateway extends BaseGateway {
   private mapWebhookStatus(
     eventType: string,
     resourceStatus?: string,
-    options?: { hasCapture?: boolean },
+    options?: { hasCapture?: boolean; finalCapture?: boolean },
   ): PaymentStatus | undefined {
     if (eventType === "PAYMENT.CAPTURE.REFUNDED") {
       const resourceMappedStatus = resourceStatus
@@ -2220,9 +2322,18 @@ export class PayPalGateway extends BaseGateway {
     }
 
     // Order completed without a capture (e.g. AUTHORIZE-intent) must not look paid.
-    // Prefer PAYMENT.CAPTURE.COMPLETED as the fulfillment signal.
+    // Prefer PAYMENT.CAPTURE.COMPLETED as the fulfillment signal (when final).
     if (eventType === "CHECKOUT.ORDER.COMPLETED") {
       return options?.hasCapture ? "paid" : "approved";
+    }
+
+    // Non-final capture: COMPLETED resource with final_capture=false is only a
+    // slice — partially_captured, not paid / isPaidOutcome.
+    if (eventType === "PAYMENT.CAPTURE.COMPLETED") {
+      if (options?.finalCapture === false) {
+        return "partially_captured";
+      }
+      return "paid";
     }
 
     const eventStatusMap: Record<string, PaymentStatus> = {
@@ -2232,7 +2343,6 @@ export class PayPalGateway extends BaseGateway {
       "PAYMENT.AUTHORIZATION.CAPTURED": "paid",
       "PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED": "partially_captured",
       "PAYMENT.AUTHORIZATION.VOIDED": "cancelled",
-      "PAYMENT.CAPTURE.COMPLETED": "paid",
       "PAYMENT.CAPTURE.DENIED": "failed",
       "PAYMENT.CAPTURE.DECLINED": "failed",
       "PAYMENT.CAPTURE.PENDING": "pending",
@@ -2245,13 +2355,70 @@ export class PayPalGateway extends BaseGateway {
     return eventStatusMap[eventType] ?? undefined;
   }
 
+  /**
+   * Resolve getPayment status from order + captures + authorization.
+   *
+   * Authorization `PARTIALLY_CAPTURED` wins over any capture `COMPLETED` so
+   * polling after a non-final partial does not report paid / isPaidOutcome.
+   * Multi-capture totals vs order/auth amount demote COMPLETED → partially_captured
+   * when captured sum is strictly less than the authorized/order total.
+   */
   private mapPaymentResultStatus(
     order: PayPalOrderResponse,
-    capture?: { status: string },
-    authorization?: { status: string },
+    capture?: { status: string; final_capture?: boolean },
+    authorization?: { status: string; amount?: { currency_code: string; value: string } },
+    captures?: Array<PayPalEmbeddedCapture>,
   ): PaymentStatus {
+    if (authorization) {
+      const authMapped = this.mapResourceStatus(authorization.status);
+      // Open partial auth must not be overridden by a COMPLETED capture slice.
+      if (
+        authMapped === "partially_captured" ||
+        authMapped === "cancelled" ||
+        authMapped === "failed" ||
+        authMapped === "pending"
+      ) {
+        return authMapped;
+      }
+      // Fully captured auth — still prefer refund/reversal on capture resources.
+      if (authMapped === "paid" && capture) {
+        const capMapped = this.mapResourceStatus(capture.status);
+        if (
+          capMapped === "refunded" ||
+          capMapped === "partially_refunded" ||
+          capMapped === "reversed"
+        ) {
+          return capMapped;
+        }
+        return "paid";
+      }
+      if (authMapped === "paid") {
+        return "paid";
+      }
+      // Auth still authorized/created with captures present → partial take.
+      if (
+        authMapped === "authorized" &&
+        captures &&
+        captures.length > 0
+      ) {
+        return "partially_captured";
+      }
+    }
+
     if (capture) {
-      return this.mapResourceStatus(capture.status);
+      let capMapped = this.mapResourceStatus(capture.status);
+      if (capMapped === "paid" && capture.final_capture === false) {
+        capMapped = "partially_captured";
+      }
+      // Multi-capture: COMPLETED slices that sum to less than order/auth total
+      // are not full settlement.
+      if (
+        capMapped === "paid" &&
+        this.isAggregateCapturePartial(order, authorization, captures)
+      ) {
+        return "partially_captured";
+      }
+      return capMapped;
     }
 
     if (authorization) {
@@ -2259,5 +2426,165 @@ export class PayPalGateway extends BaseGateway {
     }
 
     return this.mapStatus(order.status);
+  }
+
+  /**
+   * True when successful capture amounts sum to less than the order/auth total.
+   * Missing comparable totals → false (do not demote without money evidence).
+   */
+  private isAggregateCapturePartial(
+    order: PayPalOrderResponse,
+    authorization?: { amount?: { currency_code: string; value: string } },
+    captures?: Array<PayPalEmbeddedCapture>,
+  ): boolean {
+    if (!captures || captures.length === 0) {
+      return false;
+    }
+    const capturedSum = this.sumSuccessfulCaptureAmounts(
+      captures,
+      "get payment aggregate",
+    );
+    if (capturedSum === undefined) {
+      return false;
+    }
+    const totalMoney =
+      authorization?.amount ??
+      order.purchase_units?.[0]?.amount ??
+      order.amount;
+    if (!totalMoney) {
+      return false;
+    }
+    try {
+      const total = this.parseAmount(totalMoney, "get payment aggregate");
+      return capturedSum < total;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Sum amounts of successful captures (COMPLETED / PARTIALLY_REFUNDED / REFUNDED)
+   * in minor units then convert once — avoids last-slice-only reporting.
+   */
+  private sumSuccessfulCaptureAmounts(
+    captures: Array<PayPalEmbeddedCapture> | undefined,
+    operation: string,
+  ): number | undefined {
+    if (!captures || captures.length === 0) {
+      return undefined;
+    }
+
+    let totalMinor: bigint | undefined;
+    let currency: string | undefined;
+    let scale: number | undefined;
+
+    for (const capture of captures) {
+      const mapped = this.mapResourceStatus(capture.status);
+      if (
+        mapped !== "paid" &&
+        mapped !== "partially_refunded" &&
+        mapped !== "refunded" &&
+        mapped !== "partially_captured"
+      ) {
+        // pending/failed/voided captures do not contribute to captured total
+        continue;
+      }
+      if (!capture.amount) {
+        continue;
+      }
+      try {
+        const code = this.normalizeCurrencyCode(capture.amount.currency_code);
+        const captureScale = this.getCurrencyScale(code);
+        const parsed = money(capture.amount.value, code, {
+          rounding: "reject",
+          exponent: captureScale,
+          allowZero: true,
+          allowNegative: false,
+        });
+        const minor = sharedToMinorUnits(parsed, {
+          rounding: "reject",
+          exponent: captureScale,
+          allowZero: true,
+          allowNegative: false,
+        });
+        if (currency === undefined) {
+          currency = code;
+          scale = captureScale;
+          totalMinor = minor;
+        } else if (currency !== code) {
+          this.logger.warn(
+            `[PayPal] Mixed capture currencies on order (${currency} vs ${code}); skipping amount aggregate`,
+          );
+          return undefined;
+        } else {
+          totalMinor = (totalMinor ?? 0n) + minor;
+        }
+      } catch {
+        this.logger.warn(
+          `[PayPal] Failed to parse capture amount during ${operation}; skipping aggregate`,
+        );
+        return undefined;
+      }
+    }
+
+    if (totalMinor === undefined || currency === undefined || scale === undefined) {
+      return undefined;
+    }
+
+    return moneyToMajorNumber(
+      sharedFromMinorUnits(totalMinor, currency, {
+        rounding: "reject",
+        exponent: scale,
+        allowZero: true,
+        allowNegative: false,
+      }),
+      {
+        exponent: scale,
+        allowZero: true,
+        allowNegative: false,
+      },
+    );
+  }
+
+  private readResourceFinalCapture(
+    resource: PayPalWebhookPayload["resource"] | Record<string, unknown>,
+  ): boolean | undefined {
+    const value = (resource as { final_capture?: unknown }).final_capture;
+    return typeof value === "boolean" ? value : undefined;
+  }
+
+  /**
+   * When status is partially_captured on CAPTURE.COMPLETED, demote dual-write
+   * from capture.completed → payment.processing (align with isPaidOutcome).
+   */
+  private demotePartialCaptureWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (
+      event.status !== "partially_captured" ||
+      event.type !== "PAYMENT.CAPTURE.COMPLETED" ||
+      event.stableType !== "capture.completed" ||
+      !event.event ||
+      event.event.type !== "capture.completed" ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    // capture.completed.payment is optional in the dual-write shape; payment.processing
+    // requires Payment. Prefer the attached payment, else rebuild from the envelope.
+    const payment =
+      event.event.payment ?? paymentFromWebhookEvent(event);
+
+    return {
+      ...event,
+      stableType: "payment.processing",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "payment.processing",
+        payment,
+        provider: event.provider,
+      },
+    };
   }
 }

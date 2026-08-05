@@ -273,6 +273,19 @@ describe("trySelectFallbackGateway", () => {
     expect(decision.gateway).not.toBe("stripe");
   });
 
+  it("ROUTE-1: attemptedGateways exclusion is case-insensitive", () => {
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    const decision = trySelectFallbackGateway(
+      router,
+      { currency: "USD" },
+      eligibility,
+      { attemptedGateways: ["Stripe", "STRIPE"] },
+    );
+    expect(decision.gateway).toBe("paypal");
+  });
+
   it("throws no_alternate_gateway when every candidate was already attempted", () => {
     const eligibility = evaluateFallback({
       submissionState: "pre_submission_failure",

@@ -30,11 +30,15 @@ describe("getCurrencyExponent", () => {
     ["VND", 0],
     ["XOF", 0],
     ["ISK", 0], // ISO 4217 exponent 0
+    ["UYI", 0], // Uruguay Peso en Unidades Indexadas
     // Three-decimal currencies
     ["KWD", 3],
     ["BHD", 3],
     ["OMR", 3],
     ["JOD", 3],
+    // Four-decimal currencies
+    ["CLF", 4], // Unidad de Fomento
+    ["UYW", 4], // Unidad previsional
     // Standard two-decimal currencies
     ["SAR", 2],
     ["USD", 2],
@@ -48,6 +52,9 @@ describe("getCurrencyExponent", () => {
     ["mga", 2],
     ["kwd", 3],
     ["sar", 2],
+    ["clf", 4],
+    ["uyi", 0],
+    ["uyw", 4],
   ])("getCurrencyExponent(%s) returns %i", (currency, expected) => {
     expect(getCurrencyExponent(currency)).toBe(expected);
   });

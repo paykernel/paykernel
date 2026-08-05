@@ -41,6 +41,7 @@ export const REDIS_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "Claims use atomic Lua scripts; never get-then-set in JS.",
     "Injectable clock: now passed as script ARGV for FakeClock conformance.",
     "Bun binding does not support Cluster/Sentinel; rejects cluster config.",
+    "Multi-key Lua (record HASH + due/retry ZSET) requires keys.clusterKeys:true on Redis Cluster so hash tags co-locate KEYS; default clusterKeys:false is standalone-only honesty — Cluster without hash tags fails CROSSSLOT.",
     "Do not use Pub/Sub for webhook correctness.",
     "Offline command queue should be disabled/controlled for correctness-critical ops.",
     "Root entry does not import optional peer drivers.",

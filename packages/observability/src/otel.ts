@@ -53,6 +53,42 @@ export type CreateOpenTelemetryBridgeOptions = {
 const OTEL_STATUS_OK = 1;
 const OTEL_STATUS_ERROR = 2;
 
+/**
+ * Sanitize exceptions before OTEL `recordException`.
+ * Name (+ optional code) only — never raw message/stack (secret risk).
+ */
+function sanitizeOtelException(error: unknown): {
+  name: string;
+  code?: string;
+} {
+  if (error instanceof Error) {
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : undefined;
+    return code !== undefined
+      ? { name: error.name || "Error", code }
+      : { name: error.name || "Error" };
+  }
+  if (typeof error === "string") {
+    return { name: "Error" };
+  }
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "name" in error &&
+    typeof (error as { name?: unknown }).name === "string"
+  ) {
+    const name = (error as { name: string }).name || "Error";
+    const code =
+      "code" in error && typeof (error as { code?: unknown }).code === "string"
+        ? (error as { code: string }).code
+        : undefined;
+    return code !== undefined ? { name, code } : { name };
+  }
+  return { name: "unknown" };
+}
+
 function applyOtelSpanStatus(
   otelSpan: OpenTelemetrySpanLike,
   status: PaymentSpanStatus | undefined,
@@ -120,7 +156,8 @@ export function createOpenTelemetryBridge(
         },
         recordException(error: unknown): void {
           if (otelSpan.recordException !== undefined) {
-            otelSpan.recordException(error);
+            // Never forward raw Error (message/stack may hold secrets).
+            otelSpan.recordException(sanitizeOtelException(error));
           }
         },
       };

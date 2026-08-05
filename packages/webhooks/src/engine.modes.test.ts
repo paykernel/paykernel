@@ -61,7 +61,10 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({ outcome: "scheduled_for_retry" });
+    expect(outcome).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
     const rec = await store.get("stripe:evt_durable_fail");
     expect(rec?.status).toBe("pending");
     expect(rec?.lastError).toContain("temporary outage");
@@ -104,13 +107,89 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome).toEqual({ outcome: "scheduled_for_retry" });
+    expect(outcome).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "parked",
+    });
     expect(handlerRuns).toBe(0);
     const rec = await store.get("stripe:evt_ack");
     expect(rec?.status).toBe("pending");
     expect(rec?.payloadRef).toContain("payment.succeeded");
     // Parking claim is free vs maxAttempts handler budget.
     expect(rec?.attempts).toBe(0);
+  });
+
+  it("ackAfterClaim without envelope refuses before claim (invalid_webhook)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack_no_env",
+      payloadHash: "h",
+    });
+
+    expect(outcome).toEqual({
+      outcome: "invalid_webhook",
+      reason:
+        "envelope is required for ackAfterClaim (durable workers need a payloadRef)",
+    });
+    expect(store.size).toBe(0);
+  });
+
+  it("ackAfterClaim with empty-string envelope refuses before claim", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack_empty",
+      payloadHash: "h",
+      envelope: "",
+    });
+
+    expect(outcome.outcome).toBe("invalid_webhook");
+    expect(store.size).toBe(0);
+  });
+
+  it("ackAfterClaim redacts secret keys in object envelope payloadRef", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack_redact",
+      payloadHash: "h",
+      envelope: {
+        type: "payment.succeeded",
+        secret_token: "super-secret-token",
+        signature: "sig-value",
+        id: "evt_ack_redact",
+      },
+    });
+
+    expect(outcome).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "parked",
+    });
+    const rec = await store.get("stripe:evt_ack_redact");
+    expect(rec?.payloadRef).toBeDefined();
+    expect(rec?.payloadRef).not.toContain("super-secret-token");
+    expect(rec?.payloadRef).not.toContain("sig-value");
+    expect(rec?.payloadRef).toContain("[REDACTED]");
+    expect(rec?.payloadRef).toContain("evt_ack_redact");
   });
 
   it("ackAfterClaim with mode inline throws at construction", () => {
@@ -195,7 +274,10 @@ describe("modes: inline vs durable_retry (A6)", () => {
         throw new Error("x");
       },
     });
-    expect(o2.outcome).toBe("scheduled_for_retry");
+    expect(o2).toEqual({
+      outcome: "scheduled_for_retry",
+      reason: "handler_retry",
+    });
   });
 });
 
@@ -402,6 +484,56 @@ describe("leaseMs / defaultLeaseMs validation", () => {
         store,
         mode: "inline",
         defaultLeaseMs: 30_000,
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe("maxAttempts / defaultRetryAfterMs validation", () => {
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY] as const)(
+    "maxAttempts=%s throws at construction",
+    (maxAttempts) => {
+      const store = createMemoryWebhookInboxStore();
+      expect(() =>
+        createWebhookInboxEngine({
+          store,
+          mode: "durable_retry",
+          maxAttempts,
+        }),
+      ).toThrow(/maxAttempts/);
+    },
+  );
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY] as const)(
+    "defaultRetryAfterMs=%s throws at construction",
+    (defaultRetryAfterMs) => {
+      const store = createMemoryWebhookInboxStore();
+      expect(() =>
+        createWebhookInboxEngine({
+          store,
+          mode: "durable_retry",
+          defaultRetryAfterMs,
+        }),
+      ).toThrow(/defaultRetryAfterMs/);
+    },
+  );
+
+  it("accepts maxAttempts>=1 integer and defaultRetryAfterMs>=0", () => {
+    const store = createMemoryWebhookInboxStore();
+    expect(() =>
+      createWebhookInboxEngine({
+        store,
+        mode: "durable_retry",
+        maxAttempts: 1,
+        defaultRetryAfterMs: 0,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      createWebhookInboxEngine({
+        store,
+        mode: "durable_retry",
+        maxAttempts: 10,
+        defaultRetryAfterMs: 5_000,
       }),
     ).not.toThrow();
   });

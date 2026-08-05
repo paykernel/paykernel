@@ -233,8 +233,9 @@ After reclaim, the **old** worker’s `complete`/`fail`/`renew` with the pre-rec
 
 ### `durable_retry`
 
-- Retryable handler failure → `store.fail` + `scheduled_for_retry` (row becomes pending after delay).
-- `ackAfterClaim: true`: returns `scheduled_for_retry` after durable claim/release **without** running the handler. Parking claim does not consume `maxAttempts` (`restoreAttempt`). Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work.
+- Retryable handler failure → `store.fail` + `scheduled_for_retry { reason: "handler_retry" }` (row becomes pending after delay).
+- `ackAfterClaim: true`: returns `scheduled_for_retry { reason: "parked" }` after durable claim/release **without** running the handler. Requires non-empty `envelope` (else `invalid_webhook` before claim). Parking claim does not consume `maxAttempts` (`restoreAttempt`). Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work.
+- Claim backoff (`not_available`) → `scheduled_for_retry { reason: "not_available" }`. Adapters should prefer **5xx** so the provider redelivers when no durable scheduler owns the row (do not blind-ACK 200).
 - Max **handler** attempts / default `NonRetryableHandlerError` → dead letter → `handler_failed { retryable: false }`. `{ deadLetter: false }` leaves pending until `maxAttempts` (prefer default).
 - `processRetryable` is **only** valid on `durable_retry` engines (throws if the engine was built with `inline`).
 

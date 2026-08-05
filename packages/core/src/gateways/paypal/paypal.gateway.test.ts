@@ -258,16 +258,26 @@ describe('PayPalGateway', () => {
             expect(fetchCount).toBe(0);
         });
 
-        it('should reject aged transmission_time without calling PayPal', async () => {
+        it('should soft-accept aged transmission_time and still call PayPal verify', async () => {
             const warnings: string[] = [];
             const warnGateway = new PayPalGateway(
                 PAYPAL_TEST_CONFIG,
                 hooksManager,
                 captureLogger(warnings),
             );
-            let fetchCount = 0;
-            globalThis.fetch = mock(async () => {
-                fetchCount++;
+            let verifyCalled = false;
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+                if (url.includes('verify-webhook-signature')) {
+                    verifyCalled = true;
+                    return createMockResponse({ verification_status: 'SUCCESS' });
+                }
                 return createMockResponse({});
             }) as unknown as typeof fetch;
 
@@ -275,15 +285,15 @@ describe('PayPalGateway', () => {
                 { id: 'event-123' },
                 {
                     ...validWebhookHeaders(),
-                    // Older than 15 minutes
+                    // Older than 15 minutes — soft path still verifies (post-outage retries)
                     'paypal-transmission-time': new Date(Date.now() - 16 * 60 * 1000).toISOString(),
                 }
             );
 
-            expect(result).toBe(false);
-            expect(fetchCount).toBe(0);
+            expect(result).toBe(true);
+            expect(verifyCalled).toBe(true);
             expect(warnings.some((message) =>
-                message.includes('transmission_time') && message.includes('older'),
+                message.includes('transmission_time') && message.includes('aged'),
             )).toBe(true);
         });
 
@@ -1230,6 +1240,64 @@ describe('PayPalGateway', () => {
                 status: event.status,
                 rawResponse: {},
             })).toBe(false);
+        });
+
+        it('PAYMENT.CAPTURE.COMPLETED with final_capture false → partially_captured (PAYPAL-3)', () => {
+            const payload = {
+                id: 'WH-capture-partial-final',
+                event_type: 'PAYMENT.CAPTURE.COMPLETED',
+                create_time: '2024-06-15T14:30:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'capture-non-final',
+                    status: 'COMPLETED',
+                    final_capture: false,
+                    amount: {
+                        currency_code: 'USD',
+                        value: '20.00',
+                    },
+                    custom_id: 'internal_partial_cap',
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.type).toBe('PAYMENT.CAPTURE.COMPLETED');
+            expect(event.status).toBe('partially_captured');
+            expect(event.amount).toBe(20);
+            // Dual-write demoted so type-only fulfillment does not over-ship
+            expect(event.stableType).toBe('payment.processing');
+            expect(event.stableType).not.toBe('capture.completed');
+            expect(event.event?.type).toBe('payment.processing');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'capture-non-final',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('PAYMENT.CAPTURE.COMPLETED with final_capture true stays paid', () => {
+            const payload = {
+                id: 'WH-capture-final',
+                event_type: 'PAYMENT.CAPTURE.COMPLETED',
+                create_time: '2024-06-15T14:30:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'capture-final',
+                    status: 'COMPLETED',
+                    final_capture: true,
+                    amount: {
+                        currency_code: 'USD',
+                        value: '99.99',
+                    },
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('paid');
+            expect(event.stableType).toBe('capture.completed');
         });
 
         it('Phase 7 dual-write: refund events → refund.*', () => {
@@ -2307,8 +2375,11 @@ describe('PayPalGateway', () => {
             expect(result.gatewayId).toBe('CAPTURE-AUTH');
             expect(result.captureId).toBe('CAPTURE-AUTH');
             expect(result.authorizationId).toBe('AUTH-123');
-            expect(result.status).toBe('paid');
+            // Non-final partial capture is not full settlement (PAYPAL-1)
+            expect(result.status).toBe('partially_captured');
             expect(result.amount).toBe(20);
+            expect(result.outcome).toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
         });
 
         it('should default partial authorization captures to final_capture false', async () => {
@@ -2375,10 +2446,11 @@ describe('PayPalGateway', () => {
                         currency_code: 'USD',
                         value: '10.00',
                     },
+                    final_capture: true,
                 });
             }) as unknown as typeof fetch;
 
-            await gateway.capturePayment({
+            const result = await gateway.capturePayment({
                 gatewayPaymentId: 'AUTH-PARTIAL-FINAL',
                 amount: 10,
                 currency: 'USD',
@@ -2393,6 +2465,8 @@ describe('PayPalGateway', () => {
                 },
                 final_capture: true,
             });
+            expect(result.status).toBe('paid');
+            expect(isPaidOutcome(result)).toBe(true);
         });
 
         it('should reject amount on order captures because PayPal only supports partial authorization captures', async () => {
@@ -2470,10 +2544,11 @@ describe('PayPalGateway', () => {
                         currency_code: 'USD',
                         value: '25.00',
                     },
+                    final_capture: false,
                 });
             }) as unknown as typeof fetch;
 
-            await gateway.capturePayment({
+            const result = await gateway.capturePayment({
                 gatewayPaymentId: 'AUTH-789',
                 amount: 25,
                 currency: 'USD',
@@ -2488,6 +2563,8 @@ describe('PayPalGateway', () => {
                 },
                 final_capture: false,
             });
+            expect(result.status).toBe('partially_captured');
+            expect(isPaidOutcome(result)).toBe(false);
         });
 
         it('should authorize an approved AUTHORIZE-intent order and return authorization ID', async () => {
@@ -2718,6 +2795,31 @@ describe('PayPalGateway', () => {
             expect(result.status).toBe('failed');
             expect(result.outcome).toBe('failed');
             expect(result.success).toBe(false);
+        });
+
+        it('should fail-closed on unmapped refund statuses (not soft pending success)', async () => {
+            const warnings: string[] = [];
+            const warnGateway = new PayPalGateway(
+                PAYPAL_TEST_CONFIG,
+                hooksManager,
+                captureLogger(warnings),
+            );
+
+            globalThis.fetch = createMockFetch({
+                id: 'REFUND-UNKNOWN',
+                status: 'WEIRD_NEW_STATUS',
+            });
+
+            const result = await warnGateway.refundPayment({
+                gatewayPaymentId: 'CAPTURE-123',
+            });
+
+            expect(result.status).toBe('failed');
+            expect(result.outcome).toBe('failed');
+            expect(result.success).toBe(false);
+            expect(warnings.some((message) =>
+                message.includes('Unmapped refund status') && message.includes('failed'),
+            )).toBe(true);
         });
 
         it('should clarify that refunds need a capture ID when the resource is not found', async () => {
@@ -3311,7 +3413,7 @@ describe('PayPalGateway', () => {
             expect(afterOperation).toBe('getPayment');
         });
 
-        it('should prefer the last capture when getPayment returns multiple captures', async () => {
+        it('should prefer the last capture id and aggregate multi-capture amounts', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'ORDER-MULTI-CAP',
                 status: 'COMPLETED',
@@ -3347,9 +3449,96 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.getPayment({ gatewayPaymentId: 'ORDER-MULTI-CAP' });
 
+            // Last capture for refund target; amount is sum of successful captures (PAYPAL-5)
             expect(result.captureId).toBe('CAP-NEW');
-            expect(result.amount).toBe(60);
+            expect(result.amount).toBe(100);
+            expect(result.capturedAmount).toBe(100);
             expect(result.status).toBe('paid');
+            expect(isPaidOutcome(result)).toBe(true);
+        });
+
+        it('should not prefer COMPLETED capture over PARTIALLY_CAPTURED authorization (PAYPAL-2)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-PARTIAL-AUTH-GET',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-SLICE',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '25.00',
+                                    },
+                                    final_capture: false,
+                                },
+                            ],
+                            authorizations: [
+                                {
+                                    id: 'AUTH-OPEN',
+                                    status: 'PARTIALLY_CAPTURED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '100.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-PARTIAL-AUTH-GET',
+            });
+
+            expect(result.status).toBe('partially_captured');
+            expect(result.captureId).toBe('CAP-SLICE');
+            expect(result.authorizationId).toBe('AUTH-OPEN');
+            expect(result.amount).toBe(25);
+            expect(result.capturedAmount).toBe(25);
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('should map multi-capture under order total to partially_captured', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-UNDER-TOTAL',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '100.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-A',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-UNDER-TOTAL',
+            });
+
+            expect(result.status).toBe('partially_captured');
+            expect(result.amount).toBe(40);
+            expect(isPaidOutcome(result)).toBe(false);
         });
 
         it('should retrieve capture details when gatewayPaymentId is a PayPal capture ID', async () => {

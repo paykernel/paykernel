@@ -83,7 +83,7 @@ Independent re-verification. No implementer assertion accepted without source, t
 | --- | --- |
 | Test | `engine.modes.test.ts` (A6 suite) |
 | Construction | `mode: "inline" \| "durable_retry"` required; invalid mode throws at runtime; `ackAfterClaim` only valid with `durable_retry` |
-| Outcomes | inline throw → `handler_failed { retryable: true }`; durable throw → `scheduled_for_retry` |
+| Outcomes | inline throw → `handler_failed { retryable: true }`; durable throw → `scheduled_for_retry { reason: "handler_retry" }` |
 | No mix | `processRetryable` throws on inline engines; per-engine mode fixed; same store, different engines keep distinct failure outcomes |
 | Docs | `webhook-inbox.md`, `inbox-engine.md`, README document explicit modes |
 
@@ -113,17 +113,19 @@ See A6. Modes fixed at construction; never switched inside `process*`. Runtime g
 ### 10.4 `WebhookProcessingOutcome` exact set — **PASS**
 
 ```ts
+type ScheduledForRetryReason = "parked" | "handler_retry" | "not_available";
+
 type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry" }
+  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
 ```
 
-Matches roadmap §10.4 discriminant set. Optional `reason` on `invalid_webhook` is additive (does not hardcode HTTP). No Express/Hono status codes in package.
+Matches roadmap §10.4 discriminant set with additive `scheduled_for_retry.reason` so adapters can avoid silent 200 when no worker will process. Optional `reason` on `invalid_webhook` is additive (does not hardcode HTTP). No Express/Hono status codes in package.
 
 ### 10.5 Lease renewal fails when stale — **PASS**
 

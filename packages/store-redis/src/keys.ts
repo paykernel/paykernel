@@ -24,7 +24,10 @@ export type KeyOptions = {
   tenantId?: string;
   /**
    * When true, wrap the tenant (or `_`) in `{}` hash tags for Redis Cluster
-   * co-location of record + index keys. Bun binding must reject this.
+   * co-location of record + index keys so multi-key Lua (record + ZSET index)
+   * stays single-slot. **Required on Redis Cluster** for webhook/recon mutators;
+   * default `false` is correct for standalone Redis/Valkey only.
+   * Bun binding must reject this (no Cluster support).
    */
   clusterKeys?: boolean;
 };
@@ -131,6 +134,30 @@ export function recordKey(
 ): string {
   assertLogicalKey(logicalKey);
   return joinKey([...baseParts(design), store, logicalKey]);
+}
+
+/**
+ * Extract the logical key from a full Redis record key produced by {@link recordKey}.
+ *
+ * Composite logical keys (e.g. webhook `gateway:providerEventId`) contain colons;
+ * never use `split(':').pop()` — that leaves orphan ZSET members on deleteExpired.
+ *
+ * Returns `undefined` when `redisKey` does not match this design + store segment.
+ */
+export function logicalKeyFromRecordKey(
+  design: ResolvedKeyDesign,
+  store: StoreSegment,
+  redisKey: string,
+): string | undefined {
+  const prefix = joinKey([...baseParts(design), store]) + ":";
+  if (!redisKey.startsWith(prefix)) return undefined;
+  const logical = redisKey.slice(prefix.length);
+  if (logical.length === 0) return undefined;
+  // Index keys share the store segment but end with fixed names, not logical keys.
+  if (logical === "retry" || logical === "due" || logical === "retain") {
+    return undefined;
+  }
+  return logical;
 }
 
 /** ZSET of webhook keys scored by available_ms (retry/pending index). */

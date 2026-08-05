@@ -328,7 +328,7 @@ export class PaymobGateway extends BaseGateway {
     super(config, hooks, logger, PAYMOB_CAPABILITIES, runtime);
     this.paymobConfig = config;
     this.baseUrl = this.resolveBaseUrl(config);
-    this.warnIfIdempotencyStoreMissing();
+    this.warnIfIdempotencyStoreUnsafe();
     this.warnIfHmacSecretMissing();
   }
 
@@ -350,21 +350,30 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Paymob's in-memory idempotency cache is per-isolate. On serverless or
-   * Cloudflare Workers, memory is wiped frequently and not shared across
-   * isolates, so duplicate-protection is effectively lost without an external
-   * store. Emit a loud warning when running in such an environment without one.
+   * Capture/refund/void dedupe depends on a shared store. Warn when:
+   * - No store in serverless/edge (in-memory cache is per-isolate), or
+   * - Store is present but lacks atomic `reserve()` (TOCTOU get-then-set race).
    */
-  private warnIfIdempotencyStoreMissing(): void {
-    if (this.paymobConfig.idempotencyStore) {
+  private warnIfIdempotencyStoreUnsafe(): void {
+    const store = this.paymobConfig.idempotencyStore;
+    if (!store) {
+      if (this.isLikelyServerlessEnvironment()) {
+        this.logger.warn(
+          "[Paymob] No idempotencyStore configured in a serverless/edge environment. " +
+            "The in-memory idempotency cache is per-isolate and wiped frequently, so it " +
+            "provides almost no protection against duplicate mutations. Configure " +
+            "paymob.idempotencyStore with Redis, a database, or another shared store.",
+        );
+      }
       return;
     }
-    if (this.isLikelyServerlessEnvironment()) {
+
+    if (!store.reserve) {
       this.logger.warn(
-        "[Paymob] No idempotencyStore configured in a serverless/edge environment. " +
-          "The in-memory idempotency cache is per-isolate and wiped frequently, so it " +
-          "provides almost no protection against duplicate mutations. Configure " +
-          "paymob.idempotencyStore with Redis, a database, or another shared store.",
+        "[Paymob] idempotencyStore does not implement atomic reserve(). " +
+          "Concurrent workers with the same key can both pass get-then-set and run " +
+          "the mutation twice. Provide a store with an atomic reserve() " +
+          "(Redis SET NX, SQL unique constraint, etc.).",
       );
     }
   }
@@ -551,19 +560,14 @@ export class PaymobGateway extends BaseGateway {
     params: PaymobCreatePaymentParams,
   ): Promise<GatewayPaymentResult> {
     const currency = this.resolveCurrency(params.currency);
-    // Match Intention resolvePaymentMethods: auth prefers authIntegrationId,
-    // then falls back to integrationId (with warn) when capture:false.
+    // Match Intention resolvePaymentMethods: auth requires authIntegrationId
+    // (or per-request method override). Never fall back to sale integrationId
+    // for capture:false — that can settle as a sale integration.
     let integrationId = params.paymobIntegrationId;
     if (integrationId === undefined || integrationId === null) {
       if (params.capture === false) {
         if (this.paymobConfig.authIntegrationId !== undefined && this.paymobConfig.authIntegrationId !== null) {
           integrationId = this.paymobConfig.authIntegrationId;
-        } else if (this.paymobConfig.integrationId !== undefined && this.paymobConfig.integrationId !== null) {
-          this.logger.warn(
-            "[Paymob] capture:false without authIntegrationId — using integrationId for legacy checkout. " +
-              "A dedicated authIntegrationId is preferred for auth/capture flows.",
-          );
-          integrationId = this.paymobConfig.integrationId;
         }
       } else {
         integrationId = this.paymobConfig.integrationId;
@@ -572,6 +576,13 @@ export class PaymobGateway extends BaseGateway {
     const iframeId = params.paymobIframeId ?? this.paymobConfig.iframeId;
 
     if (integrationId === undefined || integrationId === null) {
+      if (params.capture === false) {
+        throw new GatewayApiError(
+          "Paymob capture:false requires paymobIntegrationId, paymobPaymentMethods, or paymob.authIntegrationId because Paymob auth/capture is integration-driven (sale integrationId is not used as a silent fallback)",
+          "paymob",
+          { config: "missing_auth_integration_id" },
+        );
+      }
       throw new GatewayApiError(
         "Paymob legacy checkout requires integrationId",
         "paymob",
@@ -754,11 +765,13 @@ export class PaymobGateway extends BaseGateway {
           "Paymob Capture API response is missing success",
           data,
         );
-        const capturedAmountCents = data.captured_amount ?? data.amount_cents;
+        // Prefer provider cumulative `captured_amount`. When omitted, sum this-op
+        // amount_cents onto inquiry-known prior captured total (multi-partial).
+        const thisOpCapturedCents = data.captured_amount ?? data.amount_cents;
         const currency = this.resolveCurrency(data.currency ?? resolvedAmount.currency);
         const cumulativeCapturedAmountCents = data.captured_amount ??
-          (capturedAmountCents !== undefined
-            ? (resolvedAmount.capturedAmountCents ?? 0) + capturedAmountCents
+          (thisOpCapturedCents !== undefined
+            ? (resolvedAmount.capturedAmountCents ?? 0) + thisOpCapturedCents
             : resolvedAmount.capturedAmountCents);
         const status = this.mapCaptureStatus(data, success, {
           transactionAmountCents: resolvedAmount.transactionAmountCents,
@@ -774,10 +787,11 @@ export class PaymobGateway extends BaseGateway {
             gatewayId,
             status,
             rawResponse: data,
-            ...(capturedAmountCents !== undefined
+            // Ledger/inventory must use cumulative captured total, not this-op only.
+            ...(cumulativeCapturedAmountCents !== undefined
               ? {
                   capturedAmount: this.fromMinorUnits(
-                    capturedAmountCents,
+                    cumulativeCapturedAmountCents,
                     currency,
                   ),
                 }
@@ -1102,6 +1116,9 @@ export class PaymobGateway extends BaseGateway {
     const raw = payload as PaymobWebhookPayload;
     const rawObj = normalized.rawObj;
     const obj = normalized.obj;
+    // HMAC does not cover is_captured / captured_amount / refunded_amount_cents /
+    // is_refund / is_void — never drive paid/refund/void from unsigned slots.
+    const statusSource = this.sanitizeWebhookTransactionForStatus(obj);
 
     // Extract paymentId from extras (payment_key_claims.extra) or fallback to merchant_order_id
     const paymentKeyClaims = this.recordOrUndefined(rawObj.payment_key_claims);
@@ -1121,7 +1138,7 @@ export class PaymobGateway extends BaseGateway {
       gateway: "paymob",
       paymentId,
       gatewayPaymentId: String(obj.id),
-      status: this.mapTransactionStatus(obj),
+      status: this.mapTransactionStatus(statusSource),
       amount: this.fromMinorUnits(obj.amount_cents, obj.currency),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
       currency: obj.currency.toUpperCase(),
@@ -1131,7 +1148,7 @@ export class PaymobGateway extends BaseGateway {
 
     return attachPaymentEvent(legacy, {
       computePayloadHash: true,
-      mapContext: this.paymobMapContextFromTransaction(obj),
+      mapContext: this.paymobMapContextFromTransaction(statusSource),
     });
   }
 
@@ -1159,6 +1176,9 @@ export class PaymobGateway extends BaseGateway {
     if (amountCents === undefined) {
       throw new InvalidWebhookError("Invalid Paymob redirection callback amount_cents");
     }
+    // Redirect HMAC covers the same signed flag set as processed callbacks.
+    // Do not copy unsigned is_captured / captured_amount / refunded_amount_cents
+    // (PAYMOB-5 fail-closed) — use inquiry for partial capture/refund money truth.
     const statusData: PaymobTransactionResponse = { amount_cents: amountCents };
     this.assignOptionalBoolean(statusData, "success", payload.success);
     this.assignOptionalBoolean(statusData, "pending", payload.pending);
@@ -1168,6 +1188,7 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(statusData, "is_refunded", payload.is_refunded);
     this.assignOptionalBoolean(statusData, "is_auth", payload.is_auth);
     this.assignOptionalBoolean(statusData, "is_capture", payload.is_capture);
+    const statusSource = this.sanitizeWebhookTransactionForStatus(statusData);
 
     // type defaults to TRANSACTION_RESPONSE so callers can distinguish redirect/response
     // callbacks from processed TRANSACTION webhooks. Dual-write demotes settlement arms
@@ -1178,7 +1199,7 @@ export class PaymobGateway extends BaseGateway {
       gateway: "paymob",
       paymentId: this.stringOrUndefined(payload.merchant_order_id),
       gatewayPaymentId: String(payload.id),
-      status: this.mapTransactionStatus(statusData),
+      status: this.mapTransactionStatus(statusSource),
       amount: this.fromMinorUnits(amountCents, payload.currency),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
       currency: payload.currency.toUpperCase(),
@@ -1188,8 +1209,54 @@ export class PaymobGateway extends BaseGateway {
 
     return attachPaymentEvent(legacy, {
       computePayloadHash: true,
-      mapContext: this.paymobMapContextFromTransaction(statusData),
+      mapContext: this.paymobMapContextFromTransaction(statusSource),
     });
+  }
+
+  /**
+   * Strip webhook fields that are **not** covered by Paymob HMAC_FIELDS before
+   * status mapping. Documented HMAC keys include is_auth, is_capture, is_refunded,
+   * is_voided, success, pending, amount_cents — not is_captured, captured_amount,
+   * refunded_amount_cents, is_refund, or is_void.
+   *
+   * is_refund / is_void are only HMAC-covered as aliases when is_refunded /
+   * is_voided are absent (`readHmacField`). When both are present, only the
+   * signed current-state flag is trusted.
+   *
+   * refunded_amount_cents may refine partial vs full **only** when a signed
+   * refund flag already establishes refund (demotion is fail-closed-safer than
+   * upgrading paid→refunded from an unsigned amount alone).
+   *
+   * @see https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac
+   */
+  private sanitizeWebhookTransactionForStatus(
+    data: PaymobTransactionResponse,
+  ): PaymobTransactionResponse {
+    const out: PaymobTransactionResponse = { ...data };
+
+    // Never covered by Paymob transaction HMAC.
+    delete out.is_captured;
+    delete out.captured_amount;
+
+    // Drop action aliases when current-state flags are present (HMAC used the latter).
+    if (out.is_refunded !== undefined) {
+      delete out.is_refund;
+    }
+    if (out.is_voided !== undefined) {
+      delete out.is_void;
+    }
+
+    // Amount-only refund upgrades are unsigned — require a signed refund signal.
+    const signedRefund =
+      out.is_refunded === true ||
+      (out.is_refunded === undefined &&
+        out.is_refund === true &&
+        out.success === true);
+    if (!signedRefund) {
+      delete out.refunded_amount_cents;
+    }
+
+    return out;
   }
 
   /**
@@ -1565,7 +1632,8 @@ export class PaymobGateway extends BaseGateway {
     if (data.pending) return "pending";
     if (data.is_voided === true || (data.success === true && data.is_void === true)) return "cancelled";
 
-    // Explicit refund flags, or refunded_amount_cents alone (some Paymob payloads omit is_refunded).
+    // Explicit refund flags, or refunded_amount_cents alone (API/inquiry path; webhooks
+    // sanitize so amount-only upgrades do not apply without a signed refund flag).
     // When captured_amount > 0 (partial capture), completeness is vs captured total — not auth amount_cents.
     // Full refund of captured amount => refunded even if captured < amount_cents.
     if (
@@ -1585,10 +1653,21 @@ export class PaymobGateway extends BaseGateway {
       ) {
         return "partially_refunded";
       }
+      // PAYMOB-6: is_refunded current-state without a positive refund amount is an
+      // incomplete money snapshot — do not fail-open as full `refunded`.
+      // is_refund action + success remains `refunded` (action outcome; amount_cents is HMAC-covered).
+      if (
+        data.is_refunded === true &&
+        !(data.success === true && data.is_refund === true) &&
+        !(data.refunded_amount_cents !== undefined && data.refunded_amount_cents > 0)
+      ) {
+        return "refund_completed";
+      }
       return "refunded";
     }
 
     // Capture amounts before auth-only: success + captured_amount > 0 is paid or partially_captured.
+    // (Webhook path strips unsigned captured_amount / is_captured; API inquiry keeps them.)
     if (data.success && data.captured_amount !== undefined && data.captured_amount > 0) {
       if (
         data.amount_cents !== undefined &&
@@ -1675,6 +1754,10 @@ export class PaymobGateway extends BaseGateway {
     }
     // Partial capture is open money — not outcome-succeeded (type dual-write uses processing).
     if (status === "partially_captured") {
+      return "requires_action";
+    }
+    // Incomplete refund money snapshot — inquire before treating as full reverse.
+    if (status === "refund_completed") {
       return "requires_action";
     }
     // Refunds may still be operation-succeeded without success flag; never isPaidOutcome.
@@ -1905,25 +1988,14 @@ export class PaymobGateway extends BaseGateway {
     }
 
     if (params.capture === false) {
-      // Preferred: dedicated auth/capture integration.
+      // Auth/capture is integration-driven. Never fall back to sale integrationId —
+      // a sale integration can settle immediately despite is_auth/payment_type AUTH.
       if (this.paymobConfig.authIntegrationId !== undefined && this.paymobConfig.authIntegrationId !== null) {
         return [this.normalizePaymentMethod(this.paymobConfig.authIntegrationId)];
       }
 
-      // Residual: fall back to sale integrationId with is_auth/payment_type AUTH
-      // already set on the Intention body. Warn so merchants configure a dedicated
-      // auth integration when available.
-      if (this.paymobConfig.integrationId !== undefined && this.paymobConfig.integrationId !== null) {
-        this.logger.warn(
-          "[Paymob] capture:false without authIntegrationId — using integrationId with " +
-            "is_auth:true and payment_type AUTH. A dedicated authIntegrationId is preferred " +
-            "for auth/capture flows.",
-        );
-        return [this.normalizePaymentMethod(this.paymobConfig.integrationId)];
-      }
-
       throw new GatewayApiError(
-        "Paymob capture:false requires paymobIntegrationId, paymobPaymentMethods, paymob.authIntegrationId, or paymob.integrationId because Paymob auth/capture is integration-driven",
+        "Paymob capture:false requires paymobIntegrationId, paymobPaymentMethods, or paymob.authIntegrationId because Paymob auth/capture is integration-driven (sale integrationId is not used as a silent fallback)",
         "paymob",
         { config: "missing_auth_integration_id" },
       );

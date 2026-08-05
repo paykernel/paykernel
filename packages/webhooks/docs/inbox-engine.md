@@ -23,21 +23,27 @@ Verification/normalization is **injected** (`processWithVerifier` or `PaymentCli
 | Mode | Fixed at construction | On handler failure |
 | --- | --- | --- |
 | `inline` | yes | `handler_failed { retryable }` |
-| `durable_retry` | yes | `scheduled_for_retry` if retryable; else `handler_failed` |
-| `durable_retry` + `ackAfterClaim` | yes | N/A — handler deferred to `processRetryable` |
+| `durable_retry` | yes | `scheduled_for_retry { reason: "handler_retry" }` if retryable; else `handler_failed` |
+| `durable_retry` + `ackAfterClaim` | yes | N/A — parks with `scheduled_for_retry { reason: "parked" }`; requires `envelope`; worker via `processRetryable` |
 
 Modes are never mixed implicitly inside `process*`. `processRetryable` throws on `inline` engines.
 
 ## Outcomes (10.4)
 
-Outcomes are framework-agnostic. **Silent ACK of failed work is forbidden.** Map outcomes to HTTP only in your adapter.
+Outcomes are framework-agnostic. **Silent ACK of failed work is forbidden.** Map outcomes to HTTP only in your adapter — and **always read `scheduled_for_retry.reason`**:
+
+| `reason` | Meaning | Safe 200? |
+| --- | --- | --- |
+| `parked` | `ackAfterClaim` released for worker | Only if `processRetryable` worker is guaranteed |
+| `handler_retry` | Handler threw; fail recorded with backoff | Yes with durable worker; else 5xx |
+| `not_available` | Claim backoff; no handler ran | Prefer **5xx** (provider redelivery) |
 
 Store claim `duplicate_failed` → `handler_failed { retryable: false }`.
-Store claim `not_available` (pending, `availableAt` in future) → `scheduled_for_retry` (no attempt burn).
+Store claim `not_available` (pending, `availableAt` in future) → `scheduled_for_retry { reason: "not_available" }` (no attempt burn).
 
 ## Lean record vs 10.2 fields
 
-See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. The engine **does not** force-redact `envelope` before `JSON.stringify` — use core `toPersistedPaymentEventEnvelope` (or strip secrets) before process.
+See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. Object envelopes are force-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`; still prefer `toPersistedPaymentEventEnvelope` so raw never enters.
 
 ## Crash boundaries (10.6)
 

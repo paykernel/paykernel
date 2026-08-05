@@ -20,6 +20,19 @@ describe("deriveWebhookEventKey", () => {
     expect(() => deriveWebhookEventKey("stripe", "")).toThrow(/providerEventId/);
     expect(() => deriveWebhookEventKey("stripe", "  ")).toThrow(/providerEventId/);
   });
+
+  it("rejects gateway containing colon (key collision)", () => {
+    expect(() => deriveWebhookEventKey("a:b", "c")).toThrow(/colon|separator|:/i);
+    expect(() => deriveWebhookEventKey("stripe:live", "evt_1")).toThrow(
+      /colon|separator|:/i,
+    );
+    // a:b + c must not equal a + b:c
+    expect(() => deriveWebhookEventKey("a:b", "c")).toThrow();
+  });
+
+  it("allows colon in providerEventId only", () => {
+    expect(deriveWebhookEventKey("gw", "a:b:c")).toBe("gw:a:b:c");
+  });
 });
 
 describe("parseWebhookEventKey", () => {

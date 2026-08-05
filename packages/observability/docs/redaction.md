@@ -94,8 +94,8 @@ Still redacted by substring patterns (unless exact allow-list hit): `secret`, `t
 ## What is not redacted
 
 - Free-form **event name** strings on `emit` (same residual as log **messages** — do not put secrets in the event string).
-- Metric attribute bags and span attributes are **not** auto-redacted — callers must only set non-sensitive primitives (see [metrics.md](./metrics.md), [opentelemetry.md](./opentelemetry.md)).
-- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set) to avoid secret-bearing exception text.
+- Metric attribute bags and span attributes are **not** auto-redacted — callers must only set non-sensitive primitives (see [metrics.md](./metrics.md), [opentelemetry.md](./opentelemetry.md)). “Secrets never by default” applies to **structured telemetry bags** via redacting sinks, not to free-form metric/span attribute values you set yourself.
+- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set). Span `recordException` is sanitized to name/code only so raw exception text never reaches OTEL exporters.
 
 ## Double-wrapping
 

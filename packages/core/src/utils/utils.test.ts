@@ -9,6 +9,7 @@ import {
   InMemoryIdempotencyStore,
   fingerprintParams,
 } from "./idempotency";
+import { money } from "./money";
 
 describe("withRetry", () => {
   const fastConfig = { baseDelayMs: 0, maxDelayMs: 0 };
@@ -359,6 +360,33 @@ describe("redact", () => {
     expect(out.cardNumber).toBe("[REDACTED]");
     expect(out.secretToken).toBe("[REDACTED]");
   });
+
+  it("redacts banking / government identifier keys (iban, bank, ssn, pin)", () => {
+    const out = redact({
+      iban: "DE89370400440532013000",
+      bankAccount: "12345678",
+      bankCode: "1100000",
+      ssn: "123-45-6789",
+      pin: "1234",
+      pinCode: "9999",
+      // Operational ids stay visible
+      refundId: "re_1",
+      customerId: "cus_1",
+      amount: 10.5,
+      currency: "SAR",
+    }) as Record<string, unknown>;
+
+    expect(out.iban).toBe("[REDACTED]");
+    expect(out.bankAccount).toBe("[REDACTED]");
+    expect(out.bankCode).toBe("[REDACTED]");
+    expect(out.ssn).toBe("[REDACTED]");
+    expect(out.pin).toBe("[REDACTED]");
+    expect(out.pinCode).toBe("[REDACTED]");
+    expect(out.refundId).toBe("re_1");
+    expect(out.customerId).toBe("cus_1");
+    expect(out.amount).toBe(10.5);
+    expect(out.currency).toBe("SAR");
+  });
 });
 
 describe("createRedactingLogger", () => {
@@ -410,6 +438,89 @@ describe("InMemoryIdempotencyStore", () => {
     expect(store.get("k999")).toBeDefined();
     expect(store.get("k0")).toBeUndefined();
   });
+
+  it("clones records on get/set so callers cannot mutate the live cache", () => {
+    const store = new InMemoryIdempotencyStore();
+    const result = { status: "paid", amount: 10.5 };
+    const record = {
+      status: "completed" as const,
+      fingerprint: "fp",
+      createdAt: 1,
+      result,
+    };
+
+    store.set("k", record);
+
+    // Mutating the caller's original must not affect the store.
+    record.status = "in_progress";
+    record.fingerprint = "tampered";
+    result.status = "failed";
+
+    const got = store.get("k");
+    expect(got).toEqual({
+      status: "completed",
+      fingerprint: "fp",
+      createdAt: 1,
+      result: { status: "paid", amount: 10.5 },
+    });
+
+    // Mutating the returned record must not affect a subsequent get.
+    got!.status = "unknown";
+    (got!.result as { status: string }).status = "refunded";
+    expect(store.get("k")).toEqual({
+      status: "completed",
+      fingerprint: "fp",
+      createdAt: 1,
+      result: { status: "paid", amount: 10.5 },
+    });
+  });
+
+  it("clones records returned from reserve", () => {
+    const store = new InMemoryIdempotencyStore();
+    const record = {
+      status: "in_progress" as const,
+      fingerprint: "fp",
+      createdAt: 1,
+    };
+    expect(store.reserve("k", record)).toBeUndefined();
+
+    const existing = store.reserve("k", {
+      status: "in_progress",
+      fingerprint: "other",
+      createdAt: 2,
+    });
+    expect(existing).toEqual({
+      status: "in_progress",
+      fingerprint: "fp",
+      createdAt: 1,
+    });
+    existing!.fingerprint = "mutated";
+    expect(store.get("k")?.fingerprint).toBe("fp");
+  });
+
+  it("move-to-end on update so recency eviction keeps recently updated keys", () => {
+    const store = new InMemoryIdempotencyStore(60_000, 3);
+    store.set("a", { status: "completed", fingerprint: "a", createdAt: 1 });
+    store.set("b", { status: "completed", fingerprint: "b", createdAt: 2 });
+    store.set("c", { status: "completed", fingerprint: "c", createdAt: 3 });
+
+    // Refresh "a" — without recency tracking, "a" stays oldest and is evicted next.
+    store.set("a", {
+      status: "completed",
+      fingerprint: "a-updated",
+      createdAt: 1,
+      result: { ok: true },
+    });
+
+    store.set("d", { status: "completed", fingerprint: "d", createdAt: 4 });
+
+    expect(store.get("a")?.fingerprint).toBe("a-updated");
+    expect(store.get("a")?.result).toEqual({ ok: true });
+    expect(store.get("b")).toBeUndefined(); // least-recently-updated
+    expect(store.get("c")).toBeDefined();
+    expect(store.get("d")).toBeDefined();
+    expect(store.size).toBe(3);
+  });
 });
 
 describe("fingerprintParams", () => {
@@ -425,5 +536,61 @@ describe("fingerprintParams", () => {
     expect(fingerprintParams(undefined)).not.toBe(fingerprintParams(null));
     expect(fingerprintParams({ a: undefined })).not.toBe(fingerprintParams({ a: null }));
     expect(fingerprintParams([undefined])).not.toBe(fingerprintParams([null]));
+  });
+
+  it("canonicalizes Money / AmountInput so economically identical amounts match", () => {
+    const asMoney = money("10.50", "SAR");
+    const asNumber = 10.5;
+    const asPadded = money("10.5", "SAR");
+
+    // Top-level Money vs plain { amount, currency }
+    expect(fingerprintParams(asMoney)).toBe(
+      fingerprintParams({ amount: "10.50", currency: "SAR" }),
+    );
+    expect(fingerprintParams(asMoney)).toBe(fingerprintParams(asPadded));
+
+    // Moyasar-style mutation fingerprint: amount is number | Money
+    expect(
+      fingerprintParams({ amount: asMoney, currency: "SAR" }),
+    ).toBe(fingerprintParams({ amount: asNumber, currency: "SAR" }));
+    expect(
+      fingerprintParams({ amount: asMoney, currency: "SAR" }),
+    ).toBe(fingerprintParams({ amount: "10.50", currency: "SAR" }));
+    expect(
+      fingerprintParams({ amount: asNumber, currency: "sar" }),
+    ).toBe(fingerprintParams({ amount: "10.5", currency: "SAR" }));
+  });
+
+  it("encodes NaN / Infinity distinctly from null (MONEY-5)", () => {
+    expect(fingerprintParams(Number.NaN)).not.toBe(fingerprintParams(null));
+    expect(fingerprintParams(Number.POSITIVE_INFINITY)).not.toBe(
+      fingerprintParams(null),
+    );
+    expect(fingerprintParams(Number.NEGATIVE_INFINITY)).not.toBe(
+      fingerprintParams(null),
+    );
+    expect(fingerprintParams(Number.NaN)).not.toBe(
+      fingerprintParams(Number.POSITIVE_INFINITY),
+    );
+    expect(fingerprintParams({ x: Number.NaN })).not.toBe(
+      fingerprintParams({ x: null }),
+    );
+  });
+
+  it("fingerprints BigInt without throwing", () => {
+    expect(fingerprintParams(10n)).toBe(fingerprintParams(10n));
+    expect(fingerprintParams(10n)).not.toBe(fingerprintParams(11n));
+    expect(fingerprintParams({ amount: 1050n })).toBe(
+      fingerprintParams({ amount: 1050n }),
+    );
+  });
+
+  it("fingerprints Date as ISO-8601, not empty object", () => {
+    const d = new Date("2026-01-15T12:00:00.000Z");
+    expect(fingerprintParams(d)).toBe(JSON.stringify(d.toISOString()));
+    expect(fingerprintParams(d)).not.toBe(fingerprintParams({}));
+    expect(fingerprintParams({ at: d })).toBe(
+      fingerprintParams({ at: new Date("2026-01-15T12:00:00.000Z") }),
+    );
   });
 });

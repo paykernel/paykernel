@@ -322,6 +322,21 @@ describe("excludeGateways", () => {
       }).gateway,
     ).toBe("paypal");
   });
+
+  it("ROUTE-1: excludeGateways is case-insensitive", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "USD" }).to("paypal"),
+      ],
+    });
+    expect(
+      router.select({
+        currency: "USD",
+        excludeGateways: ["Stripe", "STRIPE"],
+      }).gateway,
+    ).toBe("paypal");
+  });
 });
 
 describe("route().to builder", () => {

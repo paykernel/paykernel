@@ -20,6 +20,7 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { D1Executor } from "../executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -61,7 +62,11 @@ export function resolveStoreContext(options: D1StoreOptions): ResolvedStoreConte
     withStoreTransaction: async <T>(fn: () => Promise<T> | T): Promise<T> => {
       const outer = active;
       if (typeof outer.transaction !== "function") {
-        return await fn();
+        // Fail closed: never pretend multi-mutation atomicity without a real TX
+        // (SHARED-1). Prefer single-statement UPSERT/RETURNING or D1 batch().
+        throw new StoreUnsupportedFeatureError(
+          "withTransaction: D1Executor.transaction is not available; refusing silent no-op. Prefer single-statement claims or executor.batch() for multi-statement atomicity.",
+        );
       }
       return outer.transaction(async (tx) => {
         const prev = active;

@@ -160,6 +160,33 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (existing) {
+        // RECON-7: terminal jobs may be re-opened under the same key so
+        // operators can re-reconcile after completion/dead-letter without
+        // minting a new key. Active scheduled/claimed rows stay already_exists.
+        if (
+          existing.status === "completed" ||
+          existing.status === "failed" ||
+          existing.status === "manual_review"
+        ) {
+          const now = iso(clock);
+          const record: ReconciliationRecord = {
+            key: input.key,
+            status: "scheduled",
+            subjectId: input.subjectId,
+            reason: input.reason,
+            attempts: 0,
+            dueAt: input.dueAt,
+            createdAt: existing.createdAt,
+            updatedAt: now,
+            generation: existing.generation,
+            leaseOwner: undefined,
+            leaseToken: undefined,
+            leaseExpiresAt: undefined,
+            lastError: undefined,
+          };
+          entries.set(input.key, record);
+          return { kind: "scheduled", record };
+        }
         return { kind: "already_exists", record: existing };
       }
       enforceCap(input.key);

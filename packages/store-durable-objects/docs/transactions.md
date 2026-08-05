@@ -19,6 +19,10 @@ This is **not** D1 `batch()`, **not** local `BEGIN IMMEDIATE` from `adapter-sqli
 
 Worker-side code is always async. Inside the object, SQL execution is sync. Do not assume you can `await` network I/O while holding a DO storage transaction.
 
+### Worker-client `withTransaction` (honesty)
+
+`createDoPaymentStores(...).{idempotency,webhookInbox,reconciliation}.withTransaction` **hard-fails** with `StoreUnsupportedFeatureError`. Cross-object / cross-stub multi-mutation atomicity is not available; the DO manifest's `supportsTransactions: true` refers to **in-object** `transactionSync` / single-statement SQL only. Prefer single-statement claims, or call `withTransaction` on in-object stores (`createDo*Store` / `PaymentsStoreObject`).
+
 ---
 
 ## Preferred: single-statement atomicity

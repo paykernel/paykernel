@@ -51,6 +51,7 @@ export type {
 export {
   withPaymentOperation,
   recordPaymentOperation,
+  sanitizeExceptionForSpan,
 } from "./instrumentation";
 export type {
   PaymentOperationInstrumentation,

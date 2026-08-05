@@ -30,7 +30,11 @@ import {
   clockNowMsString,
 } from "../clock";
 import { withMappedErrors } from "../errors";
-import { recordKey, reconciliationDueIndexKey } from "../keys";
+import {
+  logicalKeyFromRecordKey,
+  recordKey,
+  reconciliationDueIndexKey,
+} from "../keys";
 import { enforceMaxSanitizedError } from "../limits";
 import {
   parseReconciliationRecord,
@@ -343,7 +347,13 @@ export function createRedisReconciliationStore(
           for (const redisKey of scan.keys) {
             if (deleted >= limit) break;
             if (redisKey === dueIndex || redisKey.endsWith(":due")) continue;
-            const logicalKey = redisKey.split(":").pop() ?? "";
+            // Composite keys must strip the known prefix — not split(':').pop().
+            const logicalKey = logicalKeyFromRecordKey(
+              ctx.keys,
+              "recon",
+              redisKey,
+            );
+            if (logicalKey === undefined) continue;
             const raw = await ctx.eval.eval(
               RECON_DELETE_IF_EXPIRED_LUA,
               [redisKey, dueIndex],

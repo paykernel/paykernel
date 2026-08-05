@@ -27,7 +27,7 @@ import {
   clockNowMsString,
 } from "../clock";
 import { withMappedErrors } from "../errors";
-import { recordKey, webhookRetryIndexKey } from "../keys";
+import { logicalKeyFromRecordKey, recordKey, webhookRetryIndexKey } from "../keys";
 import { enforceMaxSanitizedError, MAX_PAYLOAD_REF_LENGTH, enforceMaxString } from "../limits";
 import {
   parseTaggedResult,
@@ -293,7 +293,13 @@ export function createRedisWebhookInboxStore(
             if (deleted >= limit) break;
             // Skip the index key itself
             if (redisKey === indexKey || redisKey.endsWith(":retry")) continue;
-            const logicalKey = redisKey.split(":").pop() ?? "";
+            // Composite keys (gateway:eventId) must strip the known prefix — not pop().
+            const logicalKey = logicalKeyFromRecordKey(
+              ctx.keys,
+              "whinbox",
+              redisKey,
+            );
+            if (logicalKey === undefined) continue;
             const raw = await ctx.eval.eval(
               WEBHOOK_DELETE_IF_EXPIRED_LUA,
               [redisKey, indexKey],

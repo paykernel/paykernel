@@ -84,16 +84,18 @@ describe("createOpenTelemetryBridge", () => {
     expect(s.status?.code).toBe(1);
   });
 
-  it("maps error status and recordException", () => {
+  it("maps error status and sanitizes recordException (OBS-1)", () => {
     const mock = createMockOtelApi();
     const tracer = createOpenTelemetryBridge(mock.api);
     const span = tracer.startSpan(PAYMENT_SPAN_NAMES.refund);
-    const err = new Error("boom");
+    const err = new Error("sk_live_boom_secret");
     span.recordException?.(err);
     span.end({ code: "error", message: "Error" });
 
     const s = mock.spans[0]!;
-    expect(s.exceptions).toEqual([err]);
+    // Name only — raw message/stack must not reach OTEL exporters
+    expect(s.exceptions).toEqual([{ name: "Error" }]);
+    expect(JSON.stringify(s.exceptions)).not.toContain("sk_live");
     expect(s.status?.code).toBe(2);
     expect(s.status?.message).toBe("Error");
     expect(s.ended).toBe(true);

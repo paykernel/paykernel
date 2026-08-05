@@ -62,6 +62,7 @@ export type { StoreErrorCode } from "./errors";
 export {
   resolveKeyDesign,
   recordKey,
+  logicalKeyFromRecordKey,
   webhookRetryIndexKey,
   reconciliationDueIndexKey,
   retentionIndexKey,

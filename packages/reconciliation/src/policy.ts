@@ -50,6 +50,16 @@ const INDETERMINATE_LOCAL_STATUSES = new Set<string>([
   "processing",
 ]);
 
+/**
+ * Auth-hold / partial-capture local statuses are **not** indeterminate and are
+ * **never** a safe auto-upgrade to paid (capture amount / final_capture may
+ * still be incomplete). Policy routes these to apply_drift_review.
+ */
+const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
+  "authorized",
+  "partially_captured",
+]);
+
 /** Definitive provider failure statuses (not timeout / unknown). */
 const DEFINITIVE_FAILED_STATUSES = new Set<string>([
   "failed",
@@ -64,14 +74,59 @@ function isIndeterminateLocal(
   return INDETERMINATE_LOCAL_STATUSES.has(local.status);
 }
 
+function isAuthHoldLocal(local: LocalPaymentSnapshot | undefined): boolean {
+  if (!local || local.status === undefined) return false;
+  return AUTH_HOLD_LOCAL_STATUSES.has(local.status);
+}
+
+/**
+ * RECON-1: refuse safe paid upgrade when the provider snapshot is not bound
+ * to the target's known gatewayPaymentId (wrong-payment secondary-key hit).
+ */
+function identityBoundToTarget(
+  target: ReconciliationTarget,
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (
+    target.gatewayPaymentId !== undefined &&
+    target.gatewayPaymentId !== "" &&
+    target.gatewayPaymentId !== provider.gatewayPaymentId
+  ) {
+    return false;
+  }
+  // If expected already carries an identity, it must match too.
+  const expectedId = target.expected?.gatewayPaymentId;
+  if (
+    expectedId !== undefined &&
+    expectedId !== "" &&
+    expectedId !== provider.gatewayPaymentId
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function maySafeUpgradeToPaid(
+  target: ReconciliationTarget,
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  // RECON-4: never auto-upgrade auth holds / partial captures to paid.
+  if (isAuthHoldLocal(target.expected)) return false;
+  if (!identityBoundToTarget(target, provider)) return false;
+  return true;
+}
+
 /**
  * Decide what the application should do after a reconciliation result.
  *
  * Rules:
  * - consistent → mark_consistent
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
- * - local pending/indeterminate + provider paid + single match → update_local_to_paid
- * - local pending/indeterminate + provider definitive failed → update_local_to_failed
+ * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
+ * - local pending/indeterminate + provider definitive failed + identity-bound → update_local_to_failed
+ * - local `authorized` / `partially_captured` → paid is **never** safe auto-upgrade
+ *   (apply_drift_review) — capture totals / final_capture may still be incomplete
+ * - gatewayPaymentId mismatch (target vs provider) → never safe paid/failed upgrade
  * - ambiguous_match → manual_review
  * - temporarily_unavailable / provider_not_found retryable → retry_later
  * - ALWAYS surface do_not_create_replacement when indeterminate or ambiguous
@@ -90,7 +145,8 @@ export function decideReconciliationPolicy(
       const local = target.expected;
       if (
         isIndeterminateLocal(local) &&
-        isPaidLikePaymentStatus(result.provider.status)
+        isPaidLikePaymentStatus(result.provider.status) &&
+        maySafeUpgradeToPaid(target, result.provider)
       ) {
         return {
           action: "update_local_to_paid",
@@ -100,7 +156,8 @@ export function decideReconciliationPolicy(
       }
       if (
         isIndeterminateLocal(local) &&
-        DEFINITIVE_FAILED_STATUSES.has(result.provider.status)
+        DEFINITIVE_FAILED_STATUSES.has(result.provider.status) &&
+        identityBoundToTarget(target, result.provider)
       ) {
         return {
           action: "update_local_to_failed",
@@ -117,14 +174,16 @@ export function decideReconciliationPolicy(
 
     case "drift_detected": {
       const local = target.expected;
-      // Status-only upgrade paths still safe when drift is only status pending→paid
+      // Status-only upgrade paths still safe when drift is only status pending→paid.
+      // Identity mismatch (gatewayPaymentId) or auth-hold locals are never safe.
       const onlyStatus =
         result.differences.length === 1 &&
         result.differences[0]?.field === "status";
       if (
         onlyStatus &&
         isIndeterminateLocal(local) &&
-        isPaidLikePaymentStatus(result.provider.status)
+        isPaidLikePaymentStatus(result.provider.status) &&
+        maySafeUpgradeToPaid(target, result.provider)
       ) {
         return {
           action: "update_local_to_paid",
@@ -135,7 +194,8 @@ export function decideReconciliationPolicy(
       if (
         onlyStatus &&
         isIndeterminateLocal(local) &&
-        DEFINITIVE_FAILED_STATUSES.has(result.provider.status)
+        DEFINITIVE_FAILED_STATUSES.has(result.provider.status) &&
+        identityBoundToTarget(target, result.provider)
       ) {
         return {
           action: "update_local_to_failed",

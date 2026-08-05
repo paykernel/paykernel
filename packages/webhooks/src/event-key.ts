@@ -3,15 +3,19 @@
  *
  * Format: `{gateway}:{providerEventId}` (colon separator).
  * Both parts MUST be non-empty after trim; otherwise throws.
+ *
+ * **Gateway must not contain `:`** — otherwise `parseWebhookEventKey` and
+ * store key namespaces collide (e.g. `a:b` + `c` vs `a` + `b:c`).
+ * `providerEventId` may contain colons (rest of the key after the first colon).
  */
 
 /**
  * Stable key for inbox claim/dedupe.
  *
- * @param gateway - Gateway id (e.g. `"stripe"`, `"moyasar"`). Non-empty.
+ * @param gateway - Gateway id (e.g. `"stripe"`, `"moyasar"`). Non-empty; no `:`.
  * @param providerEventId - Provider-native event id. Non-empty.
  * @returns `gateway:providerEventId`
- * @throws Error when either part is empty/whitespace-only.
+ * @throws Error when either part is empty/whitespace-only, or gateway contains `:`.
  */
 export function deriveWebhookEventKey(
   gateway: string,
@@ -22,6 +26,11 @@ export function deriveWebhookEventKey(
     typeof providerEventId === "string" ? providerEventId.trim() : "";
   if (!g) {
     throw new Error("deriveWebhookEventKey: gateway must be a non-empty string");
+  }
+  if (g.includes(":")) {
+    throw new Error(
+      "deriveWebhookEventKey: gateway must not contain ':' (colon is the key separator)",
+    );
   }
   if (!id) {
     throw new Error(
@@ -34,6 +43,7 @@ export function deriveWebhookEventKey(
 /**
  * Best-effort split of a key produced by {@link deriveWebhookEventKey}.
  * Returns undefined if the key has no colon or empty parts.
+ * Gateway is the segment before the **first** colon (must not itself contain `:`).
  */
 export function parseWebhookEventKey(
   key: string,

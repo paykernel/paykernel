@@ -31,13 +31,14 @@ export const POSTGRES_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
   },
   coordinationScope: "multi-host",
   durability: "durable",
-  supportsTransactions: true,
+  supportsTransactions: true, // when PostgresExecutor.withTransaction is provided; store withTransaction fails closed otherwise
   supportsLeases: true,
   supportsRetentionCleanup: true,
   notes: [
     "Multi-host safe when all workers share one PostgreSQL cluster/primary.",
     "Claims use engine-level INSERT ON CONFLICT / conditional UPDATE RETURNING (sql-store postgres templates).",
     "Never get-then-set for claim correctness across connections.",
+    "withTransaction fails closed (StoreUnsupportedFeatureError) when PostgresExecutor.withTransaction is missing — no silent no-op multi-mutation atomicity.",
     "Durable: rows survive process restart; durability of the PG service depends on WAL/replication configuration.",
     "Migrations are explicit (migratePostgresAdapter) — never on package import or default factory construction.",
     "Injectable clock: lease reclaim predicates bind `now` params; FakeClock works in conformance tests.",

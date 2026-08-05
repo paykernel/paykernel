@@ -319,6 +319,37 @@ describe("PaymobGateway", () => {
       )).toBe(true);
     });
 
+    it("warns when the idempotency store lacks atomic reserve()", () => {
+      const warnings: unknown[][] = [];
+      const storeWithoutReserve: PaymobIdempotencyStore = {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      };
+      new PaymobGateway(
+        { ...PAYMOB_TEST_CONFIG, idempotencyStore: storeWithoutReserve },
+        hooksManager,
+        captureLogger(warnings),
+      );
+
+      expect(warnings.some((entry) =>
+        String(entry[0]).includes("atomic reserve"),
+      )).toBe(true);
+    });
+
+    it("does not warn about atomic reserve when the store implements reserve()", () => {
+      const warnings: unknown[][] = [];
+      new PaymobGateway(
+        { ...PAYMOB_TEST_CONFIG, idempotencyStore: new MemoryIdempotencyStore() },
+        hooksManager,
+        captureLogger(warnings),
+      );
+
+      expect(warnings.some((entry) =>
+        String(entry[0]).includes("atomic reserve"),
+      )).toBe(false);
+    });
+
     it("does not warn about missing hmacSecret when hmacSecret is configured", () => {
       const warnings: unknown[][] = [];
       new PaymobGateway(
@@ -521,28 +552,18 @@ describe("PaymobGateway", () => {
       expect(requestBody.payment_type).toBeUndefined();
     });
 
-    it("falls back to integrationId with is_auth AUTH when capture is false and authIntegrationId is missing", async () => {
-      const warnings: unknown[][] = [];
-      // PAYMOB_TEST_CONFIG has integrationId but no authIntegrationId
-      const fallbackGateway = new PaymobGateway(
-        PAYMOB_TEST_CONFIG,
-        hooksManager,
-        captureLogger(warnings),
-      );
-      mockFetchSequence(jsonResponse({ id: "pi_auth_fallback", client_secret: "csk_auth_fallback" }));
-
-      await fallbackGateway.createPayment({
+    it("does not fall back to sale integrationId when capture is false and authIntegrationId is missing", async () => {
+      // PAYMOB_TEST_CONFIG has integrationId but no authIntegrationId — must not
+      // silently settle via the sale integration (PAYMOB-4).
+      await expect(gateway.createPayment({
         ...VALID_CREATE_PARAMS,
         capture: false,
-      });
-      const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
-
-      expect(requestBody.payment_methods).toEqual([123456]);
-      expect(requestBody.is_auth).toBe(true);
-      expect(requestBody.payment_type).toBe("AUTH");
-      expect(warnings.some((entry) =>
-        String(entry[0]).includes("authIntegrationId") && String(entry[0]).includes("integrationId"),
-      )).toBe(true);
+      })).rejects.toThrow(GatewayApiError);
+      await expect(gateway.createPayment({
+        ...VALID_CREATE_PARAMS,
+        capture: false,
+      })).rejects.toThrow(/authIntegrationId|integration-driven/i);
+      expect(fetchCalls).toHaveLength(0);
     });
 
     it("fails loudly when capture is false and neither authIntegrationId nor integrationId is configured", async () => {
@@ -1628,6 +1649,29 @@ describe("PaymobGateway", () => {
       expect(isPaidOutcome(result)).toBe(false);
     });
 
+    it("reports cumulative capturedAmount when capture response omits captured_amount after prior partial", async () => {
+      // PAYMOB-2: status already uses cumulative cents; capturedAmount must not understate
+      // as this-op only when the provider omits cumulative captured_amount.
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 4000, currency: "SAR" }),
+        // Response gives this-op amount_cents only (no cumulative captured_amount).
+        jsonResponse({ id: 123, success: true, amount_cents: 2500 }),
+      );
+
+      const result = await actionGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 25,
+        currency: "SAR",
+      });
+
+      expect(result.status).toBe("partially_captured");
+      // Prior 40 + this op 25 = 65 cumulative
+      expect(result.capturedAmount).toBe(65);
+      expect(isPaidOutcome(result)).toBe(false);
+    });
+
     it("uses transaction inquiry totals to map partial captures when capture response omits amount_cents", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
@@ -1977,26 +2021,32 @@ describe("PaymobGateway", () => {
     });
 
     it("prioritizes refund and void flags over success", () => {
+      // is_refund alone (is_refunded absent) is HMAC-covered via alias.
       const refundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: true,
-      }));
+        is_refunded: undefined,
+      } as Partial<PaymobWebhookPayload["obj"]>));
+      // is_refunded true without amount → refund_completed (incomplete money; PAYMOB-6).
       const currentRefundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
         is_refunded: true,
+        refunded_amount_cents: 10000,
       } as Partial<PaymobWebhookPayload["obj"]>));
       const voidEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_void: true,
-      }));
+        is_voided: undefined,
+      } as Partial<PaymobWebhookPayload["obj"]>));
 
       expect(refundEvent.status).toBe("refunded");
       expect(currentRefundEvent.status).toBe("refunded");
       expect(voidEvent.status).toBe("cancelled");
     });
 
-    it("treats Paymob legacy action flags as authoritative even when current-state flags are false", () => {
+    it("ignores unsigned is_refund/is_void when signed is_refunded/is_voided are present (PAYMOB-1)", () => {
+      // HMAC uses is_refunded/is_voided when present; forged action aliases must not flip status.
       const refundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: true,
@@ -2008,27 +2058,27 @@ describe("PaymobGateway", () => {
         is_voided: false,
       } as Partial<PaymobWebhookPayload["obj"]>));
 
-      expect(refundEvent.status).toBe("refunded");
-      expect(voidEvent.status).toBe("cancelled");
+      expect(refundEvent.status).toBe("paid");
+      expect(voidEvent.status).toBe("paid");
     });
 
     it("does not treat failed refund or void action callbacks as completed states", () => {
       const refundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: false,
         is_refund: true,
-        is_refunded: false,
+        is_refunded: undefined,
       } as Partial<PaymobWebhookPayload["obj"]>));
       const voidEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: false,
         is_void: true,
-        is_voided: false,
+        is_voided: undefined,
       } as Partial<PaymobWebhookPayload["obj"]>));
 
       expect(refundEvent.status).toBe("failed");
       expect(voidEvent.status).toBe("failed");
     });
 
-    it("maps Paymob partial refund and partial capture fields", () => {
+    it("maps Paymob partial refund from signed is_refunded + amount; ignores unsigned capture flags", () => {
       const partialRefundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
@@ -2036,7 +2086,9 @@ describe("PaymobGateway", () => {
         amount_cents: 10000,
         refunded_amount_cents: 2500,
       }));
-      const partialCaptureEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
+      // captured_amount / is_captured are not HMAC-covered — must not drive partial capture
+      // status on the webhook path (require inquiry for multi-capture money truth).
+      const forgedPartialCapture = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         amount_cents: 10000,
         captured_amount: 5000,
@@ -2044,23 +2096,18 @@ describe("PaymobGateway", () => {
       }));
 
       expect(partialRefundEvent.status).toBe("partially_refunded");
-      expect(partialCaptureEvent.status).toBe("partially_captured");
+      expect(forgedPartialCapture.status).toBe("paid");
     });
 
-    it("maps partial refund from refunded_amount_cents alone without is_refunded", () => {
-      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+    it("does not map refund from unsigned refunded_amount_cents alone without signed refund flags", () => {
+      const partial = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
         is_refunded: false,
         amount_cents: 10000,
         refunded_amount_cents: 2500,
       }));
-
-      expect(event.status).toBe("partially_refunded");
-    });
-
-    it("maps full refund from refunded_amount_cents alone without is_refunded", () => {
-      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+      const full = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
         is_refunded: false,
@@ -2068,24 +2115,37 @@ describe("PaymobGateway", () => {
         refunded_amount_cents: 10000,
       }));
 
-      expect(event.status).toBe("refunded");
+      expect(partial.status).toBe("paid");
+      expect(full.status).toBe("paid");
     });
 
-    it("maps full refund of partial capture as refunded not partially_refunded", () => {
-      // Auth 10000, capture 5000, refund 5000 — completeness vs captured_amount, not amount_cents.
+    it("maps is_refunded without refunded_amount_cents to refund_completed not full refunded (PAYMOB-6)", () => {
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: false,
+        is_refunded: true,
+        amount_cents: 10000,
+      }));
+
+      expect(event.status).toBe("refund_completed");
+      expect(event.stableType).toBe("refund.completed");
+    });
+
+    it("maps full refund of auth amount when is_refunded + full refunded_amount_cents", () => {
+      // Without trusting unsigned captured_amount, completeness is vs signed amount_cents.
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
         is_refunded: true,
         amount_cents: 10000,
         captured_amount: 5000,
-        refunded_amount_cents: 5000,
+        refunded_amount_cents: 10000,
       }));
 
       expect(event.status).toBe("refunded");
     });
 
-    it("maps partial refund of partial capture as partially_refunded", () => {
+    it("maps partial refund of auth amount as partially_refunded", () => {
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
@@ -2108,8 +2168,8 @@ describe("PaymobGateway", () => {
       expect(event.status).toBe("authorized");
     });
 
-    it("maps is_auth true with partial captured_amount to partially_captured not authorized", () => {
-      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+    it("does not promote auth to paid/partial from unsigned captured_amount or is_captured (PAYMOB-1)", () => {
+      const partial = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_auth: true,
         is_capture: false,
@@ -2117,21 +2177,75 @@ describe("PaymobGateway", () => {
         amount_cents: 10000,
         captured_amount: 5000,
       }));
-
-      expect(event.status).toBe("partially_captured");
-    });
-
-    it("maps is_auth true with full captured_amount to paid not authorized", () => {
-      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+      const full = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_auth: true,
         is_capture: false,
-        is_captured: false,
+        is_captured: true,
         amount_cents: 10000,
         captured_amount: 10000,
       }));
 
+      expect(partial.status).toBe("authorized");
+      expect(full.status).toBe("authorized");
+      expect(partial.status === "paid").toBe(false);
+      expect(full.status === "paid").toBe(false);
+    });
+
+    it("rejects forged unsigned is_captured after valid HMAC of other fields (PAYMOB-1)", () => {
+      // Sign a legitimate auth-only payload, then inject unsigned capture flags.
+      const base = createMockWebhookPayload({
+        success: true,
+        is_auth: true,
+        is_capture: false,
+        is_refunded: false,
+        is_voided: false,
+      } as Partial<PaymobWebhookPayload["obj"]>);
+      const signature = signPayload(base);
+      expect(gateway.verifyWebhook(base, signature)).toBe(true);
+
+      const forged: PaymobWebhookPayload = {
+        ...base,
+        obj: {
+          ...base.obj,
+          is_captured: true,
+          captured_amount: 10000,
+        },
+      };
+      // HMAC still verifies — unsigned fields are outside HMAC_FIELDS.
+      expect(gateway.verifyWebhook(forged, signature)).toBe(true);
+
+      const event = gateway.parseWebhookEvent(forged);
+      expect(event.status).toBe("authorized");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.authorized");
+    });
+
+    it("rejects forged unsigned is_refunded amount-only refund after valid HMAC (PAYMOB-1)", () => {
+      const base = createMockWebhookPayload({
+        success: true,
+        is_auth: false,
+        is_capture: false,
+        is_refunded: false,
+        is_voided: false,
+      } as Partial<PaymobWebhookPayload["obj"]>);
+      const signature = signPayload(base);
+      expect(gateway.verifyWebhook(base, signature)).toBe(true);
+
+      const forged: PaymobWebhookPayload = {
+        ...base,
+        obj: {
+          ...base.obj,
+          refunded_amount_cents: 10000,
+          is_refund: true, // present alongside signed is_refunded:false → stripped
+        },
+      };
+      expect(gateway.verifyWebhook(forged, signature)).toBe(true);
+
+      const event = gateway.parseWebhookEvent(forged);
       expect(event.status).toBe("paid");
+      expect(event.status).not.toBe("refunded");
+      expect(event.stableType).toBe("payment.succeeded");
     });
 
     it("parses webhook amounts with the currency minor unit", () => {
@@ -2279,12 +2393,20 @@ describe("PaymobGateway", () => {
       expect(failed.event?.type).toBe("payment.failed");
 
       const voided = gateway.parseWebhookEvent(
-        createMockWebhookPayload({ success: true, is_void: true }),
+        createMockWebhookPayload({
+          success: true,
+          is_void: true,
+          is_voided: undefined,
+        } as Partial<PaymobWebhookPayload["obj"]>),
       );
       expect(voided.stableType).toBe("payment.cancelled");
 
       const refunded = gateway.parseWebhookEvent(
-        createMockWebhookPayload({ success: true, is_refund: true }),
+        createMockWebhookPayload({
+          success: true,
+          is_refund: true,
+          is_refunded: undefined,
+        } as Partial<PaymobWebhookPayload["obj"]>),
       );
       expect(refunded.stableType).toBe("refund.completed");
       expect(refunded.event?.type).toBe("refund.completed");
@@ -2310,13 +2432,11 @@ describe("PaymobGateway", () => {
       }
     });
 
-    it("Phase 7 dual-write: amount-only partial refund → refund.completed (not payment.succeeded)", () => {
-      // refunded_amount_cents alone (no is_refund / is_refunded): dual-write must
-      // agree with amount-aware status (not bare success → payment.succeeded).
+    it("Phase 7 dual-write: signed is_refunded + partial amount → refund.completed", () => {
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
-        is_refunded: false,
+        is_refunded: true,
         amount_cents: 10000,
         refunded_amount_cents: 2500,
       }));
@@ -2327,11 +2447,11 @@ describe("PaymobGateway", () => {
       expect(event.provider?.eventType).toBe("TRANSACTION");
     });
 
-    it("Phase 7 dual-write: amount-only full refund → refund.completed (not payment.succeeded)", () => {
+    it("Phase 7 dual-write: signed is_refunded + full amount → refund.completed", () => {
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
-        is_refunded: false,
+        is_refunded: true,
         amount_cents: 10000,
         refunded_amount_cents: 10000,
       }));
@@ -2341,8 +2461,8 @@ describe("PaymobGateway", () => {
       expect(event.event?.type).toBe("refund.completed");
     });
 
-    it("Phase 7 dual-write: full refund of partial capture amount-only → refund.completed", () => {
-      // Auth 10000, capture 5000, refund 5000 without refund flags — not payment.succeeded.
+    it("Phase 7 dual-write: unsigned amount-only refund stays payment.succeeded (fail-closed)", () => {
+      // Without signed refund flags, refunded_amount_cents must not flip status.
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: false,
@@ -2352,15 +2472,13 @@ describe("PaymobGateway", () => {
         refunded_amount_cents: 5000,
       }));
 
-      expect(event.status).toBe("refunded");
-      expect(event.stableType).toBe("refund.completed");
-      expect(event.event?.type).toBe("refund.completed");
-      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.status).toBe("paid");
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.stableType).not.toBe("refund.completed");
     });
 
-    it("Phase 7 dual-write: is_auth + partial captured_amount does not emit payment.authorized", () => {
-      // Sticky is_auth must not under-map capture when captured_amount is set.
-      // Partial capture is not full settlement → payment.processing (not payment.succeeded).
+    it("Phase 7 dual-write: is_auth + unsigned captured_amount stays payment.authorized", () => {
+      // Unsigned captured_amount must not promote auth → paid/partial on webhook path.
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_auth: true,
@@ -2370,27 +2488,24 @@ describe("PaymobGateway", () => {
         captured_amount: 5000,
       }));
 
-      expect(event.status).toBe("partially_captured");
-      expect(event.stableType).not.toBe("payment.authorized");
+      expect(event.status).toBe("authorized");
+      expect(event.stableType).toBe("payment.authorized");
       expect(event.stableType).not.toBe("payment.succeeded");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.authorized");
     });
 
-    it("Phase 7 dual-write: is_auth + full captured_amount → payment.succeeded not authorized", () => {
+    it("Phase 7 dual-write: is_capture signed true → capture/paid settlement path", () => {
+      // is_capture is HMAC-covered; full capture action maps paid / capture domain.
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
-        is_auth: true,
-        is_capture: false,
-        is_captured: false,
+        is_auth: false,
+        is_capture: true,
         amount_cents: 10000,
-        captured_amount: 10000,
       }));
 
       expect(event.status).toBe("paid");
-      expect(event.stableType).not.toBe("payment.authorized");
-      expect(event.stableType).toBe("payment.succeeded");
-      expect(event.event?.type).toBe("payment.succeeded");
+      expect(event.stableType).toBe("capture.completed");
+      expect(event.event?.type).toBe("capture.completed");
     });
 
     it("Phase 7 dual-write: failed is_refund action is payment.failed not refund.completed", () => {
@@ -2398,12 +2513,41 @@ describe("PaymobGateway", () => {
       const event = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: false,
         is_refund: true,
-        is_refunded: false,
+        is_refunded: undefined,
       } as Partial<PaymobWebhookPayload["obj"]>));
 
       expect(event.status).toBe("failed");
       expect(event.stableType).toBe("payment.failed");
       expect(event.event?.type).toBe("payment.failed");
+    });
+
+    it("redirect callbacks ignore unsigned capture/refund amounts (PAYMOB-5 fail-closed)", () => {
+      const payload = {
+        id: "123456789",
+        pending: "false",
+        success: "true",
+        amount_cents: "10000",
+        currency: "SAR",
+        created_at: "2024-12-31T12:00:00Z",
+        is_auth: "true",
+        is_capture: "false",
+        is_refunded: "false",
+        is_voided: "false",
+        // Unsigned / not mapped from redirect query even if present
+        captured_amount: "5000",
+        is_captured: "true",
+        refunded_amount_cents: "2500",
+        merchant_order_id: "payment_123",
+      };
+
+      const event = gateway.parseWebhookEvent(payload);
+      expect(event.type).toBe("TRANSACTION_RESPONSE");
+      // Unsigned amounts/is_captured must not promote auth → paid/partial.
+      expect(event.status).toBe("authorized");
+      // Redirect demotes paid-like settlement to processing; authorized stays authorized.
+      expect(event.stableType).toBe("payment.authorized");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.stableType).not.toBe("capture.completed");
     });
   });
 

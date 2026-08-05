@@ -24,11 +24,11 @@ const client = new PaymentClient({
     // Required payment method/integration ID or alias
     integrationId: 123456,
 
-    // Preferred when using createPayment({ capture: false })
+    // Required when using createPayment({ capture: false }) unless you pass
+    // paymobIntegrationId / paymobPaymentMethods per request.
     // Dual model: SDK swaps payment_methods to this auth integration AND sets
     // is_auth: true and payment_type: 'AUTH' on the Intention body.
-    // If omitted, the SDK falls back to integrationId with is_auth/payment_type
-    // AUTH and logs a warning that a dedicated authIntegrationId is preferred.
+    // Sale integrationId is never used as a silent fallback for capture:false.
     authIntegrationId: 456789,
 
     // Optional legacy fallback: when secretKey is absent, capture/refund/void/inquiry
@@ -94,14 +94,14 @@ The create result `gatewayId` is the Paymob **intention** ID (often `pi_...`), a
 
 ### Auth / capture dual model
 
-Paymob auth/capture is primarily **integration-driven**: prefer a dedicated auth/capture integration (via config `authIntegrationId`, or per-request `paymobIntegrationId` / `paymobPaymentMethods`). When `createPayment({ capture: false })` is used, the SDK:
+Paymob auth/capture is primarily **integration-driven**: use a dedicated auth/capture integration (via config `authIntegrationId`, or per-request `paymobIntegrationId` / `paymobPaymentMethods`). When `createPayment({ capture: false })` is used, the SDK:
 
-1. Resolves `payment_methods` in this order when no per-request override is supplied: `authIntegrationId` → `integrationId` (with a warning that a dedicated auth integration is preferred) → error if neither is configured.
+1. Resolves `payment_methods` from `authIntegrationId` when no per-request override is supplied. Sale `integrationId` is **not** used as a fallback (a sale integration can settle immediately despite auth-oriented body flags).
 2. Sets `is_auth: true` and `payment_type: 'AUTH'` on the Intention request body to document auth-only intent.
 
-If `capture: false` is used with **neither** `authIntegrationId` nor `integrationId` (and without a per-request method override), the SDK rejects the request instead of silently creating a normal sale payment.
+If `capture: false` is used without `authIntegrationId` and without a per-request method override, the SDK rejects the request instead of silently creating a sale-integration payment.
 
-`idempotencyKey` is used as a fallback Paymob `special_reference` during payment creation and deduplicates repeated SDK calls within the same `PaymentClient`/gateway instance. Reusing the same key with different parameters is rejected. For production with multiple workers, serverless invocations, or deploy restarts, configure `idempotencyStore` with Redis, a database, or another process-wide store so completed results can be replayed across gateway instances. Implement the store's optional `reserve` method atomically, such as Redis `SET NX` or a database unique constraint, for full cross-worker duplicate-call protection.
+`idempotencyKey` is used as a fallback Paymob `special_reference` during payment creation and deduplicates repeated SDK calls within the same `PaymentClient`/gateway instance. Reusing the same key with different parameters is rejected. For production with multiple workers, serverless invocations, or deploy restarts, configure `idempotencyStore` with Redis, a database, or another process-wide store so completed results can be replayed across gateway instances. Implement the store's optional `reserve` method atomically, such as Redis `SET NX` or a database unique constraint, for full cross-worker duplicate-call protection. The SDK warns at construction when a store lacks atomic `reserve()`, and when no store is configured in a serverless/edge environment.
 
 Paymob does not expose native idempotency keys for capture, refund, void, or Intention creation. If a network failure or Paymob 5xx response happens after the SDK sends one of those mutating requests, the SDK marks that `idempotencyKey` outcome as unknown and blocks automatic replay. Reconcile via a verified Paymob callback, transaction inquiry, or the Paymob dashboard before issuing a new mutation.
 
@@ -198,9 +198,15 @@ The SDK verifies transaction processed callbacks, saved-card token callbacks, an
 
 > ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks parse with `event.type === 'TRANSACTION_RESPONSE'` (unless Paymob supplies another `type`). Phase 7 dual-write maps redirect success/paid/capture signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
 
-Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). Transaction callbacks can normalize to `partially_refunded` or `partially_captured` when Paymob includes partial amount fields (including `refunded_amount_cents` alone without `is_refunded`, and `captured_amount` even when `is_auth` is still true), including callbacks that send numeric or boolean fields as strings. When `captured_amount > 0`, refund completeness is compared against `captured_amount` (not the original auth `amount_cents`), so a full refund of a partial capture maps to `refunded` rather than `partially_refunded`.
+Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paymentId` is `undefined` because Paymob's `order_id` is a gateway reference, not your internal payment ID; use `gatewayToken`, `gatewayPaymentId`, `gatewayObjectId`, and the raw payload to associate tokens in your own card-vault flow. TOKEN callbacks also accept string digits for numeric fields such as `id` and `merchant_id` (same coercion as transaction webhooks). **HMAC-covered status only.** Paymob's transaction HMAC covers `is_auth`, `is_capture`, `is_refunded`, `is_voided`, `success`, `pending`, and `amount_cents` — **not** `is_captured`, `captured_amount`, `refunded_amount_cents`, `is_refund`, or `is_void`. After verification the SDK strips unsigned status-driving fields before mapping so a replayed valid signature cannot forge paid/refunded/cancelled via injected slots. Practical consequences:
 
-> **Phase 7 dual-write / amount-only refunds / partial capture:** Amount-only refunds (`refunded_amount_cents > 0` without `is_refund` / `is_refunded`) dual-write `WebhookEvent.status` of `refunded` / `partially_refunded` **and** `PaymentEvent.type` / `stableType` of **`refund.completed`** — never `payment.succeeded`. Bare `success: true` is not treated as paid when status or refund amounts indicate a refund. Sticky `is_auth` with **full** `captured_amount` dual-writes `payment.succeeded` (status `paid`), not `payment.authorized`. **Partial** capture (`status: partially_captured` or `0 < captured_amount < amount_cents`) dual-writes **`payment.processing`**, not `payment.succeeded` — aligned with `isPaidOutcome` excluding partial capture. Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid.
+- Auth-only callbacks (`is_auth` + not `is_capture`) stay `authorized` even if the payload injects `is_captured` / `captured_amount`. Use **transaction inquiry** for multi-partial capture totals on the webhook path.
+- `is_refunded: true` without a positive `refunded_amount_cents` maps to `refund_completed` (incomplete money snapshot) — not full `refunded`.
+- `is_refunded` + amount can map `partially_refunded` / `refunded`. Amount-only refunds without a signed refund flag are ignored.
+- `is_refund` / `is_void` are trusted only when they are the HMAC source (the corresponding `is_refunded` / `is_voided` field is absent). When both are present, only the signed current-state flag is used.
+- Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs.
+
+> **Phase 7 dual-write:** Prefer `event.event.type` / `stableType` for fulfillment and require full paid / capture completion; do not assume TRANSACTION + success flags alone means fully paid. Redirect callbacks remain demoted to `payment.processing`.
 
 ### Operation outcomes (`getPayment` / capture)
 

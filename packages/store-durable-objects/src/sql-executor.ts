@@ -12,6 +12,7 @@
  */
 
 import type { SqlExecutor } from "@paykernel/sql-foundation";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { DoStorageLike, SqlStorageLike } from "./types";
 
 /**
@@ -134,47 +135,49 @@ export function createDoExecutor(storage: DoStorageLike): DoExecutor {
       return await fn();
     }
 
-    // Probe: if callback is sync, prefer transactionSync.
-    // We cannot know without invoking; use BEGIN path that works for both
-    // sync and async under mock SQLite and DO storage that accepts BEGIN.
+    // Prefer BEGIN IMMEDIATE … COMMIT/ROLLBACK so async multi-step work can
+    // roll back. If BEGIN is rejected, only sync work may use transactionSync
+    // (callback must run *inside* transactionSync). Never run async multi-step
+    // work outside a real transaction (fail closed — DO-2).
     depth += 1;
     allowTxnControl = true;
     try {
       execSql("BEGIN IMMEDIATE");
+    } catch (beginErr) {
+      depth -= 1;
+      allowTxnControl = false;
+      // Probe without side effects is impossible; invoke once inside
+      // transactionSync and reject Promises (async cannot join sync TX).
+      depth += 1;
       try {
-        const result = await fn();
-        execSql("COMMIT");
-        return result;
-      } catch (err) {
-        try {
-          execSql("ROLLBACK");
-        } catch {
-          /* ignore rollback errors */
-        }
-        throw err;
-      }
-    } catch (err) {
-      // If BEGIN is rejected (some DO environments), fall back to transactionSync
-      // for purely sync work only.
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/begin/i.test(msg) || /transaction/i.test(msg)) {
+        return storage.transactionSync(() => {
+          const maybe = fn();
+          if (maybe !== null && typeof maybe === "object" && "then" in maybe) {
+            throw new StoreUnsupportedFeatureError(
+              "DoExecutor.runInTransaction: BEGIN was rejected; cannot provide multi-statement atomicity for async callbacks. Prefer single-statement claims or sync executor.transaction() / transactionSync.",
+              beginErr,
+            );
+          }
+          return maybe as T;
+        });
+      } finally {
         depth -= 1;
-        allowTxnControl = false;
-        const maybe = fn();
-        if (maybe !== null && typeof maybe === "object" && "then" in maybe) {
-          // Cannot wrap async without BEGIN support.
-          return await maybe;
-        }
-        depth += 1;
-        try {
-          return storage.transactionSync(() => maybe as T);
-        } finally {
-          depth -= 1;
-        }
+      }
+    }
+
+    try {
+      const result = await fn();
+      execSql("COMMIT");
+      return result;
+    } catch (err) {
+      try {
+        execSql("ROLLBACK");
+      } catch {
+        /* ignore rollback errors */
       }
       throw err;
     } finally {
-      if (depth > 0) depth -= 1;
+      depth -= 1;
       allowTxnControl = false;
     }
   };

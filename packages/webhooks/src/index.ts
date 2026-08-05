@@ -49,6 +49,7 @@ export { NonRetryableHandlerError } from "./types";
 export type {
   WebhookProcessingMode,
   WebhookProcessingOutcome,
+  ScheduledForRetryReason,
   EngineClock,
   WebhookHandlerContext,
   WebhookHandler,

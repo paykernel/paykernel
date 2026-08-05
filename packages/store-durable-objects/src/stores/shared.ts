@@ -20,6 +20,7 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { DoExecutor } from "../sql-executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -67,11 +68,16 @@ export function resolveStoreContext(options: DoStoreOptions): ResolvedStoreConte
       if (typeof outer.transaction === "function") {
         const result = fn();
         if (result !== null && typeof result === "object" && "then" in result) {
-          return await result;
+          // Sync transaction cannot wrap async multi-step work — fail closed.
+          throw new StoreUnsupportedFeatureError(
+            "withTransaction: async callbacks require executor.runInTransaction; refusing to run without multi-statement atomicity",
+          );
         }
         return outer.transaction(() => result as T);
       }
-      return await fn();
+      throw new StoreUnsupportedFeatureError(
+        "withTransaction: executor provides neither runInTransaction nor transaction; refusing silent no-op",
+      );
     },
   };
 }

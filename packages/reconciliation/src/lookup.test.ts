@@ -52,8 +52,9 @@ describe("safe lookup order", () => {
       async findByPaymentId() {
         return { kind: "not_found" };
       },
-      async findByIdempotencyKey(_g, key) {
-        return { kind: "found", snapshots: [snap(`from-${key}`)] };
+      async findByIdempotencyKey() {
+        // Secondary hit returns same identity as target → consistent
+        return { kind: "found", snapshots: [snap("pi_missing")] };
       },
     };
     const result = await resolveProviderSnapshot(
@@ -66,7 +67,33 @@ describe("safe lookup order", () => {
     );
     expect(result.outcome).toBe("consistent");
     if (result.outcome === "consistent") {
-      expect(result.provider.gatewayPaymentId).toBe("from-idem_1");
+      expect(result.provider.gatewayPaymentId).toBe("pi_missing");
+    }
+  });
+
+  it("RECON-1: secondary-key wrong payment is drift not consistent/safe paid", async () => {
+    const lookup: ProviderLookupPort = {
+      async findByPaymentId() {
+        return { kind: "not_found" };
+      },
+      async findByIdempotencyKey() {
+        // Finds a *different* paid payment than target.gatewayPaymentId
+        return { kind: "found", snapshots: [snap("pi_B", "paid")] };
+      },
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_A",
+      idempotencyKey: "idem_shared",
+      expected: { status: "pending" },
+    };
+    const result = await resolveProviderSnapshot(target, lookup);
+    expect(result.outcome).toBe("drift_detected");
+    if (result.outcome === "drift_detected") {
+      expect(result.provider.gatewayPaymentId).toBe("pi_B");
+      expect(
+        result.differences.some((d) => d.field === "gatewayPaymentId"),
+      ).toBe(true);
     }
   });
 
@@ -210,7 +237,8 @@ describe("safe lookup order", () => {
       // no findByPaymentId even though key present
       async findByLocalReference(_g, ref) {
         called.push(ref);
-        return { kind: "found", snapshots: [snap("from-local")] };
+        // Secondary recovers the same payment id as target
+        return { kind: "found", snapshots: [snap("pi_1")] };
       },
     };
     const result = await resolveProviderSnapshot(
@@ -231,7 +259,8 @@ describe("safe lookup order", () => {
         return { kind: "error", retryable: false, message: "bad id format" };
       },
       async findByIdempotencyKey() {
-        return { kind: "found", snapshots: [snap("from-idem")] };
+        // Bound identity: secondary returns target's intended payment id
+        return { kind: "found", snapshots: [snap("pi_bad")] };
       },
     };
     const result = await resolveProviderSnapshot(
@@ -244,7 +273,7 @@ describe("safe lookup order", () => {
     );
     expect(result.outcome).toBe("consistent");
     if (result.outcome === "consistent") {
-      expect(result.provider.gatewayPaymentId).toBe("from-idem");
+      expect(result.provider.gatewayPaymentId).toBe("pi_bad");
     }
   });
 

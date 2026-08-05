@@ -180,6 +180,58 @@ describe("decideReconciliationPolicy", () => {
     expect(d2.action).not.toBe("update_local_to_paid");
     expect(d2.action).toBe("apply_drift_review");
   });
+
+  it("RECON-1: wrong-payment identity blocks update_local_to_paid", () => {
+    const wrongProvider = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_B",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      providerStatus: "succeeded",
+    });
+    const result: ReconciliationResult = {
+      outcome: "drift_detected",
+      provider: wrongProvider,
+      differences: [
+        { field: "status", local: "pending", provider: "paid" },
+        {
+          field: "gatewayPaymentId",
+          local: "pi_A",
+          provider: "pi_B",
+          message: "gatewayPaymentId mismatch",
+        },
+      ],
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_A",
+      expected: { status: "pending" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).not.toBe("update_local_to_paid");
+    expect(d.action).toBe("apply_drift_review");
+    expect(d.safe).toBe(false);
+  });
+
+  it("RECON-4: authorized/partially_captured → paid is not safe auto-upgrade", () => {
+    for (const localStatus of ["authorized", "partially_captured"] as const) {
+      const result: ReconciliationResult = {
+        outcome: "drift_detected",
+        provider: paidProvider,
+        differences: [
+          { field: "status", local: localStatus, provider: "paid" },
+        ],
+      };
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_1",
+        expected: { status: localStatus },
+      };
+      const d = decideReconciliationPolicy(result, target);
+      expect(d.action).toBe("apply_drift_review");
+      expect(d.safe).toBe(false);
+      expect(d.action).not.toBe("update_local_to_paid");
+    }
+  });
 });
 
 describe("shouldForbidReplacementCharge", () => {

@@ -109,6 +109,21 @@ describe("mockGateway", () => {
     expect(g.history.some((h) => h.operation === "createPayment")).toBe(true);
     const rec = g.history.find((h) => h.operation === "createPayment");
     expect(rec?.error?.name).toBe("CardDeclinedError");
+    // TESTKIT-3: never store raw Error.message (may carry secrets)
+    expect(rec?.error?.message).toBe("[REDACTED]");
+  });
+
+  it("history redacts error messages that look like secrets (TESTKIT-3)", async () => {
+    const g = mockGateway({
+      createPayment: [
+        { throw: new Error("Card sk_live_SECRET_TOKEN_12345 declined") },
+      ],
+    });
+    await expect(g.createPayment(baseCreate)).rejects.toThrow(/sk_live/);
+    const rec = g.history.find((h) => h.operation === "createPayment");
+    expect(rec?.error?.name).toBe("Error");
+    expect(rec?.error?.message).toBe("[REDACTED]");
+    expect(JSON.stringify(g.getHistory())).not.toContain("sk_live");
   });
 
   it("provider_ok_client_timeout dual outcome records ledger success", async () => {
@@ -646,6 +661,98 @@ describe("mockGateway", () => {
     expect(r.outcome).toBe("requires_action");
     expect(isRequiresActionOutcome(r)).toBe(true);
     expect(isPaidOutcome(r)).toBe(false);
+  });
+
+  it("requires_action/pending create does not full-capture ledger (TESTKIT-2)", async () => {
+    const g3ds = mockGateway({
+      createPayment: [{ outcome: "requires_action" }],
+    });
+    const r3ds = await g3ds.createPayment(baseCreate);
+    expect(r3ds.status).toBe("pending");
+    expect(r3ds.outcome).toBe("requires_action");
+    expect(r3ds.success).toBe(true); // API ok — not money settled
+    const s3ds = g3ds.getPaymentState(r3ds.gatewayId);
+    expect(s3ds).toBeDefined();
+    expect(s3ds!.status).toBe("pending");
+    expect(s3ds!.capturedAmount).toBe(0);
+    expect(s3ds!.authorized).toBe(false);
+    // Void of pre-capture 3DS hold must remain valid
+    const voided = await g3ds.voidPayment!({
+      gatewayPaymentId: r3ds.gatewayId,
+    });
+    expect(voided.status).toBe("cancelled");
+    expect(g3ds.getPaymentState(r3ds.gatewayId)?.status).toBe("cancelled");
+
+    const gPending = mockGateway({
+      createPayment: [{ outcome: "pending" }],
+    });
+    const rp = await gPending.createPayment(baseCreate);
+    expect(rp.status).toBe("pending");
+    const sp = gPending.getPaymentState(rp.gatewayId);
+    expect(sp?.capturedAmount).toBe(0);
+    expect(sp?.status).toBe("pending");
+  });
+
+  it("non-success scripted capture does not mutate ledger (TESTKIT-1)", async () => {
+    const g = mockGateway();
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 50,
+      capture: false,
+    });
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(0);
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+
+    g.enqueue("capturePayment", { outcome: "failed" });
+    const failed = await g.capturePayment({ gatewayPaymentId: pay.gatewayId });
+    expect(failed.outcome).toBe("failed");
+    expect(failed.status).toBe("failed");
+    // Ledger must stay authorized with zero capture after failed capture
+    const afterFailed = g.getPaymentState(pay.gatewayId)!;
+    expect(afterFailed.capturedAmount).toBe(0);
+    expect(afterFailed.status).toBe("authorized");
+
+    g.enqueue("capturePayment", { outcome: "indeterminate" });
+    const ind = await g.capturePayment({ gatewayPaymentId: pay.gatewayId });
+    expect(ind.outcome).toBe("indeterminate");
+    const afterInd = g.getPaymentState(pay.gatewayId)!;
+    expect(afterInd.capturedAmount).toBe(0);
+    expect(afterInd.status).toBe("authorized");
+
+    // Successful capture still settles (explicit enqueue — last-step would replay indeterminate)
+    g.enqueue("capturePayment", { outcome: "succeeded" });
+    const ok = await g.capturePayment({ gatewayPaymentId: pay.gatewayId });
+    expect(ok.status).toBe("paid");
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(50);
+  });
+
+  it("non-success scripted void does not cancel ledger (TESTKIT-1)", async () => {
+    const g = mockGateway({
+      voidPayment: [
+        { outcome: "failed" },
+        { outcome: "indeterminate" },
+        { outcome: "voided" },
+      ],
+    });
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 20,
+      capture: false,
+    });
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+
+    const failed = await g.voidPayment!({ gatewayPaymentId: pay.gatewayId });
+    expect(failed.outcome).toBe("failed");
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+
+    const ind = await g.voidPayment!({ gatewayPaymentId: pay.gatewayId });
+    expect(ind.outcome).toBe("indeterminate");
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+
+    // Success void still cancels
+    const voided = await g.voidPayment!({ gatewayPaymentId: pay.gatewayId });
+    expect(voided.status).toBe("cancelled");
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("cancelled");
   });
 
   it("implements PaymentGateway surface (name, capabilities, supports)", () => {

@@ -34,7 +34,6 @@ describe("moneyEquals", () => {
   it.each([
     ["10", "10.01", "USD", "USD"],
     ["10.00", "10.00", "USD", "EUR"],
-    ["1", "1", "usd", "USD"],
     // USD exponent 2 → excess precision is fail-closed unequal
     ["10.001", "10.00", "USD", "USD"],
   ] as const)(
@@ -45,6 +44,12 @@ describe("moneyEquals", () => {
       ).toBe(false);
     },
   );
+
+  // RECON-6: ISO currency codes are case-insensitive
+  it("treats currency case as insignificant", () => {
+    expect(moneyEquals(money("1", "usd"), money("1", "USD"))).toBe(true);
+    expect(moneyEquals(money("10.00", "Usd"), money("10", "USD"))).toBe(true);
+  });
 });
 
 describe("compareSnapshots (A2 machine-readable fields)", () => {
@@ -89,13 +94,13 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
     expect(diffs.some((d) => d.field === "amount")).toBe(true);
   });
 
-  it("currency is case-sensitive", () => {
-    expect(moneyEquals(money("1", "usd"), money("1", "USD"))).toBe(false);
+  it("currency case does not produce amount drift (RECON-6)", () => {
+    expect(moneyEquals(money("1", "usd"), money("1", "USD"))).toBe(true);
     const diffs = compareSnapshots(
       { amount: money("10.00", "usd") },
       provider,
     );
-    expect(diffs.some((d) => d.field === "amount")).toBe(true);
+    expect(diffs.some((d) => d.field === "amount")).toBe(false);
   });
 
   it("emits capturedAmount and refundedAmount paths", () => {

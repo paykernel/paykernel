@@ -123,6 +123,9 @@ describe("public API surface", () => {
     expect(notes.toLowerCase()).toContain("at-least-once");
     expect(notes.toLowerCase()).toContain("2026-08-03");
     expect(notes.toLowerCase()).toContain("never auto-migrate");
+    expect(notes.toLowerCase()).toContain("worker-client");
+    expect(notes.toLowerCase()).toContain("cross-object");
+    expect(notes.toLowerCase()).toContain("runintransaction");
   });
 
   it("root production graph has no local-sqlite / cloudflare:workers imports", () => {

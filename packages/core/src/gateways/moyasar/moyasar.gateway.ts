@@ -831,11 +831,14 @@ export class MoyasarGateway extends BaseGateway {
           // Moyasar returns the payment object with updated refund info.
           // There's no separate refund ID — refund is tracked on the payment.
           // Prefer "completed" on HTTP 2xx when the returned payment reflects a
-          // refund (full/partial), not only when provider status === "refunded".
+          // refund (full/partial/incomplete snapshot), not only when provider
+          // status === "refunded". `refund_completed` is the fail-closed
+          // incomplete-money status (provider refunded without amount evidence).
           const reflectsRefund =
             payment.refunded > 0 ||
             paymentStatus === "refunded" ||
             paymentStatus === "partially_refunded" ||
+            paymentStatus === "refund_completed" ||
             payment.status === "refunded";
 
           const status = reflectsRefund ? "completed" : "pending";
@@ -848,7 +851,10 @@ export class MoyasarGateway extends BaseGateway {
               gatewayRefundId: payment.id,
               status,
               totalRefunded: this.fromMinorUnits(
-                payment.refunded,
+                typeof payment.refunded === "number" &&
+                  Number.isFinite(payment.refunded)
+                  ? payment.refunded
+                  : 0,
                 payment.currency,
               ),
               refundedAt: payment.refunded_at
@@ -1057,19 +1063,26 @@ export class MoyasarGateway extends BaseGateway {
     // Never re-expose the webhook secret in rawPayload after verification.
     const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
 
+    const eventType = this.normalizeWebhookEventType(raw.type);
+    const status = this.resolvePaymentStatus({
+      status: data.status,
+      amount: data.amount,
+      refunded: data.refunded,
+      captured: data.captured,
+    });
+    // Phase-7 money fields: use refunded/captured when the event is about those
+    // money movements — never report full payment total for a partial slice
+    // (MOYASAR-1). Incomplete refund snapshots may omit amount entirely.
+    const amount = this.resolveWebhookEventAmount(data, status, eventType);
+
     const legacy: WebhookEvent = {
       id: raw.id,
-      type: this.normalizeWebhookEventType(raw.type),
+      type: eventType,
       gateway: "moyasar",
       paymentId,
       gatewayPaymentId: data.id,
-      status: this.resolvePaymentStatus({
-        status: data.status,
-        amount: data.amount,
-        refunded: data.refunded,
-        captured: data.captured,
-      }),
-      amount: this.fromMinorUnits(data.amount, data.currency),
+      status,
+      ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
       currency: data.currency.toUpperCase(),
       timestamp: new Date(raw.created_at),
@@ -1182,6 +1195,21 @@ export class MoyasarGateway extends BaseGateway {
       options.forceOutcome ??
       this.mapMoyasarOutcome(status, nextAction, redirectUrl);
 
+    // Defensive: treat missing/non-finite fee/captured/refunded as 0 so incomplete
+    // snapshots never throw while converting money fields (status still fails closed).
+    const feeMinor =
+      typeof payment.fee === "number" && Number.isFinite(payment.fee)
+        ? payment.fee
+        : 0;
+    const capturedMinor =
+      typeof payment.captured === "number" && Number.isFinite(payment.captured)
+        ? payment.captured
+        : 0;
+    const refundedMinor =
+      typeof payment.refunded === "number" && Number.isFinite(payment.refunded)
+        ? payment.refunded
+        : 0;
+
     return applyOutcomeToGatewayResult(
       {
         gatewayId: payment.id,
@@ -1190,9 +1218,9 @@ export class MoyasarGateway extends BaseGateway {
         ...(redirectUrl !== undefined ? { redirectUrl } : {}),
         ...(nextAction !== undefined ? { nextAction } : {}),
         amount: this.fromMinorUnits(payment.amount, payment.currency),
-        fee: this.fromMinorUnits(payment.fee, payment.currency),
-        capturedAmount: this.fromMinorUnits(payment.captured, payment.currency),
-        refundedAmount: this.fromMinorUnits(payment.refunded, payment.currency),
+        fee: this.fromMinorUnits(feeMinor, payment.currency),
+        capturedAmount: this.fromMinorUnits(capturedMinor, payment.currency),
+        refundedAmount: this.fromMinorUnits(refundedMinor, payment.currency),
         providerNativeStatus: payment.status,
         gateway: "moyasar",
       },
@@ -1221,6 +1249,8 @@ export class MoyasarGateway extends BaseGateway {
    * Derive Phase 6 outcome from mapped Moyasar status + challenge signals.
    * 3DS / STC OTP / initiated never map to `succeeded`.
    * Cancelled/voided maps to `failed` unless void forces succeeded.
+   * Partial capture is open money → `requires_action` (not operation-succeeded);
+   * `isPaidOutcome` remains false either way because paid-like is `paid` only.
    */
   private mapMoyasarOutcome(
     status: PaymentStatus,
@@ -1245,7 +1275,12 @@ export class MoyasarGateway extends BaseGateway {
       // Initiated without challenge URL still must not be treated as paid.
       return "requires_action";
     }
-    // paid | authorized | partially_* | refunded | setup_completed
+    // Open money story — align with Paymob demotion (MOYASAR-5).
+    if (status === "partially_captured") {
+      return "requires_action";
+    }
+    // paid | authorized | partially_refunded | refunded | refund_completed |
+    // setup_completed
     return "succeeded";
   }
 
@@ -1466,6 +1501,13 @@ export class MoyasarGateway extends BaseGateway {
    * the original authorization `amount` (matches Stripe/Paymob + behavioral
    * contracts: full refund of a partial capture is `refunded`).
    *
+   * **Fail-closed on incomplete refund snapshots (MOYASAR-2):** provider status
+   * `refunded` with missing/zero/non-finite `refunded` amount does **not** map
+   * to full `refunded`. It maps to `refund_completed` (refund entity signal
+   * without proving full money reversal) so inventory/accounting cannot fully
+   * reverse from an incomplete payload. Aligns with Stripe incomplete
+   * `charge.refunded` → `refund_completed`.
+   *
    * @param baseStatus - Optional precomputed `mapStatus` result (avoids double map/warn).
    */
   private resolvePaymentStatus(
@@ -1490,11 +1532,25 @@ export class MoyasarGateway extends BaseGateway {
 
     // Full refund of partial capture (refunded === captured < amount) => refunded.
     const refundBaseline = captured > 0 ? captured : amount;
-    if (refunded > 0 && refunded < refundBaseline) {
+    const providerSaysRefunded =
+      status === "refunded" || payment.status === "refunded";
+
+    // Positive refunded amount: amount-based completeness (never invent full).
+    if (refunded > 0) {
+      if (refundBaseline > 0 && refunded < refundBaseline) {
+        return "partially_refunded";
+      }
+      if (refundBaseline > 0 && refunded >= refundBaseline) {
+        return "refunded";
+      }
+      // Positive refunded with no usable baseline — partial is safer than full.
       return "partially_refunded";
     }
-    if (refunded >= refundBaseline && refundBaseline > 0) {
-      return "refunded";
+
+    // Provider claims refunded but refunded amount is missing/zero/non-finite.
+    // Do not fail-open to full `refunded` (MOYASAR-2).
+    if (providerSaysRefunded) {
+      return "refund_completed";
     }
 
     // Partial capture only when the base status is auth/paid (captured) family.
@@ -1511,6 +1567,76 @@ export class MoyasarGateway extends BaseGateway {
     }
 
     return status;
+  }
+
+  /**
+   * Resolve webhook/Phase-7 money field from the money movement that the event
+   * describes (MOYASAR-1).
+   *
+   * - Refund-like events/statuses → cumulative `refunded` (not payment total).
+   * - Capture / partial capture → `captured` when known.
+   * - Otherwise → payment `amount` (prefer `captured` for paid settlement when set).
+   *
+   * Incomplete refund snapshots without a finite `refunded` field omit amount
+   * rather than inventing the full payment total.
+   */
+  private resolveWebhookEventAmount(
+    data: {
+      amount: number;
+      currency: string;
+      refunded?: number;
+      captured?: number;
+    },
+    status: PaymentStatus,
+    eventType: string,
+  ): number | undefined {
+    const refunded =
+      typeof data.refunded === "number" && Number.isFinite(data.refunded)
+        ? data.refunded
+        : undefined;
+    const captured =
+      typeof data.captured === "number" && Number.isFinite(data.captured)
+        ? data.captured
+        : undefined;
+
+    const refundLike =
+      eventType === "payment_refunded" ||
+      status === "refunded" ||
+      status === "partially_refunded" ||
+      status === "refund_completed" ||
+      status === "refund_pending";
+
+    if (refundLike) {
+      if (refunded !== undefined) {
+        return this.fromMinorUnits(refunded, data.currency);
+      }
+      // Incomplete: do not report payment total as the refund money field.
+      return undefined;
+    }
+
+    const captureLike =
+      eventType === "payment_captured" || status === "partially_captured";
+
+    if (captureLike) {
+      if (captured !== undefined && captured > 0) {
+        return this.fromMinorUnits(captured, data.currency);
+      }
+      // Partial without captured field — do not invent full authorization total.
+      if (status === "partially_captured") {
+        return undefined;
+      }
+    }
+
+    // Paid settlement: prefer captured amount when the snapshot includes it.
+    if (
+      (status === "paid" || eventType === "payment_paid") &&
+      captured !== undefined &&
+      captured > 0
+    ) {
+      return this.fromMinorUnits(captured, data.currency);
+    }
+
+    return this.fromMinorUnits(data.amount, data.currency);
   }
 
   private mapNextAction(

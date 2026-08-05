@@ -85,7 +85,7 @@ console.log(result.id, context.normalizedOutcome, durationMs);
 
 The callback may return:
 
-1. **Plain value** — used as `result`; no context patch beyond duration (and `failed` if thrown).
+1. **Plain value** — used as `result`; no context patch beyond duration (and `indeterminate` if thrown).
 2. **Wrapped** `{ result, contextPatch? }` — only when object keys are exactly `result` and/or `contextPatch` (avoids mistaking domain objects that happen to have a `result` field).
 
 ```typescript
@@ -107,9 +107,9 @@ await withPaymentOperation({ context: started }, async () => ({
 
 On throw:
 
-- Span ends with `code: "error"` (optional `recordException`).
-- Finalize sets `normalizedOutcome: "failed"` if the patch did not already set an outcome.
-- Metrics record the failed outcome; latency still recorded.
+- Span ends with `code: "error"`; `recordException` receives a **sanitized** object (name + optional code only — never raw `Error.message` / stack).
+- Finalize sets `normalizedOutcome: "indeterminate"` if the patch did not already set an outcome (throws are transport-ambiguous; do not invent definitive `failed`). Override via `contextPatch` when the failure is known-final.
+- Metrics record the outcome label; latency still recorded. Indeterminate also increments `indeterminateOperations`.
 - Telemetry may include `errorName` only (not `error.message` — may contain secrets).
 - Error is **rethrown** after instrumentation.
 

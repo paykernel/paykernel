@@ -31,6 +31,7 @@ const EXPECTED_RUNTIME = [
   "StoreTimeoutError",
   "resolveKeyDesign",
   "recordKey",
+  "logicalKeyFromRecordKey",
   "REDIS_SCRIPT_REGISTRY",
   "parseTaggedResult",
 ] as const;
@@ -92,6 +93,9 @@ describe("public API surface", () => {
     expect(api.getRedisStorageAdapterManifest()).toBe(
       api.REDIS_STORAGE_ADAPTER_MANIFEST,
     );
+    const notes = api.REDIS_STORAGE_ADAPTER_MANIFEST.notes?.join(" ") ?? "";
+    expect(notes.toLowerCase()).toContain("clusterkeys");
+    expect(notes.toLowerCase()).toContain("crossslot");
   });
 
   it("root production graph has no optional driver imports", () => {

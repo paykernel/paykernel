@@ -2,17 +2,22 @@
  * transactionSync rollback: throw aborts partial writes.
  * Forbid BEGIN/COMMIT via sql.exec.
  * External-work-outside-txn invariant (static + runtime).
+ * DO-1/DO-2 transaction honesty (fail closed, no silent no-op).
  */
 import { describe, expect, it } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import {
   createDoExecutor,
+  createDoPaymentStores,
   migrateDoAdapter,
   createDoIdempotencyStore,
 } from "./index";
 import { createMockDoSql } from "./test-utils/mock-do-sql";
+import { createMockDoNamespace } from "./test-utils/mock-namespace";
 import { uniqueTablePrefix } from "./test-utils/do-env";
+import type { DoStorageLike } from "./types";
 
 const SRC_ROOT = join(import.meta.dir);
 
@@ -182,5 +187,63 @@ describe("do transactionSync", () => {
       "utf8",
     );
     expect(idemp.toLowerCase()).toMatch(/external/);
+  });
+});
+
+describe("DO-1 worker-client withTransaction honesty", () => {
+  it("createDoPaymentStores.withTransaction hard-fails (no silent no-op)", async () => {
+    const ns = createMockDoNamespace({ autoMigrate: false });
+    try {
+      const stores = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions: 2 },
+      });
+      await expect(
+        stores.idempotency.withTransaction!(async () => "nope"),
+      ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+      await expect(
+        stores.webhookInbox.withTransaction!(async () => "nope"),
+      ).rejects.toThrow(/cross-object/i);
+      await expect(
+        stores.reconciliation.withTransaction!(async () => "nope"),
+      ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+    } finally {
+      ns.close();
+    }
+  });
+});
+
+describe("DO-2 runInTransaction when BEGIN rejected", () => {
+  it("fails closed for async callbacks instead of pretending TX", async () => {
+    const handle = createMockDoSql();
+    try {
+      // Wrap storage so BEGIN IMMEDIATE is rejected (real DO may forbid it).
+      const storage: DoStorageLike = {
+        sql: {
+          exec(sql: string, ...params: unknown[]) {
+            if (/^\s*BEGIN/i.test(sql)) {
+              throw new Error("BEGIN not supported in this environment");
+            }
+            return handle.storage.sql.exec(sql, ...params);
+          },
+        },
+        transactionSync: <T>(cb: () => T): T =>
+          handle.storage.transactionSync(cb),
+      };
+      const executor = createDoExecutor(storage);
+      expect(typeof executor.runInTransaction).toBe("function");
+
+      await expect(
+        executor.runInTransaction!(async () => {
+          return "async-without-tx";
+        }),
+      ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+
+      // Sync work may still use transactionSync fallback.
+      const syncOut = await executor.runInTransaction!(() => 42);
+      expect(syncOut).toBe(42);
+    } finally {
+      handle.close();
+    }
   });
 });

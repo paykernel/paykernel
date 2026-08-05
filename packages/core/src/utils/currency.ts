@@ -45,6 +45,7 @@ const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
   "PYG",
   "RWF",
   "UGX",
+  "UYI", // Uruguay Peso en Unidades Indexadas (funds code) — ISO 4217 exponent 0
   "VND",
   "VUV",
   "XAF",
@@ -64,6 +65,14 @@ const THREE_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
   "LYD",
   "OMR",
   "TND",
+]);
+
+/**
+ * ISO 4217 currencies with a minor-unit exponent of 4.
+ */
+const FOUR_DECIMAL_CURRENCIES: ReadonlySet<string> = new Set([
+  "CLF", // Unidad de Fomento (Chile funds code)
+  "UYW", // Unidad previsional (Uruguay)
 ]);
 
 /**
@@ -126,7 +135,8 @@ function lookupOverride(
  * 1. `overrides` when provided and the code is present (invalid values throw)
  * 2. ISO 4217 zero-decimal table → 0
  * 3. ISO 4217 three-decimal table → 3
- * 4. Default → 2
+ * 4. ISO 4217 four-decimal table → 4
+ * 5. Default → 2
  *
  * Provider-specific deviations (Stripe ISK/UGX, PayPal HUF/TWD, Paymob merchant
  * maps) must be supplied via `overrides` or an explicit `exponent` on money
@@ -150,6 +160,9 @@ export function getCurrencyExponent(
   }
   if (THREE_DECIMAL_CURRENCIES.has(normalizedCurrency)) {
     return 3;
+  }
+  if (FOUR_DECIMAL_CURRENCIES.has(normalizedCurrency)) {
+    return 4;
   }
   return 2;
 }

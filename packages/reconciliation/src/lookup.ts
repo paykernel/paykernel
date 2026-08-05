@@ -180,6 +180,27 @@ function finalizeWithExpected(
   provider: ProviderPaymentSnapshot,
 ): ReconciliationResult {
   const differences = compareSnapshots(target.expected, provider);
+
+  // RECON-1: Always bind provider identity to target.gatewayPaymentId when the
+  // app already knows the intended provider payment. Secondary-key hits that
+  // resolve a *different* payment must surface as drift (never silent consistent),
+  // so policy cannot safe-upgrade local state against the wrong charge.
+  if (
+    target.gatewayPaymentId !== undefined &&
+    target.gatewayPaymentId !== "" &&
+    target.gatewayPaymentId !== provider.gatewayPaymentId
+  ) {
+    const already = differences.some((d) => d.field === "gatewayPaymentId");
+    if (!already) {
+      differences.push({
+        field: "gatewayPaymentId",
+        local: target.gatewayPaymentId,
+        provider: provider.gatewayPaymentId,
+        message: "gatewayPaymentId mismatch (secondary-key result unbound to target)",
+      });
+    }
+  }
+
   if (differences.length === 0) {
     return { outcome: "consistent", provider };
   }

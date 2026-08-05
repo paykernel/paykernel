@@ -4,6 +4,10 @@
  * Primary roadmap API: createD1PaymentStores({ db: env.PAYMENTS_DB }).
  * Does **not** migrate — call migrateD1Adapter explicitly.
  * Does **not** require Cloudflare REST / account API tokens.
+ *
+ * **Sessions default:** when `db.withSession` exists and `session` is omitted,
+ * binding factories use `"first-primary"` so post-claim SELECTs are not served
+ * from a stale replica under D1 read replication. Pass `session: false` to opt out.
  */
 
 import { createD1Executor } from "./executor";
@@ -12,15 +16,33 @@ import type { D1BindingStoreOptions, D1StoresBundle, D1StoreOptions } from "./ty
 import { createD1IdempotencyStore } from "./stores/idempotency-store";
 import { createD1WebhookInboxStore } from "./stores/webhook-inbox-store";
 import { createD1ReconciliationStore } from "./stores/reconciliation-store";
+import { D1_SESSION_FIRST_PRIMARY } from "./sessions";
 import type {
   IdempotencyStore,
   ReconciliationStore,
   WebhookInboxStore,
 } from "@paykernel/store-contracts";
 
+/**
+ * Resolve Sessions API option for binding factories.
+ * Default to first-primary when the binding supports withSession and caller
+ * did not opt out with `session: false`.
+ */
+function resolveBindingSession(
+  options: D1BindingStoreOptions,
+): string | undefined {
+  if (options.session === false) return undefined;
+  if (typeof options.session === "string") return options.session;
+  // Omitted: prefer primary-first when Sessions API is available (D1-1).
+  if (typeof options.db.withSession === "function") {
+    return D1_SESSION_FIRST_PRIMARY;
+  }
+  return undefined;
+}
+
 function bindingToStoreOptions(options: D1BindingStoreOptions): D1StoreOptions {
-  const executorOpts =
-    options.session !== undefined ? { session: options.session } : {};
+  const session = resolveBindingSession(options);
+  const executorOpts = session !== undefined ? { session } : {};
   const executor = createD1Executor(options.db, executorOpts);
   const storeOpts: D1StoreOptions = { executor };
   if (options.clock !== undefined) storeOpts.clock = options.clock;
@@ -33,10 +55,12 @@ function bindingToStoreOptions(options: D1BindingStoreOptions): D1StoreOptions {
  *
  * ```ts
  * const stores = createD1PaymentStores({ db: env.PAYMENTS_DB });
+ * // defaults to session: "first-primary" when withSession is available
  * ```
  *
- * Does **not** migrate schema. Optional `session` (e.g. `"first-primary"`)
- * scopes the executor via D1 Sessions API when available.
+ * Does **not** migrate schema. Defaults to D1 Sessions `"first-primary"` when
+ * the binding exposes `withSession` (safe read-after-write under replication).
+ * Pass `session: false` to opt out, or an explicit constraint/bookmark string.
  */
 export function createD1PaymentStores(
   options: D1BindingStoreOptions,

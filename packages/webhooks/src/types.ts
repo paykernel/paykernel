@@ -19,14 +19,32 @@ import type {
  *
  * - `inline`: await handler; on throw → store.fail (retryable) → `handler_failed`.
  * - `durable_retry`: await handler by default; on retryable throw → store.fail with
- *   delay → `scheduled_for_retry`. When `ackAfterClaim: true`, claim persists and
- *   returns `scheduled_for_retry` without running the handler (worker via
+ *   delay → `scheduled_for_retry` (`reason: "handler_retry"`). When
+ *   `ackAfterClaim: true`, claim persists and returns `scheduled_for_retry`
+ *   (`reason: "parked"`) without running the handler (worker via
  *   `processRetryable`). The parking claim does **not** count toward `maxAttempts`
  *   (store `fail({ restoreAttempt: true })`).
  */
 export type WebhookProcessingMode = "inline" | "durable_retry";
 
 // ─── Outcomes (10.4) ─────────────────────────────────────────────────────────
+
+/**
+ * Why work was deferred under `scheduled_for_retry`.
+ *
+ * Adapters MUST discriminate these for HTTP policy — a single “retry later”
+ * ACK is unsafe when no worker will process the row:
+ *
+ * - `parked` — durable `ackAfterClaim` released work for `processRetryable`
+ *   (safe 200 only when a worker is guaranteed).
+ * - `handler_retry` — handler threw retryable; `store.fail` recorded with backoff.
+ * - `not_available` — claim backoff (`availableAt` still future); no handler ran.
+ *   Prefer 5xx so the provider redelivers unless a durable scheduler owns the row.
+ */
+export type ScheduledForRetryReason =
+  | "parked"
+  | "handler_retry"
+  | "not_available";
 
 /**
  * Explicit processing outcomes. Framework adapters map these to HTTP/status
@@ -39,7 +57,7 @@ export type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry" }
+  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -127,8 +145,13 @@ export type ProcessVerifiedInput = {
   handler?: WebhookHandler;
   /**
    * Per-call override for durable_retry ack-after-claim (defaults to engine
-   * option). When true, returns `scheduled_for_retry` after durable claim
-   * without running the handler. Parking claim does not consume `maxAttempts`.
+   * option). When true, returns `scheduled_for_retry` (`reason: "parked"`) after
+   * durable claim without running the handler. Parking claim does not consume
+   * `maxAttempts`.
+   *
+   * **Requires `envelope`** (non-empty serializable payload for `payloadRef`).
+   * Without a stored payload, workers cannot materialize the event — the engine
+   * refuses with `invalid_webhook` rather than parking unfulfillable work.
    */
   ackAfterClaim?: boolean;
 };
@@ -217,22 +240,27 @@ export type CreateWebhookInboxEngineOptions = {
   defaultLeaseMs?: number;
   /**
    * Max **handler** attempts before dead-letter on durable_retry. Default: 5.
+   * Must be a finite integer `>= 1` (constructor throws otherwise).
    * Each claim that runs (or would run) the handler increments store `attempts`.
    * The `ackAfterClaim` parking claim is free (`fail({ restoreAttempt: true })`).
    * Provider redelivery while `availableAt` is in the future returns
-   * `not_available` / `scheduled_for_retry` and does not increment attempts.
+   * `not_available` / `scheduled_for_retry` (`reason: "not_available"`) and does
+   * not increment attempts.
    */
   maxAttempts?: number;
   /**
    * Default retry delay after handler failure (ms). Default: 5_000.
+   * Must be a finite number `>= 0` (constructor throws otherwise).
    * Sets store `availableAt`; both key-addressed claim and listRetryable respect it.
    */
   defaultRetryAfterMs?: number;
   /**
    * durable_retry only: when true, `processVerified` returns
-   * `scheduled_for_retry` after successful claim without running the handler.
-   * Workers must call `processRetryable`. Default: false (run handler in-process).
+   * `scheduled_for_retry` (`reason: "parked"`) after successful claim without
+   * running the handler. Workers must call `processRetryable`.
+   * Default: false (run handler in-process).
    * Parking does not consume handler attempt budget.
+   * Requires a non-empty `envelope` on each parking `processVerified` call.
    */
   ackAfterClaim?: boolean;
   /** Injectable clock for lease expiry deltas / tests. Default: Date.now. */

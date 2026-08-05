@@ -130,19 +130,31 @@ Default backoff: base 1s, max 15m, multiplier 2, jitter ratio 0.2. Inject `rando
 
 ### `processDue`
 
-Claims due jobs and runs a handler; on throw, reschedules or `markManualReview` based on `attempts` vs `maxAttempts`.
+Claims due jobs and runs a handler. **Completion requires an explicit disposition** — returning without throwing is **not** success (policy outcomes like `retry_later` must not silently complete recovery).
 
 ```typescript
 await scheduler.processDue({
   limit: 20,
   maxInFlightByGateway: { stripe: 5, paypal: 3 },
   handler: async (job) => {
-    // reconcile + apply policy; throw to reschedule
+    // reconcile + apply policy
+    // return { disposition: "complete" } | { disposition: "retry", error? } |
+    //        { disposition: "manual_review", note? }
+    // void / undefined → treated as retry (fail-closed)
+    // throw → same as { disposition: "retry", error }
+    return { disposition: "complete" };
   },
 });
+// → { processed, rescheduled, manualReview, completed, leaseLost }
 ```
 
-`maxInFlightByGateway` is a **per-processDue call** filter using the gateway segment of keys shaped `recon:{gateway}:{id}`. Applications should also bound global worker concurrency and per-provider rate limits (see [batch.md](./batch.md)).
+`leaseLost` counts fencing rejections on complete/fail/markManualReview (another worker owns the lease) — these are **not** counted as business reschedules or dead-letters.
+
+`maxInFlightByGateway` is a **per-processDue call** filter using the gateway segment of keys shaped `recon:{gateway}:{id}`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others within the call. Applications should also bound global worker concurrency and per-provider rate limits (see [batch.md](./batch.md)).
+
+### Re-scheduling terminal jobs
+
+`store.schedule` for a key that is already `completed` / `failed` / `manual_review` may reopen the job as `scheduled` (memory store does; durable adapters should match). Active `scheduled` / `claimed` rows still return `already_exists`.
 
 ---
 

@@ -32,7 +32,7 @@ export const TURSO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
   },
   coordinationScope: "multi-host",
   durability: "durable",
-  supportsTransactions: true,
+  supportsTransactions: true, // when TursoExecutor.transaction is provided; store withTransaction fails closed otherwise
   supportsLeases: true,
   supportsRetentionCleanup: true,
   notes: [
@@ -40,6 +40,7 @@ export const TURSO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "Not the same as packages/store-sqlite local single-host file databases.",
     "Claims prefer single-statement ON CONFLICT/RETURNING UPSERTs; multi-statement only in write transactions/batches.",
     "Never unprotected get-then-set across round-trips for claim correctness.",
+    "withTransaction fails closed (StoreUnsupportedFeatureError) when TursoExecutor.transaction is unavailable — no silent no-op multi-mutation atomicity.",
     "@tursodatabase/serverless and @libsql/client are NOT interchangeable — use matching subpath; test independently.",
     "Embedded replica / sync modes are NOT advertised as true local-first sync; /sync subpath is not shipped.",
     "Legacy embedded replica semantics differ from true local-first sync — do not assume offline conflict resolution.",

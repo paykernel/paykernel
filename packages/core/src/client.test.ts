@@ -78,11 +78,13 @@ describe('PaymentClient Stripe convenience methods', () => {
         let requestedUrl = '';
         globalThis.fetch = mock(async (url) => {
             requestedUrl = String(url);
+            // amount_received required for paid (STRIPE-2 fail-closed: missing settled → processing)
             return createMockResponse({
                 id: 'pi_paid',
                 object: 'payment_intent',
                 status: 'succeeded',
                 amount: 5000,
+                amount_received: 5000,
                 currency: 'usd',
                 client_secret: null,
             });
@@ -1018,6 +1020,347 @@ describe('PaymentClient after-hook post-success isolation', () => {
         expect(
             (result.nextAction as { redirectUrl?: string } | undefined)?.redirectUrl,
         ).toBe('https://hooks.stripe.com/3ds/real');
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot rewrite nested nextAction.redirect_to_url.url via after-hook (deep graph)', async () => {
+        // CORE-1: Stripe multi-level next_action graph — one-level clone is not enough.
+        const gatewayNextAction = {
+            type: 'redirect_to_url',
+            redirect_to_url: {
+                url: 'https://hooks.stripe.com/3ds/real',
+                return_url: 'https://example.com/return',
+            },
+        };
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_deep_next_action',
+                object: 'payment_intent',
+                status: 'requires_action',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: 'pi_deep_next_action_secret',
+                next_action: gatewayNextAction,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => {
+                    const na = result.nextAction as
+                        | {
+                              type?: string;
+                              redirect_to_url?: { url?: string; return_url?: string };
+                          }
+                        | undefined;
+                    if (na?.redirect_to_url && typeof na.redirect_to_url === 'object') {
+                        na.redirect_to_url.url = 'https://evil.example/phish';
+                        na.redirect_to_url.return_url = 'https://evil.example/return';
+                    }
+                    // rawResponse alias path: Stripe shares next_action into intent.
+                    // Mutating through rawResponse must not poison freeze either.
+                    const raw = result.rawResponse as
+                        | { next_action?: { redirect_to_url?: { url?: string } } }
+                        | undefined;
+                    if (raw?.next_action?.redirect_to_url) {
+                        raw.next_action.redirect_to_url.url =
+                            'https://evil.example/via-raw';
+                    }
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            nextAction: {
+                                type: 'redirect_to_url',
+                                redirect_to_url: {
+                                    url: 'https://evil.example/replaced',
+                                    return_url: 'https://evil.example/return',
+                                },
+                            },
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 50,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/return',
+        });
+
+        expect(result.outcome).toBe('requires_action');
+        expect(result.nextAction).toEqual(gatewayNextAction);
+        expect(
+            (
+                result.nextAction as
+                    | { redirect_to_url?: { url?: string } }
+                    | undefined
+            )?.redirect_to_url?.url,
+        ).toBe('https://hooks.stripe.com/3ds/real');
+        // Additive non-identity field still allowed
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot replace top-level redirectUrl via after-hook (customer redirect identity)', async () => {
+        // CORE-2: merchants branch on result.redirectUrl for browser redirects.
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_redirect_url_guard',
+                object: 'payment_intent',
+                status: 'requires_action',
+                amount: 5000,
+                currency: 'usd',
+                client_secret: 'pi_redirect_url_guard_secret',
+                next_action: {
+                    type: 'redirect_to_url',
+                    redirect_to_url: {
+                        url: 'https://hooks.stripe.com/3ds/real',
+                        return_url: 'https://example.com/return',
+                    },
+                },
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => {
+                    (result as { redirectUrl?: string }).redirectUrl =
+                        'https://evil.example/inplace';
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            redirectUrl: 'https://evil.example/phish',
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 50,
+            currency: 'USD',
+            callbackUrl: 'https://example.com/return',
+        });
+
+        expect(result.outcome).toBe('requires_action');
+        expect(result.redirectUrl).toBe('https://hooks.stripe.com/3ds/real');
+        expect(result.redirectUrl).not.toBe('https://evil.example/phish');
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot invent top-level redirectUrl via after-hook when gateway omitted it', async () => {
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_no_redirect',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 2000,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        redirectUrl: 'https://evil.example/forged-redirect',
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_no_redirect',
+        });
+
+        expect(result.gatewayId).toBe('pi_no_redirect');
+        // Stripe void mapping may leave redirectUrl undefined as a present key —
+        // either absent or undefined is fine; forged phishing URL must not stick.
+        expect(result.redirectUrl).toBeUndefined();
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot invent gatewayObjectId via after-hook when gateway omitted it', async () => {
+        // CORE-3: secondary provider object id must not be forged for recon/routing.
+        globalThis.fetch = mock(async () =>
+            createMockResponse({
+                id: 'pi_no_goid',
+                object: 'payment_intent',
+                status: 'canceled',
+                amount: 1500,
+                currency: 'usd',
+                client_secret: null,
+            }),
+        ) as unknown as typeof fetch;
+
+        const client = new PaymentClient({
+            stripe: { secretKey: 'sk_test_123', webhookSecret: 'whsec_test' },
+            defaultGateway: 'stripe',
+            hooks: {
+                afterVoid: async (_ctx, result) => ({
+                    proceed: true,
+                    modifiedResult: {
+                        ...result,
+                        gatewayObjectId: 'forged_gateway_object',
+                        rawResponse: { annotated: true },
+                    },
+                }),
+            },
+        });
+
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_no_goid',
+        });
+
+        expect(result.gatewayId).toBe('pi_no_goid');
+        expect(result.gatewayObjectId).toBeUndefined();
+        expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
+    });
+
+    it('cannot rewrite gatewayObjectId via after-hook when gateway set it', async () => {
+        // CORE-3 restore path: custom gateway that dual-writes gatewayObjectId.
+        class FreezeIdGateway extends BaseGateway {
+            readonly name = 'freezeid';
+
+            constructor(hooks: HooksManager) {
+                super({}, hooks, undefined, {
+                    payments: true,
+                    immediateCapture: true,
+                    authorization: false,
+                    partialCapture: false,
+                    refunds: true,
+                    partialRefunds: false,
+                    voids: false,
+                });
+            }
+
+            async createPayment(
+                params: CreatePaymentParams,
+            ): Promise<GatewayPaymentResult> {
+                return this.executeWithHooks('createPayment', params, async () => ({
+                    success: true,
+                    outcome: 'requires_action' as const,
+                    gatewayId: 'intent_real',
+                    gatewayObjectId: 'obj_real_secondary',
+                    status: 'pending' as const,
+                    redirectUrl: 'https://provider.example/approve',
+                    amount: params.amount,
+                    nextAction: {
+                        type: 'redirect_to_url',
+                        redirect_to_url: {
+                            url: 'https://provider.example/approve',
+                            return_url: 'https://merchant.example/return',
+                        },
+                    },
+                    rawResponse: {
+                        next_action: {
+                            type: 'redirect_to_url',
+                            redirect_to_url: {
+                                url: 'https://provider.example/approve',
+                            },
+                        },
+                    },
+                }));
+            }
+
+            async capturePayment(): Promise<GatewayPaymentResult> {
+                throw new OperationNotSupportedError('capture', this.name);
+            }
+
+            async refundPayment(): Promise<GatewayRefundResult> {
+                throw new OperationNotSupportedError('refund', this.name);
+            }
+
+            verifyWebhook(): boolean {
+                return true;
+            }
+
+            parseWebhookEvent(payload: unknown): WebhookEvent {
+                return {
+                    id: 'evt_freeze',
+                    type: 'payment_paid',
+                    gateway: this.name,
+                    paymentId: undefined,
+                    gatewayPaymentId: 'intent_real',
+                    status: 'paid',
+                    timestamp: new Date(),
+                    rawPayload: payload,
+                };
+            }
+        }
+
+        const client = createPaymentClient({
+            gateways: {
+                freezeid: {
+                    name: 'freezeid',
+                    manifest: { name: 'freezeid', displayName: 'Freeze ID Test' },
+                    create(ctx: GatewayContext) {
+                        return new FreezeIdGateway(ctx.hooks);
+                    },
+                },
+            },
+            defaultGateway: 'freezeid',
+            hooks: {
+                afterCreatePayment: async (_ctx, result) => {
+                    (result as { gatewayObjectId?: string }).gatewayObjectId =
+                        'forged_inplace';
+                    (result as { redirectUrl?: string }).redirectUrl =
+                        'https://evil.example/inplace';
+                    const na = result.nextAction as
+                        | { redirect_to_url?: { url?: string } }
+                        | undefined;
+                    if (na?.redirect_to_url) {
+                        na.redirect_to_url.url = 'https://evil.example/nested';
+                    }
+                    return {
+                        proceed: true,
+                        modifiedResult: {
+                            ...result,
+                            gatewayObjectId: 'forged_object_id',
+                            redirectUrl: 'https://evil.example/phish',
+                            nextAction: {
+                                type: 'redirect_to_url',
+                                redirect_to_url: {
+                                    url: 'https://evil.example/replaced',
+                                },
+                            },
+                            rawResponse: { annotated: true },
+                        },
+                    };
+                },
+            },
+        });
+
+        const result = await client.createPayment({
+            amount: 25,
+            currency: 'USD',
+            callbackUrl: 'https://merchant.example/return',
+        });
+
+        expect(result.gatewayId).toBe('intent_real');
+        expect(result.gatewayObjectId).toBe('obj_real_secondary');
+        expect(result.redirectUrl).toBe('https://provider.example/approve');
+        expect(result.nextAction).toEqual({
+            type: 'redirect_to_url',
+            redirect_to_url: {
+                url: 'https://provider.example/approve',
+                return_url: 'https://merchant.example/return',
+            },
+        });
         expect((result.rawResponse as { annotated?: boolean }).annotated).toBe(true);
     });
 

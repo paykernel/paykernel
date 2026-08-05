@@ -21,6 +21,7 @@ describe("public API runtime surface", () => {
       // Instrumentation
       ["withPaymentOperation", observability.withPaymentOperation],
       ["recordPaymentOperation", observability.recordPaymentOperation],
+      ["sanitizeExceptionForSpan", observability.sanitizeExceptionForSpan],
       // Redaction
       ["createRedactingTelemetrySink", observability.createRedactingTelemetrySink],
       ["redactTelemetryData", observability.redactTelemetryData],

@@ -6,6 +6,7 @@ import {
   createNoopTracer,
   METRIC_NAMES,
   recordPaymentOperation,
+  sanitizeExceptionForSpan,
   withPaymentOperation,
   type PaymentSpan,
   type PaymentTracer,
@@ -207,7 +208,8 @@ describe("withPaymentOperation", () => {
     expect(seen[0]?.errorName).toBe("Error");
     expect(seen[0]?.errorMessage).toBeUndefined();
     expect(JSON.stringify(seen[0])).not.toContain("sk_live");
-    expect(seen[0]?.normalizedOutcome).toBe("failed");
+    // OBS-2: throws default to indeterminate (transport-ambiguous), not failed
+    expect(seen[0]?.normalizedOutcome).toBe("indeterminate");
   });
 
   it("starts span with operation type name and ends ok", async () => {
@@ -234,7 +236,7 @@ describe("withPaymentOperation", () => {
     expect(spans[0]!.attributes.durationMs).toBe(3);
   });
 
-  it("re-throws errors, marks span error, outcome failed", async () => {
+  it("re-throws errors, marks span error, outcome indeterminate (OBS-2)", async () => {
     const metrics = createInMemoryPaymentMetrics();
     const { tracer, spans } = recordingTracer();
     const ctx = createOperationContext({
@@ -256,7 +258,45 @@ describe("withPaymentOperation", () => {
     const outcomes = metrics.snapshot().samples.filter(
       (s) => s.name === METRIC_NAMES.operationOutcomes,
     );
-    expect(outcomes[0]!.attributes?.outcome).toBe("failed");
+    expect(outcomes[0]!.attributes?.outcome).toBe("indeterminate");
+    expect(metrics.snapshot().counters[METRIC_NAMES.indeterminateOperations]).toBe(
+      1,
+    );
+  });
+
+  it("sanitizes recordException — name only, no secret message (OBS-1)", async () => {
+    const exceptions: unknown[] = [];
+    const tracer: PaymentTracer = {
+      startSpan(name) {
+        return {
+          end() {},
+          setAttribute() {},
+          recordException(error: unknown) {
+            exceptions.push(error);
+          },
+        };
+      },
+    };
+    const ctx = createOperationContext({
+      operationId: "op_san",
+      gateway: "stripe",
+      operationType: "payment.create",
+    });
+
+    await expect(
+      withPaymentOperation(
+        { context: ctx, tracer, clock: fakeClock([0, 1]) },
+        async () => {
+          throw new Error("Bearer sk_live_SHOULD_NOT_EXPORT");
+        },
+      ),
+    ).rejects.toThrow(/sk_live/);
+
+    expect(exceptions).toHaveLength(1);
+    const ex = exceptions[0] as { name?: string; message?: string; code?: string };
+    expect(ex.name).toBe("Error");
+    expect(ex.message).toBeUndefined();
+    expect(JSON.stringify(exceptions[0])).not.toContain("sk_live");
   });
 
   it("supports plain (non-wrapped) return values", async () => {
@@ -290,6 +330,30 @@ describe("withPaymentOperation", () => {
       }),
     );
     expect(metrics.snapshot().counters[METRIC_NAMES.retries]).toBe(1);
+  });
+});
+
+describe("sanitizeExceptionForSpan", () => {
+  it("keeps name/code only — strips message and free-form strings", () => {
+    const err = new Error("sk_live_secret_in_message");
+    const sanitized = sanitizeExceptionForSpan(err);
+    expect(sanitized).toEqual({ name: "Error" });
+    expect(JSON.stringify(sanitized)).not.toContain("sk_live");
+
+    class CodedError extends Error {
+      code = "CARD_DECLINED";
+      constructor() {
+        super("pan 4242");
+        this.name = "CardDeclinedError";
+      }
+    }
+    expect(sanitizeExceptionForSpan(new CodedError())).toEqual({
+      name: "CardDeclinedError",
+      code: "CARD_DECLINED",
+    });
+    expect(sanitizeExceptionForSpan("raw string secret")).toEqual({
+      name: "Error",
+    });
   });
 });
 

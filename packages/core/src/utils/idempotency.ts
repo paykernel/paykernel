@@ -1,4 +1,4 @@
-// file: packages/payments/src/utils/idempotency.ts
+// file: packages/core/src/utils/idempotency.ts
 
 /**
  * Application-level idempotency primitives.
@@ -9,6 +9,8 @@
  * deduplicate those mutations across retries — and, with an atomic `reserve`
  * backed by Redis/SQL, across processes.
  */
+
+import { isMoney, money } from "./money";
 
 type MaybePromise<T> = T | Promise<T>;
 
@@ -45,17 +47,60 @@ const DEFAULT_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const DEFAULT_MAX_ENTRIES = 10_000;
 
 /**
+ * Deep-clone an idempotency record so callers and the store never share
+ * mutable references (including nested `result` graphs).
+ */
+function cloneIdempotencyRecord(record: IdempotencyRecord): IdempotencyRecord {
+  let result: unknown;
+  if ("result" in record) {
+    result = cloneUnknown(record.result);
+  }
+
+  const cloned: IdempotencyRecord = {
+    status: record.status,
+    fingerprint: record.fingerprint,
+    createdAt: record.createdAt,
+  };
+  if ("result" in record) {
+    cloned.result = result;
+  }
+  return cloned;
+}
+
+function cloneUnknown(value: unknown): unknown {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  try {
+    return structuredClone(value);
+  } catch {
+    // Non-cloneable values (functions, DOM nodes, etc.): best-effort JSON.
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch {
+      return value;
+    }
+  }
+}
+
+/**
  * Simple in-memory idempotency store with TTL eviction and a bounded size.
  * Suitable for a single long-lived process; provide a shared store (Redis/SQL)
  * for multi-worker or serverless deployments.
  *
  * Memory is capped at `maxEntries`. Expired entries are evicted lazily on
  * read, and when the store reaches capacity a write first prunes expired
- * entries and then, if still full, evicts the oldest entry (insertion order).
- * This prevents unbounded growth under high request volume where keys are
- * written once and never read again. Under sustained pressure beyond
- * `maxEntries`, the oldest in-progress guards may be evicted, so size the cap
- * for your throughput or use a shared store for strict guarantees.
+ * entries and then, if still full, evicts the least-recently-updated entry
+ * (Map insertion order with move-to-end on every `set`). Records returned from
+ * `get`/`reserve` and stored by `set` are cloned so callers cannot mutate the
+ * live cache (status / fingerprint / result).
+ *
+ * Under sustained pressure beyond `maxEntries`, the oldest in-progress guards
+ * may be evicted, so size the cap for your throughput or use a shared store
+ * for strict guarantees.
  */
 export class InMemoryIdempotencyStore implements IdempotencyStore {
   private readonly entries = new Map<
@@ -77,19 +122,31 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
       this.entries.delete(key);
       return undefined;
     }
-    return entry.record;
+    return cloneIdempotencyRecord(entry.record);
   }
 
   set(key: string, record: IdempotencyRecord): void {
+    const isUpdate = this.entries.has(key);
+
     // Only do the O(n) prune/evict work when at capacity for a new key, so the
     // common path (updating an existing key or writing below the cap) stays O(1).
-    if (!this.entries.has(key) && this.entries.size >= this.maxEntries) {
+    if (!isUpdate && this.entries.size >= this.maxEntries) {
       this.pruneExpired();
       if (this.entries.size >= this.maxEntries) {
         this.evictOldest();
       }
     }
-    this.entries.set(key, { record, expiresAt: Date.now() + this.ttlMs });
+
+    // Move-to-end on update so recency tracks last write (LRU-style eviction).
+    if (isUpdate) {
+      this.entries.delete(key);
+    }
+
+    const stored = Object.freeze(cloneIdempotencyRecord(record));
+    this.entries.set(key, {
+      record: stored,
+      expiresAt: Date.now() + this.ttlMs,
+    });
   }
 
   delete(key: string): void {
@@ -133,6 +190,13 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  *
  * `undefined` and `null` are encoded distinctly so omitting a field (or an
  * explicit `undefined`) does not collide with an explicit `null`.
+ *
+ * Money / AmountInput shapes are canonicalized so economically identical
+ * amounts fingerprint the same way, e.g. `money("10.50","SAR")`,
+ * `{ amount: "10.50", currency: "SAR" }`, and `{ amount: 10.5, currency: "SAR" }`.
+ *
+ * Non-JSON primitives are encoded distinctly: `NaN`/`Infinity` do not collapse
+ * to `null`, `bigint` does not throw, and `Date` uses ISO-8601 rather than `{}`.
  */
 export function fingerprintParams(value: unknown): string {
   return stableStringify(value);
@@ -141,19 +205,123 @@ export function fingerprintParams(value: unknown): string {
 /** Sentinel so `undefined` does not collapse to the same encoding as `null`. */
 const UNDEFINED_SENTINEL = '"__undefined__"';
 
+/** Parse options that never reject zero/negative amounts during fingerprinting. */
+const FINGERPRINT_MONEY_OPTS = {
+  allowZero: true,
+  allowNegative: true,
+} as const;
+
+/**
+ * Try to normalize an amount+currency pair to canonical Money major-unit form.
+ * Returns undefined when the value cannot be parsed as money (caller falls back
+ * to structural encoding).
+ *
+ * - `number` / decimal `string` amounts use the sibling `currency`.
+ * - Nested {@link Money} under `amount` is re-validated via its own currency;
+ *   the sibling currency is still normalized so
+ *   `{ amount: money("10.50","SAR"), currency: "SAR" }` matches
+ *   `{ amount: 10.5, currency: "SAR" }`.
+ */
+function tryCanonicalAmountCurrency(
+  amount: unknown,
+  currency: string,
+): { amount: string; currency: string } | undefined {
+  try {
+    if (typeof amount === "number" || typeof amount === "string") {
+      const m = money(amount, currency, FINGERPRINT_MONEY_OPTS);
+      return { amount: m.amount, currency: m.currency };
+    }
+    if (isMoney(amount)) {
+      const m = money(amount.amount, amount.currency, FINGERPRINT_MONEY_OPTS);
+      const sibling = currency.trim().toUpperCase();
+      // Matching sibling (case-insensitive): fully canonical pair.
+      if (sibling === m.currency) {
+        return { amount: m.amount, currency: m.currency };
+      }
+      // Mismatched sibling still collapses the nested Money amount string so
+      // structural fingerprints stay stable; currencies remain distinct.
+      if (sibling.length > 0) {
+        return { amount: m.amount, currency: sibling };
+      }
+      return { amount: m.amount, currency: m.currency };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 function stableStringify(value: unknown): string {
   if (value === undefined) {
     return UNDEFINED_SENTINEL;
   }
+
+  if (typeof value === "number") {
+    // JSON.stringify(NaN/±Infinity) is "null" — encode distinctly (MONEY-5).
+    if (Number.isNaN(value)) {
+      return '"NaN"';
+    }
+    if (value === Number.POSITIVE_INFINITY) {
+      return '"Infinity"';
+    }
+    if (value === Number.NEGATIVE_INFINITY) {
+      return '"-Infinity"';
+    }
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === "bigint") {
+    // JSON.stringify(bigint) throws — encode as decimal digits + "n" (MONEY-5).
+    return JSON.stringify(`${value.toString()}n`);
+  }
+
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value) ?? "null";
   }
+
+  // Date → ISO string (default object walk yields "{}") (MONEY-5).
+  if (value instanceof Date) {
+    return JSON.stringify(value.toISOString());
+  }
+
+  // Canonical Money shape (MONEY-1).
+  if (isMoney(value)) {
+    try {
+      const m = money(value.amount, value.currency, FINGERPRINT_MONEY_OPTS);
+      return stableStringify({ amount: m.amount, currency: m.currency });
+    } catch {
+      // Fall through to structural encoding of the raw object.
+    }
+  }
+
   if (Array.isArray(value)) {
     return `[${value.map(stableStringify).join(",")}]`;
   }
+
   const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
+
+  // Canonicalize AmountInput+currency siblings so number | Money | decimal
+  // string amounts with the same economic value share a fingerprint (MONEY-1).
+  let source: Record<string, unknown> = record;
+  if (
+    Object.prototype.hasOwnProperty.call(record, "amount") &&
+    typeof record.currency === "string"
+  ) {
+    const canonical = tryCanonicalAmountCurrency(
+      record.amount,
+      record.currency,
+    );
+    if (canonical) {
+      source = {
+        ...record,
+        amount: canonical.amount,
+        currency: canonical.currency,
+      };
+    }
+  }
+
+  const keys = Object.keys(source).sort();
   return `{${keys
-    .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+    .map((key) => `${JSON.stringify(key)}:${stableStringify(source[key])}`)
     .join(",")}}`;
 }

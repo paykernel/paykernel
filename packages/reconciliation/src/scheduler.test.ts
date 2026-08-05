@@ -125,6 +125,7 @@ describe("createReconciliationScheduler (A3)", () => {
     });
     // first claim attempts=1 < 2 → reschedule
     expect(result.rescheduled).toBe(1);
+    expect(result.completed).toBe(0);
 
     // advance past retry
     clock.advance(60_000);
@@ -135,6 +136,7 @@ describe("createReconciliationScheduler (A3)", () => {
     });
     // attempts=2 >= maxAttempts 2 → manual review
     expect(result2.manualReview).toBe(1);
+    expect(result2.completed).toBe(0);
 
     const key = deriveReconciliationJobKey({
       gateway: "stripe",
@@ -224,6 +226,7 @@ describe("createReconciliationScheduler (A3)", () => {
       maxInFlightByGateway: { stripe: 1 },
       handler: async (job) => {
         handled.push(job.key);
+        return { disposition: "complete" as const };
       },
     });
 
@@ -340,11 +343,192 @@ describe("createReconciliationScheduler (A3)", () => {
       leaseMs: 30_000,
       handler: async (job) => {
         handled.push(job.key);
+        return { disposition: "complete" as const };
       },
     });
     expect(recovered.processed).toBe(1);
     expect(recovered.completed).toBe(1);
     expect(handled).toEqual([key]);
     expect((await store.get(key))?.status).toBe("completed");
+  });
+
+  it("RECON-2: processDue does not complete on void / retry disposition", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      maxAttempts: 10,
+      backoff: createExponentialBackoff({
+        baseMs: 1000,
+        maxMs: 60_000,
+        multiplier: 2,
+        jitterRatio: 0,
+      }),
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_retry_later" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "retry_later_path",
+    });
+
+    // Handler that would have been "success" under throw-only contract but
+    // models policy retry_later by returning void / explicit retry.
+    const voidResult = await scheduler.processDue({
+      handler: async () => {
+        // intentional no disposition — fail-closed retry
+      },
+    });
+    expect(voidResult.processed).toBe(1);
+    expect(voidResult.completed).toBe(0);
+    expect(voidResult.rescheduled).toBe(1);
+
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_retry_later",
+    });
+    expect((await store.get(key))?.status).toBe("scheduled");
+
+    clock.advance(60_000);
+    const explicitRetry = await scheduler.processDue({
+      handler: async () => ({
+        disposition: "retry" as const,
+        error: "policy:retry_later",
+        retryAfterMs: 5_000,
+      }),
+    });
+    expect(explicitRetry.completed).toBe(0);
+    expect(explicitRetry.rescheduled).toBe(1);
+    const rec = await store.get(key);
+    expect(rec?.status).toBe("scheduled");
+    expect(Date.parse(rec!.dueAt)).toBe(clock.nowMs() + 5_000);
+  });
+
+  it("RECON-2: processDue completes only on explicit complete disposition", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({ store, clock });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_ok" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "ok",
+    });
+
+    const result = await scheduler.processDue({
+      handler: async () => ({ disposition: "complete" as const }),
+    });
+    expect(result.completed).toBe(1);
+    expect(result.rescheduled).toBe(0);
+    expect(result.leaseLost).toBe(0);
+  });
+
+  it("RECON-3: lease_lost after handler is not counted as business reschedule", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      defaultLeaseMs: 1_000,
+      maxAttempts: 2,
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_lease" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "lease",
+    });
+
+    // Intercept: claim via processDue but force lease expiry before complete.
+    const result = await scheduler.processDue({
+      leaseMs: 1_000,
+      handler: async () => {
+        clock.advance(2_000);
+        // Steal lease as another owner while original token is now expired.
+        const key = deriveReconciliationJobKey({
+          gateway: "stripe",
+          gatewayPaymentId: "pi_lease",
+        });
+        const reclaimed = await store.claim({
+          key,
+          owner: "thief",
+          leaseMs: 30_000,
+        });
+        expect(reclaimed.kind).toBe("acquired");
+        return { disposition: "complete" as const };
+      },
+    });
+
+    expect(result.processed).toBe(1);
+    expect(result.completed).toBe(0);
+    expect(result.rescheduled).toBe(0);
+    expect(result.manualReview).toBe(0);
+    expect(result.leaseLost).toBe(1);
+  });
+
+  it("RECON-7: schedule reopens terminal completed job under same key", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const input = {
+      target: { gateway: "stripe", gatewayPaymentId: "pi_term" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "first",
+    };
+    await scheduler.schedule(input);
+    const claimed = await scheduler.claimDue();
+    await scheduler.complete({
+      key: claimed[0]!.key,
+      leaseToken: claimed[0]!.leaseToken,
+    });
+    expect((await store.get(claimed[0]!.key))?.status).toBe("completed");
+
+    const again = await scheduler.schedule({
+      ...input,
+      reason: "reopen",
+      runAt: new Date(clock.nowMs() + 1_000).toISOString(),
+    });
+    expect(again.kind).toBe("scheduled");
+    if (again.kind === "scheduled") {
+      expect(again.record.status).toBe("scheduled");
+      expect(again.record.reason).toBe("reopen");
+    }
+  });
+
+  it("RECON-8: maxInFlightByGateway oversample does not starve other gateways", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const runAt = new Date(clock.nowMs()).toISOString();
+
+    // Many stripe jobs first (would fill a tight listDue window), then moyasar.
+    for (let i = 0; i < 8; i++) {
+      await scheduler.schedule({
+        target: { gateway: "stripe", gatewayPaymentId: `pi_s_${i}` },
+        runAt,
+        reason: "s",
+      });
+    }
+    await scheduler.schedule({
+      target: { gateway: "moyasar", gatewayPaymentId: "pi_m_1" },
+      runAt,
+      reason: "m",
+    });
+
+    const handled: string[] = [];
+    const result = await scheduler.processDue({
+      limit: 3,
+      maxInFlightByGateway: { stripe: 1 },
+      handler: async (job) => {
+        handled.push(job.key);
+        return { disposition: "complete" as const };
+      },
+    });
+
+    // Cap stripe at 1; remaining slots should pick moyasar rather than only stripe.
+    expect(result.completed).toBeGreaterThanOrEqual(2);
+    expect(handled.some((k) => k.includes(":moyasar:"))).toBe(true);
+    expect(handled.filter((k) => k.includes(":stripe:")).length).toBe(1);
   });
 });

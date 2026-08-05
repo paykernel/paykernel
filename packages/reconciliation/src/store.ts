@@ -126,6 +126,13 @@ export type ScheduleReconciliationInput = {
   dueAt: IsoTimestamp;
 };
 
+/**
+ * Result of `schedule`.
+ *
+ * Adapters SHOULD reopen terminal rows (`completed` / `failed` / `manual_review`)
+ * as a fresh `scheduled` job under the same key (`kind: "scheduled"`). Active
+ * `scheduled` / `claimed` rows return `already_exists` (idempotent insert).
+ */
 export type ScheduleResult =
   | { kind: "scheduled"; record: ReconciliationRecord }
   | { kind: "already_exists"; record: ReconciliationRecord };

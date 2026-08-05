@@ -7,6 +7,7 @@ import {
 } from "@paykernel/testkit";
 import {
   StoreLeaseLostError,
+  StoreUnsupportedFeatureError,
 } from "@paykernel/store-contracts";
 import {
   createTursoIdempotencyStore,
@@ -362,6 +363,33 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(call!.sql).toContain("lease_expires_at");
     expect(call!.sql).toContain("lease_expires_at >");
     expect(call!.params).toContain(now);
+  });
+});
+
+describe("withTransaction honesty (SHARED-1)", () => {
+  it("fails closed when executor lacks transaction (no silent no-op)", async () => {
+    const executor = createScriptedExecutor({});
+    expect(executor.transaction).toBeUndefined();
+    const store = createTursoIdempotencyStore({ executor });
+    await expect(
+      store.withTransaction(async () => "should-not-run"),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+    await expect(
+      store.withTransaction(async () => "should-not-run"),
+    ).rejects.toThrow(/refusing silent no-op/i);
+  });
+
+  it("uses executor.transaction when present", async () => {
+    const executor = createScriptedExecutor({});
+    let nested = false;
+    executor.transaction = async <T>(fn: (tx: typeof executor) => Promise<T>) => {
+      nested = true;
+      return fn(executor);
+    };
+    const store = createTursoIdempotencyStore({ executor });
+    const out = await store.withTransaction(async () => "ok");
+    expect(out).toBe("ok");
+    expect(nested).toBe(true);
   });
 });
 

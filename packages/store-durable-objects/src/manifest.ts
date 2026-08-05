@@ -38,7 +38,7 @@ export const DO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
   },
   coordinationScope: "multi-host",
   durability: "durable",
-  supportsTransactions: true, // transactionSync + implicit SQL statement atomicity
+  supportsTransactions: true, // in-object transactionSync + implicit SQL statement atomicity
   supportsLeases: true,
   supportsRetentionCleanup: true,
   notes: [
@@ -55,6 +55,8 @@ export const DO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "Optional alarms are at-least-once; use partitioned queue + one alarm per DO; bounded retries + backoff/jitter.",
     "Injectable clock for FakeClock conformance; TEXT IDs/tokens/hashes; explicit schema ensure not import-time migrate.",
     "Worker client is async (stub RPC); DO-internal SQL is synchronous.",
+    "supportsTransactions applies in-object (createDo*Store / PaymentsStoreObject transactionSync). Worker-client createDoPaymentStores.withTransaction hard-fails (StoreUnsupportedFeatureError) — no cross-object multi-mutation atomicity and no silent no-op.",
+    "runInTransaction fails closed for async callbacks when BEGIN is rejected (no pretend multi-statement atomicity).",
     "Never auto-migrate on package import or default createDoPaymentStores construction.",
     "Workers-only deployment; do not import cloudflare:workers into portable packages (core/webhooks/testkit).",
     "Pin verification date against Cloudflare DO SQLite storage + alarms docs: verified 2026-08-03 (https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/ , https://developers.cloudflare.com/durable-objects/api/alarms/).",

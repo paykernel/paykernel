@@ -378,6 +378,48 @@ function fromStripeAmount(
   });
 }
 
+/** Finite Stripe minor-unit amount, or undefined when missing/non-finite. */
+function finiteStripeMinor(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Settled/captured minor units on a PaymentIntent-like object.
+ * Prefer `amount_received`, then expanded `latest_charge.amount_captured`,
+ * then first charge in `charges.data` (legacy list shape).
+ * Does **not** fall back to authorized `amount` — that would claim full capture.
+ */
+function resolveStripeCapturedMinor(object: {
+  amount_received?: unknown;
+  latest_charge?: unknown;
+  charges?: { data?: Array<{ amount_captured?: unknown }> };
+}): number | undefined {
+  const received = finiteStripeMinor(object.amount_received);
+  if (received !== undefined) {
+    return received;
+  }
+
+  const latest = object.latest_charge;
+  if (typeof latest === "object" && latest !== null) {
+    const captured = finiteStripeMinor(
+      (latest as { amount_captured?: unknown }).amount_captured,
+    );
+    if (captured !== undefined) {
+      return captured;
+    }
+  }
+
+  const firstCharge = object.charges?.data?.[0];
+  if (firstCharge) {
+    const captured = finiteStripeMinor(firstCharge.amount_captured);
+    if (captured !== undefined) {
+      return captured;
+    }
+  }
+
+  return undefined;
+}
+
 function expandableId(
   value: string | { id?: string } | null | undefined,
 ): string | undefined {
@@ -1047,7 +1089,8 @@ export class StripeGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
-        // Partial capture: succeeded + amount_received < authorized amount.
+        // Partial capture: succeeded + settled < authorized amount.
+        // Fail closed when settled amount is missing (do not claim full paid).
         const status =
           response.status === "succeeded"
             ? this.succeededPaymentIntentWebhookStatus(
@@ -1055,12 +1098,18 @@ export class StripeGateway extends BaseGateway {
               )
             : this.mapStatus(response.status);
 
+        // Amount: amount_received → amount_captured → amount. Never coerce
+        // missing amount_received alone to major 0 via fromStripeAmount(undefined).
+        const currency = response.currency ?? p.currency ?? "usd";
+        const settledMinor = resolveStripeCapturedMinor(response);
+        const amountMinor =
+          settledMinor ?? finiteStripeMinor(response.amount);
+
         return this.mapPaymentIntentResult(response, {
           status,
-          amount: fromStripeAmount(
-            response.amount_received,
-            response.currency ?? p.currency ?? "usd",
-          ),
+          ...(amountMinor !== undefined
+            ? { amount: fromStripeAmount(amountMinor, currency) }
+            : {}),
           // Capture paths historically omit redirectUrl (undefined).
           omitRedirectUrl: true,
         });
@@ -1204,7 +1253,8 @@ export class StripeGateway extends BaseGateway {
         const currency = paymentIntent.currency ?? "usd";
         let status = this.mapStatus(paymentIntent.status);
 
-        // Prefer captured/settled amount when present on succeeded intents.
+        // Settled amount: amount_received → latest_charge.amount_captured (no auth fallback).
+        const settledMinor = resolveStripeCapturedMinor(paymentIntent);
         const amountReceived = paymentIntent.amount_received;
         const hasAmountReceived =
           typeof amountReceived === "number" && Number.isFinite(amountReceived);
@@ -1217,9 +1267,10 @@ export class StripeGateway extends BaseGateway {
         const capturedBase = hasAmountReceived
           ? amountReceived
           : (amountCaptured ?? paymentIntent.amount);
+        // Result amount prefers settled total when known; else authorized amount.
         const amountMinor =
-          paymentIntent.status === "succeeded" && hasAmountReceived
-            ? amountReceived
+          paymentIntent.status === "succeeded" && settledMinor !== undefined
+            ? settledMinor
             : paymentIntent.amount;
 
         // Refund status overrides partial-capture status when both apply.
@@ -1234,12 +1285,17 @@ export class StripeGateway extends BaseGateway {
             capturedBase > 0 && amountRefunded >= capturedBase
               ? "refunded"
               : "partially_refunded";
-        } else if (
-          paymentIntent.status === "succeeded" &&
-          hasAmountReceived &&
-          amountReceived < paymentIntent.amount
-        ) {
-          status = "partially_captured";
+        } else if (paymentIntent.status === "succeeded") {
+          if (settledMinor === undefined) {
+            // Incomplete money snapshot: do not claim full paid (fail closed).
+            status = "processing";
+          } else if (
+            typeof paymentIntent.amount === "number" &&
+            Number.isFinite(paymentIntent.amount) &&
+            settledMinor < paymentIntent.amount
+          ) {
+            status = "partially_captured";
+          }
         }
 
         const refundedAmount =
@@ -1652,14 +1708,19 @@ export class StripeGateway extends BaseGateway {
 
     if (object.object === "payment_intent") {
       const pi = object as any;
-      // Prefer amount_received for succeeded PaymentIntents (captured/settled).
+      // Prefer settled amount for succeeded PaymentIntents:
+      // amount_received → amount_captured (latest_charge / charges.data).
       if (
-        (raw.type === "payment_intent.succeeded" ||
-          pi.status === "succeeded") &&
-        typeof pi.amount_received === "number" &&
-        Number.isFinite(pi.amount_received)
+        raw.type === "payment_intent.succeeded" ||
+        pi.status === "succeeded"
       ) {
-        amount = fromStripeAmount(pi.amount_received, amountCurrency);
+        const settled = resolveStripeCapturedMinor(pi);
+        if (settled !== undefined) {
+          amount = fromStripeAmount(settled, amountCurrency);
+        } else if (typeof pi.amount === "number") {
+          // Incomplete snapshot: report authorized amount only (status fail-closed).
+          amount = fromStripeAmount(pi.amount, amountCurrency);
+        }
       } else if (typeof pi.amount === "number") {
         amount = fromStripeAmount(pi.amount, amountCurrency);
       }
@@ -1701,15 +1762,20 @@ export class StripeGateway extends BaseGateway {
           status = "paid";
         } else if (
           session.payment_status === "no_payment_required" &&
-          session.status === "complete" &&
-          // setup_completed only for true setup flows — not payment mode
-          // sessions that happen to need no payment.
-          (session.mode === "setup" ||
-            expandableId(session.setup_intent) !== undefined)
+          session.status === "complete"
         ) {
-          status = "setup_completed";
+          // setup_completed only for true setup flows — not payment-mode
+          // $0 / free / coupon sessions (those are fulfillment-ready paid).
+          if (
+            session.mode === "setup" ||
+            expandableId(session.setup_intent) !== undefined
+          ) {
+            status = "setup_completed";
+          } else {
+            status = "paid";
+          }
         } else {
-          // complete without paid (or no_payment_required in payment mode)
+          // incomplete / unpaid checkout remains pending
           status = "pending";
         }
         break;
@@ -2144,19 +2210,24 @@ export class StripeGateway extends BaseGateway {
   }
 
   /**
-   * Succeeded PaymentIntent webhook status: partial capture when
-   * amount_received is finite and less than the authorized amount.
+   * Succeeded PaymentIntent status from money fields.
+   * - settled (amount_received → amount_captured) < amount → partially_captured
+   * - settled known and not partial → paid
+   * - settled missing → processing (fail closed; never claim full paid)
    */
   private succeededPaymentIntentWebhookStatus(
     object: StripeWebhookPayload["data"]["object"],
   ): PaymentStatus {
     const pi = object as any;
+    const settled = resolveStripeCapturedMinor(pi);
+    if (settled === undefined) {
+      // Incomplete money snapshot — do not map missing settled amount to paid.
+      return "processing";
+    }
     if (
-      typeof pi.amount_received === "number" &&
-      Number.isFinite(pi.amount_received) &&
       typeof pi.amount === "number" &&
       Number.isFinite(pi.amount) &&
-      pi.amount_received < pi.amount
+      settled < pi.amount
     ) {
       return "partially_captured";
     }

@@ -341,3 +341,60 @@ describe("reconciliation store mock port", () => {
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
 });
+
+describe("deleteExpired composite logical keys (REDIS-1)", () => {
+  it("webhook deleteExpired passes full gateway:eventId as Lua ARGV logicalKey", async () => {
+    const composite = "stripe:evt_abc";
+    const redisKey = `psdk:v1:whinbox:${composite}`;
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "SCAN") {
+        return ["0", [redisKey]];
+      }
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        return ["deleted"];
+      }
+      return null;
+    });
+    const store = createRedisWebhookInboxStore({ port });
+    const result = await store.deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    expect(result.deleted).toBe(1);
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    // EVAL sha numkeys key1 key2 beforeIso logicalKey
+    // After SCRIPT LOAD path uses EVALSHA: sha, 2, record, index, before, logical
+    const args = evalCall!.args.map(String);
+    expect(args).toContain(composite);
+    expect(args).not.toContain("evt_abc"); // bare pop fragment must not be used alone without gateway
+    // Stronger: last ARGV is logical key
+    expect(args[args.length - 1]).toBe(composite);
+  });
+
+  it("recon deleteExpired passes full composite logical key", async () => {
+    const composite = "tenant:job:1";
+    const redisKey = `psdk:v1:recon:${composite}`;
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "SCAN") {
+        return ["0", [redisKey]];
+      }
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        return ["deleted"];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({ port });
+    const result = await store.deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    expect(result.deleted).toBe(1);
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    const args = evalCall!.args.map(String);
+    expect(args[args.length - 1]).toBe(composite);
+  });
+});

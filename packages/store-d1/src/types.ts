@@ -72,10 +72,16 @@ export type D1BindingStoreOptions = {
   clock?: StoreClock;
   namespace?: SchemaNamespaceConfig;
   /**
-   * When set, wraps the binding with `db.withSession(session)` if available
-   * (e.g. `"first-primary"` for read-after-write under read replication).
+   * D1 Sessions API constraint / bookmark for read-after-write under read replication.
+   *
+   * - **Default (omitted):** `"first-primary"` when `db.withSession` exists — primary-first
+   *   session so post-claim SELECTs are not served from a stale replica.
+   * - **string:** explicit constraint/bookmark (e.g. `"first-primary"`, `"first-unconstrained"`, bookmark).
+   * - **`false`:** opt out of sessions (stale replica reads possible under D1 read replication).
+   *
+   * See docs/sessions-and-replication.md.
    */
-  session?: string;
+  session?: string | false;
 };
 
 export type D1StoresBundle = {

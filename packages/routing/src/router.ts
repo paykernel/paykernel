@@ -87,8 +87,11 @@ function selectImpl(
   fallback: string | undefined,
   healthThreshold: number,
 ): RoutingDecision {
+  // ROUTE-1: excludeGateways compared case-insensitively (after trim).
   const exclude = new Set(
-    (input.excludeGateways ?? []).map((g) => g.trim()).filter(Boolean),
+    (input.excludeGateways ?? [])
+      .map((g) => g.trim().toLowerCase())
+      .filter(Boolean),
   );
 
   const candidates: Candidate[] = [];
@@ -96,7 +99,7 @@ function selectImpl(
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i];
     if (rule === undefined) continue;
-    if (exclude.has(rule.gateway)) continue;
+    if (exclude.has(rule.gateway.trim().toLowerCase())) continue;
     if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
     if (!ruleMatches(rule, input)) continue;
     candidates.push({ rule, index: i });
@@ -172,12 +175,13 @@ function selectFallback(
   input: RoutingInput,
   fallback: string | undefined,
   healthThreshold: number,
+  /** Lowercased gateway ids. */
   exclude: ReadonlySet<string>,
 ): RoutingDecision {
   if (
     fallback !== undefined &&
     fallback.length > 0 &&
-    !exclude.has(fallback) &&
+    !exclude.has(fallback.trim().toLowerCase()) &&
     isGatewayHealthy(fallback, input, healthThreshold)
   ) {
     // Select-time fallback still honors input-level requiredCapabilities.

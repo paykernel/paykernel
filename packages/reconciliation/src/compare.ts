@@ -2,7 +2,12 @@
  * Pure snapshot compare → machine-readable ReconciliationDifference[].
  */
 
-import { MoneyAmountError, toMinorUnits, type Money } from "@paykernel/core";
+import {
+  MoneyAmountError,
+  normalizeCurrencyCode,
+  toMinorUnits,
+  type Money,
+} from "@paykernel/core";
 import type {
   LocalPaymentSnapshot,
   ProviderPaymentSnapshot,
@@ -19,9 +24,23 @@ const MONEY_EQ_PARSE = {
 } as const;
 
 /**
+ * Normalize currency for equality (ISO alphabetic codes are case-insensitive).
+ * Empty/invalid codes fall back to trimmed uppercase so equality stays defined.
+ */
+function currencyCodesEqual(a: string, b: string): boolean {
+  if (a === b) return true;
+  try {
+    return normalizeCurrencyCode(a) === normalizeCurrencyCode(b);
+  } catch {
+    // Fail-closed on empty/invalid: still allow exact trim/upper match.
+    return a.trim().toUpperCase() === b.trim().toUpperCase() && a.trim() !== "";
+  }
+}
+
+/**
  * Money equality for reconciliation drift detection.
  *
- * - **Currency** strings are compared exactly (case-sensitive).
+ * - **Currency** codes compare case-insensitively (ISO 4217 alphabetic).
  * - **Amounts** compare by currency-scale minor units (`bigint` via core
  *   `toMinorUnits`), so equivalent decimal spellings match
  *   (`"10"` ≡ `"10.00"` for USD; `"1.25"` ≡ `"1.250"` for KWD).
@@ -31,16 +50,18 @@ const MONEY_EQ_PARSE = {
  * Never uses float multiply or `Number` compare.
  */
 export function moneyEquals(a: Money, b: Money): boolean {
-  if (a.currency !== b.currency) {
+  if (!currencyCodesEqual(a.currency, b.currency)) {
     return false;
   }
   if (a.amount === b.amount) {
     return true;
   }
   try {
+    // Use normalized currency for exponent lookup so "usd"/"USD" share scale.
+    const currency = normalizeCurrencyCode(a.currency);
     return (
-      toMinorUnits(a.amount, a.currency, MONEY_EQ_PARSE) ===
-      toMinorUnits(b.amount, b.currency, MONEY_EQ_PARSE)
+      toMinorUnits(a.amount, currency, MONEY_EQ_PARSE) ===
+      toMinorUnits(b.amount, currency, MONEY_EQ_PARSE)
     );
   } catch (err) {
     // Fail-closed: invalid/excess-precision amounts are not equal.
@@ -57,7 +78,8 @@ export function moneyEquals(a: Money, b: Money): boolean {
  * Empty differences → consistent path.
  *
  * Only fields present on `local` are compared (partial local knowledge).
- * Amount fields use {@link moneyEquals} (minor-unit numeric equality + exact currency).
+ * Amount fields use {@link moneyEquals} (minor-unit numeric equality +
+ * case-insensitive currency codes).
  */
 export function compareSnapshots(
   local: LocalPaymentSnapshot | undefined,

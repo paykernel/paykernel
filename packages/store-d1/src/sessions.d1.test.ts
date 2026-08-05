@@ -163,4 +163,30 @@ describe("d1 sessions (mock)", () => {
       handle.close();
     }
   });
+
+  it("createD1PaymentStores defaults to first-primary when withSession exists (D1-1)", () => {
+    const handle = createMockD1({ sessions: true });
+    try {
+      createD1PaymentStores({ db: handle.db });
+      expect(handle.lastSessionConstraint).toBe("first-primary");
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("createD1PaymentStores session:false opts out of default first-primary", () => {
+    const handle = createMockD1({ sessions: true });
+    try {
+      createD1PaymentStores({ db: handle.db, session: false });
+      expect(handle.lastSessionConstraint).toBeUndefined();
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("manifest notes document default first-primary binding session", () => {
+    const notes = D1_STORAGE_ADAPTER_MANIFEST.notes?.join(" ") ?? "";
+    expect(notes.toLowerCase()).toContain("first-primary");
+    expect(notes.toLowerCase()).toContain("session: false");
+  });
 });

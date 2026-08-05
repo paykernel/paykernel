@@ -55,6 +55,11 @@ const SENSITIVE_KEY_PATTERNS = [
   "client_secret",
   "clientsecret",
   "given_id",
+  // Banking / government identifiers (MONEY-6)
+  "iban",
+  "bank",
+  "ssn",
+  "pin",
 ];
 
 /**
@@ -80,6 +85,15 @@ const SAFE_KEY_ALLOWLIST = new Set([
   "captureid",
   "orderid",
   "paymentid",
+  "refundid",
+  "voidid",
+  "customerid",
+  "merchantid",
+  "sessionid",
+  "requestid",
+  "correlationid",
+  "traceid",
+  "spanid",
   // Phase 20 OperationContext / telemetry diagnostics
   // (attemptNumber→"number", namespace→"name", *Key→"key"; others defensive)
   "operationid",
@@ -103,6 +117,10 @@ const SAFE_KEY_ALLOWLIST = new Set([
   "errorname",
   "exceptionname",
   "exceptiontype",
+  // Currency / amount field names are not PII (values may still nest sensitive objects)
+  "currency",
+  "amount",
+  "currencycode",
 ]);
 
 const REDACTED = "[REDACTED]";

@@ -115,10 +115,10 @@ Pipeline detail (engine-internal after claim):
 2. `deriveWebhookEventKey`.
 3. `store.claim({ key, payloadHash, owner, leaseMs, payloadRef? })`.
 4. Non-`acquired` → outcome without running the handler.
-5. Mode branch: `durable_retry` + `ackAfterClaim` → schedule worker path; else require `handler`.
+5. Mode branch: `durable_retry` + `ackAfterClaim` → require `envelope`, park as `scheduled_for_retry { reason: "parked" }`; else require `handler`.
 6. Run handler under lease (`ctx.renew` rotates token).
 7. Success → `store.complete` → `{ outcome: "processed" }`.
-8. Throw → sanitize → `store.fail` → `handler_failed` / `scheduled_for_retry`.
+8. Throw → sanitize → `store.fail` → `handler_failed` / `scheduled_for_retry { reason: "handler_retry" }`.
 9. `complete` loses lease after handler success → `{ outcome: "handler_failed", retryable: true }` (**not** `processed`).
 
 ---
@@ -209,6 +209,7 @@ parseWebhookEventKey("stripe:evt_123");     // { gateway: "stripe", providerEven
 ```
 
 - Both parts must be non-empty after trim; otherwise `deriveWebhookEventKey` throws and `processVerified` returns `invalid_webhook`.
+- **Gateway must not contain `:`** (colon is the key separator). Rejecting colon-in-gateway prevents collisions such as `a:b`+`c` vs `a`+`b:c`. `providerEventId` may still contain colons.
 - Format: `{gateway}:{providerEventId}` (first colon splits for parse).
 
 ### Payload hash
@@ -273,9 +274,9 @@ Adapters **may** add first-class columns later without breaking this lean contra
 - Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
 - Unsanitized exception messages that may embed secrets
 
-**Honesty (envelope → `payloadRef`):** the engine persists `envelope` via `JSON.stringify` **without forced redaction**. Whatever you pass to `processVerified` / `processWithVerifier` / `processRetryable` is stored as `payloadRef` as-is. Apps **must** use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
+**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **String** envelopes are stored as-is (opaque refs). Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
 
-Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). Engine `sanitizeWebhookError` strips common secret patterns before `store.fail` — that sanitizer does **not** rewrite `payloadRef`.
+Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
 
 ---
 
@@ -286,8 +287,8 @@ Mode is **required** on `createWebhookInboxEngine` and is **fixed for the life o
 | Mode | Behavior |
 | --- | --- |
 | `inline` | Await handler under lease. Retryable throw → `store.fail` → `{ outcome: "handler_failed", retryable: true }`. Non-retryable / dead letter → `handler_failed { retryable: false }`. |
-| `durable_retry` | Await handler by default. Retryable throw → `store.fail` with delay → `{ outcome: "scheduled_for_retry" }`. |
-| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `scheduled_for_retry` **without** running the handler. Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. |
+| `durable_retry` | Await handler by default. Retryable throw → `store.fail` with delay → `{ outcome: "scheduled_for_retry", reason: "handler_retry" }`. |
+| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `{ outcome: "scheduled_for_retry", reason: "parked" }` **without** running the handler. Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. **Requires non-empty `envelope`** (refuses with `invalid_webhook` otherwise). |
 
 ```typescript
 // Explicit — never omit mode
@@ -296,26 +297,27 @@ const inlineEngine = createWebhookInboxEngine({ store, mode: "inline" });
 const durableEngine = createWebhookInboxEngine({
   store,
   mode: "durable_retry",
-  maxAttempts: 5,
-  defaultRetryAfterMs: 5_000,
+  maxAttempts: 5, // finite integer >= 1
+  defaultRetryAfterMs: 5_000, // finite number >= 0
   // Optional: ACK after durable claim; worker processes later
   ackAfterClaim: true,
 });
 ```
 
-`ackAfterClaim` is only valid with `mode: "durable_retry"` (constructor throws otherwise). Per-call `ackAfterClaim` on `processVerified` may override the engine default in durable mode only.
+`ackAfterClaim` is only valid with `mode: "durable_retry"` (constructor throws otherwise). Per-call `ackAfterClaim` on `processVerified` may override the engine default in durable mode only. Parking **requires** `envelope` so `payloadRef` is materializable by workers.
 
 ### Attempt budget and backoff
 
-- `maxAttempts` is max **handler** attempts before `dead_letter` on `durable_retry` (default 5).
+- `maxAttempts` is max **handler** attempts before `dead_letter` on `durable_retry` (default 5). Must be a finite integer **`>= 1`** (constructor throws otherwise).
 - Each successful store `claim` acquire increments `attempts`. The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
-- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry`.
+- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry { reason: "not_available" }`.
 - `listRetryable` only returns rows with `availableAt <= now` (same gate).
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
+- `defaultRetryAfterMs` must be a finite number **`>= 0`** (constructor throws otherwise). Default remains **5_000**.
 
 #### Residual: `ackAfterClaim` + `fail(restoreAttempt)` lease_lost
 
-If `store.fail({ restoreAttempt: true })` after the parking claim throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine still returns `scheduled_for_retry` (claim was durable; another owner may exist) **but the parking attempt may remain burned** — there is no safe tokenless restore. This is intentional residual under extreme clock skew / zero-duration leases (now rejected at config), not the default money path. Prefer positive lease durations and NTP-aligned clocks across hosts.
+If `store.fail({ restoreAttempt: true })` after the parking claim throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine still returns `scheduled_for_retry { reason: "parked" }` (claim was durable; another owner may exist) **but the parking attempt may remain burned** — there is no safe tokenless restore. This is intentional residual under extreme clock skew / zero-duration leases (now rejected at config), not the default money path. Prefer positive lease durations and NTP-aligned clocks across hosts.
 
 ### `NonRetryableHandlerError`
 
@@ -354,11 +356,13 @@ const result = await durableEngine.processRetryable({
 The engine **never** hardcodes Express/Hono status codes. Your framework adapter owns HTTP policy.
 
 ```ts
+type ScheduledForRetryReason = "parked" | "handler_retry" | "not_available";
+
 type WebhookProcessingOutcome =
   | { outcome: "processed" }
   | { outcome: "duplicate_completed" }
   | { outcome: "already_processing"; retryAfterMs?: number }
-  | { outcome: "scheduled_for_retry" }
+  | { outcome: "scheduled_for_retry"; reason: ScheduledForRetryReason }
   | { outcome: "handler_failed"; retryable: boolean }
   | { outcome: "payload_conflict" }
   | { outcome: "invalid_webhook"; reason?: string };
@@ -369,23 +373,25 @@ type WebhookProcessingOutcome =
 | `processed` | Handler ran; inbox completed | 200 |
 | `duplicate_completed` | Already terminal success; handler not re-run | 200 |
 | `already_processing` | Another worker holds lease; optional `retryAfterMs` | 503 / 409 + Retry-After |
-| `scheduled_for_retry` | Durable path scheduled / retryable fail recorded / backoff `not_available` | **Policy choice** — see below (engine never hardcodes HTTP) |
+| `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work | **200 only if a worker runs `processRetryable`** |
+| `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff | **200** if durable worker will re-drive; else **5xx** |
+| `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran | **5xx** (provider redelivery) unless a durable scheduler owns the row |
 | `handler_failed` `retryable: true` | Handler failed; may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail | 200 or 4xx per policy (do not infinite-retry forever) |
 | `payload_conflict` | Same key, different payload hash | 400 / 409 |
-| `invalid_webhook` | Bad input or verify failed | 400 |
+| `invalid_webhook` | Bad input or verify failed (incl. `ackAfterClaim` without envelope) | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 
-**`scheduled_for_retry` recommended HTTP policy:**
+**`scheduled_for_retry` recommended HTTP policy (must use `reason`):**
 
-| When | Suggested HTTP | Why |
+| `reason` | Suggested HTTP | Why |
 | --- | --- | --- |
-| Durable claim/fail already persisted **and** a worker will process (`ackAfterClaim`, intentional durable ACK) | **200** | Provider need not redeliver; your `processRetryable` worker owns the work |
-| You want the **provider** to redeliver (no worker yet, or park not confirmed) | **5xx** | Provider retry is the recovery path |
-| Store claim `not_available` (backoff before `availableAt`) | either | Same outcome discriminant; prefer 5xx if you rely on provider redelivery for true backoff, or 200 if a durable scheduler will re-drive after `availableAt` |
+| `parked` | **200** | Durable claim/fail already persisted **and** a worker will process (`processRetryable`). Without a worker, do **not** 200 — you will drop money-moving webhooks. |
+| `handler_retry` | **200** with worker / **5xx** without | Fail was recorded; durable worker re-drives after `availableAt`, or provider redelivers. |
+| `not_available` | **5xx** | No work processed this delivery; prefer provider redelivery (or 200 only when a durable scheduler is guaranteed). **Never silent-ACK 200 on inline engines with no worker.** |
 
-**Silent ACK of failed work is forbidden:** do not return success for `handler_failed` retryable work unless you have an explicit durable-retry + worker design and accept provider-level non-retry.
+**Silent ACK of failed work is forbidden:** do not return success for `handler_failed` retryable work or for `scheduled_for_retry` without a real recovery path (worker or provider redelivery).
 
 Store claim kind mapping:
 
@@ -396,7 +402,7 @@ Store claim kind mapping:
 | `in_progress` | `already_processing` (+ `retryAfterMs` when lease expiry known) |
 | `payload_hash_conflict` | `payload_conflict` |
 | `duplicate_failed` | `handler_failed { retryable: false }` |
-| `not_available` | `scheduled_for_retry` (backoff before `availableAt`; no attempt++) |
+| `not_available` | `scheduled_for_retry` `{ reason: "not_available" }` (backoff before `availableAt`; no attempt++) |
 
 ### Illustrative adapter (not part of this package)
 
@@ -412,9 +418,19 @@ function mapOutcomeToHttp(o: WebhookProcessingOutcome): { status: number } {
     case "already_processing":
       return { status: 503 };
     case "scheduled_for_retry":
-      // Policy choice (engine is HTTP-agnostic):
-      // 200 = durable ACK (worker will process); 5xx = ask provider to redeliver.
-      return { status: 200 };
+      // Discriminate reason — never blind-ACK 200 when no worker will process.
+      switch (o.reason) {
+        case "parked":
+          // 200 only when processRetryable worker is guaranteed.
+          return { status: 200 };
+        case "handler_retry":
+          // Durable worker owns re-drive → 200; else ask provider to redeliver.
+          return { status: 200 }; // or 500 if no worker
+        case "not_available":
+          // Backoff window; no handler ran this delivery → provider redelivery.
+          return { status: 503 };
+      }
+      break;
     case "handler_failed":
       return { status: o.retryable ? 500 : 200 };
   }

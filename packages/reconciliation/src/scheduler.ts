@@ -15,6 +15,7 @@ import type {
   ReconciliationStore,
   ScheduleResult,
 } from "./store";
+import { isStoreLeaseLostError } from "./store";
 import type { ExponentialBackoff } from "./backoff";
 import { createExponentialBackoff } from "./backoff";
 import { sanitizeReconciliationError } from "./sanitize";
@@ -91,6 +92,23 @@ export type ListDeadLetterOptions = {
   scan?: () => Promise<ReconciliationRecord[]>;
 };
 
+/**
+ * Explicit disposition from a processDue handler (RECON-2).
+ *
+ * Completing a job requires `{ disposition: "complete" }`. Returning void is
+ * treated as retry (fail-closed) so policy outcomes like `retry_later` cannot
+ * silently terminate recovery when the handler forgets to throw.
+ */
+export type ProcessDueDisposition =
+  | { disposition: "complete" }
+  | {
+      disposition: "retry";
+      error?: unknown;
+      /** Optional override delay; when omitted, exponential backoff is used. */
+      retryAfterMs?: number;
+    }
+  | { disposition: "manual_review"; note?: string };
+
 export type ProcessDueOptions = {
   limit?: number;
   owner?: string;
@@ -101,10 +119,16 @@ export type ProcessDueOptions = {
    */
   maxInFlightByGateway?: Record<string, number>;
   /**
-   * Handler for each claimed job. Throw → failAndReschedule or markManualReview
-   * depending on attempts vs maxAttempts.
+   * Handler for each claimed job.
+   *
+   * - Return `{ disposition: "complete" }` to mark the job completed.
+   * - Return `{ disposition: "retry" }` or throw → failAndReschedule (or
+   *   markManualReview when attempts ≥ maxAttempts).
+   * - Return `{ disposition: "manual_review" }` to dead-letter without counting
+   *   as a transient failure path.
+   * - Return `void` / `undefined` → treated as retry (fail-closed; RECON-2).
    */
-  handler: (job: ClaimedJob) => Promise<void>;
+  handler: (job: ClaimedJob) => Promise<ProcessDueDisposition | void>;
 };
 
 /**
@@ -161,6 +185,8 @@ export type ReconciliationScheduler = {
     rescheduled: number;
     manualReview: number;
     completed: number;
+    /** Jobs where complete/fail fencing rejected (another worker owns the lease). */
+    leaseLost: number;
   }>;
   readonly store: ReconciliationStore;
   readonly maxAttempts: number;
@@ -198,6 +224,9 @@ export function createReconciliationScheduler(
     async schedule(input: ScheduleJobInput): Promise<ScheduleResult> {
       const key = input.key ?? deriveReconciliationJobKey(input.target);
       const subjectId = deriveSubjectId(input.target, key);
+      // RECON-7: adapters SHOULD reopen terminal rows (completed/failed/
+      // manual_review) as scheduled under the same key. Active rows remain
+      // already_exists. See ScheduleResult docs + memory-store reopen.
       return store.schedule({
         key,
         subjectId,
@@ -299,7 +328,14 @@ export function createReconciliationScheduler(
       const leaseMs = options.leaseMs ?? defaultLeaseMs;
       const limit = options.limit ?? 10;
       const now = new Date(clock.nowMs()).toISOString();
-      const due = await store.listDue({ now, limit });
+
+      // RECON-8: when per-gateway caps are set, oversample listDue so a
+      // cap-dominated prefix cannot starve other gateways within this call.
+      const fetchLimit =
+        options.maxInFlightByGateway !== undefined
+          ? Math.min(1_000, Math.max(limit * 10, limit + 50))
+          : limit;
+      const due = await store.listDue({ now, limit: fetchLimit });
 
       // Apply per-gateway caps *before* claim so we never abandon a held lease.
       // Keys from deriveReconciliationJobKey are `recon:gateway:id`.
@@ -307,6 +343,7 @@ export function createReconciliationScheduler(
       if (options.maxInFlightByGateway) {
         const counts: Record<string, number> = {};
         for (const rec of due) {
+          if (candidates.length >= limit) break;
           const gateway = gatewayFromKey(rec.key);
           const max = options.maxInFlightByGateway[gateway];
           if (max !== undefined) {
@@ -317,13 +354,14 @@ export function createReconciliationScheduler(
           candidates.push(rec);
         }
       } else {
-        candidates.push(...due);
+        candidates.push(...due.slice(0, limit));
       }
 
       let processed = 0;
       let rescheduled = 0;
       let manualReview = 0;
       let completed = 0;
+      let leaseLost = 0;
 
       for (const rec of candidates) {
         const claimResult: ClaimResult = await store.claim({
@@ -339,36 +377,116 @@ export function createReconciliationScheduler(
           record: claimResult.record,
         };
         processed++;
+
+        let disposition: ProcessDueDisposition;
         try {
-          await options.handler(job);
-          await store.complete({
-            key: job.key,
-            leaseToken: job.leaseToken,
-          });
-          completed++;
+          const raw = await options.handler(job);
+          disposition = normalizeHandlerDisposition(raw);
         } catch (err) {
+          disposition = { disposition: "retry", error: err };
+        }
+
+        try {
+          if (disposition.disposition === "complete") {
+            await store.complete({
+              key: job.key,
+              leaseToken: job.leaseToken,
+            });
+            completed++;
+            continue;
+          }
+
+          if (disposition.disposition === "manual_review") {
+            const reviewPayload: MarkManualReviewJobInput = {
+              key: job.key,
+              leaseToken: job.leaseToken,
+            };
+            if (disposition.note !== undefined) {
+              reviewPayload.note = sanitizeReconciliationError(disposition.note);
+            }
+            await this.markManualReview(reviewPayload);
+            manualReview++;
+            continue;
+          }
+
+          // retry (explicit or fail-closed void / throw)
           if (job.record.attempts >= maxAttempts) {
             const reviewPayload: MarkManualReviewJobInput = {
               key: job.key,
               leaseToken: job.leaseToken,
-              note: sanitizeReconciliationError(err),
+              note: sanitizeReconciliationError(
+                disposition.error ?? "processDue handler requested retry at max attempts",
+              ),
             };
             await this.markManualReview(reviewPayload);
             manualReview++;
+          } else if (
+            disposition.retryAfterMs !== undefined &&
+            Number.isFinite(disposition.retryAfterMs) &&
+            disposition.retryAfterMs >= 0
+          ) {
+            const retryAt = new Date(
+              clock.nowMs() + disposition.retryAfterMs,
+            ).toISOString();
+            await store.fail({
+              key: job.key,
+              leaseToken: job.leaseToken,
+              error: sanitizeReconciliationError(
+                disposition.error ?? "processDue handler requested retry",
+              ),
+              retryAt,
+            });
+            rescheduled++;
           } else {
             await this.failAndReschedule({
               key: job.key,
               leaseToken: job.leaseToken,
-              error: err,
+              error:
+                disposition.error ??
+                "processDue handler did not return explicit complete disposition",
               attempt: job.record.attempts,
             });
             rescheduled++;
           }
+        } catch (err) {
+          // RECON-3: lease_lost after a successful handler (or during terminal
+          // mutation) means another worker owns the job — do not treat as a
+          // business failure / maxAttempts dead-letter.
+          if (isStoreLeaseLostError(err)) {
+            leaseLost++;
+            continue;
+          }
+          throw err;
         }
       }
 
-      return { processed, rescheduled, manualReview, completed };
+      return { processed, rescheduled, manualReview, completed, leaseLost };
     },
+  };
+}
+
+/** Only `{ disposition: "complete" }` finishes a job; void → fail-closed retry. */
+function normalizeHandlerDisposition(
+  raw: ProcessDueDisposition | void,
+): ProcessDueDisposition {
+  if (raw === undefined) {
+    return {
+      disposition: "retry",
+      error:
+        'processDue handler returned no disposition (void); treating as retry — return { disposition: "complete" } to finish',
+    };
+  }
+  if (
+    raw.disposition === "complete" ||
+    raw.disposition === "retry" ||
+    raw.disposition === "manual_review"
+  ) {
+    return raw;
+  }
+  return {
+    disposition: "retry",
+    error:
+      "processDue handler returned unrecognized disposition; treating as retry",
   };
 }
 

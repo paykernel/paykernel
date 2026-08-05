@@ -217,6 +217,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 1000,
+            amount_received: 1000,
             currency: "usd",
             metadata: { paymentId: "internal_123" },
           },
@@ -248,6 +249,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 1000,
+            amount_received: 1000,
             currency: "usd",
             metadata: {},
           },
@@ -279,6 +281,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 1000,
+            amount_received: 1000,
             currency: "usd",
             metadata: {},
           },
@@ -334,6 +337,7 @@ describe("StripeGateway", () => {
               object: "payment_intent",
               status: "succeeded",
               amount: 1000,
+              amount_received: 1000,
               currency: "usd",
               metadata: {},
             },
@@ -428,7 +432,7 @@ describe("StripeGateway", () => {
       expect(event.gatewayObjectId).toBe("cs_setup_done");
     });
 
-    it("should not mark payment-mode no_payment_required as setup_completed", () => {
+    it("should mark payment-mode no_payment_required complete as paid (not setup_completed)", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_checkout_free_payment",
         type: "checkout.session.completed",
@@ -448,8 +452,13 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      expect(event.status).toBe("pending");
+      // $0 / free / 100% coupon Checkout: complete + no_payment_required is
+      // fulfillment-ready paid (STRIPE-1). Never setup_completed (vault only).
+      expect(event.status).toBe("paid");
       expect(event.status).not.toBe("setup_completed");
+      expect(event.status).not.toBe("pending");
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.succeeded");
     });
 
     it("should use Subscription ID for subscription checkout completion", () => {
@@ -518,6 +527,7 @@ describe("StripeGateway", () => {
             object: "payment_intent",
             status: "succeeded",
             amount: 500,
+            amount_received: 500,
             currency: "jpy",
             metadata: {},
           },
@@ -967,6 +977,86 @@ describe("StripeGateway", () => {
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("should fail closed when amount_received is missing on payment_intent.succeeded", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_missing_received",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_missing_received",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      // STRIPE-2: missing settled amount must not claim full paid / isPaidOutcome.
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(100); // authorized amount only (display)
+    });
+
+    it("should use amount_captured fallback when amount_received is missing", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_captured_fallback",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_captured_fallback",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_captured_fallback",
+              amount_captured: 6000,
+              currency: "usd",
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.amount).toBe(60);
+      expect(event.stableType).toBe("payment.processing");
+    });
+
+    it("should treat amount_captured equal to amount as paid when amount_received missing", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_full_via_captured",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_full_via_captured",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_full_via_captured",
+              amount_captured: 10000,
+              currency: "usd",
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("paid");
+      expect(event.amount).toBe(100);
+      expect(event.stableType).toBe("payment.succeeded");
     });
 
     it("should omit currency when Stripe omits it on the webhook object", () => {
@@ -1715,6 +1805,52 @@ describe("StripeGateway", () => {
 
       const result = await gateway.capturePayment({
         gatewayPaymentId: "pi_cap_partial",
+        amount: 60,
+        currency: "USD",
+      });
+
+      expect(result.status).toBe("partially_captured");
+      expect(result.amount).toBe(60);
+    });
+
+    it("should fail closed when capture response omits amount_received and amount_captured", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_cap_incomplete",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.capturePayment({
+        gatewayPaymentId: "pi_cap_incomplete",
+      });
+
+      // STRIPE-2: missing settled amount → not paid; amount uses auth (not 0).
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.amount).toBe(100);
+      expect(result.outcome).not.toBe("succeeded");
+    });
+
+    it("should use amount_captured for capture status/amount when amount_received missing", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_cap_via_charge",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+          latest_charge: {
+            id: "ch_cap_via_charge",
+            amount_captured: 6000,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.capturePayment({
+        gatewayPaymentId: "pi_cap_via_charge",
         amount: 60,
         currency: "USD",
       });
@@ -2965,6 +3101,56 @@ describe("StripeGateway", () => {
 
       expect(result.status).toBe("refunded");
       expect(result.refundedAmount).toBe(60);
+    });
+
+    it("should mark partial capture via amount_captured when amount_received absent", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_partial_via_captured",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+          latest_charge: {
+            id: "ch_partial_via_captured",
+            amount_captured: 6000,
+            amount_refunded: 0,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_partial_via_captured",
+      });
+
+      expect(result.status).toBe("partially_captured");
+      expect(result.amount).toBe(60);
+    });
+
+    it("should fail closed on getPayment when succeeded but settled amount fields missing", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_incomplete_settled",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          currency: "usd",
+          latest_charge: {
+            id: "ch_incomplete_settled",
+            amount_refunded: 0,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_incomplete_settled",
+      });
+
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.amount).toBe(100);
     });
   });
 

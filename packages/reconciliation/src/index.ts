@@ -28,6 +28,7 @@ export type {
   FailAndRescheduleInput,
   ListDeadLetterOptions,
   MarkManualReviewJobInput,
+  ProcessDueDisposition,
   ProcessDueOptions,
   ReconciliationScheduler,
   ScheduleJobInput,

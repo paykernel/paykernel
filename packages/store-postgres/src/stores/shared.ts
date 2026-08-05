@@ -20,6 +20,7 @@ import type {
   WebhookInboxRecord,
   ReconciliationRecord,
 } from "@paykernel/store-contracts";
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { PostgresExecutor } from "../executor";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -56,7 +57,11 @@ export function resolveStoreContext(options: PostgresStoreOptions): ResolvedStor
     withStoreTransaction: async <T>(fn: () => Promise<T> | T): Promise<T> => {
       const outer = active;
       if (typeof outer.withTransaction !== "function") {
-        return await fn();
+        // Fail closed: never pretend multi-mutation atomicity when the executor
+        // cannot open a real transaction (SHARED-1).
+        throw new StoreUnsupportedFeatureError(
+          "withTransaction: PostgresExecutor.withTransaction is not available; refusing silent no-op. Use a pool/driver that exposes withTransaction (pg Pool, postgres.js begin, Bun SQL), or single-statement claims.",
+        );
       }
       return outer.withTransaction(async (tx) => {
         const prev = active;
