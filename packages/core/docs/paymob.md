@@ -187,12 +187,16 @@ app.post('/webhooks/paymob', async (req) => {
   const event = await client.handleWebhook('paymob', req.body, hmac);
 
   console.log(event.status);
-  console.log(event.paymentId);
+  // Correlate with signed gatewayPaymentId (txn id) — not event.paymentId.
+  // merchant_order_id / payment_key_claims extras are not HMAC-bound.
+  console.log(event.gatewayPaymentId);
   console.log(event.amount);
 
   return { received: true };
 });
 ```
+
+> ⚠️ **Do not fulfill on `event.paymentId` after Paymob HMAC.** Paymob’s signature binds `id`, `order.id`, money flags, and amounts — **not** `merchant_order_id` or `payment_key_claims.extra.paymentId`. The SDK leaves `event.paymentId` undefined on transaction webhooks so a valid low-value body cannot be rewritten to a victim order id. Map `event.gatewayPaymentId` (signed transaction id) to your order in your own store, or inquire with that id.
 
 The SDK verifies transaction processed callbacks, saved-card token callbacks, and query-style transaction response callbacks with their separate Paymob HMAC field shapes.
 

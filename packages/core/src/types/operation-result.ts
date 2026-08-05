@@ -260,15 +260,17 @@ export function paymentFromGatewayResult(
 export function inferOperationOutcome(
     result: GatewayPaymentResult,
 ): PaymentOperationOutcome {
-    if (result.outcome !== undefined) {
-        return result.outcome;
-    }
-
+    // Uncertainty beats an explicit `outcome: 'succeeded'`. Callers that set
+    // reconciliationRequired must not get a settled inference for fulfillment.
     if (
         result.reconciliationRequired === true ||
         hasRawIndeterminateMarker(result.rawResponse)
     ) {
         return "indeterminate";
+    }
+
+    if (result.outcome !== undefined) {
+        return result.outcome;
     }
 
     if (result.decline !== undefined) {
@@ -564,15 +566,23 @@ export function successFromOutcome(outcome: PaymentOperationOutcome): boolean {
  *
  * Auth holds (`authorized`), buyer approval (`approved`), pending, requires_action,
  * declined, failed, and indeterminate all return **false**.
+ * `reconciliationRequired: true` always returns **false** even if outcome/status
+ * look settled — post-submit uncertainty must not drive fulfillment.
  */
 export function isPaidOutcome(
     result: GatewayPaymentResult | PaymentOperationResult,
 ): boolean {
     if (isOperationResult(result)) {
+        if (result.reconciliationRequired === true) {
+            return false;
+        }
         return (
             result.outcome === "succeeded" &&
             isPaidLikePaymentStatus(result.payment.status)
         );
+    }
+    if (result.reconciliationRequired === true) {
+        return false;
     }
     const outcome = inferOperationOutcome(result);
     return outcome === "succeeded" && isPaidLikePaymentStatus(result.status);

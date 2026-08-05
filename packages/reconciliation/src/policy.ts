@@ -61,8 +61,9 @@ const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
 ]);
 
 /**
- * Provider statuses that mean money may already exist or still needs capture /
- * fulfillment work — never treat sparse local + these as safe mark_consistent.
+ * Provider statuses that mean money may already exist, still needs capture /
+ * fulfillment work, or funds left the merchant via refund/chargeback — never
+ * treat sparse local + these as safe mark_consistent (false recovery completion).
  */
 const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "authorized",
@@ -70,11 +71,14 @@ const OPEN_INCOMPLETE_PROVIDER_STATUSES = new Set<string>([
   "partially_captured",
   "processing",
   "pending",
+  "partially_refunded",
+  "refunded",
+  "reversed",
 ]);
 
 /**
  * Local statuses where a second createPayment would risk duplicate money
- * movement (open auth/settlement or already settled/refunded).
+ * movement (open auth/settlement, already settled/refunded, or chargeback).
  */
 const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "pending",
@@ -85,6 +89,7 @@ const OPEN_MONEY_LOCAL_STATUSES = new Set<string>([
   "partially_refunded",
   "paid",
   "refunded",
+  "reversed",
   "setup_completed",
 ]);
 

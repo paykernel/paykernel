@@ -387,6 +387,20 @@ describe("operation-result helpers", () => {
     expect(isPaidOutcome(result)).toBe(false);
   });
 
+  it("reconciliationRequired blocks isPaidOutcome even with outcome succeeded (CORE-1)", () => {
+    const result = baseResult({
+      success: true,
+      status: "paid",
+      outcome: "succeeded",
+      reconciliationRequired: true,
+    });
+    expect(inferOperationOutcome(result)).toBe("indeterminate");
+    expect(isPaidOutcome(result)).toBe(false);
+
+    const op = mapGatewayResultToOperationResult(result);
+    expect(isPaidOutcome(op)).toBe(false);
+  });
+
   it("cancelled status is not paid and not succeeded unless outcome forced", () => {
     const cancelled = baseResult({
       success: true,

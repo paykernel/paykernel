@@ -188,6 +188,9 @@ describe("decideReconciliationPolicy", () => {
       "approved",
       "partially_captured",
       "processing",
+      "refunded",
+      "partially_refunded",
+      "reversed",
     ] as const) {
       const provider = buildProviderPaymentSnapshot({
         gatewayPaymentId: "pi_open",
@@ -290,6 +293,8 @@ describe("shouldForbidReplacementCharge", () => {
       "partially_captured",
       "partially_refunded",
       "paid",
+      "refunded",
+      "reversed",
     ] as const) {
       expect(
         shouldForbidReplacementCharge(consistentPaid, {

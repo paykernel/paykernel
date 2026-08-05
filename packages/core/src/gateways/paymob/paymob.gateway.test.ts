@@ -2026,7 +2026,8 @@ describe("PaymobGateway", () => {
       expect(event.id).toBe("123456789");
       expect(event.gateway).toBe("paymob");
       expect(event.gatewayPaymentId).toBe("123456789");
-      expect(event.paymentId).toBe("order_abc123");
+      // PAYMOB-1: merchant_order_id / extras are unsigned — never copy into paymentId.
+      expect(event.paymentId).toBeUndefined();
       expect(event.status).toBe("paid");
       expect(event.amount).toBe(100);
       expect(event.currency).toBe("SAR");
@@ -2349,17 +2350,18 @@ describe("PaymobGateway", () => {
       expect(event.amount).toBe(20.125);
     });
 
-    it("extracts paymentId from payment key claims extras before merchant_order_id", () => {
+    it("does not trust unsigned payment_key_claims extras for paymentId (PAYMOB-1)", () => {
       const payload = createMockWebhookPayload({
         payment_key_claims: {
           extra: { paymentId: "payment_from_extra" },
         },
       });
 
-      expect(gateway.parseWebhookEvent(payload).paymentId).toBe("payment_from_extra");
+      expect(gateway.parseWebhookEvent(payload).paymentId).toBeUndefined();
+      expect(gateway.parseWebhookEvent(payload).gatewayPaymentId).toBe("123456789");
     });
 
-    it("extracts paymentId from nested Paymob creation_extras", () => {
+    it("does not trust unsigned creation_extras for paymentId (PAYMOB-1)", () => {
       const payload = createMockWebhookPayload({
         payment_key_claims: {
           extra: {
@@ -2368,7 +2370,8 @@ describe("PaymobGateway", () => {
         },
       });
 
-      expect(gateway.parseWebhookEvent(payload).paymentId).toBe("payment_from_creation_extras");
+      expect(gateway.parseWebhookEvent(payload).paymentId).toBeUndefined();
+      expect(gateway.parseWebhookEvent(payload).gatewayPaymentId).toBe("123456789");
     });
 
     it("parses card token callbacks as setup events", () => {
@@ -2438,7 +2441,8 @@ describe("PaymobGateway", () => {
       // TRANSACTION_RESPONSE distinguishes redirect callbacks from processed TRANSACTION webhooks.
       // Callers must not fulfill orders on redirect-only events.
       expect(event.type).toBe("TRANSACTION_RESPONSE");
-      expect(event.paymentId).toBe("payment_123");
+      // merchant_order_id is unsigned — correlate via signed gatewayPaymentId only.
+      expect(event.paymentId).toBeUndefined();
       expect(event.gatewayPaymentId).toBe("123456789");
       expect(event.status).toBe("paid");
       expect(event.amount).toBe(100);

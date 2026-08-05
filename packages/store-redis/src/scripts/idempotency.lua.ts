@@ -268,11 +268,17 @@ redis.call('HSET', rec,
 return {'ok'}
 `.trim();
 
-/** KEYS[1]=record — read path (also soft-expire reserved if lease past) ARGV: nowMs, nowIso */
+/**
+ * KEYS[1]=record — pure read path.
+ * ARGV: nowMs, nowIso (kept for call-site parity; not used to mutate).
+ *
+ * A4 / REDIS-1: do NOT soft-expire or clear lease_token on get. Concurrent get
+ * after lease wall-clock expiry must leave fencing tokens intact so the original
+ * worker can still markIndeterminate / complete. Reclaim paths own transition
+ * to expired + token wipe. Matches SQL get (SELECT only).
+ */
 export const IDEMPOTENCY_GET_LUA = `
 local rec = KEYS[1]
-local nowMs = tonumber(ARGV[1])
-local nowIso = ARGV[2]
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -304,21 +310,6 @@ if redis.call('EXISTS', rec) == 0 then
 end
 
 local m = hgetall_map(rec)
-if (m['status'] or '') == 'reserved' then
-  local exp = tonumber(m['lease_expires_ms'] or '0') or 0
-  if exp <= nowMs then
-    redis.call('HSET', rec,
-      'status', 'expired',
-      'lease_owner', '',
-      'lease_token', '',
-      'lease_expires_at', '',
-      'lease_expires_ms', '0',
-      'updated_at', nowIso
-    )
-    m = hgetall_map(rec)
-  end
-end
-
 local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]}
 `.trim();

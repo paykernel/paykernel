@@ -1116,23 +1116,10 @@ export class PaymobGateway extends BaseGateway {
       throw new InvalidWebhookError("Invalid Paymob transaction webhook payload");
     }
     const raw = payload as PaymobWebhookPayload;
-    const rawObj = normalized.rawObj;
     const obj = normalized.obj;
     // HMAC does not cover is_captured / captured_amount / refunded_amount_cents /
     // is_refund / is_void — never drive paid/refund/void from unsigned slots.
     const statusSource = this.sanitizeWebhookTransactionForStatus(obj);
-
-    // Extract paymentId from extras (payment_key_claims.extra) or fallback to merchant_order_id
-    const paymentKeyClaims = this.recordOrUndefined(rawObj.payment_key_claims);
-    const extra = this.recordOrUndefined(paymentKeyClaims?.extra);
-    const creationExtras = this.recordOrUndefined(extra?.creation_extras);
-    const order = this.recordOrUndefined(rawObj.order);
-    const paymentId =
-      this.stringOrUndefined(extra?.paymentId) ??
-      this.stringOrUndefined(creationExtras?.paymentId) ??
-      this.stringOrUndefined(extra?.orderId) ??
-      this.stringOrUndefined(creationExtras?.orderId) ??
-      this.stringOrUndefined(order?.merchant_order_id);
 
     const status = this.mapTransactionStatus(statusSource);
     const amount = this.resolveWebhookEventAmount(
@@ -1142,11 +1129,15 @@ export class PaymobGateway extends BaseGateway {
       statusSource.refunded_amount_cents,
     );
 
+    // PAYMOB-1: HMAC does not cover merchant_order_id / payment_key_claims.extra /
+    // creation_extras.paymentId. Never copy those into event.paymentId after
+    // verify — a valid signed body can be rewritten to a victim order id.
+    // Correlate via signed gatewayPaymentId (obj.id) server-side.
     const legacy: WebhookEvent = {
       id: String(obj.id),
       type: normalized.type,
       gateway: "paymob",
-      paymentId,
+      paymentId: undefined,
       gatewayPaymentId: String(obj.id),
       status,
       ...(amount !== undefined ? { amount } : {}),
@@ -1210,11 +1201,12 @@ export class PaymobGateway extends BaseGateway {
     // type defaults to TRANSACTION_RESPONSE so callers can distinguish redirect/response
     // callbacks from processed TRANSACTION webhooks. Dual-write demotes settlement arms
     // to payment.processing — never fulfill on redirect-only events.
+    // PAYMOB-1: merchant_order_id is not HMAC-bound — omit paymentId on redirect too.
     const legacy: WebhookEvent = {
       id: String(payload.id),
       type: this.stringOrUndefined(payload.type) ?? "TRANSACTION_RESPONSE",
       gateway: "paymob",
-      paymentId: this.stringOrUndefined(payload.merchant_order_id),
+      paymentId: undefined,
       gatewayPaymentId: String(payload.id),
       status,
       ...(amount !== undefined ? { amount } : {}),
