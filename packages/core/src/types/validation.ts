@@ -97,16 +97,28 @@ const MOYASAR_MAX_METADATA_VALUE_LENGTH = 500;
 
 /**
  * 0.x dual-accept amount: deprecated major-unit `number` or Money-shaped
- * `{ amount: string, currency: string }`.
+ * `{ amount: string, currency: string, exponent?: number }`.
  *
  * CORE-2: Money arm enforces decimal form + sign at the Zod boundary so
  * adapters that trust schemas alone cannot pass garbage/negative Money into
  * conversion. Full scale/exponent checks remain in shared money helpers.
+ *
+ * P05-MONEY-1: optional `exponent` (integer 0–18) is part of the object so
+ * Zod does not strip a stored non-ISO scale (e.g. OMR merchant override 2).
  */
-const MoneyAmountBaseSchema = z.object({
-    amount: z.string().min(1, "Money.amount must be a non-empty decimal string"),
-    currency: z.string().min(1, "Money.currency must be a non-empty string"),
-});
+const MoneyAmountBaseSchema = z
+    .object({
+        amount: z.string().min(1, "Money.amount must be a non-empty decimal string"),
+        currency: z.string().min(1, "Money.currency must be a non-empty string"),
+        exponent: z.number().int().min(0).max(18).optional(),
+    })
+    // Drop `exponent: undefined` so parsed Money matches `exponent?: number`
+    // under exactOptionalPropertyTypes (Stripe toStripeAmount / AmountInput).
+    .transform((val) =>
+        val.exponent === undefined
+            ? { amount: val.amount, currency: val.currency }
+            : { amount: val.amount, currency: val.currency, exponent: val.exponent },
+    );
 
 /** Decimal major-unit string: optional leading sign, digits, optional fraction. */
 const MONEY_DECIMAL_FORM = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;

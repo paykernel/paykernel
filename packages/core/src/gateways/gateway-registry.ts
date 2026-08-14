@@ -6,8 +6,10 @@ import type { GatewayContext } from "./gateway-context";
 import type { GatewayManifest } from "./gateway-manifest";
 import type { PaymentGateway } from "./gateway.interface";
 import {
+    DEFAULT_GATEWAY_CAPABILITIES,
     freezeCapabilities,
     type GatewayCapabilities,
+    type GatewayCapabilityKey,
 } from "./gateway-capabilities";
 
 /**
@@ -130,6 +132,62 @@ function freezeManifest(manifest: GatewayManifest): GatewayManifest {
     return Object.freeze(copy) as GatewayManifest;
 }
 
+/**
+ * Phase 3 surface: `capabilities` snapshot + `supports()`.
+ * Pre-Phase-3 plain objects omit these; {@link attachDefaultCapabilitySurface}
+ * fail-closes them at `createAll` time.
+ */
+function hasCapabilitySurface(gateway: PaymentGateway): boolean {
+    return (
+        typeof gateway.supports === "function" &&
+        gateway.capabilities != null &&
+        typeof gateway.capabilities === "object"
+    );
+}
+
+/**
+ * P05-CAPS-2: adapters that omit a capability surface must not silently
+ * over-claim. Attach all-false {@link DEFAULT_GATEWAY_CAPABILITIES} + `supports()`.
+ */
+function attachDefaultCapabilitySurface(gateway: PaymentGateway): PaymentGateway {
+    if (hasCapabilitySurface(gateway)) {
+        return gateway;
+    }
+
+    const capabilities = DEFAULT_GATEWAY_CAPABILITIES;
+    const supports = (capability: GatewayCapabilityKey): boolean =>
+        capabilities[capability] === true;
+
+    const defineSurface = (target: PaymentGateway): boolean => {
+        try {
+            Object.defineProperty(target, "capabilities", {
+                value: capabilities,
+                enumerable: true,
+                configurable: true,
+                writable: false,
+            });
+            Object.defineProperty(target, "supports", {
+                value: supports,
+                enumerable: true,
+                configurable: true,
+                writable: false,
+            });
+            return hasCapabilitySurface(target);
+        } catch {
+            return false;
+        }
+    };
+
+    if (defineSurface(gateway)) {
+        return gateway;
+    }
+
+    // Frozen / sealed instance: wrap so methods stay on the prototype chain.
+    const wrapped = Object.create(gateway) as PaymentGateway;
+    defineSurface(wrapped);
+    return wrapped;
+}
+
 function assertAdapterName(adapter: GatewayAdapter): void {
     if (typeof adapter.name !== "string" || adapter.name.trim().length === 0) {
         throw new InvalidRequestError(
@@ -197,7 +255,7 @@ class ImmutableGatewayRegistryImpl<TMap extends GatewayMap>
                     `Gateway adapter '${name}' created instance with name '${gateway.name}'`,
                 );
             }
-            instances[name] = gateway;
+            instances[name] = attachDefaultCapabilitySurface(gateway);
         }
         return Object.freeze(instances) as { [K in keyof TMap]: TMap[K] };
     }

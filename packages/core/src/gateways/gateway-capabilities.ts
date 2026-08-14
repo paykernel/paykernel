@@ -83,10 +83,15 @@ export function isGatewayCapabilityKey(
 /**
  * Primary SDK operation associated with a capability, when one exists.
  *
+ * This map is method presence only (claim-harness structural check). It is
+ * not create-path proof that createPayment implements the capability.
+ *
  * Semantics (this SDK surface):
  * - `payments` → `createPayment` (create a payment / charge intent)
  * - `immediateCapture` → `createPayment` (create that captures without a later capture step)
- * - `authorization` → `capturePayment` (auth holds are completed via capture; create uses `capture: false`)
+ * - `authorization` → `capturePayment` (method presence only, not create-path proof.
+ *   Completing an auth hold uses capture; this mapping does not prove the
+ *   create path supports `capture: false` / authorize intent.)
  * - `partialCapture` → `capturePayment` (capture with a partial `amount`)
  * - `refunds` / `partialRefunds` → `refundPayment`
  * - `voids` → `voidPayment`
@@ -112,6 +117,49 @@ export const CAPABILITY_OPERATION_MAP: Readonly<
   voids: "voidPayment",
   hostedCheckout: "createCheckoutSession",
 });
+
+/**
+ * Capabilities that must be claimed for `operation` given hook-final `params`.
+ * Shared by {@link PaymentClient} facade checks and BaseGateway post-before
+ * asserts so a non-BaseGateway surface cannot skip authorization / splits.
+ */
+export function requiredCapabilitiesForOperation(
+  operation: string,
+  params: unknown,
+): GatewayCapabilityKey[] {
+  const bag =
+    params !== null && typeof params === "object"
+      ? (params as Record<string, unknown>)
+      : {};
+
+  switch (operation) {
+    case "createPayment": {
+      const required: GatewayCapabilityKey[] = ["payments"];
+      if (bag.capture === false) {
+        required.push("authorization");
+      }
+      if (Array.isArray(bag.splits) && bag.splits.length > 0) {
+        required.push("marketplaceSplits");
+      }
+      return required;
+    }
+    case "refundPayment": {
+      const required: GatewayCapabilityKey[] = ["refunds"];
+      if (bag.amount !== undefined) {
+        required.push("partialRefunds");
+      }
+      return required;
+    }
+    case "voidPayment":
+      return ["voids"];
+    case "createCheckoutSession":
+      return ["hostedCheckout"];
+    case "capturePayment":
+      return bag.amount !== undefined ? ["partialCapture"] : [];
+    default:
+      return [];
+  }
+}
 
 /**
  * Shallow-freeze a complete capability record (boolean values only).

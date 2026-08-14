@@ -8,6 +8,7 @@ import {
   isGatewayCapabilityKey,
   CAPABILITY_OPERATION_MAP,
   freezeCapabilities,
+  requiredCapabilitiesForOperation,
   type GatewayCapabilities,
   type GatewayCapabilityKey,
 } from "./gateway-capabilities";
@@ -203,6 +204,35 @@ describe("gateway capabilities foundation", () => {
       for (const key of GATEWAY_CAPABILITY_KEYS) {
         expect(CAPABILITY_OPERATION_MAP[key]).toBe(mapped[key]);
       }
+    });
+
+    it("requiredCapabilitiesForOperation encodes create/refund/void/capture gates", () => {
+      expect(requiredCapabilitiesForOperation("createPayment", { capture: true }))
+        .toEqual(["payments"]);
+      expect(
+        requiredCapabilitiesForOperation("createPayment", { capture: false }),
+      ).toEqual(["payments", "authorization"]);
+      expect(
+        requiredCapabilitiesForOperation("createPayment", {
+          splits: [{ amount: 1 }],
+        }),
+      ).toEqual(["payments", "marketplaceSplits"]);
+      expect(requiredCapabilitiesForOperation("refundPayment", {})).toEqual([
+        "refunds",
+      ]);
+      expect(
+        requiredCapabilitiesForOperation("refundPayment", { amount: 1 }),
+      ).toEqual(["refunds", "partialRefunds"]);
+      expect(requiredCapabilitiesForOperation("voidPayment", {})).toEqual([
+        "voids",
+      ]);
+      expect(requiredCapabilitiesForOperation("capturePayment", {})).toEqual([]);
+      expect(
+        requiredCapabilitiesForOperation("capturePayment", { amount: 1 }),
+      ).toEqual(["partialCapture"]);
+      expect(
+        requiredCapabilitiesForOperation("createCheckoutSession", {}),
+      ).toEqual(["hostedCheckout"]);
     });
   });
 

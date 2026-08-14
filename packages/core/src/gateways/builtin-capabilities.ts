@@ -20,8 +20,8 @@ import {
 } from "./gateway-capabilities";
 import type { GatewayManifest } from "./gateway-manifest";
 
-/** Built-in adapter package version (matches `@paykernel/core`). */
-export const BUILTIN_ADAPTER_VERSION = "0.8.0";
+/** Built-in adapter package version — must match `packages/core/package.json`. */
+export const BUILTIN_ADAPTER_VERSION = "0.1.0-next.0";
 
 /**
  * Stripe PaymentIntent + Checkout Session surface.
@@ -76,9 +76,9 @@ export const MOYASAR_CAPABILITIES: GatewayCapabilities = freezeCapabilities(
 /**
  * PayPal Orders + authorizations surface.
  *
- * `partialCapture` is claimed because authorization captures accept `amount`
- * (`paypalCaptureType: "authorization"`). Order-level captures still reject
- * amount at the gateway layer — callers must use the authorize path for partials.
+ * Keep `partialCapture` true: the authorization-capture path accepts `amount`.
+ * PayPal order captures reject amount; callers must use
+ * `paypalCaptureType: "authorization"` (authorize-then-capture) for partials.
  */
 export const PAYPAL_CAPABILITIES: GatewayCapabilities = freezeCapabilities(
   defineGatewayCapabilities({

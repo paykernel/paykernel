@@ -120,6 +120,7 @@ import {
   fromMinorUnits,
   getCurrencyExponent,
   normalizeCurrencyCode,
+  isKnownCurrencyCode,
   normalizeAmountInput,
   mapGatewayResultToOperationResult,
   mapGatewayRefundToOperationResult,
@@ -294,6 +295,7 @@ expectType<MinorAmount>(toMinorUnits(moneyAmount));
 expectType<Money>(fromMinorUnits(1050n, "SAR"));
 expectType<number>(getCurrencyExponent("JPY"));
 expectType<string>(normalizeCurrencyCode("sar"));
+expectType<boolean>(isKnownCurrencyCode("SAR"));
 expectType<Money>(normalizeAmountInput(10.5, "SAR"));
 expectType<Money>(normalizeAmountInput(moneyAmount, "SAR"));
 

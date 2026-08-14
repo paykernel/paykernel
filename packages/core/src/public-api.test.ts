@@ -152,6 +152,7 @@ describe("public API runtime surface", () => {
         ["MoneyAmountError", sdk.MoneyAmountError],
         ["getCurrencyExponent", sdk.getCurrencyExponent],
         ["normalizeCurrencyCode", sdk.normalizeCurrencyCode],
+        ["isKnownCurrencyCode", sdk.isKnownCurrencyCode],
         // Phase 6 operation outcomes + domain helpers
         ["mapGatewayResultToOperationResult", sdk.mapGatewayResultToOperationResult],
         ["applyOutcomeToGatewayResult", sdk.applyOutcomeToGatewayResult],
@@ -206,11 +207,13 @@ describe("public API runtime surface", () => {
         ["operationContextToTelemetryData", sdk.operationContextToTelemetryData],
       ];
 
-      expect(runtimeExports).toHaveLength(148);
+      expect(runtimeExports).toHaveLength(149);
       for (const [exportName, value] of runtimeExports) {
         expect(value, exportName).toBeDefined();
         expect(sdk).toHaveProperty(exportName);
       }
+      const freezeList = runtimeExports.map(([exportName]) => exportName).sort();
+      expect(Object.keys(sdk).sort()).toEqual(freezeList);
       expect(sdk.PaymentClient).toBe(PaymentClient);
       expect(typeof sdk.noopLogger.debug).toBe("function");
       expect(typeof sdk.DEFAULT_RETRY_CONFIG.maxAttempts).toBe("number");
@@ -437,6 +440,7 @@ describe("public API runtime surface", () => {
       expect(sdk.minorAmountToNumber(1050n)).toBe(1050);
       expect(sdk.getCurrencyExponent("JPY")).toBe(0);
       expect(sdk.normalizeCurrencyCode("sar")).toBe("SAR");
+      expect(sdk.isKnownCurrencyCode("SAR")).toBe(true);
       expect(sdk.formatMoney(m)).toBe("10.50 SAR");
       // Deprecated number path still works for clean decimals
       expect(sdk.normalizeAmountInput(10.5, "SAR").amount).toBe("10.50");

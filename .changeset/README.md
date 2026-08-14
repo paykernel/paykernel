@@ -27,11 +27,11 @@ bun run version-packages
 # equivalent: bunx changeset version
 ```
 
-Prefer letting the **Release** GitHub Action open a “Version packages” PR on `master` rather than versioning by hand on every merge.
+Prefer letting the **Release** GitHub Action open a “Version packages” PR on `main` rather than versioning by hand on every merge.
 
 ## Publish
 
-**Do not publish casually from a laptop in normal flow.** CI publishes on `master` when a version PR is merged (see `.github/workflows/release.yml`).
+**Do not publish casually from a laptop in normal flow.** CI publishes on `main` when a version PR is merged (see `.github/workflows/release.yml`).
 
 If you must publish locally (maintainer escape hatch):
 

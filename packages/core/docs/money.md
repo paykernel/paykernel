@@ -159,8 +159,13 @@ toMinorUnits("20.12", "OMR", { exponentOverrides: { OMR: 2 } }); // 2012n
 toMinorUnits("10", "USD", { exponent: 0 }); // 10n
 ```
 
-Invalid override values (non-integer or negative) **throw** — they are never
-silently ignored when the key is present.
+Invalid override values (non-integer, negative, or **> 18**) **throw** — they
+are never silently ignored when the key is present. Same 0–18 bound as
+`money({ exponent })` / stored `Money.exponent`.
+
+Zod create/capture/refund amount schemas keep optional `Money.exponent` so a
+gateway parse cannot strip a merchant scale (e.g. `money("20.12", "OMR",
+{ exponentOverrides: { OMR: 2 } })` stays 2012 minors, not ISO 20120).
 
 ## 0.x migration from `number`
 
@@ -230,7 +235,7 @@ ledgering. A future 1.0 may switch result amounts to `Money`.
 | Function | Purpose |
 | --- | --- |
 | `money(amount, currency, options?)` | Build canonical `Money` |
-| `isMoney(value)` | Type guard |
+| `isMoney(value)` | Type guard (present `exponent` must be integer 0–18) |
 | `toMinorUnits(...)` | Major → `bigint` minor |
 | `fromMinorUnits(minor, currency, options?)` | Minor → `Money` |
 | `normalizeAmountInput(input, currency, options?)` | `number \| Money` → `Money` (currency match required) |
@@ -239,7 +244,8 @@ ledgering. A future 1.0 may switch result amounts to `Money`.
 | `minorAmountToNumber(minor)` | Safe bigint → number (throws if unsafe) |
 | `moneyToMajorNumber(m)` | Legacy major `number` (float risk) |
 | `MoneyAmountError` | Structured amount failure (`kind` for remapping) |
-| `getCurrencyExponent(code, overrides?)` | ISO (+ overrides) exponent |
+| `getCurrencyExponent(code, overrides?)` | ISO (+ overrides) exponent (override > 18 throws) |
+| `isKnownCurrencyCode(code)` | True when the code is in the SDK ISO tables |
 | `normalizeCurrencyCode(code)` | Trim + uppercase |
 
 Invalid amounts throw `MoneyAmountError` (extends `InvalidRequestError`) with a

@@ -36,8 +36,7 @@ jobs:
         run: bun run typecheck:types
 
       - name: Test
-        # Match monorepo `bun run test` intent: core + testkit + webhooks (offline-safe).
-        run: bun test packages/core packages/testkit packages/webhooks
+        run: bun run test
 
       - name: Test with coverage
         run: bun run test:coverage

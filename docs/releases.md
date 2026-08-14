@@ -32,7 +32,7 @@ Versioning is **independent** (`fixed: []`, `linked: []` in `.changeset/config.j
 
 1. **Develop** on a branch; open a PR.
 2. **Record intent** with `bun run changeset` (committed under `.changeset/`).
-3. **Merge to `master`**. The Release workflow either:
+3. **Merge to `main`**. The Release workflow either:
    - opens/updates a **Version packages** PR (when unpublished changesets exist), or
    - **publishes** to npm when that version PR is merged (versions already bumped).
 4. Consumers install the new version from npm (`@paykernel/core`, and optionally `@paykernel/testkit` / `@paykernel/webhooks` / `@paykernel/reconciliation` / `@paykernel/opentelemetry` / `@paykernel/routing` / `@paykernel/store-postgres` / `@paykernel/store-redis` / `@paykernel/store-sqlite` / `@paykernel/store-turso` / `@paykernel/store-d1` / `@paykernel/store-durable-objects`).
@@ -94,7 +94,7 @@ bunx changeset pre enter beta
 
 1. Add changesets as usual (`bun run changeset`).
 2. Version: `bun run version-packages` → e.g. `0.9.0-canary.0`.
-3. Publish via CI (merge to `master` under the release workflow) or maintainer `bun run release`.
+3. Publish via CI (merge to `main` under the release workflow) or maintainer `bun run release`.
 4. Consumers install with a dist-tag, e.g.:
 
    ```bash
@@ -116,7 +116,7 @@ Then add a normal changeset, version, and publish for the stable bump (e.g. `0.9
 
 | Channel    | How                                        | When                              |
 | ---------- | ------------------------------------------ | --------------------------------- |
-| **Stable** | No pre mode; normal changesets on `master` | Production releases               |
+| **Stable** | No pre mode; normal changesets on `main` | Production releases               |
 | **Canary** | `changeset pre enter canary`               | Continuous / bleeding-edge RCs    |
 | **Beta**   | `changeset pre enter beta`                 | Feature-complete RC before stable |
 
@@ -134,7 +134,7 @@ Prefer CI so provenance and the Version PR flow stay intact. Do not publish from
 
 ## Related files
 
-- `.changeset/config.json` — independent versioning, public access, `baseBranch: master`
+- `.changeset/config.json` — independent versioning, public access, `baseBranch: main`
 - `.changeset/README.md` — short CLI cheat sheet
 - `.github/workflows/release.yml` — version PR + publish with provenance
 - `packages/core/CHANGELOG.md` — generated notes for `@paykernel/core`

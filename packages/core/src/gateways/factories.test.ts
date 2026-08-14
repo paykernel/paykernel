@@ -21,11 +21,10 @@ import {
   PAYPAL_CAPABILITIES,
   PAYMOB_CAPABILITIES,
   BUILTIN_GATEWAY_CAPABILITIES,
+  BUILTIN_ADAPTER_VERSION,
 } from "./builtin-capabilities";
 import type { GatewayAdapter } from "./gateway-adapter";
 import type { PaymentGateway } from "./gateway.interface";
-
-const ADAPTER_VERSION = "0.8.0";
 
 function expectCapabilitiesEqual(
   a: Record<GatewayCapabilityKey, boolean>,
@@ -45,7 +44,7 @@ describe("built-in gateway adapter factories", () => {
       expect(adapter.name).toBe("stripe");
       expect(adapter.manifest.name).toBe("stripe");
       expect(adapter.manifest.displayName).toBe("Stripe");
-      expect(adapter.manifest.version).toBe(ADAPTER_VERSION);
+      expect(adapter.manifest.version).toBe(BUILTIN_ADAPTER_VERSION);
       expect(adapter.manifest.capabilities).toEqual(STRIPE_CAPABILITIES);
       const gateway = adapter.create(ctx);
       expect(gateway).toBeInstanceOf(StripeGateway);
@@ -68,7 +67,7 @@ describe("built-in gateway adapter factories", () => {
       expect(adapter.name).toBe("moyasar");
       expect(adapter.manifest.name).toBe("moyasar");
       expect(adapter.manifest.displayName).toBe("Moyasar");
-      expect(adapter.manifest.version).toBe(ADAPTER_VERSION);
+      expect(adapter.manifest.version).toBe(BUILTIN_ADAPTER_VERSION);
       expect(adapter.manifest.capabilities).toEqual(MOYASAR_CAPABILITIES);
       const gateway = adapter.create(ctx);
       expect(gateway).toBeInstanceOf(MoyasarGateway);
@@ -91,7 +90,7 @@ describe("built-in gateway adapter factories", () => {
       expect(adapter.name).toBe("paypal");
       expect(adapter.manifest.name).toBe("paypal");
       expect(adapter.manifest.displayName).toBe("PayPal");
-      expect(adapter.manifest.version).toBe(ADAPTER_VERSION);
+      expect(adapter.manifest.version).toBe(BUILTIN_ADAPTER_VERSION);
       expect(adapter.manifest.capabilities).toEqual(PAYPAL_CAPABILITIES);
       const gateway = adapter.create(ctx);
       expect(gateway).toBeInstanceOf(PayPalGateway);
@@ -114,7 +113,7 @@ describe("built-in gateway adapter factories", () => {
       expect(adapter.name).toBe("paymob");
       expect(adapter.manifest.name).toBe("paymob");
       expect(adapter.manifest.displayName).toBe("Paymob");
-      expect(adapter.manifest.version).toBe(ADAPTER_VERSION);
+      expect(adapter.manifest.version).toBe(BUILTIN_ADAPTER_VERSION);
       expect(adapter.manifest.capabilities).toEqual(PAYMOB_CAPABILITIES);
       const gateway = adapter.create(ctx);
       expect(gateway).toBeInstanceOf(PaymobGateway);

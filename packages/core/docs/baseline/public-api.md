@@ -5,17 +5,17 @@
 
 ## Generation metadata
 
-- **Generated at (UTC)**: 2026-08-03T03:52:02.726Z
+- **Generated at (UTC)**: 2026-08-14T13:12:11.636Z
 - **Command**: `bun run scripts/generate-api-baseline.ts`
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 326013 bytes, sha256 `fa14b67da61f147a6aa251e263a306a3fadc0773f26123060cf8d2fcf82c081a`
+- **Bundle**: `dist/index.js` — 397971 bytes, sha256 `cd7698d31f78610aff726b960cf9c5096ae3d0109d6bd0ebebb955681485d846`
 
 ## Package
 
 - **name**: `@paykernel/core`
-- **version**: `0.8.0`
+- **version**: `0.1.0-next.0`
 
 ## Entry points
 
@@ -60,15 +60,18 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `createDefaultGatewayContext` | function |
 | `createDynamicGatewayRegistry` | function |
 | `createGatewayRegistry` | function |
+| `createOperationContext` | function |
 | `createPaymentClient` | function |
 | `createPaymentRuntime` | function |
 | `createRedactingLogger` | function |
+| `createRedactingTelemetrySink` | function |
 | `createTimeoutSignal` | function |
 | `DEFAULT_GATEWAY_CAPABILITIES` | const |
 | `DEFAULT_RETRY_CONFIG` | const |
 | `defineGatewayCapabilities` | function |
 | `encryptRawWebhookPayload` | function |
 | `extractAbortSignal` | function |
+| `finalizeOperationContext` | function |
 | `fingerprintParams` | function |
 | `formatMoney` | function |
 | `freezeCapabilities` | function |
@@ -98,6 +101,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `isGatewayCapabilityKey` | function |
 | `isGatewayPaymentResult` | function |
 | `isIndeterminateOutcome` | function |
+| `isKnownCurrencyCode` | function |
 | `isMoney` | function |
 | `isPaidLikePaymentStatus` | function |
 | `isPaidOutcome` | function |
@@ -128,6 +132,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `noopLogger` | const |
 | `normalizeAmountInput` | function |
 | `normalizeCurrencyCode` | function |
+| `operationContextToTelemetryData` | function |
 | `OperationNotSupportedError` | class |
 | `PAID_LIKE_PAYMENT_STATUSES` | const |
 | `parseRetryAfterSeconds` | function |
@@ -183,7 +188,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `withAbortSignal` | function |
 | `withRetry` | function |
 
-**Count**: 143
+**Count**: 149
 
 ## Type-only exports
 
@@ -216,6 +221,7 @@ These exist only in the TypeScript declaration surface.
 | `CommonPaymentInput` |
 | `CreateCheckoutSessionParams` |
 | `CreateDefaultGatewayContextOptions` |
+| `CreateOperationContextInput` |
 | `CreatePaymentClientOptions` |
 | `CreatePaymentParams` |
 | `CreditCardSource` |
@@ -227,6 +233,7 @@ These exist only in the TypeScript declaration surface.
 | `DisputeStatus` |
 | `EncryptedRawPayloadRecord` |
 | `ErrorHook` |
+| `FinalizeOperationContextPatch` |
 | `GatewayAdapter` |
 | `GatewayAdaptersMap` |
 | `GatewayCapabilities` |
@@ -241,6 +248,7 @@ These exist only in the TypeScript declaration surface.
 | `GatewayRefundResult` |
 | `GatewayRegistryBuilder` |
 | `GatewayRuntimeDeps` |
+| `GetCurrencyExponentOptions` |
 | `GetPaymentParams` |
 | `HookContext` |
 | `IdempotencyRecord` |
@@ -267,6 +275,7 @@ These exist only in the TypeScript declaration surface.
 | `MoyasarPaymentSplit` |
 | `MoyasarStcPayOtpNextAction` |
 | `MoyasarWebhookPayload` |
+| `OperationContext` |
 | `OperationNotSupportedErrorOptions` |
 | `OperationRequestOptions` |
 | `OperationType` |
@@ -286,6 +295,7 @@ These exist only in the TypeScript declaration surface.
 | `PaymentNextAction` |
 | `PaymentOperationOutcome` |
 | `PaymentOperationResult` |
+| `PaymentOperationType` |
 | `PaymentRuntime` |
 | `PaymentStatus` |
 | `PaymobCardTokenWebhookPayload` |
@@ -333,14 +343,14 @@ These exist only in the TypeScript declaration surface.
 | `WebhookVerifiedHook` |
 | `WithRetryOptions` |
 
-**Count**: 139
+**Count**: 145
 
 ## Cross-checks
 
 - Parsed value exports present on runtime module: **yes**
 - Runtime keys not listed in `src/index.ts` value exports: _none_
 - Type-only names that also exist as runtime values: _none_
-- Total distinct public names (runtime + type-only): **282**
+- Total distinct public names (runtime + type-only): **294**
 
 ## Declaration output tree (`dist/**/*.d.ts`)
 
@@ -366,17 +376,16 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `gateways/stripe/stripe.gateway.d.ts`
 - `hooks/hooks.manager.d.ts`
 - `hooks/hooks.types.d.ts`
-- `hooks/index.d.ts`
 - `index.d.ts`
 - `runtime/abort.d.ts`
 - `runtime/clock.d.ts`
 - `runtime/crypto-portable.d.ts`
 - `runtime/crypto-provider.d.ts`
 - `runtime/index.d.ts`
+- `runtime/operation-context.d.ts`
 - `runtime/payment-runtime.d.ts`
 - `types/config.types.d.ts`
 - `types/domain-status.d.ts`
-- `types/index.d.ts`
 - `types/moyasar-source.types.d.ts`
 - `types/operation-result.d.ts`
 - `types/payment-event.d.ts`
@@ -392,7 +401,7 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `utils/money.d.ts`
 - `utils/retry.d.ts`
 
-**Count**: 45
+**Count**: 44
 
 ## Notes
 

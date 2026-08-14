@@ -556,6 +556,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         "indeterminate",
         "failed",
         "custom",
+        "provider_ok_client_timeout",
+        "provider_success_client_timeout",
       ]);
       if (typeof o === "string" && refundable.has(o)) {
         return defaultOutcome as ScriptedRefundOutcome;
@@ -584,6 +586,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         throw new NetworkError("Request aborted", effectiveSignal.reason);
       }
       clock.advance(ms);
+      // Yield so abort listeners scheduled against this turn (or queued
+      // before the call) can fire after virtual time advances.
+      await Promise.resolve();
+      if (effectiveSignal?.aborted) {
+        throw new NetworkError("Request aborted", effectiveSignal.reason);
+      }
       return;
     }
 
@@ -994,6 +1002,24 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     }
   }
 
+  function signWebhookBound(payload: unknown, secret?: string): string {
+    return signWebhook(payload, secret ?? webhookSecret);
+  }
+
+  function generateWebhookEventBound(
+    opts: Parameters<typeof generateWebhookEvent>[0] = {},
+  ): ReturnType<typeof generateWebhookEvent> {
+    const args: Parameters<typeof generateWebhookEvent>[0] = {
+      gateway: name,
+      secret: webhookSecret,
+      ...opts,
+    };
+    if (args.createdAt === undefined && clock) {
+      args.createdAt = new Date(clock.nowMs()).toISOString();
+    }
+    return generateWebhookEvent(args);
+  }
+
   const gateway: MockGateway = {
     name,
     capabilities,
@@ -1088,19 +1114,11 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     },
 
     signWebhook(payload: unknown, secret?: string) {
-      return signWebhook(payload, secret ?? webhookSecret);
+      return signWebhookBound(payload, secret);
     },
 
     generateWebhookEvent(opts = {}) {
-      const args: Parameters<typeof generateWebhookEvent>[0] = {
-        gateway: name,
-        secret: webhookSecret,
-        ...opts,
-      };
-      if (args.createdAt === undefined && clock) {
-        args.createdAt = new Date(clock.nowMs()).toISOString();
-      }
-      return generateWebhookEvent(args);
+      return generateWebhookEventBound(opts);
     },
 
     generateDuplicateWebhooks,
@@ -1109,10 +1127,11 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     webhookHelpers: {
       withDuplicate: withDuplicateWebhook,
       outOfOrder: outOfOrderWebhooks,
-      sign: signMockWebhook,
+      sign: (payload, options = {}) =>
+        signMockWebhook(payload, { secret: webhookSecret, ...options }),
       computeSignature: computeMockWebhookSignature,
-      signWebhook,
-      generateWebhookEvent,
+      signWebhook: signWebhookBound,
+      generateWebhookEvent: generateWebhookEventBound,
       generateDuplicateWebhooks,
       generateOutOfOrderWebhooks,
     },
@@ -1556,21 +1575,31 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             "completed",
             minorToMajor(state.refundedAmountMinor, state.currency),
           );
-          if (outcome?.outcome === "partial_refund" || outcome?.result) {
-            const override = (outcome.result ??
-              {}) as Partial<GatewayRefundResult>;
-            return {
-              ...base,
-              ...override,
-              // Re-assert ledger-derived money identity after spread
-              status: base.status,
-              totalRefunded: base.totalRefunded,
-              success: base.success,
-              outcome: base.outcome,
-              gatewayRefundId: override.gatewayRefundId ?? base.gatewayRefundId,
-            };
+          const result =
+            outcome?.outcome === "partial_refund" || outcome?.result
+              ? {
+                  ...base,
+                  ...((outcome.result ?? {}) as Partial<GatewayRefundResult>),
+                  // Re-assert ledger-derived money identity after spread
+                  status: base.status,
+                  totalRefunded: base.totalRefunded,
+                  success: base.success,
+                  outcome: base.outcome,
+                  gatewayRefundId:
+                    ((outcome.result ?? {}) as Partial<GatewayRefundResult>)
+                      .gatewayRefundId ?? base.gatewayRefundId,
+                }
+              : base;
+          if (
+            outcome?.outcome === "provider_ok_client_timeout" ||
+            outcome?.outcome === "provider_success_client_timeout"
+          ) {
+            throw new NetworkError(
+              outcome.message ??
+                "Client timeout after provider-side success (mock; reconcile via getPaymentState)",
+            );
           }
-          return base;
+          return result;
         });
       });
     },

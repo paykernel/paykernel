@@ -18,6 +18,7 @@ import {
   GatewayNotConfiguredError,
   InvalidWebhookError,
   CardDeclinedError,
+  defineGatewayCapabilities,
   type GatewayAdapter,
   type GatewayContext,
   type PaymentGateway,
@@ -158,12 +159,19 @@ function createCustomAdapter(options?: {
 function createNamedAdapter<N extends string>(
   name: N,
 ): GatewayAdapter<N, PaymentGateway<N>> {
+  // Named adapters create payments in these tests — claim payments:true so
+  // createAll fail-closed defaults do not block client.createPayment.
+  const capabilities = defineGatewayCapabilities({ payments: true });
   return {
     name,
     manifest: { name, displayName: name },
     create() {
       return {
         name,
+        capabilities,
+        supports(capability) {
+          return capabilities[capability] === true;
+        },
         async createPayment() {
           return mockPaymentResult(`${name}_pay`);
         },

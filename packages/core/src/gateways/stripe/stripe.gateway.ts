@@ -77,6 +77,10 @@ import {
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
 } from "../../utils/money";
+import {
+  getCurrencyExponent,
+  isKnownCurrencyCode,
+} from "../../utils/currency";
 
 /**
  * Stripe maps transient failures to NetworkError (timeouts, connection errors,
@@ -228,6 +232,8 @@ const STRIPE_CHECKOUT_SESSION_ID_PATTERN = /^cs_[A-Za-z0-9_]+$/;
 function stripeCurrencyExponent(currency: string): number {
   const normalized = currency.toLowerCase();
 
+  // Stripe-specific tables stay explicit (ISK/UGX two-decimal specials,
+  // MGA zero-decimal, Stripe three-decimal set). Never fold into ISO-only.
   if (STRIPE_TWO_DECIMAL_SPECIAL_CASES.has(normalized)) {
     return 2;
   }
@@ -236,7 +242,19 @@ function stripeCurrencyExponent(currency: string): number {
     return 3;
   }
 
-  return STRIPE_ZERO_DECIMAL_CURRENCIES.has(normalized) ? 0 : 2;
+  if (STRIPE_ZERO_DECIMAL_CURRENCIES.has(normalized)) {
+    return 0;
+  }
+
+  // Known ISO two-decimal codes (USD, EUR, …). Unknown codes such as JYP
+  // (typo of JPY) must not silently default to exponent 2.
+  if (isKnownCurrencyCode(normalized) && getCurrencyExponent(normalized) === 2) {
+    return 2;
+  }
+
+  throw new InvalidRequestError(
+    `Unknown Stripe currency code: ${normalized.toUpperCase()}`,
+  );
 }
 
 function stripeMaximumAmount(currency: string): number {
@@ -307,11 +325,36 @@ function assertStripeMinorUnitAmount(
   return stripeAmount;
 }
 
+/**
+ * Zod input types carry `exponent?: number | undefined` (exactOptionalPropertyTypes).
+ * Rebuild a real {@link AmountInput} so `toStripeAmount` stays on the Money contract.
+ */
+function asAmountInput(
+  amount:
+    | AmountInput
+    | { amount: string; currency: string; exponent?: number | undefined },
+): AmountInput {
+  if (typeof amount === "number") {
+    return amount;
+  }
+  if (amount.exponent === undefined) {
+    return { amount: amount.amount, currency: amount.currency };
+  }
+  return {
+    amount: amount.amount,
+    currency: amount.currency,
+    exponent: amount.exponent,
+  };
+}
+
 function toStripeAmount(
-  amount: AmountInput,
+  amount:
+    | AmountInput
+    | { amount: string; currency: string; exponent?: number | undefined },
   currency: string,
   options?: { enforceChargeLimits?: boolean; allowZero?: boolean },
 ): number {
+  const amountInput = asAmountInput(amount);
   const normalized = currency.toLowerCase();
   const allowZero = options?.allowZero === true;
   // Stripe-specific exponents (ISK/UGX two-decimal specials, MGA zero-decimal,
@@ -326,7 +369,7 @@ function toStripeAmount(
 
   let minor: bigint;
   try {
-    const money = normalizeAmountInput(amount, currency, parseOpts);
+    const money = normalizeAmountInput(amountInput, currency, parseOpts);
     minor = sharedToMinorUnits(money, parseOpts);
   } catch (error) {
     if (error instanceof MoneyAmountError) {

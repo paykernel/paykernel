@@ -10,7 +10,7 @@ Source of truth for **resolution fields**: [`package.json`](../../package.json).
 | Field | Value |
 | --- | --- |
 | `name` | `@paykernel/core` |
-| `version` (at freeze) | `0.8.0` |
+| `version` (at freeze) | `0.1.0-next.0` |
 | `type` | `module` (ESM-only) |
 | `main` | `./dist/index.js` |
 | `types` | `./dist/index.d.ts` |
@@ -151,6 +151,7 @@ import {
   MoneyAmountError,
   getCurrencyExponent,
   normalizeCurrencyCode,
+  isKnownCurrencyCode,
   // Phase 6 operation outcomes + domain helpers
   mapGatewayResultToOperationResult,
   applyOutcomeToGatewayResult,

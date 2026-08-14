@@ -1,6 +1,6 @@
 # Behavioral contracts (Phase 0 baseline)
 
-This document consolidates **current** runtime contracts of `@paykernel/core` **v0.8.0**. It is a regression baseline for integrators: retry safety, provider IDs, webhooks, statuses, hooks isolation, indeterminate outcomes, and runtime assumptions.
+This document consolidates **current** runtime contracts of `@paykernel/core` **v0.1.0-next.0**. It is a regression baseline for integrators: retry safety, provider IDs, webhooks, statuses, hooks isolation, indeterminate outcomes, and runtime assumptions.
 
 **Shipped architecture (not aspirational):** the SDK lives in a Bun monorepo (`packages/core`). Prefer `createPaymentClient` with `createGatewayRegistry` / gateway factories (or a `gateways` map) for new code; the legacy `new PaymentClient({ moyasar, … })` constructor remains supported and deprecated through `0.x`. See [plugin-architecture.md](./plugin-architecture.md) and [custom-gateways.md](./custom-gateways.md).
 
@@ -201,7 +201,7 @@ type PaymentStatus =
   | "setup_completed";
 ```
 
-There is **no** single exported `isTerminalStatus()` helper in v0.8.0. Classification below is the **product meaning for fulfillment guidance** used across README and gateway docs. Gateway-specific mapping tables remain authoritative for each provider.
+There is **no** single exported `isTerminalStatus()` helper in v0.1.0-next.0. Classification below is the **product meaning for fulfillment guidance** used across README and gateway docs. Gateway-specific mapping tables remain authoritative for each provider.
 
 ### Non-terminal (do not treat as final “ship goods / money settled” without further checks)
 
@@ -319,8 +319,8 @@ Examples that return successfully from the SDK **without** meaning “safe to sh
 | **HTTP** | Gateways use **injected** `PaymentRuntime.fetch` / `GatewayContext.fetch` (defaults delegate to live `globalThis.fetch`). Timeouts via `AbortController` / `AbortSignal`. Node ≥ 18 and Bun ≥ 1.0. |
 | **Crypto** | **Portable pure HMAC-SHA256/SHA512, SHA-256/512, timing-safe compare, and encoding helpers** — no production dependency on `node:crypto` or `node:buffer`. UUID via Web Crypto / `getRandomValues`. Sync `verifyWebhook` remains available. |
 | **PaymentRuntime** | Optional `createPaymentClient({ runtime?: Partial<PaymentRuntime> })` and `createPaymentRuntime()` inject `fetch` / `crypto` / `clock` / `randomUUID`. **No secrets** on the runtime bag. |
-| **Persistence** | **No required database or Redis.** Optional injectable idempotency stores for Moyasar/Paymob. Lease-aware inbox/idempotency/reconciliation **store contracts** are defined in `@paykernel/testkit` (Phase 9) — not shipped as core engines. |
-| **Default idempotency** | Core `InMemoryIdempotencyStore` and Paymob’s built-in cache are **process-local** (per isolate). Multi-worker / serverless / restarts need a **shared** store for mutation safety. Distinct from testkit lease-aware `IdempotencyStore` / `LeaseAwareIdempotencyStore` ([store-contracts.md](../../testkit/docs/store-contracts.md)). |
+| **Persistence** | **No required database or Redis.** Optional injectable idempotency stores for Moyasar/Paymob. Lease-aware inbox/idempotency/reconciliation **store contracts** are defined in `@paykernel/store-contracts` (Phase 9) — not shipped as core engines. |
+| **Default idempotency** | Core `InMemoryIdempotencyStore` and Paymob’s built-in cache are **process-local** (per isolate). Multi-worker / serverless / restarts need a **shared** store for mutation safety. Distinct from `@paykernel/store-contracts` lease-aware `IdempotencyStore` / `LeaseAwareIdempotencyStore` ([store-contracts README](../../store-contracts/README.md)). |
 | **Secrets** | Server-side only. Secret keys must not ship to browsers. Publishable keys are optional on config and are not used for money mutations or webhook verification in this package. |
 | **Amounts** | Public APIs accept `AmountInput` (`Money` preferred; plain major-unit `number` still allowed, deprecated). Response amount fields remain major-unit `number` in 0.x. |
 | **Published surface** | Package ships `dist`, `docs`, `README`, `LICENSE` (see `package.json` `files`). Portability gate: production `src` + published `dist` must not static-import `node:` builtins (`bun run check:runtime-portability`). |
@@ -345,7 +345,7 @@ Full Phase 8 guide: [runtime.md](./runtime.md).
 - **When behavior changes in a breaking or product-visible way:** update this file in the same change as code/docs/tests.
 - **Do not** extend this file with Phase 1+ designs unless they ship and tests assert them.
 
-### Unknowns / explicit non-claims (v0.8.0)
+### Unknowns / explicit non-claims (v0.1.0-next.0)
 
 - No SDK-wide exported helper classifies terminal vs non-terminal `PaymentStatus`; the table in §4 is documentation guidance aligned with existing docs, not a runtime API.
 - Exact issuer capture/void time windows (e.g. Moyasar mada ~14 days, void-after-capture ~2 hours) are **provider policy** documented as guidance, not enforced timers in the SDK.

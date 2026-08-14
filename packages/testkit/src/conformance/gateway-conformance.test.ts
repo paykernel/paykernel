@@ -129,6 +129,113 @@ describe("runGatewayConformanceSuite", () => {
     expect(report.passed).toContain("safe_retry");
   });
 
+  it("amount_conversion fails when result.amount is omitted (P05-CONF-1)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "amount-omitted",
+      mode: "full",
+      include: ["amount_conversion"],
+      createGateway: () => {
+        const g = mockGateway({
+          name: "amount-omitted",
+          capabilities: fullCaps,
+        });
+        const orig = g.createPayment.bind(g);
+        g.createPayment = async (params) => {
+          const result = await orig(params);
+          const { amount: _omit, ...rest } = result;
+          return rest;
+        };
+        return g;
+      },
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(false);
+    const fail = report.failed.find((f) => f.case === "amount_conversion");
+    expect(fail).toBeDefined();
+    expect(fail?.error).toMatch(/amount/i);
+  });
+
+  it("logging_redaction fails when setLogger is a no-op (P05-CONF-1)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "logger-noop",
+      mode: "full",
+      include: ["logging_redaction"],
+      createGateway: () => {
+        const g = mockGateway({
+          name: "logger-noop",
+          capabilities: fullCaps,
+        });
+        g.setLogger = () => {
+          /* swallow injection — sink must not stay empty */
+        };
+        return g;
+      },
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(false);
+    const fail = report.failed.find((f) => f.case === "logging_redaction");
+    expect(fail).toBeDefined();
+    expect(fail?.error).toMatch(/inject logger|sink|PAN|apiSecret/i);
+  });
+
+  it("network_failure fails when result is success:true (P05-CONF-1)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "network-success-true",
+      mode: "full",
+      include: ["network_failure"],
+      createGateway: () => {
+        const g = mockGateway({
+          name: "network-success-true",
+          capabilities: fullCaps,
+        });
+        g.createPayment = async () => ({
+          success: true,
+          status: "pending",
+          gatewayId: "pay_network_lie",
+          outcome: "requires_action",
+        });
+        return g;
+      },
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(false);
+    const fail = report.failed.find((f) => f.case === "network_failure");
+    expect(fail).toBeDefined();
+    expect(fail?.error).toMatch(/success:true/i);
+  });
+
+  it("indeterminate_outcomes fails when indeterminate is remapped to paid (P05-CONF-1)", async () => {
+    const report = await runGatewayConformanceSuite({
+      name: "indeterminate-paid",
+      mode: "full",
+      include: ["indeterminate_outcomes"],
+      createGateway: () => {
+        const g = mockGateway({
+          name: "indeterminate-paid",
+          capabilities: fullCaps,
+        });
+        const origEnqueue = g.enqueue.bind(g);
+        g.enqueue = (operation, outcome) => {
+          const name =
+            outcome && typeof outcome === "object" && "outcome" in outcome
+              ? (outcome as { outcome?: string }).outcome
+              : undefined;
+          if (name === "indeterminate") {
+            origEnqueue(operation, { outcome: "succeeded" });
+            return;
+          }
+          origEnqueue(operation, outcome);
+        };
+        return g;
+      },
+      capabilities: fullCaps,
+    });
+    expect(report.ok).toBe(false);
+    const fail = report.failed.find((f) => f.case === "indeterminate_outcomes");
+    expect(fail).toBeDefined();
+    expect(fail?.error).toMatch(/indeterminate|success|paid/i);
+  });
+
   it("safe_retry fails when gatewayId diverges on retry (TESTKIT-2)", async () => {
     const report = await runGatewayConformanceSuite({
       name: "unsafe-retry",

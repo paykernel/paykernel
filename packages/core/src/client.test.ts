@@ -266,8 +266,10 @@ class CapabilityTestGateway extends BaseGateway {
         super({}, hooks, undefined, capabilities);
         this.name = name;
         if (opts.implementVoid) {
-            this.voidPayment = async () =>
-                mockCapPaymentResult(`${name}_void`, { status: 'cancelled' });
+            this.voidPayment = async (params) =>
+                this.executeWithHooks('voidPayment', params, async () =>
+                    mockCapPaymentResult(`${name}_void`, { status: 'cancelled' }),
+                );
         }
     }
 
@@ -412,6 +414,94 @@ describe('PaymentClient capability enforcement (Phase 3)', () => {
             expect(error).toBeInstanceOf(OperationNotSupportedError);
             const err = error as OperationNotSupportedError;
             expect(err.capability).toBe('voids');
+            expect(err.claimedSupport).toBe(false);
+        }
+    });
+
+    it('gateway().voidPayment with voids:false throws (P05-CAPS-1)', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                shadowvoid: capabilityAdapter(
+                    'shadowvoid',
+                    { payments: true, voids: false },
+                    { implementVoid: true },
+                ),
+            },
+            defaultGateway: 'shadowvoid',
+        });
+
+        const gw = client.gateway('shadowvoid');
+        expect(typeof gw.voidPayment).toBe('function');
+        expect(gw.supports('voids')).toBe(false);
+
+        try {
+            await gw.voidPayment!({ gatewayPaymentId: 'pay_1' });
+            expect.unreachable('direct gateway().voidPayment should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('voids');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('voidPayment');
+        }
+    });
+
+    it('createPayment with capture:false throws when authorization is not claimed (P05-CAPS-1)', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                noauth: capabilityAdapter('noauth', {
+                    payments: true,
+                    authorization: false,
+                }),
+            },
+            defaultGateway: 'noauth',
+        });
+
+        try {
+            await client.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/cb',
+                capture: false,
+            });
+            expect.unreachable('capture:false without authorization should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('authorization');
+            expect(err.claimedSupport).toBe(false);
+            expect(err.operation).toBe('createPayment');
+        }
+    });
+
+    it('beforeCreatePayment cannot inject capture:false to bypass authorization:false', async () => {
+        const client = createPaymentClient({
+            gateways: {
+                noauth: capabilityAdapter('noauth', {
+                    payments: true,
+                    authorization: false,
+                }),
+            },
+            defaultGateway: 'noauth',
+            hooks: {
+                beforeCreatePayment: async (ctx) => ({
+                    proceed: true,
+                    params: { ...ctx.params, capture: false },
+                }),
+            },
+        });
+
+        try {
+            await client.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/cb',
+            });
+            expect.unreachable('hook-injected capture:false should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('authorization');
             expect(err.claimedSupport).toBe(false);
         }
     });
@@ -585,8 +675,9 @@ describe('PaymentClient capability enforcement (Phase 3)', () => {
         }
     });
 
-    it('legacy plain gateway without capabilities falls back to method presence for void', async () => {
-        // Pre-Phase-3 style object: no capabilities / supports
+    it('createAll attaches fail-closed capabilities when adapter instance lacks a surface (P05-CAPS-2)', async () => {
+        // Pre-Phase-3 style object: no capabilities / supports.
+        // Registry createAll must attach DEFAULT_GATEWAY_CAPABILITIES + supports().
         const legacyGw = {
             name: 'legacy',
             async createPayment() {
@@ -631,22 +722,34 @@ describe('PaymentClient capability enforcement (Phase 3)', () => {
             defaultGateway: 'legacy',
         });
 
-        // createPayment works without payments claim (no capability surface)
-        const created = await client.createPayment({
-            amount: 10,
-            currency: 'USD',
-            callbackUrl: 'https://example.com/cb',
-        });
-        expect(created.gatewayId).toBe('legacy_pay');
+        const gw = client.gateway('legacy');
+        expect(typeof gw.supports).toBe('function');
+        expect(gw.capabilities).toBeDefined();
+        expect(gw.supports('payments')).toBe(false);
+        expect(gw.supports('voids')).toBe(false);
+        expect(gw.capabilities.payments).toBe(false);
 
-        // void without method → OperationNotSupportedError without capability key
         try {
-            await client.voidPayment({ gatewayPaymentId: 'pay_l' });
-            expect.unreachable('should throw');
+            await client.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/cb',
+            });
+            expect.unreachable('fail-closed payments:false should throw');
         } catch (error) {
             expect(error).toBeInstanceOf(OperationNotSupportedError);
             const err = error as OperationNotSupportedError;
-            expect(err.capability).toBeUndefined();
+            expect(err.capability).toBe('payments');
+            expect(err.claimedSupport).toBe(false);
+        }
+
+        try {
+            await client.voidPayment({ gatewayPaymentId: 'pay_l' });
+            expect.unreachable('fail-closed voids:false should throw');
+        } catch (error) {
+            expect(error).toBeInstanceOf(OperationNotSupportedError);
+            const err = error as OperationNotSupportedError;
+            expect(err.capability).toBe('voids');
             expect(err.operation).toBe('voidPayment');
         }
     });

@@ -26,9 +26,12 @@ export type CurrencyCode = string;
 /**
  * Per-call or merchant-level minor-unit exponent overrides.
  * Keys should be ISO 4217 codes (case-insensitive lookup).
- * Values must be integers >= 0.
+ * Values must be integers in 0–18 (same bound as `money()` / `Money.exponent`).
  */
 export type CurrencyExponentOverrides = Readonly<Record<string, number>>;
+
+/** Maximum supported minor-unit exponent (guards absurd override values). */
+const MAX_EXPONENT = 18;
 
 /**
  * ISO 4217 currencies with a minor-unit exponent of 0.
@@ -146,7 +149,7 @@ export function normalizeCurrencyCode(currency: string): string {
  * Look up an override by normalized code (keys matched case-insensitively).
  * Returns `undefined` when the currency is not present in the map.
  * Throws {@link InvalidRequestError} when the currency is present but the
- * value is not an integer >= 0 (explicit invalid override is never ignored).
+ * value is not an integer in 0–18 (explicit invalid override is never ignored).
  */
 function lookupOverride(
   overrides: CurrencyExponentOverrides,
@@ -177,6 +180,11 @@ function lookupOverride(
       `Invalid currency exponent override for ${code}: must be an integer >= 0`,
     );
   }
+  if (found > MAX_EXPONENT) {
+    throw new InvalidRequestError(
+      `Invalid currency exponent override for ${code}: exceeds maximum supported (${MAX_EXPONENT})`,
+    );
+  }
 
   return found;
 }
@@ -185,7 +193,8 @@ function lookupOverride(
  * Returns the minor-unit exponent for a currency code (case-insensitive).
  *
  * Lookup order:
- * 1. `overrides` when provided and the code is present (invalid values throw)
+ * 1. `overrides` when provided and the code is present (invalid values throw,
+ *    including exponent > 18)
  * 2. ISO 4217 zero-decimal table → 0
  * 3. ISO 4217 three-decimal table → 3
  * 4. ISO 4217 four-decimal table → 4

@@ -34,6 +34,7 @@ import {
 import {
     defineGatewayCapabilities,
     freezeCapabilities,
+    requiredCapabilitiesForOperation,
     type GatewayCapabilities,
     type GatewayCapabilityKey,
 } from './gateway-capabilities';
@@ -340,6 +341,22 @@ export abstract class BaseGateway implements PaymentGateway {
     }
 
     /**
+     * After before-hooks, gate the operation against {@link supports}.
+     * Claims are authoritative: a method may exist and still be rejected.
+     */
+    protected assertCapabilitiesAfterHooks(
+        operation: OperationType,
+        params: unknown,
+    ): void {
+        for (const capability of requiredCapabilitiesForOperation(
+            operation,
+            params,
+        )) {
+            this.assertCapability(capability, operation);
+        }
+    }
+
+    /**
      * Template method that wraps any operation with before/after/error hooks
      */
     protected async executeWithHooks<T, R>(
@@ -399,6 +416,10 @@ export abstract class BaseGateway implements PaymentGateway {
         } else {
             finalParams = withAbortSignal(finalParams, hookSignal);
         }
+
+        // P05-CAPS-1: re-assert claims on hook-final params so before-hooks
+        // cannot inject capture:false / amount / splits past capability:false.
+        this.assertCapabilitiesAfterHooks(operation, finalParams);
 
         let result: R;
         try {

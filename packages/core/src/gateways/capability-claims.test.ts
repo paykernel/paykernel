@@ -8,6 +8,9 @@
  */
 
 import { describe, it, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   stripeGateway,
   moyasarGateway,
@@ -23,6 +26,7 @@ import {
   type GatewayCapabilities,
 } from "./gateway-capabilities";
 import {
+  BUILTIN_ADAPTER_VERSION,
   BUILTIN_GATEWAY_CAPABILITIES,
   BUILTIN_GATEWAY_MANIFESTS,
   STRIPE_CAPABILITIES,
@@ -30,6 +34,7 @@ import {
   PAYPAL_CAPABILITIES,
   PAYMOB_CAPABILITIES,
 } from "./builtin-capabilities";
+import { generateGatewayCapabilitiesMarkdown } from "./capabilities-docs";
 import { BaseGateway } from "./base.gateway";
 import type { GatewayAdapter } from "./gateway-adapter";
 import type { PaymentGateway } from "./gateway.interface";
@@ -43,6 +48,8 @@ import type {
 import type { WebhookEvent } from "../types/webhook.types";
 import { HooksManager } from "../hooks/hooks.manager";
 
+const HERE = dirname(fileURLToPath(import.meta.url));
+const CORE_ROOT = join(HERE, "../..");
 const ctx = createDefaultGatewayContext();
 
 type BuiltinCase = {
@@ -160,6 +167,44 @@ describe("capability claim validation (Phase 3.4)", () => {
         const key = manifest.name as keyof typeof BUILTIN_GATEWAY_CAPABILITIES;
         expect(manifest.capabilities).toEqual(BUILTIN_GATEWAY_CAPABILITIES[key]);
       }
+    });
+
+    it("BUILTIN_ADAPTER_VERSION matches packages/core/package.json version (P05-VER-1)", () => {
+      const pkg = JSON.parse(
+        readFileSync(join(CORE_ROOT, "package.json"), "utf8"),
+      ) as { version: string };
+      expect(pkg.version.length).toBeGreaterThan(0);
+      expect(BUILTIN_ADAPTER_VERSION).toBe(pkg.version);
+      for (const manifest of BUILTIN_GATEWAY_MANIFESTS) {
+        expect(manifest.version).toBe(pkg.version);
+      }
+    });
+
+    it("PayPal keeps partialCapture true; order captures reject amount (P05-PAYPAL-1)", () => {
+      // Auth-path captures accept amount — keep the claim true.
+      expect(PAYPAL_CAPABILITIES.partialCapture).toBe(true);
+      expect(PAYPAL_CAPABILITIES.authorization).toBe(true);
+
+      const claimsSrc = readFileSync(
+        join(HERE, "builtin-capabilities.ts"),
+        "utf8",
+      );
+      expect(claimsSrc).toMatch(/partialCapture:\s*true/);
+      expect(claimsSrc).toMatch(/paypalCaptureType/);
+      expect(claimsSrc).toMatch(/order captures reject amount/i);
+
+      const generated = generateGatewayCapabilitiesMarkdown(
+        BUILTIN_GATEWAY_MANIFESTS,
+      );
+      expect(generated).toMatch(/paypalCaptureType/);
+      expect(generated).toMatch(/order captures reject amount/i);
+
+      const customGateways = readFileSync(
+        join(CORE_ROOT, "docs", "custom-gateways.md"),
+        "utf8",
+      );
+      expect(customGateways).toMatch(/paypalCaptureType/);
+      expect(customGateways).toMatch(/order captures reject amount/i);
     });
   });
 

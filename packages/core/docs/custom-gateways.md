@@ -289,6 +289,12 @@ class ExampleGateway extends BaseGateway {
 Built-in comparison tables are **generated from code** — see
 [gateway-capabilities.md](./gateway-capabilities.md) (`bun run docs:capabilities`).
 
+**PayPal `partialCapture`:** claimed `true` because the authorization-capture
+path accepts `amount`. PayPal order captures reject amount; callers must
+use `paypalCaptureType: 'authorization'` (authorize-then-capture). Do not treat
+`supports('partialCapture')` as meaning a default order capture can take a
+partial amount.
+
 ## Amount conversion (required)
 
 Custom adapters **must** use the shared money helpers from

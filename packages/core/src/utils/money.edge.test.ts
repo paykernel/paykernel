@@ -182,6 +182,18 @@ describe("5.4 exponent overrides", () => {
       }),
     ).toBe(1234n);
   });
+
+  it("getCurrencyExponent rejects override > 18 like money() (P05-MONEY-1)", () => {
+    expect(() => getCurrencyExponent("SAR", { SAR: 19 })).toThrow(
+      InvalidRequestError,
+    );
+    expect(() => money("1", "SAR", { exponentOverrides: { SAR: 19 } })).toThrow(
+      InvalidRequestError,
+    );
+    expect(() => money("1", "SAR", { exponent: 19 })).toThrow(
+      InvalidRequestError,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

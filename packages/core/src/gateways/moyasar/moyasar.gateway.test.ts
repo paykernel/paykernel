@@ -563,6 +563,30 @@ describe("MoyasarGateway", () => {
       expect(result.amount).toBe(10.5);
     });
 
+    it("keeps Money.exponent through Zod so OMR override is 2012 not 20120 (P05-MONEY-1)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          amount: 2012,
+          fee: 0,
+          captured: 2012,
+          refunded: 0,
+          currency: "OMR",
+        }),
+      );
+
+      await createGateway().createPayment({
+        amount: money("20.12", "OMR", { exponentOverrides: { OMR: 2 } }),
+        currency: "OMR",
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      expect(lastRequestBody().amount).toBe(2012);
+      expect(lastRequestBody().amount).not.toBe(20120);
+    });
+
     it("rejects Money amounts with excess currency precision", async () => {
       await expect(
         createGateway().createPayment({

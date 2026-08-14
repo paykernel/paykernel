@@ -10,7 +10,7 @@ import {
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { money } from "../../utils/money";
-import { PaymentAbortedError } from "../../errors";
+import { InvalidRequestError, PaymentAbortedError } from "../../errors";
 import { createHmac } from "node:crypto";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1724,6 +1724,50 @@ describe("StripeGateway", () => {
       expect(params.get("currency")).toBe("jpy");
       expect(result.amount).toBe(5000);
     });
+
+    it("should reject unknown currency codes like JYP (not default exponent 2)", async () => {
+      await expect(
+        gateway.createPayment({
+          amount: 1000,
+          currency: "JYP",
+          callbackUrl: "https://example.com",
+        }),
+      ).rejects.toBeInstanceOf(InvalidRequestError);
+    });
+
+    it.each([
+      // Stripe zero-decimal (ISO MGA is 2) — 500 majors → 500 minor
+      { currency: "MGA", amount: 500, expectedMinor: "500" },
+      // Stripe two-decimal specials (ISO ISK/UGX are 0) — 10 majors → 1000 minor
+      { currency: "ISK", amount: 10, expectedMinor: "1000" },
+      { currency: "UGX", amount: 10, expectedMinor: "1000" },
+    ] as const)(
+      "keeps Stripe-specific exponent tables for $currency",
+      async ({ currency, amount, expectedMinor }) => {
+        let capturedBody = "";
+        globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+          capturedBody = opts.body as string;
+          return createMockResponse({
+            id: "pi_stripe_exp",
+            object: "payment_intent",
+            status: "requires_payment_method",
+            amount: Number(expectedMinor),
+            currency: currency.toLowerCase(),
+            client_secret: "pi_stripe_exp_secret",
+          });
+        }) as unknown as typeof fetch;
+
+        await gateway.createPayment({
+          amount,
+          currency,
+          callbackUrl: "https://example.com",
+        });
+
+        expect(new URLSearchParams(capturedBody).get("amount")).toBe(
+          expectedMinor,
+        );
+      },
+    );
 
     it("should create three-decimal currency payment intents in minor units", async () => {
       let capturedBody: string = "";

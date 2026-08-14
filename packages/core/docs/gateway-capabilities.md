@@ -11,10 +11,10 @@ bun run docs:capabilities
 
 ## Providers
 
-- **Stripe** (`stripe`) `0.8.0`
-- **Moyasar** (`moyasar`) `0.8.0`
-- **PayPal** (`paypal`) `0.8.0`
-- **Paymob** (`paymob`) `0.8.0`
+- **Stripe** (`stripe`) `0.1.0-next.0`
+- **Moyasar** (`moyasar`) `0.1.0-next.0`
+- **PayPal** (`paypal`) `0.1.0-next.0`
+- **Paymob** (`paymob`) `0.1.0-next.0`
 
 ## Capability matrix
 
@@ -45,6 +45,10 @@ Claims are conservative: method presence alone does not imply `true`.
 - **partialCapture** / **partialRefunds**: optional `amount` on
   `capturePayment` / `refundPayment`. Omitting `amount` is a full
   capture/refund and does not require the partial flag.
+- **PayPal partialCapture**: claimed `true` because authorization
+  captures accept `amount` when `paypalCaptureType: "authorization"`.
+  PayPal order captures reject amount; callers must use
+  `paypalCaptureType: "authorization"` (authorize-then-capture).
 - **hostedCheckout**: first-class `createCheckoutSession` (Stripe Checkout
   Session product), not every provider redirect URL.
 - **marketplaceSplits**: create-time split / transfer surface (e.g. Moyasar

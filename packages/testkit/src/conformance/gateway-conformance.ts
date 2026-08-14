@@ -368,12 +368,10 @@ export async function runGatewayConformanceSuite(
           const expectedMajor =
             ac.expectedMajor ??
             amountInputToExpectedMajor(ac.amount, ac.currency);
-          if (result.amount !== undefined) {
-            assert(
-              Math.abs(result.amount - expectedMajor) < 1e-9,
-              `amount major units: expected ${expectedMajor}, got ${result.amount} (${ac.currency})`,
-            );
-          }
+          assert(
+            result.amount === expectedMajor,
+            `amount major units: expected ${expectedMajor}, got ${String(result.amount)} (${ac.currency})`,
+          );
           const expectedMinor =
             ac.expectedMinor ??
             fixtures.expectedAmountMinor ??
@@ -390,9 +388,9 @@ export async function runGatewayConformanceSuite(
             "gatewayId required",
           );
           // Never claim paid with wrong major→minor silent scale (e.g. 10.5 → 10)
-          if (isPaidSuccess(result) && result.amount !== undefined) {
+          if (isPaidSuccess(result)) {
             assert(
-              Math.abs(result.amount - expectedMajor) < 1e-9,
+              result.amount === expectedMajor,
               "paid result amount must match major units",
             );
           }
@@ -571,14 +569,21 @@ export async function runGatewayConformanceSuite(
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
-          resultSuccess = isPaidSuccess(result);
+          resultSuccess = result.success === true;
+          assert(
+            result.success !== true,
+            "network_failure must not accept success:true",
+          );
         } catch (e) {
           err = e;
         }
-        assert(resultSuccess !== true, "network_error must not claim paid");
+        assert(
+          resultSuccess !== true,
+          "network_failure must not accept success:true",
+        );
         assert(
           err instanceof NetworkError || resultSuccess === false,
-          "network_error should surface NetworkError (or non-paid result)",
+          "network_error should surface NetworkError (or success:false result)",
         );
       },
     },
@@ -1103,15 +1108,21 @@ export async function runGatewayConformanceSuite(
           "expected [REDACTED] markers",
         );
 
-        // Gateway path: create with secret-like metadata; history / logs must
-        // not embed live key patterns. Mock may record params for assertions —
-        // ensure no sk_live_ / whsec_ leaks in serialized history.
+        // Gateway path: inject logger and create with secret-like metadata.
+        // Sink must receive logs and must not contain PAN / apiSecret.
         const g = await fresh();
         if (allowNetworkOps(g) || isScriptableMock(g)) {
           const mockish = g as Mockish;
+          if (isScriptableMock(g)) {
+            assert(
+              typeof mockish.setLogger === "function",
+              "logging_redaction must inject logger (mock setLogger required)",
+            );
+          }
           if (typeof mockish.setLogger === "function") {
             mockish.setLogger(redacting);
           }
+          const sinkBefore = captured.length;
           await g
             .createPayment({
               amount: 1,
@@ -1128,11 +1139,35 @@ export async function runGatewayConformanceSuite(
               /* network/scripted failures ok */
             });
 
+          if (typeof mockish.setLogger === "function") {
+            const gatewayLogs = captured.slice(sinkBefore);
+            assert(
+              gatewayLogs.length > 0,
+              "logging_redaction must inject logger; sink received no gateway logs",
+            );
+            const sinkBlob = JSON.stringify(gatewayLogs);
+            assert(
+              !sinkBlob.includes("4111111111111111"),
+              "sink must not contain PAN",
+            );
+            assert(
+              !sinkBlob.includes("super-secret-value"),
+              "sink must not contain apiSecret",
+            );
+          }
+
           if (mockish.history) {
             const hist = JSON.stringify(mockish.history);
             assert(!/sk_live_/.test(hist), "history must not contain sk_live_");
             assert(!/whsec_/.test(hist), "history must not contain whsec_");
-            // Live card dump in history is for test params; redacting logger path above is source of truth
+            assert(
+              !hist.includes("4111111111111111"),
+              "history must not contain PAN",
+            );
+            assert(
+              !hist.includes("super-secret-value"),
+              "history must not contain apiSecret",
+            );
           }
         } else if (mode === "applicable") {
           // Offline structural redaction check already done via createRedactingLogger
@@ -1206,6 +1241,9 @@ export async function runGatewayConformanceSuite(
         mockish.enqueue("createPayment", {
           outcome: "provider_ok_client_timeout",
         });
+        mockish.enqueue("createPayment", {
+          outcome: "indeterminate",
+        });
         let err: unknown;
         let paid = false;
         try {
@@ -1230,6 +1268,26 @@ export async function runGatewayConformanceSuite(
             "provider-side success retained for reconcile",
           );
         }
+
+        const ind = await g.createPayment({
+          amount: 5,
+          currency: "USD",
+          callbackUrl: fixtures.createPayment.callbackUrl,
+        });
+        assert(
+          ind.success !== true,
+          "indeterminate must not surface success:true",
+        );
+        assert(!isPaidSuccess(ind), "indeterminate must never surface paid");
+        assert(
+          (ind as { outcome?: string }).outcome === "indeterminate",
+          "indeterminate script must surface outcome indeterminate",
+        );
+        assert(
+          (ind as { reconciliationRequired?: boolean }).reconciliationRequired ===
+            true,
+          "indeterminate must set reconciliationRequired",
+        );
       },
     },
   ];

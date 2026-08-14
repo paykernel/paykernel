@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { InvalidRequestError } from "../errors";
 import {
   getCurrencyExponent,
+  isKnownCurrencyCode,
   normalizeCurrencyCode,
 } from "./currency";
 
@@ -88,6 +89,9 @@ describe("getCurrencyExponent", () => {
     expect(() =>
       getCurrencyExponent("SAR", { SAR: Number.NaN }),
     ).toThrow(InvalidRequestError);
+    expect(() => getCurrencyExponent("SAR", { SAR: 19 })).toThrow(
+      InvalidRequestError,
+    );
   });
 
   it("ignores overrides map when currency is not present", () => {
@@ -108,5 +112,32 @@ describe("getCurrencyExponent", () => {
     expect(
       getCurrencyExponent("OMR", { overrides: { OMR: 2 }, allowUnknown: true }),
     ).toBe(2);
+  });
+});
+
+describe("isKnownCurrencyCode", () => {
+  it("returns true for known 0/2/3/4-decimal ISO codes", () => {
+    expect(isKnownCurrencyCode("JPY")).toBe(true);
+    expect(isKnownCurrencyCode("USD")).toBe(true);
+    expect(isKnownCurrencyCode("OMR")).toBe(true);
+    expect(isKnownCurrencyCode("CLF")).toBe(true);
+    expect(isKnownCurrencyCode("MGA")).toBe(true);
+  });
+
+  it("is case-insensitive and trims whitespace", () => {
+    expect(isKnownCurrencyCode("usd")).toBe(true);
+    expect(isKnownCurrencyCode("  omr ")).toBe(true);
+    expect(isKnownCurrencyCode("jpy")).toBe(true);
+  });
+
+  it("returns false for unknown codes and does not treat typos as known", () => {
+    expect(isKnownCurrencyCode("XXX")).toBe(false);
+    expect(isKnownCurrencyCode("JYP")).toBe(false);
+    expect(isKnownCurrencyCode("ZZZ")).toBe(false);
+  });
+
+  it("rejects empty / whitespace-only codes", () => {
+    expect(() => isKnownCurrencyCode("")).toThrow(InvalidRequestError);
+    expect(() => isKnownCurrencyCode("   ")).toThrow(InvalidRequestError);
   });
 });

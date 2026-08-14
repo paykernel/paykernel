@@ -538,10 +538,11 @@ export function money(
 }
 
 /**
- * Type guard for a Money-shaped value (`amount` + `currency` strings with a
- * well-formed decimal amount). Does not enforce currency-scale precision.
+ * Amount+currency decimal shape (no exponent check). Used so conversion
+ * helpers still fail closed on a corrupt {@link Money.exponent} instead of
+ * treating the value as a bare string amount (MONEY-3).
  */
-export function isMoney(value: unknown): value is Money {
+function isMoneyShape(value: unknown): value is Money {
   if (typeof value !== "object" || value === null) {
     return false;
   }
@@ -561,6 +562,23 @@ export function isMoney(value: unknown): value is Money {
   }
 }
 
+function moneyExponentIsValid(value: Money): boolean {
+  if (!Object.prototype.hasOwnProperty.call(value, "exponent") || value.exponent === undefined) {
+    return true;
+  }
+  const exp = value.exponent;
+  return typeof exp === "number" && Number.isInteger(exp) && exp >= 0 && exp <= MAX_EXPONENT;
+}
+
+/**
+ * Type guard for a Money-shaped value (`amount` + `currency` strings with a
+ * well-formed decimal amount). Does not enforce currency-scale precision.
+ * When `exponent` is present, it must be an integer in 0–18 (P05-MONEY-1).
+ */
+export function isMoney(value: unknown): value is Money {
+  return isMoneyShape(value) && moneyExponentIsValid(value);
+}
+
 /**
  * Re-validate an unknown value as {@link Money} with optional parse options.
  * Stored {@link Money.exponent} is re-applied when options omit scale.
@@ -569,7 +587,7 @@ export function validateMoney(
   value: unknown,
   options?: MoneyParseOptions,
 ): Money {
-  if (!isMoney(value)) {
+  if (!isMoneyShape(value)) {
     throwInvalidAmount("Value is not a valid Money object", "invalid_format");
   }
   return money(value.amount, value.currency, resolveMoneyParseOptions(value, options));
@@ -598,7 +616,7 @@ export function toMinorUnits(
   currencyOrOptions?: string | MoneyParseOptions,
   options?: MoneyParseOptions,
 ): MinorAmount {
-  if (isMoney(amount)) {
+  if (isMoneyShape(amount)) {
     const opts =
       typeof currencyOrOptions === "object" && currencyOrOptions !== null
         ? currencyOrOptions
@@ -709,7 +727,7 @@ export function moneyToMajorNumber(
   m: Money,
   options?: MoneyParseOptions,
 ): number {
-  if (!isMoney(m)) {
+  if (!isMoneyShape(m)) {
     throwInvalidAmount(
       "moneyToMajorNumber requires a Money value",
       "invalid_format",
@@ -783,7 +801,7 @@ export function normalizeAmountInput(
 ): Money {
   const code = normalizeCurrencyCode(currency);
 
-  if (isMoney(input)) {
+  if (isMoneyShape(input)) {
     const inputCode = normalizeCurrencyCode(input.currency);
     if (inputCode !== code) {
       throwInvalidAmount(

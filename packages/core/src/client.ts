@@ -1,7 +1,10 @@
 // file: packages/payments/src/client.ts
 
 import type { PaymentGateway } from "./gateways/gateway.interface";
-import type { GatewayCapabilityKey } from "./gateways/gateway-capabilities";
+import {
+  requiredCapabilitiesForOperation,
+  type GatewayCapabilityKey,
+} from "./gateways/gateway-capabilities";
 import type {
   CreatePaymentParams,
   CaptureParams,
@@ -528,7 +531,14 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
   ): Promise<GatewayPaymentResult> {
     const gw = this.resolveGateway(gateway);
     // Capability claims are authoritative when a Phase 3 surface is present.
-    this.assertCapability(gw, "payments", "createPayment");
+    // Includes authorization (capture:false) and marketplaceSplits so
+    // non-BaseGateway adapters cannot skip those on the facade.
+    for (const capability of requiredCapabilitiesForOperation(
+      "createPayment",
+      params,
+    )) {
+      this.assertCapability(gw, capability, "createPayment");
+    }
     return gw.createPayment(params as CreatePaymentParams);
   }
 
@@ -544,8 +554,11 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     gateway?: keyof TGateways & string,
   ): Promise<GatewayPaymentResult> {
     const gw = this.resolveGateway(gateway);
-    if (params.amount !== undefined) {
-      this.assertCapability(gw, "partialCapture", "capturePayment");
+    for (const capability of requiredCapabilitiesForOperation(
+      "capturePayment",
+      params,
+    )) {
+      this.assertCapability(gw, capability, "capturePayment");
     }
     return gw.capturePayment(params);
   }
@@ -562,9 +575,11 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     gateway?: keyof TGateways & string,
   ): Promise<GatewayRefundResult> {
     const gw = this.resolveGateway(gateway);
-    this.assertCapability(gw, "refunds", "refundPayment");
-    if (params.amount !== undefined) {
-      this.assertCapability(gw, "partialRefunds", "refundPayment");
+    for (const capability of requiredCapabilitiesForOperation(
+      "refundPayment",
+      params,
+    )) {
+      this.assertCapability(gw, capability, "refundPayment");
     }
     return gw.refundPayment(params);
   }
@@ -582,7 +597,12 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
   ): Promise<GatewayPaymentResult> {
     const gw = this.resolveGateway(gateway);
     // Claims first when present (authoritative even if a method exists).
-    this.assertCapability(gw, "voids", "voidPayment");
+    for (const capability of requiredCapabilitiesForOperation(
+      "voidPayment",
+      params,
+    )) {
+      this.assertCapability(gw, capability, "voidPayment");
+    }
     if (typeof gw.voidPayment !== "function") {
       // Method missing: include capability metadata when a Phase 3 surface exists
       // (claim may be true but method absent — surface the mismatch).

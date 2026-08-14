@@ -679,6 +679,43 @@ describe("mockGateway", () => {
     expect(generated.event.event?.schemaVersion).toBe("1");
   });
 
+  it("webhookHelpers.signWebhook and generateWebhookEvent bind instance secret and name (P05-TK-3)", () => {
+    const secret = "instance_bound_secret";
+    const g = mockGateway({ name: "acme", webhookSecret: secret });
+    const payload = createMockWebhookPayload({
+      id: "e_bound",
+      type: "payment_paid",
+      gatewayPaymentId: "pay_bound",
+    });
+    expect(g.webhookHelpers.signWebhook(payload)).toBe(
+      computeMockWebhookSignature(payload, secret),
+    );
+    expect(g.webhookHelpers.signWebhook(payload)).toBe(g.signWebhook(payload));
+    expect(g.webhookHelpers.signWebhook(payload)).not.toBe(
+      signWebhook(payload),
+    );
+
+    const generated = g.webhookHelpers.generateWebhookEvent({
+      id: "e_gen",
+      gatewayPaymentId: "pay_bound",
+      status: "paid",
+      createdAt: "2024-01-01T00:00:00.000Z",
+    });
+    expect(generated.event.gateway).toBe("acme");
+    expect(generated.signature).toBe(
+      computeMockWebhookSignature(generated.raw, secret),
+    );
+    expect(g.verifyWebhook(generated.raw)).toBe(true);
+    expect(
+      g.generateWebhookEvent({
+        id: "e_gen",
+        gatewayPaymentId: "pay_bound",
+        status: "paid",
+        createdAt: "2024-01-01T00:00:00.000Z",
+      }).event.gateway,
+    ).toBe("acme");
+  });
+
   it("Phase 7 dual-write: stable type option and free-form mapping", () => {
     // Stable name as type → PaymentEvent.type matches; free-form type is that name
     const stable = generateWebhookEvent({
@@ -836,6 +873,50 @@ describe("mockGateway", () => {
     });
     c.abort();
     await expect(p).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("FakeClock applyLatency re-checks abort after advance (P05-TK-1)", async () => {
+    const clock = createFakeClock({ initialMs: 1_000 });
+    const g = mockGateway({
+      clock,
+      createPayment: [{ outcome: "succeeded", latencyMs: 50 }],
+    });
+    const c = new AbortController();
+    const p = g.createPayment({
+      amount: 1,
+      currency: "USD",
+      callbackUrl: "https://ex.test/cb",
+      // @ts-expect-error signal is testkit extension
+      signal: c.signal,
+    });
+    c.abort();
+    await expect(p).rejects.toBeInstanceOf(NetworkError);
+    expect(clock.nowMs()).toBe(1_050);
+    expect(g.getLastProviderSideSuccess()).toBeUndefined();
+    expect(g.getPaymentState("pay_mock_1")).toBeUndefined();
+  });
+
+  it("FakeClock applyLatency yields so a pre-queued abort is observed (P05-TK-1)", async () => {
+    const clock = createFakeClock({ initialMs: 2_000 });
+    const g = mockGateway({
+      clock,
+      createPayment: [{ outcome: "succeeded", latencyMs: 10 }],
+    });
+    const c = new AbortController();
+    queueMicrotask(() => {
+      c.abort();
+    });
+    await expect(
+      g.createPayment({
+        amount: 1,
+        currency: "USD",
+        callbackUrl: "https://ex.test/cb",
+        // @ts-expect-error signal is testkit extension
+        signal: c.signal,
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+    expect(clock.nowMs()).toBe(2_010);
+    expect(g.getPaymentState("pay_mock_1")).toBeUndefined();
   });
 
   it("void authorized payment", async () => {
@@ -1019,6 +1100,33 @@ describe("mockGateway", () => {
     const st = g.getPaymentState(pay.gatewayId)!;
     expect(st.refundedAmount).toBe(15);
     expect(st.status).toBe("partially_refunded");
+  });
+
+  it("refundPayment provider_ok_client_timeout settles ledger then throws (P05-TK-2)", async () => {
+    for (const outcome of [
+      "provider_ok_client_timeout",
+      "provider_success_client_timeout",
+    ] as const) {
+      const g = mockGateway({
+        refundPayment: [{ outcome }],
+      });
+      const paid = await g.createPayment({
+        amount: 20,
+        currency: "USD",
+        callbackUrl: "https://ex.test/cb",
+        capture: true,
+      });
+      await expect(
+        g.refundPayment({
+          gatewayPaymentId: paid.gatewayId,
+          amount: 20,
+          currency: "USD",
+        }),
+      ).rejects.toBeInstanceOf(NetworkError);
+      const state = g.getPaymentState(paid.gatewayId);
+      expect(state?.status).toBe("refunded");
+      expect(state?.refundedAmount).toBe(20);
+    }
   });
 
   it("implements PaymentGateway surface (name, capabilities, supports)", () => {

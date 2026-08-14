@@ -12,6 +12,7 @@ import {
   PaymentClient,
   GatewayNotConfiguredError,
   InvalidRequestError,
+  OperationNotSupportedError,
   StripeGateway,
   MoyasarGateway,
 } from "./index";
@@ -203,6 +204,115 @@ describe("createPaymentClient — gateways map", () => {
     expect(() => createPaymentClient({} as never)).toThrow(
       /either 'registry' or 'gateways'/,
     );
+  });
+
+  it("createAll attaches DEFAULT_GATEWAY_CAPABILITIES when instance lacks a surface", async () => {
+    const adapter: GatewayAdapter<"bare", PaymentGateway<"bare">> = {
+      name: "bare",
+      manifest: { name: "bare" },
+      create() {
+        return {
+          name: "bare",
+          async createPayment() {
+            return mockPaymentResult("bare_pay");
+          },
+          async capturePayment() {
+            return mockPaymentResult("bare_cap");
+          },
+          async refundPayment() {
+            return {
+              success: true,
+              gatewayRefundId: "bare_ref",
+              status: "completed",
+              rawResponse: {},
+            };
+          },
+          verifyWebhook() {
+            return true;
+          },
+          parseWebhookEvent(payload: unknown): WebhookEvent {
+            return {
+              id: "evt_bare",
+              type: "payment_paid",
+              gateway: "bare",
+              paymentId: undefined,
+              gatewayPaymentId: "pay_1",
+              status: "paid",
+              timestamp: new Date(),
+              rawPayload: payload,
+            };
+          },
+        } as PaymentGateway<"bare">;
+      },
+    };
+
+    const client = createPaymentClient({
+      gateways: { bare: adapter },
+      defaultGateway: "bare",
+    });
+
+    const gw = client.gateway("bare");
+    expect(typeof gw.supports).toBe("function");
+    expect(gw.capabilities).toBeDefined();
+    expect(gw.supports("payments")).toBe(false);
+    expect(gw.capabilities.payments).toBe(false);
+
+    await expect(
+      client.createPayment({
+        amount: 1,
+        currency: "USD",
+        callbackUrl: "https://example.com/cb",
+      }),
+    ).rejects.toBeInstanceOf(OperationNotSupportedError);
+  });
+
+  it("facade rejects capture:false and splits on a non-BaseGateway surface", async () => {
+    const noAuth = createMockAdapter("plain");
+    const client = createPaymentClient({
+      gateways: {
+        plain: {
+          ...noAuth,
+          create() {
+            return createMockGateway("plain", {
+              payments: true,
+              authorization: false,
+              marketplaceSplits: false,
+            });
+          },
+        },
+      },
+      defaultGateway: "plain",
+    });
+
+    try {
+      await client.createPayment({
+        amount: 10,
+        currency: "USD",
+        callbackUrl: "https://example.com/cb",
+        capture: false,
+      });
+      expect.unreachable("capture:false should throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(OperationNotSupportedError);
+      expect((error as OperationNotSupportedError).capability).toBe(
+        "authorization",
+      );
+    }
+
+    try {
+      await client.createPayment({
+        amount: 10,
+        currency: "USD",
+        callbackUrl: "https://example.com/cb",
+        splits: [{ amount: 1, type: "fixed", destination: "acc_1" }],
+      } as CreatePaymentParams);
+      expect.unreachable("splits should throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(OperationNotSupportedError);
+      expect((error as OperationNotSupportedError).capability).toBe(
+        "marketplaceSplits",
+      );
+    }
   });
 });
 

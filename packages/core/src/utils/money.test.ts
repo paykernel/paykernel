@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { InvalidRequestError } from "../errors";
+import { CreatePaymentParamsSchema } from "../types/validation";
 import {
   formatMoney,
   fromMinorUnits,
@@ -205,6 +206,7 @@ describe("sign zero policies and overrides", () => {
       currency: "SAR",
       exponent: -1,
     } as unknown as ReturnType<typeof money>;
+    expect(isMoney(negative)).toBe(false);
     expect(() => toMinorUnits(negative)).toThrow(MoneyAmountError);
     try {
       toMinorUnits(negative);
@@ -282,6 +284,54 @@ describe("invalid formats and helpers", () => {
     expect(isMoney({ amount: 1, currency: "USD" })).toBe(false);
     expect(isMoney(null)).toBe(false);
     expect(isMoney({ amount: "1e2", currency: "USD" })).toBe(false);
+  });
+
+  it("isMoney requires present exponent to be an integer 0-18 (P05-MONEY-1)", () => {
+    expect(isMoney({ amount: "20.12", currency: "OMR", exponent: 2 })).toBe(
+      true,
+    );
+    expect(isMoney({ amount: "10", currency: "USD", exponent: 0 })).toBe(true);
+    expect(isMoney({ amount: "1.00", currency: "USD", exponent: 18 })).toBe(
+      true,
+    );
+    expect(isMoney({ amount: "1.00", currency: "USD", exponent: 19 })).toBe(
+      false,
+    );
+    expect(isMoney({ amount: "1.00", currency: "USD", exponent: -1 })).toBe(
+      false,
+    );
+    expect(isMoney({ amount: "1.00", currency: "USD", exponent: 1.5 })).toBe(
+      false,
+    );
+    expect(
+      isMoney({ amount: "1.00", currency: "USD", exponent: "2" as unknown as number }),
+    ).toBe(false);
+  });
+
+  it("CreatePaymentParamsSchema parse keeps Money.exponent (P05-MONEY-1)", () => {
+    const omr = money("20.12", "OMR", { exponentOverrides: { OMR: 2 } });
+    expect(omr.exponent).toBe(2);
+
+    const parsed = CreatePaymentParamsSchema.parse({
+      amount: omr,
+      currency: "OMR",
+      callbackUrl: "https://example.com/callback",
+    });
+
+    expect(parsed.amount).toEqual({
+      amount: "20.12",
+      currency: "OMR",
+      exponent: 2,
+    });
+    expect(isMoney(parsed.amount)).toBe(true);
+    expect(toMinorUnits(parsed.amount as Money)).toBe(2012n);
+
+    const rejected = CreatePaymentParamsSchema.safeParse({
+      amount: { amount: "20.12", currency: "OMR", exponent: 19 },
+      currency: "OMR",
+      callbackUrl: "https://example.com/callback",
+    });
+    expect(rejected.success).toBe(false);
   });
 
   it("validateMoney re-parses and canonicalizes", () => {
