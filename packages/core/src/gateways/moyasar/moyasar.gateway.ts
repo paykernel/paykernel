@@ -6,6 +6,8 @@ import {
   combineAbortSignals,
   createTimeoutSignal,
   extractAbortSignal,
+  isAbortError,
+  isMutatingHttpMethod,
   mapHttpAbortError,
 } from "../../runtime/abort";
 import {
@@ -38,6 +40,7 @@ import type {
 } from "../../types/webhook.types";
 import {
   attachPaymentEvent,
+  hashWebhookPayload,
   paymentFromWebhookEvent,
   PAYMENT_EVENT_SCHEMA_VERSION,
 } from "../../types/payment-event";
@@ -378,7 +381,7 @@ export class MoyasarGateway extends BaseGateway {
 
     const key = `moyasar:${operation}:${paymentId}:${idempotencyKey}`;
     const fingerprint = fingerprintParams(fingerprintInput);
-    const createdAt = Date.now();
+    const createdAt = this.clock.nowMs();
 
     const existing = await store.reserve(key, {
       status: "in_progress",
@@ -411,7 +414,7 @@ export class MoyasarGateway extends BaseGateway {
         store.set(key, {
           status: "completed",
           fingerprint,
-          createdAt: Date.now(),
+          createdAt: this.clock.nowMs(),
           result,
         }),
       );
@@ -428,7 +431,7 @@ export class MoyasarGateway extends BaseGateway {
           store.set(key, {
             status: "unknown",
             fingerprint,
-            createdAt: Date.now(),
+            createdAt: this.clock.nowMs(),
           }),
         );
       }
@@ -463,7 +466,7 @@ export class MoyasarGateway extends BaseGateway {
    *   (provider `failed`/`abandoned`, or an unmapped status). An `initiated`
    *   payment maps to `success: true` with `status: 'pending'`. Always check
    *   `status` (and complete 3DS/OTP) before fulfillment — fulfill only on
-   *   `paid` (or `authorized` for auth-only holds).
+   *   `status === 'paid'` / `isPaidOutcome`. `authorized` is not fulfillment.
    */
   async createPayment(params: CreatePaymentParams): Promise<GatewayPaymentResult>;
   async createPayment(params: MoyasarCreatePaymentParams): Promise<GatewayPaymentResult>;
@@ -1124,8 +1127,9 @@ export class MoyasarGateway extends BaseGateway {
    * Parse Moyasar webhook payload into normalized WebhookEvent.
    *
    * Dual-writes Phase 7 {@link import('../../types/payment-event').PaymentEvent}
-   * on `event` / `stableType` / `provider` while keeping provider-native `type`
-   * and redacted `rawPayload` (secret_token stripped).
+   * on `event` / `stableType` / `provider` while keeping provider-native `type`.
+   * Hash via {@link hashWebhookPayload} **before** stripping `secret_token`
+   * (redacts in place). `rawPayload` omits the secret after hashing.
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
     const raw = this.assertMoyasarWebhookPayload(payload);
@@ -1144,7 +1148,9 @@ export class MoyasarGateway extends BaseGateway {
       captured?: number;
     };
 
-    // Never re-expose the webhook secret in rawPayload after verification.
+    // Hash with secret_token present so digest matches
+    // hashWebhookPayload(redacted-with-key). Strip only after hashing.
+    const payloadHash = hashWebhookPayload(raw);
     const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
 
     const eventType = this.normalizeWebhookEventType(raw.type);
@@ -1180,15 +1186,18 @@ export class MoyasarGateway extends BaseGateway {
       rawPayload: rawWithoutSecret,
     };
 
-    const attached = attachPaymentEvent(legacy, { computePayloadHash: true });
+    const attached = attachPaymentEvent(legacy);
     // MOYASAR-3: payment_paid / payment_captured map to settled dual-write from
     // envelope type alone — demote when domain status is not paid-like (paid).
     // Covers amount-derived partially_captured and any other non-paid domain.
     // Incomplete refund_completed must not dual-write refund.completed —
     // type-only handlers would over-settle without proven refunded amount.
-    return this.demoteIncompleteRefundWebhookDualWrite(
-      this.demoteNonPaidSettledWebhookDualWrite(attached),
-    );
+    return {
+      ...this.demoteIncompleteRefundWebhookDualWrite(
+        this.demoteNonPaidSettledWebhookDualWrite(attached),
+      ),
+      payloadHash,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1274,7 +1283,8 @@ export class MoyasarGateway extends BaseGateway {
    * Prefer `outcome` (Phase 6). `success` is dual-written for 0.x:
    * false when status maps to SDK `failed` (or outcome declined/failed);
    * true for paid/authorized/pending/requires_action paths. Callers must
-   * check `outcome === 'succeeded'` + paid-like status before fulfilling.
+   * fulfill only on `status === 'paid'` / `isPaidOutcome` — never on
+   * `authorized` or `success` alone.
    */
   private mapPaymentResponse(
     payment: MoyasarPaymentResponse,
@@ -1317,13 +1327,16 @@ export class MoyasarGateway extends BaseGateway {
         ? payment.currency.trim().toUpperCase()
         : undefined;
 
-    // Paid-like without a complete money snapshot (finite amount + currency):
-    // demote so isPaidOutcome stays false. Finite 0 is legitimate only for
-    // non-paid paths (e.g. verified → setup_completed). Currency-stripped paid
-    // must not fulfill without amount/currency verification.
+    // Paid-like without a complete money snapshot (finite amount + currency +
+    // finite captured total): demote so isPaidOutcome stays false. Finite 0 is
+    // legitimate only for non-paid paths (e.g. verified → setup_completed).
+    // Currency-stripped paid / paid-captured without captured must not fulfill
+    // (P610-MOY-2 / Stripe/Paymob parity).
     if (
       status === "paid" &&
-      (amountMinor === undefined || currency === undefined)
+      (amountMinor === undefined ||
+        currency === undefined ||
+        capturedMinor === undefined)
     ) {
       status = "processing";
     }
@@ -1586,10 +1599,7 @@ export class MoyasarGateway extends BaseGateway {
     init: RequestInit,
     fallbackMessage: string,
   ): Promise<unknown> {
-    const response = await this.request(urlOrPath, init);
-    const data = (await this.parseJsonResponse(response)) as
-      | MoyasarPaymentResponse
-      | MoyasarErrorResponse;
+    const { response, data } = await this.request(urlOrPath, init);
 
     if (!response.ok) {
       throw this.createApiError(
@@ -1603,7 +1613,10 @@ export class MoyasarGateway extends BaseGateway {
     return data;
   }
 
-  private async request(urlOrPath: string, init: RequestInit): Promise<Response> {
+  private async request(
+    urlOrPath: string,
+    init: RequestInit,
+  ): Promise<{ response: Response; data: unknown }> {
     const timeoutMs = this.moyasarConfig.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const { signal: timeoutSignal, clear } = createTimeoutSignal(timeoutMs);
     const callerSignal = init.signal ?? undefined;
@@ -1611,20 +1624,38 @@ export class MoyasarGateway extends BaseGateway {
     const url = urlOrPath.startsWith("http")
       ? urlOrPath
       : `${this.baseUrl}${urlOrPath}`;
+    const abortOptions = {
+      callerSignal,
+      timeoutSignal,
+      timeoutMessage: "Moyasar API request timed out",
+      networkMessage: "Failed to connect to Moyasar API",
+      callerAbortMessage: "Moyasar API request aborted by caller signal",
+      afterProviderSubmit: isMutatingHttpMethod(
+        typeof init.method === "string" ? init.method : undefined,
+      ),
+    };
 
     try {
-      return await this.fetch(url, {
-        ...init,
-        ...(signal !== undefined ? { signal } : {}),
-      });
-    } catch (e) {
-      throw mapHttpAbortError(e, {
-        callerSignal,
-        timeoutSignal,
-        timeoutMessage: "Moyasar API request timed out",
-        networkMessage: "Failed to connect to Moyasar API",
-        callerAbortMessage: "Moyasar API request aborted by caller signal",
-      });
+      let response: Response;
+      try {
+        response = await this.fetch(url, {
+          ...init,
+          ...(signal !== undefined ? { signal } : {}),
+        });
+      } catch (e) {
+        throw mapHttpAbortError(e, abortOptions);
+      }
+
+      // Keep timeout armed until the body is consumed (P610-ABT-4).
+      try {
+        const data = await this.parseJsonResponse(response);
+        return { response, data };
+      } catch (e) {
+        if (isAbortError(e)) {
+          throw mapHttpAbortError(e, abortOptions);
+        }
+        throw e;
+      }
     } finally {
       clear();
     }
@@ -1634,6 +1665,10 @@ export class MoyasarGateway extends BaseGateway {
     try {
       return await response.json();
     } catch (e) {
+      // Body-read abort must stay a timeout/caller abort, not invalid JSON.
+      if (isAbortError(e)) {
+        throw e;
+      }
       throw new GatewayApiError(
         "Moyasar API returned an invalid JSON response",
         "moyasar",
@@ -1745,6 +1780,18 @@ export class MoyasarGateway extends BaseGateway {
         payment.status === "paid")
     ) {
       return "partially_captured";
+    }
+
+    // Paid/captured family without a finite captured total: fail closed
+    // (P610-MOY-2 / Stripe/Paymob parity). Missing/non-finite captured must
+    // not fulfill as paid / isPaidOutcome.
+    if (status === "paid") {
+      const capturedFinite =
+        typeof payment.captured === "number" &&
+        Number.isFinite(payment.captured);
+      if (!capturedFinite) {
+        return "processing";
+      }
     }
 
     return status;

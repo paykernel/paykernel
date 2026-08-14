@@ -89,13 +89,18 @@ export class StoreLeaseLostError extends Error {
 /**
  * True when `error` is a store lease/fencing rejection.
  *
+ * **Adapters MUST throw `name === "StoreLeaseLostError"`** (this class or a
+ * dual-package / testkit copy). Source of truth for the contract type lives in
+ * `@paykernel/store-contracts`.
+ *
  * Matches:
  * - {@link StoreLeaseLostError} instances (including cross-realm subclasses)
  * - Errors with `name === "StoreLeaseLostError"` (portable dual copies / testkit)
  *
  * Does **not** match bare `{ code: "lease_lost" }` domain throws — handlers
  * reusing that code for business errors must not skip `store.fail` or look like
- * fencing losses (WEBHOOKS-6).
+ * fencing losses (WEBHOOKS-6). The engine uses this helper, not a code-only
+ * check.
  */
 export function isStoreLeaseLostError(error: unknown): boolean {
   if (error instanceof StoreLeaseLostError) return true;
@@ -238,7 +243,14 @@ export type CompleteWebhookInput = {
 
 export type FailWebhookInput = {
   key: WebhookEventKey;
-  /** Required active lease token. Wrong/stale/expired → {@link StoreLeaseLostError}. */
+  /**
+   * Matching lease token on a `claimed` row. Wrong/stale (or after reclaim)
+   * → {@link StoreLeaseLostError}.
+   *
+   * **WEBHOOKS-2:** matching token + `status === "claimed"` succeeds even after
+   * lease expiry so hang/timeout handlers still record pending/dead_letter.
+   * `complete` / `renew` still require an **unexpired** lease.
+   */
   leaseToken: LeaseToken;
   /** Sanitized error code/message only — never secrets or raw payloads. */
   error: string;
@@ -271,9 +283,9 @@ export type ListRetryableInput = {
  * `claim` MUST be a single atomic engine-level claim. Not get-then-set races.
  *
  * ### Lease-gated mutators
- * After acquire, `renew` / `complete` / `fail` **require the active `leaseToken`**.
- * Wrong/stale/expired → {@link StoreLeaseLostError} or renew `lease_lost`.
- * After lease reclaim, the old token MUST fail.
+ * After acquire, `renew` / `complete` **require the active `leaseToken`**
+ * (unexpired). `fail` requires a matching token on `claimed` and **succeeds
+ * after expiry** (WEBHOOKS-2). After lease reclaim, the old token MUST fail.
  *
  * Same event key: second claim with same payload hash while in-progress → in_progress;
  * completed → already_completed (before hash check); dead_letter/failed → duplicate_failed

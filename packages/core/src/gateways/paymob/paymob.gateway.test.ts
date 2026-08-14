@@ -194,6 +194,21 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /** Logger that records warn/error calls as [message, context?] tuples. */
+function fakeClock(startMs: number): {
+  now(): Date;
+  nowMs(): number;
+  advance(ms: number): void;
+} {
+  let current = startMs;
+  return {
+    now: () => new Date(current),
+    nowMs: () => current,
+    advance(ms: number) {
+      current += ms;
+    },
+  };
+}
+
 function captureLogger(sink: unknown[][]): Logger {
   return {
     debug: () => {},
@@ -1058,14 +1073,14 @@ describe("PaymobGateway", () => {
         jsonResponse({ success: true, refunded_amount_cents: 5000, currency: "SAR" }),
       );
 
-      // HTTP 200 + missing refund id: NetworkError (indeterminate fence), not clean GatewayApiError.
-      await expect(
-        actionGateway.refundPayment({
-          gatewayPaymentId: "123456789",
-          amount: 50,
-          currency: "SAR",
-        }),
-      ).rejects.toThrow(NetworkError);
+      // HTTP 200 + missing refund id: post-submit indeterminate result, not GatewayApiError.
+      const missingId = await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+      });
+      expect(missingId.outcome).toBe("indeterminate");
+      expect(missingId.reconciliationRequired).toBe(true);
     });
 
     it("derives full capture amount from transaction inquiry when amount is omitted", async () => {
@@ -1196,7 +1211,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "refund_unknown_123",
       };
 
-      await expect(actionGateway.refundPayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
       await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
@@ -1219,7 +1235,8 @@ describe("PaymobGateway", () => {
         currency: "SAR",
         idempotencyKey: "refund_unknown_fence_under_pressure",
       };
-      await expect(actionGateway.refundPayment(unknownParams)).rejects.toThrow(NetworkError);
+      const unknownFirst = await actionGateway.refundPayment(unknownParams);
+      expect(unknownFirst.outcome).toBe("indeterminate");
 
       // Fill the in-memory map to capacity with terminal completed entries.
       // Only completed entries are FIFO-evictable — unknown must survive.
@@ -1252,6 +1269,107 @@ describe("PaymobGateway", () => {
       // Unknown fence still blocks retry (no double-apply) — observable behavior,
       // not private Map membership.
       await expect(actionGateway.refundPayment(unknownParams)).rejects.toThrow(InvalidRequestError);
+    });
+
+    it("stamps idempotency createdAt/expiresAt from this.clock.nowMs() (P610-CLK-2)", async () => {
+      const fixedMs = 1_700_000_000_000;
+      const clock = fakeClock(fixedMs);
+      const store = new MemoryIdempotencyStore();
+      const clockGateway = new PaymobGateway(
+        { ...PAYMOB_TEST_CONFIG, idempotencyStore: store },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      mockFetchSequence(jsonResponse({ id: "pi_clock_123", client_secret: "csk_clock_123" }));
+
+      await clockGateway.createPayment({
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "create_clock_stamp",
+      });
+
+      const record = store.records.get("createPayment:create_clock_stamp");
+      expect(record?.createdAt).toBe(fixedMs);
+      expect(record?.expiresAt).toBe(fixedMs + 24 * 60 * 60 * 1_000);
+      expect(record?.createdAt).not.toBe(Date.now());
+    });
+
+    it("prunes completed idempotency entries against this.clock.nowMs() (P610-CLK-2)", async () => {
+      const ttlMs = 24 * 60 * 60 * 1_000;
+      const clock = fakeClock(5_000_000_000_000);
+      const clockGateway = new PaymobGateway(
+        PAYMOB_TEST_CONFIG,
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      const cache = (clockGateway as unknown as {
+        idempotencyCache: Map<string, { fingerprint: string; createdAt: number; status?: string }>;
+      }).idempotencyCache;
+      cache.set("createPayment:old_completed_clock", {
+        fingerprint: "fp_old",
+        createdAt: clock.nowMs() - ttlMs - 1,
+        status: "completed",
+      });
+
+      mockFetchSequence(jsonResponse({ id: "pi_prune_clock", client_secret: "csk_prune_clock" }));
+      await clockGateway.createPayment({
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "create_trigger_clock_prune",
+      });
+
+      expect(cache.has("createPayment:old_completed_clock")).toBe(false);
+    });
+
+    it("never prunes in_progress or unknown idempotency fences (P610-CLK-3)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      const cache = (actionGateway as unknown as {
+        idempotencyCache: Map<string, { fingerprint: string; createdAt: number; status?: string }>;
+      }).idempotencyCache;
+      cache.set("refundPayment:ancient_unknown", {
+        fingerprint: JSON.stringify({
+          amount: 50,
+          currency: "SAR",
+          gatewayPaymentId: "123456789",
+          idempotencyKey: "ancient_unknown",
+        }),
+        createdAt: 0,
+        status: "unknown",
+      });
+      cache.set("refundPayment:ancient_in_progress", {
+        fingerprint: "fp_in_progress",
+        createdAt: 0,
+        status: "in_progress",
+      });
+      cache.set("createPayment:ancient_completed", {
+        fingerprint: "fp_completed",
+        createdAt: 0,
+        status: "completed",
+      });
+
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 456, success: true, refunded_amount_cents: 1000 }),
+      );
+      await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 10,
+        currency: "SAR",
+        idempotencyKey: "refund_trigger_prune",
+      });
+
+      expect(cache.has("refundPayment:ancient_unknown")).toBe(true);
+      expect(cache.has("refundPayment:ancient_in_progress")).toBe(true);
+      expect(cache.has("createPayment:ancient_completed")).toBe(false);
+
+      await expect(actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "ancient_unknown",
+      })).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund"))).toHaveLength(1);
     });
 
     it("refuses new idempotency keys when cache is full of non-evictable fences (PAYMOB-3)", async () => {
@@ -1292,7 +1410,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "refund_unknown_500",
       };
 
-      await expect(actionGateway.refundPayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
       await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
@@ -1449,7 +1568,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "refund_unknown_store_write_fails",
       };
 
-      await expect(actionGateway.refundPayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
       await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
       expect(idempotencyStore.setCalls).toBe(1);
       expect(warnings[0]?.[0]).toContain("Failed to persist refundPayment idempotency record");
@@ -1703,6 +1823,32 @@ describe("PaymobGateway", () => {
         call.url.endsWith("/api/auth/tokens"),
       );
       expect(authCalls).toHaveLength(1);
+    });
+
+    it("expires non-JWT legacy auth cache using this.clock.nowMs() TTL (P610-CLK-2)", async () => {
+      const clock = fakeClock(1_700_000_000_000);
+      const actionGateway = new PaymobGateway(
+        PAYMOB_ACTION_CONFIG,
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_not_a_jwt" }),
+        jsonResponse({ id: 1, amount_cents: 100, currency: "SAR" }),
+        jsonResponse({ id: 2, amount_cents: 100, currency: "SAR" }),
+        jsonResponse({ token: "auth_token_refreshed" }),
+        jsonResponse({ id: 3, amount_cents: 100, currency: "SAR" }),
+      );
+
+      await actionGateway.getPayment({ gatewayPaymentId: "111111111" });
+      await actionGateway.getPayment({ gatewayPaymentId: "222222222" });
+      expect(fetchCalls.filter((call) => call.url.endsWith("/api/auth/tokens"))).toHaveLength(1);
+
+      clock.advance(50 * 60 * 1000 + 1);
+      await actionGateway.getPayment({ gatewayPaymentId: "333333333" });
+
+      expect(fetchCalls.filter((call) => call.url.endsWith("/api/auth/tokens"))).toHaveLength(2);
     });
 
     it("reuses a cached token derived from the JWT expiry across calls", async () => {
@@ -2052,13 +2198,15 @@ describe("PaymobGateway", () => {
         jsonResponse({ id: 123 }),
       );
 
-      // HTTP 200 + missing success is NetworkError (indeterminate), not a clean GatewayApiError.
-      await expect(actionGateway.capturePayment({
+      // HTTP 200 + missing success is post-submit indeterminate, not GatewayApiError.
+      const malformed = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
         amount: 50,
         currency: "SAR",
         idempotencyKey: "capture_malformed_body_200",
-      })).rejects.toThrow(NetworkError);
+      });
+      expect(malformed.outcome).toBe("indeterminate");
+      expect(malformed.reconciliationRequired).toBe(true);
     });
 
     it("keeps idempotency fence after HTTP 200 + malformed capture body (PAYMOB-1)", async () => {
@@ -2077,7 +2225,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "capture_200_malformed_fence",
       };
 
-      await expect(actionGateway.capturePayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.capturePayment(params);
+      expect(first.outcome).toBe("indeterminate");
       // Second attempt must be blocked — fence retained (no double capture).
       await expect(actionGateway.capturePayment(params)).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls.map((call) => call.url)).toEqual([
@@ -2103,7 +2252,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "refund_200_missing_id_fence",
       };
 
-      await expect(actionGateway.refundPayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
       await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
@@ -2124,7 +2274,8 @@ describe("PaymobGateway", () => {
         idempotencyKey: "void_200_bad_success_fence",
       };
 
-      await expect(actionGateway.voidPayment(params)).rejects.toThrow(NetworkError);
+      const first = await actionGateway.voidPayment(params);
+      expect(first.outcome).toBe("indeterminate");
       await expect(actionGateway.voidPayment(params)).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
@@ -2262,7 +2413,43 @@ describe("PaymobGateway", () => {
         });
       }) as typeof fetch;
 
-      await expect(timeoutGateway.createPayment(VALID_CREATE_PARAMS)).rejects.toThrow(NetworkError);
+      const timedOut = await timeoutGateway.createPayment(VALID_CREATE_PARAMS);
+      expect(timedOut.outcome).toBe("indeterminate");
+      expect(timedOut.reconciliationRequired).toBe(true);
+    });
+
+    it("keeps the request timeout until the response body is consumed (P610-ABT-4)", async () => {
+      const timeoutGateway = new PaymobGateway(
+        { ...PAYMOB_TEST_CONFIG, timeoutMs: 40 },
+        hooksManager,
+      );
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(_input), init });
+        const encoder = new TextEncoder();
+        const body = JSON.stringify({ id: "pi_slow_body", client_secret: "csk_slow_body" });
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              const timer = setTimeout(() => {
+                controller.enqueue(encoder.encode(body));
+                controller.close();
+              }, 250);
+              init?.signal?.addEventListener("abort", () => {
+                clearTimeout(timer);
+                controller.error(Object.assign(new Error("aborted"), { name: "AbortError" }));
+              });
+            },
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }) as typeof fetch;
+
+      const hungBody = await timeoutGateway.createPayment(VALID_CREATE_PARAMS);
+      expect(hungBody.outcome).toBe("indeterminate");
+      expect(hungBody.reconciliationRequired).toBe(true);
     });
   });
 
@@ -3134,6 +3321,19 @@ describe("PaymobGateway", () => {
       expect(() => gateway.parseWebhookEvent(createMockWebhookPayload({
         created_at: "not-a-date",
       }))).toThrow(InvalidWebhookError);
+    });
+
+    it("does not default a missing webhook type to TRANSACTION fulfillment", () => {
+      const payload = createMockWebhookPayload();
+      const { type: _omittedType, ...withoutType } = payload;
+      void _omittedType;
+
+      const event = gateway.parseWebhookEvent(withoutType);
+
+      expect(event.type).not.toBe("TRANSACTION");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).toBe("provider.unmapped");
+      expect(event.stableType).toBeUndefined();
     });
 
     it("Phase 7 dual-write: success TRANSACTION → payment.succeeded", () => {

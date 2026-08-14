@@ -294,7 +294,7 @@ interface PaymobNormalizedTransactionWebhook {
 
 class PaymobIndeterminateNetworkError extends NetworkError {
   constructor(error: NetworkError) {
-    super(error.message, error.originalError);
+    super(error.message, error.originalError, { afterProviderSubmit: true });
     this.name = "PaymobIndeterminateNetworkError";
   }
 }
@@ -304,6 +304,7 @@ class PaymobIndeterminateGatewayError extends NetworkError {
     super(
       `Paymob ${operation} API returned ${status} after a mutating request; gateway outcome is unknown`,
       rawResponse,
+      { afterProviderSubmit: true },
     );
     this.name = "PaymobIndeterminateGatewayError";
   }
@@ -319,6 +320,7 @@ class PaymobIndeterminateResponseError extends NetworkError {
     super(
       `Paymob ${operation} API returned HTTP 200 with an unreadable body; gateway outcome is unknown (${detail})`,
       rawResponse,
+      { afterProviderSubmit: true },
     );
     this.name = "PaymobIndeterminateResponseError";
   }
@@ -2232,8 +2234,8 @@ export class PaymobGateway extends BaseGateway {
    * instead of stampeding the /api/auth/tokens endpoint.
    */
   private async authenticateLegacy(): Promise<string> {
-    // Check if we have a valid cached token
-    if (this.legacyAuthToken && Date.now() < this.legacyAuthTokenExpiry) {
+    // Check if we have a valid cached token (cache TTL vs injectable clock).
+    if (this.legacyAuthToken && this.clock.nowMs() < this.legacyAuthTokenExpiry) {
       return this.legacyAuthToken;
     }
 
@@ -2302,7 +2304,7 @@ export class PaymobGateway extends BaseGateway {
    */
   private resolveAuthTokenExpiry(token: string): number {
     const FALLBACK_MS = 50 * 60 * 1000;
-    const fallback = Date.now() + FALLBACK_MS;
+    const fallback = this.clock.nowMs() + FALLBACK_MS;
 
     const expiryMs = this.decodeJwtExpiryMs(token);
     if (expiryMs === undefined) {
@@ -2311,6 +2313,7 @@ export class PaymobGateway extends BaseGateway {
 
     const refreshSkewMs = 5 * 60 * 1000;
     const withSkew = expiryMs - refreshSkewMs;
+    // JWT `exp` is wall-clock epoch seconds, not a cache TTL.
     return withSkew > Date.now() ? withSkew : fallback;
   }
 
@@ -2769,9 +2772,16 @@ export class PaymobGateway extends BaseGateway {
     const signal = combineAbortSignals(callerSignal, timeoutSignal);
 
     try {
-      return await this.fetch(url, {
+      const response = await this.fetch(url, {
         ...init,
         ...(signal !== undefined ? { signal } : {}),
+      });
+      // Keep timeout attached until the body is fully consumed (P610-ABT-4).
+      const bodyText = await this.readResponseText(response, signal);
+      return new Response(bodyText, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
       });
     } catch (error) {
       throw mapHttpAbortError(error, {
@@ -2783,6 +2793,41 @@ export class PaymobGateway extends BaseGateway {
       });
     } finally {
       clear();
+    }
+  }
+
+  /**
+   * Read the response body while the request timeout/caller signal is still live.
+   * Clearing the timeout after headers arrive would let a stalled body hang
+   * past `timeoutMs`.
+   */
+  private async readResponseText(
+    response: Response,
+    signal: AbortSignal | undefined,
+  ): Promise<string> {
+    if (signal?.aborted) {
+      throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+    }
+
+    const textPromise = response.text();
+    if (!signal) {
+      return textPromise;
+    }
+
+    let removeAbortListener: (() => void) | undefined;
+    const abortPromise = new Promise<never>((_, reject) => {
+      const onAbort = () => {
+        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+    });
+
+    try {
+      return await Promise.race([textPromise, abortPromise]);
+    } finally {
+      removeAbortListener?.();
+      void textPromise.catch(() => undefined);
     }
   }
 
@@ -2846,11 +2891,12 @@ export class PaymobGateway extends BaseGateway {
       }
     }
 
+    const nowMs = this.clock.nowMs();
     const inProgressRecord = {
       fingerprint,
       status: "in_progress" as const,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + IDEMPOTENCY_CACHE_TTL_MS,
+      createdAt: nowMs,
+      expiresAt: nowMs + IDEMPOTENCY_CACHE_TTL_MS,
     };
 
     // PAYMOB-3: never FIFO-evict in-flight or unknown fences (double-apply risk).
@@ -2864,7 +2910,7 @@ export class PaymobGateway extends BaseGateway {
     let keepLocalUnknownRecord = false;
     const cacheEntry: PaymobIdempotencyCacheEntry<R> = {
       fingerprint,
-      createdAt: Date.now(),
+      createdAt: nowMs,
       status: "in_progress",
     };
     const promise = (async () => {
@@ -2901,11 +2947,12 @@ export class PaymobGateway extends BaseGateway {
       return executor();
     })().then(async (result) => {
       cacheEntry.status = "completed";
+      const completedAt = this.clock.nowMs();
       await this.trySetStoredIdempotencyRecord(cacheKey, {
         fingerprint,
         status: "completed",
-        createdAt: Date.now(),
-        expiresAt: Date.now() + IDEMPOTENCY_CACHE_TTL_MS,
+        createdAt: completedAt,
+        expiresAt: completedAt + IDEMPOTENCY_CACHE_TTL_MS,
         result,
       }, operation);
       return result;
@@ -2913,16 +2960,17 @@ export class PaymobGateway extends BaseGateway {
       // Network/5xx after POST and HTTP-200 body validation failures all fence:
       // Paymob may have applied the money op (PAYMOB-1).
       if (isPaymobIndeterminateError(error)) {
+        const unknownAt = this.clock.nowMs();
         this.idempotencyCache.set(cacheKey, {
           fingerprint,
           status: "unknown",
-          createdAt: Date.now(),
+          createdAt: unknownAt,
         });
         await this.trySetStoredIdempotencyRecord(cacheKey, {
           fingerprint,
           status: "unknown",
-          createdAt: Date.now(),
-          expiresAt: Date.now() + IDEMPOTENCY_CACHE_TTL_MS,
+          createdAt: unknownAt,
+          expiresAt: unknownAt + IDEMPOTENCY_CACHE_TTL_MS,
         }, operation);
         throw error;
       }
@@ -2981,7 +3029,7 @@ export class PaymobGateway extends BaseGateway {
 
     if (store.reserve) {
       const existing = await store.reserve(key, record);
-      if (existing?.expiresAt && existing.expiresAt <= Date.now()) {
+      if (existing?.expiresAt && existing.expiresAt <= this.clock.nowMs()) {
         await store.delete(key);
         return await store.reserve(key, record);
       }
@@ -3008,7 +3056,7 @@ export class PaymobGateway extends BaseGateway {
       return undefined;
     }
 
-    if (record.expiresAt <= Date.now()) {
+    if (record.expiresAt <= this.clock.nowMs()) {
       await store.delete(key);
       return undefined;
     }
@@ -3069,8 +3117,12 @@ export class PaymobGateway extends BaseGateway {
   }
 
   private pruneExpiredIdempotencyEntries(): void {
-    const expiresBefore = Date.now() - IDEMPOTENCY_CACHE_TTL_MS;
+    const expiresBefore = this.clock.nowMs() - IDEMPOTENCY_CACHE_TTL_MS;
     for (const [key, entry] of this.idempotencyCache) {
+      // Never drop in-flight or unknown fences (double-apply / lost outcome).
+      if (entry.status === "in_progress" || entry.status === "unknown") {
+        continue;
+      }
       if (entry.createdAt < expiresBefore) {
         this.idempotencyCache.delete(key);
       }
@@ -3323,7 +3375,9 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(obj, "is_captured", rawObj.is_captured);
 
     return {
-      type: this.stringOrUndefined(raw?.type) ?? "TRANSACTION",
+      // Missing type must not default to TRANSACTION — that invents fulfillment
+      // (payment.succeeded) via flag/status mapping. Empty type maps unmapped.
+      type: this.stringOrUndefined(raw?.type) ?? "",
       rawObj,
       obj,
     };

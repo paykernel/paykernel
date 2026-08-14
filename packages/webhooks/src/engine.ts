@@ -28,14 +28,17 @@
  *
  * **Silent ACK forbidden:** failed/uncertain work returns an explicit
  * {@link WebhookProcessingOutcome} — never imply success without `processed`
- * or intentional `duplicate_completed` / `scheduled_for_retry`.
+ * or intentional `duplicate_completed` / durable `scheduled_for_retry`.
+ * Inline mode never emits `scheduled_for_retry`.
  *
  * Modes are fixed at construction (`inline` | `durable_retry`).
  */
 
 import {
   hashWebhookPayload,
+  isPaymentEvent,
   redactWebhookPayloadSecrets,
+  toPersistedPaymentEventEnvelope,
 } from "@paykernel/core";
 import { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";
 import {
@@ -237,12 +240,26 @@ function isForgeryClassVerifyError(err: unknown): boolean {
 }
 
 /**
+ * Transient HTTP statuses that must stay retryable even though they are 4xx.
+ * 408 Request Timeout, 409 Conflict, 425 Too Early, 429 Too Many Requests.
+ */
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 425 || status === 429;
+}
+
+/** Client 4xx that are permanent config/input failures (not transient). */
+function isPermanentClientHttpStatus(status: number): boolean {
+  return status >= 400 && status < 500 && !isTransientHttpStatus(status);
+}
+
+/**
  * WEBHOOKS-5 / WEBHOOKS-6: permanent (non-retryable) verify/normalize failures
  * that are **not** forgery — e.g. structural `GatewayApiError` ("Invalid webhook
  * payload"), or explicit `retryable: false`.
  *
  * **Not permanent:** post-verify `InvalidRequestError` / parse failures
  * (WEBHOOKS-5) — treat as retryable so authentic paid events redeliver.
+ * 408 / 409 / 425 / 429 stay retryable.
  *
  * Map permanent cases to `handler_failed { retryable: false }` (not infinite
  * 5xx, not forgery 400).
@@ -264,9 +281,11 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
   const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
 
-  // Rate limits are transient even though status is 4xx.
+  // Rate limits and other transient 4xx stay retryable (provider redelivery).
   if (name === "ratelimiterror" || code === "rate_limit_exceeded") return false;
-  if (typeof e.statusCode === "number" && e.statusCode === 429) return false;
+  if (typeof e.statusCode === "number" && isTransientHttpStatus(e.statusCode)) {
+    return false;
+  }
 
   // WEBHOOKS-5: post-verify parse / request-shape errors must stay retryable so
   // signature-valid paid events redeliver (new event types, thin payloads, skew).
@@ -305,12 +324,7 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
           : "statusCode" in raw
             ? (raw as { statusCode?: unknown }).statusCode
             : undefined;
-      if (
-        typeof status === "number" &&
-        status >= 400 &&
-        status < 500 &&
-        status !== 429
-      ) {
+      if (typeof status === "number" && isPermanentClientHttpStatus(status)) {
         return true;
       }
     }
@@ -320,9 +334,9 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
 
   // Remaining definite client-config 4xx (e.g. GatewayNotConfiguredError).
   // Exclude forgery (handled first), InvalidRequestError / parse (above),
-  // rate limit (above). Leave network/5xx to fail-open.
+  // transient 4xx (408/409/425/429). Leave network/5xx to fail-open.
   if (typeof e.statusCode === "number") {
-    if (e.statusCode >= 400 && e.statusCode < 500 && e.statusCode !== 429) {
+    if (isPermanentClientHttpStatus(e.statusCode)) {
       if (!isForgeryClassVerifyError(err)) return true;
     }
   }
@@ -453,6 +467,111 @@ function envelopeToPayloadRef(envelope: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+const FORBIDDEN_PERSIST_KEYS = new Set(["rawpayload", "headers"]);
+
+/**
+ * P610-SNAP-1: durable payloadRef must never carry request-local rawPayload
+ * or HTTP headers (signatures). Check own keys on objects; JSON strings are
+ * parsed first.
+ */
+function valueHasForbiddenPersistKeys(value: unknown): boolean {
+  let current = value;
+  if (typeof current === "string") {
+    if (current.length === 0) return false;
+    try {
+      current = JSON.parse(current) as unknown;
+    } catch {
+      return false;
+    }
+  }
+  if (current === null || typeof current !== "object" || Array.isArray(current)) {
+    return false;
+  }
+  for (const key of Object.keys(current as Record<string, unknown>)) {
+    if (!FORBIDDEN_PERSIST_KEYS.has(key.toLowerCase())) continue;
+    const v = (current as Record<string, unknown>)[key];
+    if (v !== undefined && v !== null) return true;
+  }
+  return false;
+}
+
+function payloadRefHasForbiddenKeys(ref: string): boolean {
+  try {
+    return valueHasForbiddenPersistKeys(JSON.parse(ref) as unknown);
+  } catch {
+    return false;
+  }
+}
+
+function extractPaymentEventForPersist(value: unknown):
+  | Parameters<typeof toPersistedPaymentEventEnvelope>[0]
+  | undefined {
+  if (isPaymentEvent(value)) return value;
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const nested = (value as { event?: unknown }).event;
+    if (isPaymentEvent(nested)) return nested;
+  }
+  return undefined;
+}
+
+function tryPersistedPaymentEventEnvelopeRef(
+  value: unknown,
+  payloadHash: string,
+): string | undefined {
+  const pe = extractPaymentEventForPersist(value);
+  if (pe === undefined) return undefined;
+  try {
+    const env = toPersistedPaymentEventEnvelope(pe, { payloadHash });
+    const ref = envelopeToPayloadRef(env);
+    if (ref !== undefined && !payloadRefHasForbiddenKeys(ref)) return ref;
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+const DURABLE_PAYLOAD_REQUIRED =
+  "envelope or event is required for durable_retry (workers need a payloadRef to redrive; refusing claim without materializable payload)";
+const DURABLE_RAW_REFUSED =
+  "durable_retry must not persist rawPayload/headers (use toPersistedPaymentEventEnvelope)";
+
+/**
+ * P610-SNAP-1: materialize a persistable payloadRef for durable_retry.
+ * Prefer core `toPersistedPaymentEventEnvelope` when the value still carries
+ * request-local `rawPayload` / `headers`; otherwise refuse.
+ */
+function resolveDurablePayloadRef(args: {
+  envelope?: unknown;
+  event?: unknown;
+  payloadHash: string;
+}): { ok: true; payloadRef: string } | { ok: false; reason: string } {
+  const source =
+    args.envelope !== undefined && args.envelope !== null && args.envelope !== ""
+      ? args.envelope
+      : args.event;
+
+  if (source === undefined || source === null || source === "") {
+    return { ok: false, reason: DURABLE_PAYLOAD_REQUIRED };
+  }
+
+  if (valueHasForbiddenPersistKeys(source)) {
+    const converted = tryPersistedPaymentEventEnvelopeRef(source, args.payloadHash);
+    if (converted !== undefined) return { ok: true, payloadRef: converted };
+    return { ok: false, reason: DURABLE_RAW_REFUSED };
+  }
+
+  const ref = envelopeToPayloadRef(source);
+  if (ref === undefined) {
+    return { ok: false, reason: DURABLE_PAYLOAD_REQUIRED };
+  }
+  if (payloadRefHasForbiddenKeys(ref)) {
+    const converted = tryPersistedPaymentEventEnvelopeRef(source, args.payloadHash);
+    if (converted !== undefined) return { ok: true, payloadRef: converted };
+    return { ok: false, reason: DURABLE_RAW_REFUSED };
+  }
+  return { ok: true, payloadRef: ref };
 }
 
 /**
@@ -736,6 +855,9 @@ export function createWebhookInboxEngine(
       };
       if (deadLetter) {
         failInput.deadLetter = true;
+      } else if (mode === "inline") {
+        // P610-ACK-1: inline fail is immediately redeliverable (no backoff ACK).
+        failInput.retryAfterMs = 0;
       } else {
         failInput.retryAfterMs = defaultRetryAfterMs;
       }
@@ -757,10 +879,12 @@ export function createWebhookInboxEngine(
             forceDeadLetter: deadLetter || nonRetry,
             priorAttempts: currentRecord.attempts,
           });
-          if (recovered.terminal || deadLetter || nonRetry) {
+          // P610-ACK-3: non-retryable / terminal only when fail/dead_letter
+          // actually applied (or claim already terminal).
+          if (recovered.terminal) {
             return outcomeHandlerFailed(false);
           }
-          if (mode === "durable_retry") {
+          if (recovered.recorded && mode === "durable_retry") {
             return outcomeScheduledForRetry(
               "handler_retry",
               timingFromRetryAfterMs(defaultRetryAfterMs, clock.nowMs()),
@@ -815,7 +939,7 @@ export function createWebhookInboxEngine(
     error: string;
     forceDeadLetter: boolean;
     priorAttempts: number;
-  }): Promise<{ terminal: boolean }> {
+  }): Promise<{ terminal: boolean; recorded: boolean }> {
     try {
       const claimInput: {
         key: string;
@@ -834,10 +958,10 @@ export function createWebhookInboxEngine(
       }
       const reclaim = await store.claim(claimInput);
       if (reclaim.kind === "already_completed" || reclaim.kind === "duplicate_failed") {
-        return { terminal: true };
+        return { terminal: true, recorded: true };
       }
       if (reclaim.kind !== "acquired") {
-        return { terminal: false };
+        return { terminal: false, recorded: false };
       }
       // Reclaim increments attempts when status was pending after soft-release.
       // Use the higher of prior claim attempts and reclaimed counter for budget.
@@ -861,14 +985,22 @@ export function createWebhookInboxEngine(
       };
       if (deadLetter) {
         failInput.deadLetter = true;
+      } else if (mode === "inline") {
+        failInput.retryAfterMs = 0;
       } else {
         failInput.retryAfterMs = defaultRetryAfterMs;
       }
-      await store.fail(failInput);
-      return { terminal: deadLetter };
+      try {
+        await store.fail(failInput);
+      } catch {
+        // P610-ACK-3: post-reclaim fail did not apply — not terminal.
+        return { terminal: false, recorded: false };
+      }
+      return { terminal: deadLetter, recorded: true };
     } catch {
-      // Best-effort only.
-      return { terminal: args.forceDeadLetter };
+      // P610-ACK-3: catch must not advertise terminal unless fail/dead_letter
+      // applied or claim kind is already_completed / duplicate_failed.
+      return { terminal: false, recorded: false };
     }
   }
 
@@ -923,20 +1055,30 @@ export function createWebhookInboxEngine(
     );
     // Prefer explicit envelope; for durable_retry also snapshot redacted `event`
     // so handler failures can redrive without stub materialization (WEBHOOKS-1).
-    const payloadRef =
-      envelopeToPayloadRef(input.envelope) ??
-      (mode === "durable_retry"
-        ? envelopeToPayloadRef(input.event)
-        : undefined);
-
-    // Refuse durable_retry claims without a materializable payload — claiming
-    // then failing cannot recover paid work, and dead-letter would permanent-block
-    // redelivery (WEBHOOKS-1). ackAfterClaim and inline-handler durable paths both
-    // need envelope or event before claim.
-    if (mode === "durable_retry" && payloadRef === undefined) {
-      return outcomeInvalidWebhook(
-        "envelope or event is required for durable_retry (workers need a payloadRef to redrive; refusing claim without materializable payload)",
-      );
+    // P610-SNAP-1: never persist rawPayload/headers — wrap via
+    // toPersistedPaymentEventEnvelope or refuse.
+    let payloadRef: string | undefined;
+    if (mode === "durable_retry") {
+      const snap = resolveDurablePayloadRef({
+        envelope: input.envelope,
+        event: input.event,
+        payloadHash,
+      });
+      if (!snap.ok) {
+        return outcomeInvalidWebhook(snap.reason);
+      }
+      payloadRef = snap.payloadRef;
+    } else if (input.envelope !== undefined) {
+      const snap = resolveDurablePayloadRef({
+        envelope: input.envelope,
+        payloadHash,
+      });
+      if (snap.ok) {
+        payloadRef = snap.payloadRef;
+      } else if (snap.reason === DURABLE_RAW_REFUSED) {
+        return outcomeInvalidWebhook(snap.reason);
+      }
+      // empty / unserializable envelope: inline does not require payloadRef
     }
 
     // Refuse durable park without a materializable payload — otherwise workers
@@ -977,6 +1119,10 @@ export function createWebhookInboxEngine(
         return outcomeHandlerFailed(false);
       case "not_available":
         // Backoff: provider redelivery during availableAt window must not burn attempts.
+        // P610-ACK-1: inline never emits scheduled_for_retry (no worker path).
+        if (mode === "inline") {
+          return outcomeHandlerFailed(true);
+        }
         // Distinct reason so adapters can 5xx (provider redelivery) instead of silent 200.
         // WEBHOOKS-5: expose availableAt / retryAfterMs for honest Retry-After.
         return outcomeScheduledForRetry(
@@ -1008,13 +1154,13 @@ export function createWebhookInboxEngine(
         });
       } catch (err) {
         if (isStoreLeaseLostError(err)) {
-          // Token dead before restoreAttempt applied (clock/lease skew): claim
-          // already persisted; may leave parking attempt burned. No safe
-          // tokenless restore — return scheduled_for_retry, not business failure.
-          return outcomeScheduledForRetry(
-            "parked",
-            timingFromRetryAfterMs(0, clock.nowMs()),
-          );
+          // P610-ACK-2: parked ONLY when fail(restoreAttempt) applied.
+          // lease_lost means the row is still claimed — never ACK as parked.
+          const retryAfter = retryAfterFromRecord(claim.record);
+          if (retryAfter !== undefined && retryAfter > 0) {
+            return outcomeAlreadyProcessing(retryAfter);
+          }
+          return outcomeHandlerFailed(true);
         }
         throw err;
       }
@@ -1073,7 +1219,10 @@ export function createWebhookInboxEngine(
       return outcomeHandlerFailed(true);
     }
     if (!verified.ok) {
-      return outcomeInvalidWebhook(verified.reason);
+      // P610-SNAP-1: never leak secrets from { ok: false }.reason.
+      return outcomeInvalidWebhook(
+        verified.reason !== undefined ? sanitize(verified.reason) : undefined,
+      );
     }
 
     const next: ProcessVerifiedInput = {
@@ -1124,8 +1273,13 @@ export function createWebhookInboxEngine(
         providerEventId = resolved.providerEventId;
         payloadHash = resolved.payloadHash;
         event = resolved.event;
-        const fromEnvelope = envelopeToPayloadRef(resolved.envelope);
-        if (fromEnvelope !== undefined) payloadRef = fromEnvelope;
+        if (resolved.envelope !== undefined) {
+          const snap = resolveDurablePayloadRef({
+            envelope: resolved.envelope,
+            payloadHash,
+          });
+          if (snap.ok) payloadRef = snap.payloadRef;
+        }
         // WEBHOOKS-5: redact / materialize with same rules as first delivery.
         // Prefer custom resolveEvent.event when provided; else payloadRef.
         if (event !== undefined) {
@@ -1175,8 +1329,9 @@ export function createWebhookInboxEngine(
           });
         } catch (failErr) {
           if (isStoreLeaseLostError(failErr)) {
-            // WEBHOOKS-3: dead-letter intent must not become forever-retryable.
-            await bestEffortRecordFailAfterLeaseLost({
+            // WEBHOOKS-3: dead-letter intent must not become forever-retryable
+            // unless fail/dead_letter actually applied (P610-ACK-3).
+            const recovered = await bestEffortRecordFailAfterLeaseLost({
               key: rec.key,
               payloadHash,
               payloadRef: rec.payloadRef,
@@ -1189,7 +1344,7 @@ export function createWebhookInboxEngine(
             });
             items.push({
               key: rec.key,
-              outcome: outcomeHandlerFailed(false),
+              outcome: outcomeHandlerFailed(!recovered.terminal),
             });
             continue;
           }

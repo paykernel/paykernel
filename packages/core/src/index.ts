@@ -124,6 +124,8 @@ export {
   mapGatewayResultToOperationResult,
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
+  applyIndeterminatePaymentOutcome,
+  applyIndeterminateRefundOutcome,
   successFromOutcome,
   isPaidOutcome,
   isRequiresActionOutcome,

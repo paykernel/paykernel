@@ -298,8 +298,9 @@ export type EncryptedRawPayloadRecord = {
 // ─── Secret redaction + hashing ──────────────────────────────────────────────
 
 /**
- * Known secret / signature field names (lowercase) stripped from hash inputs
- * and envelope sanitization. Nested keys matching these are redacted.
+ * Known secret / signature field names stripped from hash inputs and envelope
+ * sanitization. Matching is case-insensitive. Nested keys matching these
+ * (including camelCase aliases) are redacted.
  */
 export const WEBHOOK_PAYLOAD_SECRET_KEYS: readonly string[] = [
   "secret_token",
@@ -308,7 +309,10 @@ export const WEBHOOK_PAYLOAD_SECRET_KEYS: readonly string[] = [
   "hmac",
   "authorization",
   "client_secret",
+  "clientSecret",
+  "secretToken",
   "webhook_secret",
+  "webhookSecret",
   "webhooksecret",
   "api_key",
   "apikey",
@@ -316,6 +320,7 @@ export const WEBHOOK_PAYLOAD_SECRET_KEYS: readonly string[] = [
   "private_key",
   "privatekey",
   "access_token",
+  "accessToken",
   "refresh_token",
   "stripe-signature",
   "paypal-transmission-sig",
@@ -338,8 +343,38 @@ export function redactWebhookPayloadSecrets(value: unknown): unknown {
   return redactDeep(value, new WeakSet());
 }
 
+function tryParseJsonObjectOrArray(value: string): unknown | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (parsed !== null && typeof parsed === "object") {
+      return parsed;
+    }
+  } catch {
+    // non-JSON / binary-ish string
+  }
+  return undefined;
+}
+
+function isBinaryPayload(value: unknown): value is Uint8Array {
+  return (
+    value instanceof Uint8Array ||
+    (typeof Buffer !== "undefined" && Buffer.isBuffer(value))
+  );
+}
+
 function redactDeep(value: unknown, seen: WeakSet<object>): unknown {
   if (value === null || value === undefined) return value;
+
+  // Parse JSON strings and redact (same as prepareEncryptPlaintext). Remain a
+  // string so string vs object hashes may still differ after redaction (WEBHOOKS-2).
+  if (typeof value === "string") {
+    const parsed = tryParseJsonObjectOrArray(value);
+    if (parsed !== undefined) {
+      return stableStringifyForHash(redactDeep(parsed, seen));
+    }
+    return value;
+  }
+
   if (typeof value !== "object") return value;
 
   if (seen.has(value as object)) {
@@ -351,15 +386,9 @@ function redactDeep(value: unknown, seen: WeakSet<object>): unknown {
     return value.map((item) => redactDeep(item, seen));
   }
 
-  // Buffer / Uint8Array — do not attempt to walk; stringify as marker
-  if (
-    typeof Buffer !== "undefined" &&
-    Buffer.isBuffer(value)
-  ) {
-    return `[Buffer:${value.length}]`;
-  }
-  if (value instanceof Uint8Array) {
-    return `[Uint8Array:${value.length}]`;
+  // Nested binary: contribute actual bytes, not a length marker.
+  if (isBinaryPayload(value)) {
+    return Array.from(value);
   }
   if (value instanceof Date) {
     return value.toISOString();
@@ -412,17 +441,27 @@ function canonicalize(value: unknown): unknown {
  * are redacted before hashing so `secret_token` / signatures never enter the
  * digest input. Algorithm and encoding are unchanged (UTF-8 → lowercase hex).
  *
- * **Shape is part of the digest (WEBHOOKS-2 / inbox honesty):** non-object
- * strings are **not** JSON-parsed before redaction/stringify. Therefore
- * `hashWebhookPayload(rawBodyString)` and `hashWebhookPayload(parsedObject)`
- * are **not** interchangeable even when the string is JSON of that object —
- * mixing them on an **active lease** yields `payload_conflict`; idle pending
- * rows **supersede** the hash (WEBHOOKS-3/4 — not a permanent stuck conflict).
- * Prefer a single source: gateway `event.payloadHash` when set
+ * **JSON strings** are parsed and redacted the same way as
+ * {@link prepareEncryptPlaintext}: if `JSON.parse` yields a non-null
+ * object/array, secret keys are stripped before the digest. Non-JSON strings
+ * pass through as the original string.
+ *
+ * **Binary:** top-level `Uint8Array` / `Buffer` is hashed as the raw bytes
+ * (not a length marker). Nested binary values contribute their actual bytes.
+ *
+ * **Shape is part of the digest (WEBHOOKS-2 / inbox honesty):** after
+ * redaction, `hashWebhookPayload(rawBodyString)` and
+ * `hashWebhookPayload(parsedObject)` may still differ — mixing them on an
+ * **active lease** yields `payload_conflict`; idle pending rows **supersede**
+ * the hash (WEBHOOKS-3/4 — not a permanent stuck conflict). Prefer a single
+ * source: gateway `event.payloadHash` when set
  * (e.g. `computePayloadHash: true` on the **parsed** `rawPayload`), or always
  * hash the same object shape the gateway used.
  */
 export function hashWebhookPayload(raw: unknown): string {
+  if (isBinaryPayload(raw)) {
+    return sha256Hex(raw);
+  }
   const redacted = redactWebhookPayloadSecrets(raw);
   const canonical = stableStringifyForHash(redacted);
   return sha256Hex(canonical);
@@ -442,20 +481,13 @@ export function hashWebhookPayload(raw: unknown): string {
  */
 function prepareEncryptPlaintext(raw: unknown): string | Uint8Array {
   if (typeof raw === "string") {
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed !== null && typeof parsed === "object") {
-        return stableStringifyForHash(redactWebhookPayloadSecrets(parsed));
-      }
-    } catch {
-      // non-JSON / binary-ish string — app-owned pass-through
+    const parsed = tryParseJsonObjectOrArray(raw);
+    if (parsed !== undefined) {
+      return stableStringifyForHash(redactWebhookPayloadSecrets(parsed));
     }
     return raw;
   }
-  if (raw instanceof Uint8Array) {
-    return raw;
-  }
-  if (typeof Buffer !== "undefined" && Buffer.isBuffer(raw)) {
+  if (isBinaryPayload(raw)) {
     return raw;
   }
   return stableStringifyForHash(redactWebhookPayloadSecrets(raw));
@@ -543,7 +575,13 @@ function stripRawInPlace(event: PaymentEvent): PaymentEvent {
 
 function stripPayment(p: Payment): Payment {
   const { rawResponse: _r, clientSecret: _c, ...rest } = p;
-  // clientSecret is a secret — never persist on envelopes
+  // clientSecret is a secret — never persist on envelopes (top-level or nextAction)
+  if (rest.nextAction && typeof rest.nextAction === "object") {
+    const { clientSecret: _nested, ...nextRest } = rest.nextAction as {
+      clientSecret?: string;
+    } & typeof rest.nextAction;
+    rest.nextAction = nextRest;
+  }
   return rest;
 }
 

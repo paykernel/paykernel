@@ -14,8 +14,13 @@
 import { describe, it, expect } from "bun:test";
 import { createWebhookInboxEngine } from "./engine";
 import { createMemoryWebhookInboxStore } from "./memory-store";
-import { isStoreLeaseLostError } from "./store";
+import {
+  isStoreLeaseLostError,
+  StoreLeaseLostError,
+  type WebhookInboxStore,
+} from "./store";
 import { createTestClock } from "./test-clock";
+import { NonRetryableHandlerError } from "./types";
 
 describe("crash boundaries (10.6)", () => {
   /**
@@ -349,5 +354,53 @@ describe("crash boundaries (10.6)", () => {
     });
     expect(o).toEqual({ outcome: "duplicate_completed" });
     expect(runs).toBe(0);
+  });
+
+  it("P610-ACK-3: post-reclaim fail throw → retryable handler_failed (not terminal)", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    let failCalls = 0;
+    const wrapped: WebhookInboxStore = {
+      claim: store.claim.bind(store),
+      renew: store.renew.bind(store),
+      complete: store.complete.bind(store),
+      fail: async () => {
+        failCalls++;
+        if (failCalls === 1) {
+          throw new StoreLeaseLostError("initial fail lease_lost");
+        }
+        // Reclaim succeeded; this fail must not be treated as applied.
+        throw new Error("post-reclaim fail boom");
+      },
+      get: store.get.bind(store),
+      listRetryable: store.listRetryable.bind(store),
+      deleteExpired: store.deleteExpired.bind(store),
+    };
+
+    const engine = createWebhookInboxEngine({
+      store: wrapped,
+      mode: "durable_retry",
+      defaultLeaseMs: 1_000,
+      defaultRetryAfterMs: 0,
+      clock,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack3",
+      payloadHash: "h",
+      event: { id: "evt_ack3", type: "payment.succeeded" },
+      handler: async () => {
+        // Expire lease so bestEffort can re-claim after first fail lease_lost.
+        clock.advance(2_000);
+        throw new NonRetryableHandlerError("poison");
+      },
+    });
+
+    expect(failCalls).toBeGreaterThanOrEqual(2);
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    const rec = await store.get("stripe:evt_ack3");
+    // fail/dead_letter never applied — must not advertise terminal ACK.
+    expect(rec?.status).not.toBe("dead_letter");
   });
 });

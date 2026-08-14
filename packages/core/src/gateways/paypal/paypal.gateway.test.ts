@@ -12,7 +12,8 @@ import {
     AuthenticationError,
     RateLimitError,
     NetworkError,
-    ResourceNotFoundError
+    ResourceNotFoundError,
+    PaymentAbortedError,
 } from '../../errors';
 import type { PayPalConfig } from '../../types/config.types';
 import type { CreatePaymentParams } from '../../types/payment.types';
@@ -1201,8 +1202,13 @@ describe('PayPalGateway', () => {
             expect(event.status).not.toBe('partially_refunded');
             expect(event.gatewayPaymentId).toBe('CAPTURE-FOR-REFUND');
             expect(event.gatewayObjectId).toBe('REFUND-COMPLETED');
-            expect(event.stableType).toBe('refund.completed');
-            expect(event.event?.type).toBe('refund.completed');
+            // Incomplete refund_completed must not dual-write refund.completed
+            // (Stripe/Moyasar/Paymob). Provider-native type stays on the envelope.
+            expect(event.type).toBe('PAYMENT.REFUND.COMPLETED');
+            expect(event.stableType).toBe('refund.pending');
+            expect(event.stableType).not.toBe('refund.completed');
+            expect(event.event?.type).toBe('refund.pending');
+            expect(event.provider?.eventType).toBe('PAYMENT.REFUND.COMPLETED');
             expect(event.amount).toBe(5);
             expect(event.currency).toBe('USD');
         });
@@ -2806,7 +2812,8 @@ describe('PayPalGateway', () => {
             // Non-final partial capture is not full settlement (PAYPAL-1)
             expect(result.status).toBe('partially_captured');
             expect(result.amount).toBe(20);
-            expect(result.outcome).toBe('succeeded');
+            expect(result.outcome).toBe('requires_action');
+            expect(result.outcome).not.toBe('succeeded');
             expect(isPaidOutcome(result)).toBe(false);
         });
 
@@ -3718,6 +3725,65 @@ describe('PayPalGateway', () => {
                 })
             ).rejects.toThrow(GatewayApiError);
         });
+
+        it('should compare tokenExpiry against clock.nowMs() not wall Date (P610-CLK-1)', async () => {
+            let nowMs = 1_000_000;
+            let tokenFetchCount = 0;
+            const clock = {
+                now: () => new Date(nowMs),
+                nowMs: () => nowMs,
+            };
+
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    tokenFetchCount++;
+                    return createMockResponse({
+                        access_token: `clock_token_${tokenFetchCount}`,
+                        expires_in: 3600,
+                    });
+                }
+
+                return createMockResponse({
+                    id: `ORDER-CLOCK-${tokenFetchCount}`,
+                    status: 'CREATED',
+                    links: [
+                        { rel: 'payer-action', href: 'https://paypal.com/checkoutnow?token=ORDER-CLOCK' },
+                    ],
+                });
+            }) as unknown as typeof fetch;
+
+            const clockGateway = new PayPalGateway(
+                PAYPAL_TEST_CONFIG,
+                hooksManager,
+                undefined,
+                { clock },
+            );
+
+            await clockGateway.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com',
+            });
+            await clockGateway.createPayment({
+                amount: 20,
+                currency: 'USD',
+                callbackUrl: 'https://example.com',
+            });
+
+            // Fake epoch is 1970; comparing expiry to `new Date()` would refetch every time.
+            expect(tokenFetchCount).toBe(1);
+
+            // expires_in 3600 → refresh 300s early → expiry at nowMs + 3_300_000
+            nowMs = 1_000_000 + 3_300_001;
+            await clockGateway.createPayment({
+                amount: 30,
+                currency: 'USD',
+                callbackUrl: 'https://example.com',
+            });
+            expect(tokenFetchCount).toBe(2);
+        });
     });
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -4607,6 +4673,9 @@ describe('PayPalGateway', () => {
             // Full clawback: do not report original face as still-held.
             expect(result.amount).toBeUndefined();
             expect(result.currency).toBeUndefined();
+            // P610-PP-1: reversal is not a successful charge outcome.
+            expect(result.outcome).not.toBe('succeeded');
+            expect(result.outcome).toBe('failed');
             expect(isPaidOutcome(result)).toBe(false);
         });
 
@@ -4662,7 +4731,8 @@ describe('PayPalGateway', () => {
             expect(result.status).toBe('partially_captured');
             expect(result.amount).toBe(20);
             expect(result.currency).toBe('USD');
-            expect(result.outcome).toBe('succeeded');
+            expect(result.outcome).toBe('requires_action');
+            expect(result.outcome).not.toBe('succeeded');
             expect(isPaidOutcome(result)).toBe(false);
         });
 
@@ -4780,6 +4850,81 @@ describe('PayPalGateway', () => {
                 const status = await gateway.getPaymentStatus('CAP-STATUS-123');
                 expect(status).toBe('paid');
             });
+        });
+    });
+
+    describe('Abort and timeout (P610-ABT-4)', () => {
+        it('should time out while reading a hanging PayPal response body', async () => {
+            const timeoutGateway = new PayPalGateway(
+                { ...PAYPAL_TEST_CONFIG, timeoutMs: 1 },
+                hooksManager,
+            );
+
+            globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: new Headers(),
+                    text: async () =>
+                        new Promise<string>((_resolve, reject) => {
+                            init?.signal?.addEventListener('abort', () => {
+                                reject(new DOMException('Aborted', 'AbortError'));
+                            });
+                        }),
+                } as unknown as Response;
+            }) as unknown as typeof fetch;
+
+            const hungBody = await timeoutGateway.createPayment({
+                amount: 10,
+                currency: 'USD',
+                callbackUrl: 'https://example.com',
+            });
+            expect(hungBody.outcome).toBe('indeterminate');
+            expect(hungBody.reconciliationRequired).toBe(true);
+        });
+
+        it('should thread caller AbortSignal into token acquisition', async () => {
+            let tokenSawCallerAbort = false;
+
+            globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+                if (url.includes('oauth2/token')) {
+                    tokenSawCallerAbort = init?.signal?.aborted === true;
+                    if (init?.signal?.aborted) {
+                        throw new DOMException('Aborted', 'AbortError');
+                    }
+                    return createMockResponse({
+                        access_token: 'should_not_issue',
+                        expires_in: 3600,
+                    });
+                }
+                return createMockResponse({
+                    id: 'ORDER-SHOULD-NOT-RUN',
+                    status: 'CREATED',
+                });
+            }) as unknown as typeof fetch;
+
+            const controller = new AbortController();
+            controller.abort();
+
+            await expect(
+                gateway.createPayment({
+                    amount: 10,
+                    currency: 'USD',
+                    callbackUrl: 'https://example.com',
+                    signal: controller.signal,
+                }),
+            ).rejects.toBeInstanceOf(PaymentAbortedError);
+            expect(tokenSawCallerAbort).toBe(true);
         });
     });
 });

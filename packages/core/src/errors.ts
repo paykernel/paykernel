@@ -208,8 +208,20 @@ export class InvalidRequestError extends PaymentError {
  * Thrown when there is a network connectivity issue usually transient
  */
 export class NetworkError extends PaymentError {
-    constructor(message = 'Network error occurred', public readonly originalError?: unknown) {
+    /**
+     * True when the provider may already have accepted a mutating request
+     * (timeout / drop / 5xx after POST). Callers must reconcile, not retry
+     * as a fresh failure. Preflight auth and GET failures stay false.
+     */
+    readonly afterProviderSubmit: boolean;
+
+    constructor(
+        message = 'Network error occurred',
+        public readonly originalError?: unknown,
+        options?: { afterProviderSubmit?: boolean },
+    ) {
         super(message, 'NETWORK_ERROR', 503);
         this.name = 'NetworkError';
+        this.afterProviderSubmit = options?.afterProviderSubmit === true;
     }
 }

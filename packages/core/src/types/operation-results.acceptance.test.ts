@@ -19,7 +19,11 @@ import type {
 import {
   mapGatewayResultToOperationResult,
   mapGatewayRefundToOperationResult,
+  applyOutcomeToGatewayResult,
+  inferOperationOutcome,
   isPaidOutcome,
+  isRequiresActionOutcome,
+  isIndeterminateOutcome,
   successFromRefundOutcome,
   buildProviderReferences,
   money,
@@ -236,6 +240,28 @@ describe("AC6: cross-gateway outcome consistency on create shapes", () => {
       expectedOutcome: "succeeded",
       paid: true,
     },
+    {
+      gateway: "paymob",
+      name: "bare partial capture is open money",
+      result: basePayment({
+        success: true,
+        status: "partially_captured",
+        gatewayId: "txn_paymob_partial",
+      }),
+      expectedOutcome: "requires_action",
+      paid: false,
+    },
+    {
+      gateway: "stripe",
+      name: "success:false pending is not a failed decline",
+      result: basePayment({
+        success: false,
+        status: "pending",
+        gatewayId: "pi_stripe_unk",
+      }),
+      expectedOutcome: "indeterminate",
+      paid: false,
+    },
   ];
 
   for (const c of cases) {
@@ -256,6 +282,102 @@ describe("AC6: cross-gateway outcome consistency on create shapes", () => {
       }
     });
   }
+});
+
+describe("P610-INF: infer fail-closed money / no dual-write lie", () => {
+  it("bare partially_captured infers requires_action; settled-success statuses stay succeeded", () => {
+    const bare = basePayment({
+      success: true,
+      status: "partially_captured",
+      gatewayId: "cap_partial",
+    });
+    expect(inferOperationOutcome(bare)).toBe("requires_action");
+    expect(isRequiresActionOutcome(bare)).toBe(true);
+    expect(isPaidOutcome(bare)).toBe(false);
+
+    expect(
+      inferOperationOutcome(basePayment({ success: true, status: "paid" })),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        basePayment({ success: true, status: "authorized" }),
+      ),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        basePayment({ success: true, status: "refunded" }),
+      ),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        basePayment({ success: true, status: "partially_refunded" }),
+      ),
+    ).toBe("succeeded");
+    expect(
+      isPaidOutcome(basePayment({ success: true, status: "authorized" })),
+    ).toBe(false);
+  });
+
+  it("success:false + pending/processing/approved infers indeterminate", () => {
+    for (const status of ["pending", "processing", "approved"] as const) {
+      const result = basePayment({
+        success: false,
+        status,
+        gatewayId: `unk_${status}`,
+      });
+      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const op = mapGatewayResultToOperationResult(result);
+      expect(op.outcome).toBe("indeterminate");
+      if (op.outcome === "indeterminate") {
+        expect(op.reconciliationRequired).toBe(true);
+      }
+      expect(isIndeterminateOutcome(result)).toBe(true);
+      expect(isPaidOutcome(result)).toBe(false);
+    }
+  });
+
+  it("applyOutcome stored outcome matches infer; recon only on indeterminate", () => {
+    const appliedPartial = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "cap_partial",
+        status: "partially_captured",
+        rawResponse: {},
+        gateway: "paymob",
+      },
+      "requires_action",
+    );
+    expect(appliedPartial.outcome).toBe("requires_action");
+    expect(appliedPartial.reconciliationRequired).toBeUndefined();
+    expect(inferOperationOutcome(appliedPartial)).toBe(appliedPartial.outcome);
+
+    const appliedPaid = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_paid",
+        status: "paid",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "succeeded",
+      { reconciliationRequired: true },
+    );
+    expect(appliedPaid.outcome).toBe("succeeded");
+    expect(appliedPaid.reconciliationRequired).toBeUndefined();
+    expect(inferOperationOutcome(appliedPaid)).toBe(appliedPaid.outcome);
+    expect(isPaidOutcome(appliedPaid)).toBe(true);
+
+    const appliedInd = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_unk",
+        status: "pending",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "indeterminate",
+    );
+    expect(appliedInd.outcome).toBe("indeterminate");
+    expect(appliedInd.reconciliationRequired).toBe(true);
+    expect(inferOperationOutcome(appliedInd)).toBe(appliedInd.outcome);
+  });
 });
 
 describe("AC7: RefundOperationResult parallel mapping", () => {

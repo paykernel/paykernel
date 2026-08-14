@@ -2025,6 +2025,7 @@ describe('PaymentClient webhook error isolation', () => {
                 id: 'pay_core2',
                 status: 'paid',
                 amount: 5000,
+                captured: 5000,
                 currency: 'SAR',
             },
         });
@@ -2510,6 +2511,7 @@ describe('PaymentClient PayPal webhooks', () => {
                 id: 'pay_moyasar_1',
                 status: 'paid',
                 amount: 10000,
+                captured: 10000,
                 currency: 'SAR',
                 metadata: { paymentId: 'internal_1' },
             },
@@ -2523,5 +2525,209 @@ describe('PaymentClient PayPal webhooks', () => {
             (event.rawPayload as Record<string, unknown>).secret_token,
         ).toBeUndefined();
         expect(event.payloadHash).toBeDefined();
+    });
+});
+
+function createWebhookOnlyClient(
+    name: 'custom' | 'stripe',
+    parseWebhookEvent: (payload: unknown) => WebhookEvent,
+) {
+    return createPaymentClient({
+        gateways: {
+            [name]: {
+                name,
+                manifest: {
+                    name,
+                    displayName: 'Webhook-only test gateway',
+                    version: '0.0.1',
+                },
+                create() {
+                    return {
+                        name,
+                        capabilities: {
+                            createPayment: true,
+                            capturePayment: false,
+                            refundPayment: false,
+                            voidPayment: false,
+                            getPayment: false,
+                            getPaymentStatus: false,
+                            webhooks: true,
+                            createCheckoutSession: false,
+                        },
+                        supports(cap: string) {
+                            return cap === 'webhooks' || cap === 'createPayment';
+                        },
+                        async createPayment() {
+                            throw new Error('unused');
+                        },
+                        async capturePayment() {
+                            throw new Error('unused');
+                        },
+                        async refundPayment() {
+                            throw new Error('unused');
+                        },
+                        verifyWebhook() {
+                            return true;
+                        },
+                        parseWebhookEvent,
+                    };
+                },
+            },
+        },
+        defaultGateway: name,
+    });
+}
+
+describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
+    it('rebuilds dual-write when event.event fails isPaymentEvent', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_invalid_dual',
+            type: 'payment_paid',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_1',
+            status: 'paid',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            // Present but not a v1 PaymentEvent — safety-net must rebuild.
+            event: { type: 'payment.succeeded' } as WebhookEvent['event'],
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.event).toBeDefined();
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.event?.type).toBe('provider.unmapped');
+        expect(event.event).not.toEqual({ type: 'payment.succeeded' });
+        expect(event.provider?.eventType).toBe('payment_paid');
+        expect(event.payloadHash).toBeDefined();
+    });
+
+    it('rebuilds dual-write when event.event.schemaVersion !== 1', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_schema_v2',
+            type: 'payment_paid',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_1',
+            status: 'paid',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '2' as unknown as '1',
+            event: {
+                schemaVersion: '2',
+                type: 'payment.succeeded',
+                provider: {
+                    gateway: 'custom',
+                    eventId: 'evt_schema_v2',
+                    eventType: 'payment_paid',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            } as unknown as WebhookEvent['event'],
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.schemaVersion).toBe('1');
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.event?.type).toBe('provider.unmapped');
+        expect(event.event?.type).not.toBe('payment.succeeded');
+    });
+
+    it('does not overwrite a valid schemaVersion-1 PaymentEvent', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_valid_dual',
+            type: 'payment_paid',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_1',
+            status: 'paid',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '1',
+            stableType: 'payment.succeeded',
+            event: {
+                schemaVersion: '1',
+                type: 'payment.succeeded',
+                payment: {
+                    status: 'paid',
+                    references: { gatewayPaymentId: 'gw_1' },
+                },
+                provider: {
+                    gateway: 'custom',
+                    eventId: 'evt_valid_dual',
+                    eventType: 'payment_paid',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            },
+            provider: {
+                gateway: 'custom',
+                eventId: 'evt_valid_dual',
+                eventType: 'payment_paid',
+                occurredAt: '2024-01-01T00:00:00.000Z',
+                receivedAt: '2024-01-01T00:00:00.000Z',
+            },
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.event?.type).toBe('payment.succeeded');
+        expect(event.stableType).toBe('payment.succeeded');
+    });
+
+    it('P610-SAFE-1: incomplete-money stripe-like rebuild demotes payment.succeeded', async () => {
+        const client = createWebhookOnlyClient('stripe', (payload) => ({
+            id: 'evt_pi_incomplete',
+            type: 'payment_intent.succeeded',
+            gateway: 'stripe',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'pi_incomplete',
+            status: 'processing',
+            amount: 100,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+        }));
+
+        let verifiedType: string | undefined;
+        client.addHook('onWebhookVerified', async (hookEvent) => {
+            verifiedType = hookEvent.event?.type;
+        });
+
+        const event = await client.handleWebhook('stripe', { hello: true });
+
+        expect(event.type).toBe('payment_intent.succeeded');
+        expect(event.status).toBe('processing');
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.stableType).toBe('payment.processing');
+        expect(event.event?.type).toBe('payment.processing');
+        expect(event.stableType).not.toBe('payment.succeeded');
+        expect(event.event?.type).not.toBe('payment.succeeded');
+        expect(verifiedType).toBe('payment.processing');
+    });
+
+    it('P610-SAFE-1: incomplete-refund stripe-like rebuild demotes refund.completed', async () => {
+        const client = createWebhookOnlyClient('stripe', (payload) => ({
+            id: 'evt_refund_incomplete',
+            type: 'refund.completed',
+            gateway: 'stripe',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'pi_refund',
+            status: 'refund_completed',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+        }));
+
+        const event = await client.handleWebhook('stripe', { hello: true });
+
+        expect(event.status).toBe('refund_completed');
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.stableType).toBe('refund.pending');
+        expect(event.event?.type).toBe('refund.pending');
+        expect(event.stableType).not.toBe('refund.completed');
+        expect(event.event?.type).not.toBe('refund.completed');
     });
 });

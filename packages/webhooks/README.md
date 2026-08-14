@@ -177,7 +177,7 @@ idle supersede yet:
 
 | Mode | Behavior |
 | --- | --- |
-| `inline` | Await handler under lease. Failure → `handler_failed { retryable }`. |
+| `inline` | Await handler under lease. Failure → `handler_failed { retryable }` (`fail` uses `retryAfterMs: 0`). **Never** emits `scheduled_for_retry`. |
 | `durable_retry` | Await handler by default; retryable failure → `store.fail` + `scheduled_for_retry`. |
 | `durable_retry` + `ackAfterClaim: true` | After durable claim, release to pending and return `scheduled_for_retry` **without** running the handler (parking claim free vs `maxAttempts`). Workers call `processRetryable`. |
 
@@ -220,8 +220,8 @@ type WebhookProcessingOutcome =
 Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
-- Store claim `not_available` (backoff before `availableAt`) → `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` without burning attempts. Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
-- `scheduled_for_retry { reason: "parked" }` is safe to 200 **only** when a `processRetryable` worker is guaranteed.
+- Store claim `not_available` (backoff before `availableAt`) → durable `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` without burning attempts. **Inline maps `not_available` to `handler_failed { retryable: true }`** (never `scheduled_for_retry`). Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
+- `scheduled_for_retry { reason: "parked" }` is emitted **only** after `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` → `already_processing` or `handler_failed { retryable: true }`. Safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts`.
 - Durable redrive never materializes stub events: missing `payloadRef` → dead-letter / `handler_failed { retryable: false }`.
@@ -262,7 +262,7 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
 
-**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store; plain opaque refs without secret shapes pass through. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive.
+**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store; plain opaque refs without secret shapes pass through. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive. Values that still carry `rawPayload` or `headers` are converted via `toPersistedPaymentEventEnvelope` when a PaymentEvent is present; otherwise the claim is refused (`invalid_webhook`) — raw request-local payloads are never persisted (P610-SNAP-1).
 
 Durable adapters must pass testkit `runWebhookInboxStoreConformanceSuite`.
 

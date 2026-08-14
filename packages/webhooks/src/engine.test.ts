@@ -861,6 +861,27 @@ describe("processWithVerifier", () => {
     expect(store.size).toBe(0);
   });
 
+  it("P610-SNAP-1: sanitizes {ok:false}.reason", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => ({
+        ok: false,
+        reason: "bad sig sk_live_LEAKME123 token",
+      }),
+      handler: async () => {},
+    });
+    expect(o.outcome).toBe("invalid_webhook");
+    if (o.outcome === "invalid_webhook") {
+      expect(o.reason).toBeDefined();
+      expect(o.reason).not.toContain("sk_live_");
+      expect(o.reason).not.toContain("LEAKME123");
+      expect(o.reason).toContain("[REDACTED]");
+    }
+    expect(store.size).toBe(0);
+  });
+
   it("verify infra/network throw → retryable handler_failed not invalid_webhook (WEBHOOKS-1)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
@@ -997,6 +1018,43 @@ describe("processWithVerifier", () => {
     expect(store.size).toBe(0);
   });
 
+  it.each([408, 409, 425] as const)(
+    "statusCode %s stays retryable (narrow permanent 4xx)",
+    async (statusCode) => {
+      const store = createMemoryWebhookInboxStore();
+      const engine = createWebhookInboxEngine({ store, mode: "inline" });
+      const err = new Error(`transient ${statusCode}`);
+      (err as Error & { statusCode?: number }).statusCode = statusCode;
+      const o = await engine.processWithVerifier({
+        raw: {},
+        verifyAndNormalize: async () => {
+          throw err;
+        },
+        handler: async () => {},
+      });
+      expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+      expect(store.size).toBe(0);
+    },
+  );
+
+  it("GatewayApiError nested 408/409/425 stay retryable", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("gateway conflict");
+    err.name = "GatewayApiError";
+    (err as Error & { code?: string; rawError?: { status: number } }).code =
+      "GATEWAY_API_ERROR";
+    (err as Error & { rawError?: { status: number } }).rawError = { status: 409 };
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+  });
+
   it("transient GatewayApiError (postback) → retryable handler_failed (WEBHOOKS-6)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
@@ -1102,6 +1160,170 @@ describe("no silent ACK of failures", () => {
     });
     expect(o.outcome).not.toBe("processed");
     expect(o.outcome).not.toBe("duplicate_completed");
+  });
+});
+
+describe("P610-ACK-1: inline never emits scheduled_for_retry", () => {
+  it("inline throw then immediate redelivery is not scheduled_for_retry", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      clock,
+      // If fail used this delay, immediate redelivery would hit not_available.
+      defaultRetryAfterMs: 60_000,
+    });
+
+    const first = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_inline_redeliver",
+      payloadHash: "h",
+      handler: async () => {
+        throw new Error("temporary outage");
+      },
+    });
+    expect(first).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(first.outcome).not.toBe("scheduled_for_retry");
+
+    let runs = 0;
+    const second = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_inline_redeliver",
+      payloadHash: "h",
+      handler: async () => {
+        runs++;
+      },
+    });
+    expect(second.outcome).not.toBe("scheduled_for_retry");
+    expect(second).toEqual({ outcome: "processed" });
+    expect(runs).toBe(1);
+  });
+
+  it("inline maps claim not_available to handler_failed retryable true", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const claim = await store.claim({
+      key: "stripe:evt_inline_na",
+      payloadHash: "h",
+      owner: "seed",
+      leaseMs: 30_000,
+    });
+    if (claim.kind !== "acquired") throw new Error("expected acquired");
+    await store.fail({
+      key: "stripe:evt_inline_na",
+      leaseToken: claim.leaseToken,
+      error: "backoff",
+      retryAfterMs: 60_000,
+    });
+
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      clock,
+    });
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_inline_na",
+      payloadHash: "h",
+      handler: async () => {
+        throw new Error("must not run");
+      },
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(o.outcome).not.toBe("scheduled_for_retry");
+  });
+});
+
+describe("P610-SNAP-1: durable_retry must not persist rawPayload", () => {
+  const paymentEvent = {
+    schemaVersion: "1" as const,
+    type: "payment.succeeded" as const,
+    provider: {
+      gateway: "stripe" as const,
+      eventId: "evt_snap_pe",
+      eventType: "payment_intent.succeeded",
+      occurredAt: "2026-01-01T00:00:00.000Z",
+      receivedAt: "2026-01-01T00:00:00.000Z",
+    },
+    payment: {
+      status: "succeeded" as const,
+      references: { providerPaymentId: "pi_snap" },
+    },
+  };
+
+  it("refuses event that still has rawPayload/headers (no PaymentEvent to wrap)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+    });
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_snap_refuse",
+      payloadHash: "h",
+      event: {
+        id: "evt_snap_refuse",
+        type: "payment.succeeded",
+        rawPayload: { card: "4242424242424242", secret: "raw-body" },
+        headers: { "stripe-signature": "t=1,v1=abc" },
+      },
+      handler: async () => {},
+    });
+    expect(o.outcome).toBe("invalid_webhook");
+    if (o.outcome === "invalid_webhook") {
+      expect(o.reason).toMatch(/rawPayload|headers|toPersistedPaymentEventEnvelope/i);
+    }
+    expect(store.size).toBe(0);
+  });
+
+  it("wraps dual-write event via toPersistedPaymentEventEnvelope (no rawPayload in payloadRef)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+    });
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_snap_wrap",
+      payloadHash: "h_snap_wrap",
+      event: {
+        id: "evt_snap_wrap",
+        type: "payment_intent.succeeded",
+        rawPayload: { do_not_persist: "raw-body-secret" },
+        headers: { "stripe-signature": "t=1,v1=leak-sig" },
+        event: paymentEvent,
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "processed" });
+    const rec = await store.get("stripe:evt_snap_wrap");
+    expect(rec?.payloadRef).toBeDefined();
+    expect(rec?.payloadRef).not.toContain("raw-body-secret");
+    expect(rec?.payloadRef).not.toContain("stripe-signature");
+    expect(rec?.payloadRef).not.toContain("leak-sig");
+    expect(rec?.payloadRef).not.toMatch(/"rawPayload"/);
+    expect(rec?.payloadRef).toContain("payment.succeeded");
+  });
+
+  it("refuses envelope that still has rawPayload", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+    const o = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_snap_env",
+      payloadHash: "h",
+      envelope: {
+        id: "evt_snap_env",
+        rawPayload: { leak: "envelope-raw" },
+      },
+    });
+    expect(o.outcome).toBe("invalid_webhook");
+    expect(store.size).toBe(0);
   });
 });
 

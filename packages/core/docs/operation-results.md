@@ -37,6 +37,8 @@ if (isPaidOutcome(result)) {
 }
 ```
 
+**Post-submit transport (P610-IND-1):** `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` no longer throw `NetworkError` when the mutating HTTP request may already have been accepted (timeout, connection drop, or 5xx after POST). `BaseGateway` returns `outcome: 'indeterminate'` + `reconciliationRequired: true`. Preflight auth and GET still throw `NetworkError`. Caller abort still throws `PaymentAbortedError`.
+
 ## `PaymentOperationResult` arms
 
 Preferred union (via `mapGatewayResultToOperationResult`):
@@ -66,9 +68,11 @@ if (op.outcome === 'succeeded' && op.payment.status === 'paid') {
   await fulfillOrder(op.payment.references.providerObjectId);
 }
 // Auth hold: outcome can be 'succeeded' with status 'authorized' — isPaidOutcome is false
-// Partial capture (Paymob/Stripe): outcome may be 'requires_action' with status
-// 'partially_captured' — Phase-6 map/infer **preserves** requires_action (does not
-// upgrade to succeeded). Still not isPaidOutcome; never fulfill remaining auth.
+// Partial capture: bare `{ success: true, status: 'partially_captured' }` infers
+// `requires_action` (open money). Gateways (Paymob/Stripe) may also dual-write
+// `outcome: 'requires_action'`; Phase-6 must not upgrade that to succeeded.
+// `paid` / `authorized` / `refunded` / `partially_refunded` remain settled-success
+// for **outcome only** — `isPaidOutcome` stays paid-only.
 // Successful void: outcome 'succeeded' + status 'cancelled' stays succeeded on
 // map/infer (not coerced to failed); isPaidOutcome remains false.
 ```
@@ -114,6 +118,19 @@ When gateways (or the testkit mock) use `applyOutcomeToGatewayResult`:
 | `indeterminate` | `false` | **Not** a decline — always `reconciliationRequired: true` |
 
 `success: false` + `outcome: 'indeterminate'` means “do not treat as paid,” **not** “safe to mark order failed without reconciliation.”
+
+`applyOutcomeToGatewayResult` attaches `reconciliationRequired: true` **only** when `outcome` is `indeterminate`. Passing `extras.reconciliationRequired` on a succeeded / requires_action / declined / failed write is ignored so stored `outcome` still matches `inferOperationOutcome` (no dual-write lie).
+
+Bare inference (no explicit `outcome`):
+
+| `success` | `status` | inferred `outcome` |
+| --- | --- | --- |
+| `true` | `paid` / `authorized` / `refunded` / `partially_refunded` | `succeeded` (fulfill only when `paid`) |
+| `true` | `partially_captured` | `requires_action` (open money) |
+| `true` | `pending` / `processing` / `approved` | `requires_action` |
+| `false` | `pending` / `processing` / `approved` | `indeterminate` (not `failed`) |
+| `false` | `failed` | `declined` |
+| `false` | `cancelled` | `failed` |
 
 ### Helpers
 

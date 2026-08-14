@@ -14,6 +14,7 @@ import type { PaymentHooks } from "../../hooks/hooks.types";
 import type { MoyasarConfig } from "../../types/config.types";
 import {
   assertNoSecretsInEnvelope,
+  hashWebhookPayload,
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { isPaidOutcome } from "../../types/operation-result";
@@ -545,6 +546,45 @@ describe("MoyasarGateway", () => {
       expect(isPaidOutcome(result)).toBe(false);
       expect(result.currency).toBeUndefined();
       expect(result.amount).toBeUndefined();
+    });
+
+    it("fail-closes paid/captured family without a finite captured total (P610-MOY-2)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: undefined,
+        }),
+      );
+
+      const missing = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      expect(missing.status).toBe("processing");
+      expect(missing.status).not.toBe("paid");
+      expect(isPaidOutcome(missing)).toBe(false);
+
+      mockFetchJson(
+        paymentResponse({
+          status: "captured",
+          amount: 10000,
+          captured: Number.NaN,
+        }),
+      );
+
+      const nonFinite = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(nonFinite.status).toBe("processing");
+      expect(nonFinite.status).not.toBe("paid");
+      expect(isPaidOutcome(nonFinite)).toBe(false);
     });
 
     it("accepts Money amount input for createPayment (bigint minor conversion)", async () => {
@@ -1709,14 +1749,15 @@ describe("MoyasarGateway", () => {
         throw new Error("unreachable");
       }) as typeof fetch;
 
-      await expect(
-        createGateway({ ...CONFIG, timeoutMs: 1 }).createPayment({
-          amount: 100,
-          currency: "SAR",
-          callbackUrl: "https://example.com/callback",
-          moyasarSource: { type: "token", token: "token_test_abc" },
-        }),
-      ).rejects.toBeInstanceOf(NetworkError);
+      const timedOut = await createGateway({ ...CONFIG, timeoutMs: 1 }).createPayment({
+        amount: 100,
+        currency: "SAR",
+        callbackUrl: "https://example.com/callback",
+        moyasarSource: { type: "token", token: "token_test_abc" },
+      });
+      expect(timedOut.outcome).toBe("indeterminate");
+      expect(timedOut.reconciliationRequired).toBe(true);
+      expect(timedOut.success).toBe(false);
     });
 
     it("does not strip signal through Moyasar schema validation before HTTP", async () => {
@@ -1736,6 +1777,29 @@ describe("MoyasarGateway", () => {
         signal: controller.signal,
       });
       expect(sawSignal).toBe(true);
+    });
+
+    it("keeps timeout until the response body is consumed (P610-ABT-4)", async () => {
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(_input), init });
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers({ "Content-Type": "application/json" }),
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener("abort", () => {
+                reject(new DOMException("Aborted", "AbortError"));
+              });
+            }),
+        } as Response;
+      }) as typeof fetch;
+
+      await expect(
+        createGateway({ ...CONFIG, timeoutMs: 20 }).getPayment({
+          gatewayPaymentId: PAYMENT_ID,
+        }),
+      ).rejects.toBeInstanceOf(NetworkError);
     });
   });
 
@@ -1794,6 +1858,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 1234,
           currency: "KWD",
+          captured: 1234,
           metadata: {
             paymentId: "internal_123",
           },
@@ -1818,6 +1883,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
         },
       });
 
@@ -1830,6 +1896,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
         },
       });
       expect(
@@ -1866,6 +1933,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
         },
       });
 
@@ -1884,6 +1952,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
         },
       });
 
@@ -2163,6 +2232,95 @@ describe("MoyasarGateway", () => {
       expect(event.event?.type).toBe("payment.succeeded");
     });
 
+    it("fail-closes payment_paid / payment_captured without a finite captured total (P610-MOY-2)", () => {
+      const missing = createGateway().parseWebhookEvent({
+        id: "wh_paid_no_captured",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+        },
+      });
+
+      expect(missing.status).toBe("processing");
+      expect(missing.status).not.toBe("paid");
+      expect(missing.stableType).toBe("payment.processing");
+      expect(missing.event?.type).toBe("payment.processing");
+
+      const nonFinite = createGateway().parseWebhookEvent({
+        id: "wh_captured_nan",
+        type: "payment_captured",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "captured",
+          amount: 10000,
+          currency: "SAR",
+          captured: Number.NaN,
+        },
+      });
+
+      expect(nonFinite.status).toBe("processing");
+      expect(nonFinite.status).not.toBe("paid");
+      expect(nonFinite.stableType).toBe("payment.processing");
+      expect(nonFinite.event?.type).toBe("payment.processing");
+    });
+
+    it("hashes webhook via hashWebhookPayload with secret_token redacted in place (P610-MOY-3)", () => {
+      const payload = {
+        id: "wh_hash",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+        },
+      };
+      const { secret_token: _secret, ...stripped } = payload;
+      const redactedWithKey = { ...payload, secret_token: "[REDACTED]" };
+
+      const event = createGateway().parseWebhookEvent(payload);
+
+      expect(event.payloadHash).toBe(hashWebhookPayload(redactedWithKey));
+      expect(event.payloadHash).toBe(hashWebhookPayload(payload));
+      expect(event.payloadHash).not.toBe(hashWebhookPayload(stripped));
+      expect(
+        (event.rawPayload as Record<string, unknown>).secret_token,
+      ).toBeUndefined();
+    });
+
+    it("does not dual-write payment.succeeded for a free-form type with paid status", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_freeform",
+        type: "totally_custom_moyasar_event",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+        },
+      });
+
+      expect(event.type).toBe("totally_custom_moyasar_event");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      // Mapper stream owns webhook-event-map (no status fallback).
+      expect(event.stableType).toBeUndefined();
+      expect(event.event?.type).toBe("provider.unmapped");
+    });
+
     it("maps unmapped provider statuses to failed (fail-closed)", () => {
       const warnings: string[] = [];
       const logger = {
@@ -2203,6 +2361,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
           metadata: {
             orderId: "order_123",
           },
@@ -2298,6 +2457,7 @@ describe("MoyasarGateway", () => {
           status: "paid",
           amount: 10000,
           currency: "SAR",
+          captured: 10000,
           metadata: { paymentId: "internal_123" },
         },
       });
@@ -2378,6 +2538,45 @@ describe("MoyasarGateway", () => {
     });
   });
 
+  describe("clock injection", () => {
+    it("uses this.clock.nowMs() for mutation createdAt (P610-CLK-2)", async () => {
+      const createdAts: number[] = [];
+      const store = new InMemoryIdempotencyStore();
+      const reserve = store.reserve.bind(store);
+      const set = store.set.bind(store);
+      store.reserve = (key, record) => {
+        createdAts.push(record.createdAt);
+        return reserve(key, record);
+      };
+      store.set = (key, record) => {
+        createdAts.push(record.createdAt);
+        return set(key, record);
+      };
+
+      const fixedMs = 1_700_000_123_000;
+      const gateway = new MoyasarGateway(
+        { ...CONFIG, idempotencyStore: store },
+        new HooksManager(),
+        undefined,
+        {
+          clock: {
+            now: () => new Date(fixedMs),
+            nowMs: () => fixedMs,
+          },
+        },
+      );
+
+      mockFetchJson(paymentResponse({ status: "voided" }));
+      await gateway.voidPayment({
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      });
+
+      expect(createdAts.length).toBeGreaterThan(0);
+      expect(createdAts.every((value) => value === fixedMs)).toBe(true);
+    });
+  });
+
   describe("idempotent mutations", () => {
     it("replays a completed refund without a second API call", async () => {
       const idempotencyStore = new InMemoryIdempotencyStore();
@@ -2453,7 +2652,9 @@ describe("MoyasarGateway", () => {
         idempotencyKey: "refund-key-4",
       };
 
-      await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(NetworkError);
+      const first = await gateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
       // The outcome is unknown, so a retry with the same key is refused rather
       // than risking a double refund.
       await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(InvalidRequestError);

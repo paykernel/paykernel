@@ -340,7 +340,7 @@ Adapters **may** add first-class columns later without breaking this lean contra
 - Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
 - Unsanitized exception messages that may embed secrets
 
-**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **JSON string** envelopes that parse as object/array are also redacted then re-stringified; opaque non-JSON strings have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store — plain opaque refs without secret shapes pass through. On `durable_retry`, if `envelope` is omitted a redacted snapshot of `event` is stored so redrive has payment fields. Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
+**Honesty (envelope → `payloadRef`):** object/array envelopes are deep-redacted via core `redactWebhookPayloadSecrets` (known secret keys → `"[REDACTED]"`) then `JSON.stringify`'d into `payloadRef`. **JSON string** envelopes that parse as object/array are also redacted then re-stringified; opaque non-JSON strings have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store — plain opaque refs without secret shapes pass through. On `durable_retry`, if `envelope` is omitted a redacted snapshot of `event` is stored so redrive has payment fields. Values that still carry `rawPayload` or `headers` are converted via core `toPersistedPaymentEventEnvelope` when a PaymentEvent is present; otherwise the engine refuses with `invalid_webhook` (P610-SNAP-1). Redaction is defense-in-depth — apps should still use core `toPersistedPaymentEventEnvelope` (or strip signatures, secrets, and raw provider payloads themselves) before claim. Do not pass `rawPayload` / signature headers / webhook secrets into `envelope`.
 
 Use core `toPersistedPaymentEventEnvelope` / redacted `payloadHash` for anything persisted. Recommended dual-write envelopes stored as `payloadRef` are **auto-unwrapped** by default `processRetryable` materialization (handlers receive `.event`). **Missing `payloadRef` never stubs** `{ key, payloadHash }` — workers dead-letter with `handler_failed { retryable: false }`. Engine `sanitizeWebhookError` strips common secret patterns before `store.fail`.
 
@@ -352,7 +352,7 @@ Mode is **required** on `createWebhookInboxEngine` and is **fixed for the life o
 
 | Mode | Behavior |
 | --- | --- |
-| `inline` | Await handler under lease. Retryable throw → `store.fail` → `{ outcome: "handler_failed", retryable: true }`. Non-retryable / dead letter → `handler_failed { retryable: false }`. |
+| `inline` | Await handler under lease. Retryable throw → `store.fail` with `retryAfterMs: 0` → `{ outcome: "handler_failed", retryable: true }`. Non-retryable / dead letter → `handler_failed { retryable: false }`. **Never** emits `scheduled_for_retry` (claim `not_available` → `handler_failed { retryable: true }`). |
 | `durable_retry` | Await handler by default. Retryable throw → `store.fail` with delay → `{ outcome: "scheduled_for_retry", reason: "handler_retry" }`. |
 | `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `{ outcome: "scheduled_for_retry", reason: "parked" }` **without** running the handler. Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. **Requires non-empty `envelope`** (refuses with `invalid_webhook` otherwise). |
 
@@ -379,14 +379,14 @@ const durableEngine = createWebhookInboxEngine({
 - The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
 - **Crash reclaim:** soft-release of an expired `claimed` lease (via get/listRetryable) restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget.
 - **WEBHOOKS-2 (lease timeout / hang):** `store.fail` with a matching token succeeds even after lease expiry so handler hang/timeout still records an attempt. Soft-release alone must not make `maxAttempts` a no-op — poison/long handlers eventually dead-letter.
-- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). The engine maps that to `scheduled_for_retry { reason: "not_available" }`. Adapters should map this to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
+- `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). **durable_retry** maps that to `scheduled_for_retry { reason: "not_available" }`. **inline** maps it to `handler_failed { retryable: true }` (P610-ACK-1 — no worker path). Adapters should map these to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
 - `listRetryable` only returns rows with `availableAt <= now` (same gate). Soft-release on list/get/claim restores unfinished claim attempts.
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
 - `defaultRetryAfterMs` must be a finite number **`>= 0`** (constructor throws otherwise). Default remains **5_000**.
 
-#### Residual: `ackAfterClaim` + `fail(restoreAttempt)` lease_lost
+#### `ackAfterClaim` + `fail(restoreAttempt)` lease_lost (P610-ACK-2)
 
-If `store.fail({ restoreAttempt: true })` after the parking claim throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine still returns `scheduled_for_retry { reason: "parked" }` (claim was durable; another owner may exist) **but the parking attempt may remain burned** — there is no safe tokenless restore. This is intentional residual under extreme clock skew / zero-duration leases (now rejected at config), not the default money path. Prefer positive lease durations and NTP-aligned clocks across hosts.
+`scheduled_for_retry { reason: "parked" }` is returned **only if** `store.fail({ restoreAttempt: true })` succeeds. If that fail throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine returns `already_processing` (when lease expiry is still in the future) or `handler_failed { retryable: true }` — **never** parked. The row may still be `claimed` and the parking attempt may remain burned; adapters must 5xx so the provider redelivers. Prefer positive lease durations and NTP-aligned clocks across hosts.
 
 ### `NonRetryableHandlerError`
 
@@ -455,7 +455,7 @@ type WebhookProcessingOutcome =
 | `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown/parse/`InvalidRequestError` throw (WEBHOOKS-1/5); may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail / permanent verify structure (WEBHOOKS-6) | 200 or 4xx per policy (do not infinite-retry forever) |
 | `payload_conflict` | Same key, different hash **while lease active only** (idle pending supersedes and reclaims — not permanent; WEBHOOKS-3/4) | 409 / 400 while lease held — not silent 200; redeliver after expiry with correct hash |
-| `invalid_webhook` | Bad input, `{ ok: false }`, or verify-false `InvalidWebhookError` only (not parse / `InvalidRequestError`) | 400 |
+| `invalid_webhook` | Bad input, `{ ok: false }` (reason sanitized), or verify-false `InvalidWebhookError` only (not parse / `InvalidRequestError`) | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 
@@ -478,7 +478,7 @@ Store claim kind mapping:
 | `in_progress` | `already_processing` (+ `retryAfterMs` when lease expiry known) |
 | `payload_hash_conflict` | `payload_conflict` |
 | `duplicate_failed` | `handler_failed { retryable: false }` |
-| `not_available` | `scheduled_for_retry` `{ reason: "not_available", availableAt?, retryAfterMs? }` (backoff before `availableAt`; no attempt++) |
+| `not_available` | **durable_retry:** `scheduled_for_retry` `{ reason: "not_available", availableAt?, retryAfterMs? }` (backoff before `availableAt`; no attempt++). **inline:** `handler_failed { retryable: true }` (P610-ACK-1) |
 
 ### Illustrative adapter (not part of this package)
 

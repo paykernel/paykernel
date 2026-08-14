@@ -190,7 +190,7 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
 | Paymob | `TOKEN` | `payment_method.setup_completed` | |
 | Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context; **processed** server webhook only |
-| Paymob | `TRANSACTION` + signed `is_refunded` (or HMAC `is_refund` alias) | **`refund.completed`** | Domain status **`refund_completed`** (incomplete snapshot) — **not** full `refunded` / `partially_refunded`. Unsigned `refunded_amount_cents` is stripped after HMAC and cannot choose partial vs full |
+| Paymob | `TRANSACTION` + signed `is_refunded` (or HMAC `is_refund` alias) | **`refund.pending`** | Domain status **`refund_completed`** (incomplete snapshot) — **not** full `refunded` / `partially_refunded`. Unsigned `refunded_amount_cents` is stripped after HMAC and cannot choose partial vs full |
 | Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without signed refund flags) | **ignored for refund** | Status stays non-refund; **not** `payment.succeeded` and **not** forged `refunded` |
 | Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled; capture totals on webhooks still require inquiry for multi-partial (unsigned `captured_amount` stripped) |
 | Paymob | `TRANSACTION` `partially_captured` (status or partial `captured_amount` on **API** path) | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like); amount-aware capture logic required |
@@ -230,7 +230,7 @@ Fulfill only with status `paid` or `isPaidOutcome`.
 `refunded_amount_cents`. After verify the SDK **always strips** unsigned
 `refunded_amount_cents` / `captured_amount` / `is_captured` before status map.
 Signed `is_refunded: true` → domain status **`refund_completed`** (incomplete
-money snapshot) with dual-write `refund.completed`; partial vs full completeness
+money snapshot) with dual-write `refund.pending`; partial vs full completeness
 requires transaction inquiry. Refund domain webhooks **omit `amount`** when no
 trusted refunded total is available so consumers do not book order
 `amount_cents` as the refund. Amount-only `refunded_amount_cents` without a signed
@@ -326,7 +326,10 @@ canonical digest), independent of which plaintext path the codec receives.
 
 **Never** re-expose Moyasar `secret_token`, Stripe signatures, PayPal transmission
 sigs, or HMAC headers in envelopes, logs, or `payloadHash` inputs.
-`hashWebhookPayload` redacts known secret keys before hashing.
+`hashWebhookPayload` redacts known secret keys (including camelCase aliases)
+before hashing. JSON strings are parsed and redacted the same way as encrypt
+plaintext; after redaction, string vs object digests may still differ
+(WEBHOOKS-2). Top-level `Uint8Array` / `Buffer` is hashed as the raw bytes.
 
 ## `PersistedPaymentEventEnvelope`
 

@@ -267,29 +267,14 @@ export const MOYASAR_EVENT_TYPE_MAP: Readonly<
 
 function mapMoyasarEventType(
   providerEventType: string,
-  context?: ProviderEventMapContext,
+  _context?: ProviderEventMapContext,
 ): MappedStableEventType {
   const direct = MOYASAR_EVENT_TYPE_MAP[providerEventType];
   if (direct !== undefined) {
     return direct;
   }
-
-  // Fallback from normalized PaymentStatus when type is free-form
-  const status = (context?.status ?? "").toLowerCase();
-  // paid-like settlement only — buyer `approved` is pre-capture (not fulfillment-ready)
-  if (status === "paid") return "payment.succeeded";
-  if (status === "approved") return "payment.processing";
-  if (status === "failed") return "payment.failed";
-  if (status === "authorized") return "payment.authorized";
-  if (status === "cancelled" || status === "voided") return "payment.cancelled";
-  if (status === "refunded" || status === "partially_refunded") {
-    return "refund.completed";
-  }
-  if (status === "setup_completed") return "payment_method.setup_completed";
-  if (status === "pending" || status === "initiated" || status === "processing") {
-    return "payment.processing";
-  }
-
+  // Unknown / free-form types stay unmapped. Do not status-fallback
+  // (unknown + paid must not invent payment.succeeded).
   return "provider.unmapped";
 }
 
@@ -575,10 +560,8 @@ function mapPaymobEventType(
     return mapped;
   }
 
-  // Unknown Paymob type: try flags/status still
-  const fromUnknown = mapPaymobTransactionSignals(context);
-  if (fromUnknown !== undefined) return fromUnknown;
-
+  // Only TOKEN / TRANSACTION / TRANSACTION_RESPONSE map. Unknown types stay
+  // unmapped even when flags.success or status would otherwise settle.
   return "provider.unmapped";
 }
 

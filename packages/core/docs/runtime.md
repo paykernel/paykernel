@@ -47,7 +47,7 @@ const client = createPaymentClient({
 | `fetch` | Live-delegating `globalThis.fetch` | Gateways use `this.fetch` / context fetch — not bare `fetch(...)` at call sites |
 | `crypto` | Web Crypto (`globalThis.crypto`) | `CryptoProvider`: `randomUUID`, `getRandomValues`, optional `subtle` |
 | `clock` | `Date` / `Date.now` | `Clock`: `now()` / `nowMs()` (Stripe webhook skew uses clock) |
-| `randomUUID` | `crypto.randomUUID` | Fallback via `getRandomValues` when needed |
+| `randomUUID` | `crypto.randomUUID` | Falls back to `uuidV4FromGetRandomValues` when `randomUUID` is missing (still requires Web Crypto `getRandomValues`) |
 
 Helpers:
 
@@ -57,19 +57,18 @@ Helpers:
 | `mergePaymentRuntime(base, partial?)` | Overlay partial fields |
 | `paymentRuntimeFromContext(ctx)` | Project runtime fields from `GatewayContext` |
 | `systemClock` | Default wall clock |
-| `resolveDefaultCrypto` | Web Crypto provider resolution (see fallback note) |
+| `resolveDefaultCrypto` | Web Crypto provider resolution (CORE-3: throws when missing — inject `crypto`) |
 | `uuidV4FromGetRandomValues` | UUID v4 from `getRandomValues` only |
 
-#### `resolveDefaultCrypto` and the `Math.random` fallback
+#### `resolveDefaultCrypto` (CORE-3)
 
 `resolveDefaultCrypto()` prefers `globalThis.crypto` (Web Crypto). If
-`getRandomValues` is missing, it falls back to a **non-cryptographic**
-`Math.random` polyfill for UUID / random bytes. That fallback is acceptable
-for unit tests and rare constrained sandboxes only.
+`getRandomValues` is missing, it **throws**. It does **not** fall back to
+`Math.random`. Auto idempotency keys and runtime UUIDs must be
+cryptographically strong.
 
-**Production / edge:** when the runtime may lack Web Crypto (unusual on modern
-Node 18+, Bun, Deno, and Workers — but possible on exotic hosts), inject an
-explicit `CryptoProvider`:
+On hosts without Web Crypto (unusual on modern Node 18+, Bun, Deno, and
+Workers — but possible on exotic hosts), inject an explicit `CryptoProvider`:
 
 ```ts
 const client = createPaymentClient({
@@ -84,8 +83,8 @@ const client = createPaymentClient({
 });
 ```
 
-Do not rely on the `Math.random` path for lease tokens, UUIDs, or any
-security-sensitive randomness in production.
+Do not ship a `Math.random` UUID path for lease tokens, idempotency keys, or
+any security-sensitive randomness.
 
 **Never** put API keys, webhook secrets, DB handles, request objects, or PII on
 `PaymentRuntime` / `GatewayContext`.
@@ -239,7 +238,9 @@ const ok = client.gateway("stripe").verifyWebhook(rawBody, sig);
 ## HTTP timeouts and AbortSignal
 
 Built-in gateways cancel in-flight provider HTTP with a **timeout** signal
-(`AbortController` + `setTimeout`, or `AbortSignal.timeout` where PayPal uses it).
+from `createTimeoutSignal` (always `AbortController` + `setTimeout` so
+`clear()` cancels; `unref()` when the host timer supports it). `AbortSignal.timeout`
+is not used — its timer cannot be cancelled.
 
 - Config knobs: per-gateway `timeoutMs` (defaults are provider-specific).
 - Timeouts surface as **`NetworkError`** (indeterminate for money mutations —
@@ -379,8 +380,8 @@ CI fails if `node:` appears in production sources or `dist/**/*.js`.
 
 | Check | Command / location |
 | --- | --- |
-| Production src has no `node:` / banned bare builtins | `bun run check:runtime-portability` (`scripts/check-runtime-portability.ts`) |
-| Published `dist/**/*.js` has no `node:` imports | same (Workers/Deno gate) |
+| Production src has no `node:` / `bun:` / `cloudflare:` / banned bare builtins | `bun run check:runtime-portability` (`scripts/check-runtime-portability.ts`) — `packages/core`, `packages/webhooks`, `packages/store-contracts` |
+| Published `dist/**/*.js` has no `node:` / `bun:` / `cloudflare:` imports | same (Workers/Deno gate) |
 | Unit tests for checker | `bun test scripts/check-runtime-portability.test.ts` (via `bun run test:runtime`) |
 | Workspace portable policy | `bun run check:boundaries` (empty `node:` allowlist for portable prod) |
 | Consumer install + functional smoke | `scripts/consumer-smoke.mjs` — Bun **and** Node against packed tarball: import, `createPaymentRuntime`, portable Stripe `verifyWebhook`, injected fetch context |

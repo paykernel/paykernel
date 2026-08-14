@@ -7,12 +7,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  PORTABLE_PACKAGE_DIRS,
   classifyPortableSpecifier,
   extractImportSpecifiers,
   isTestFile,
   scanCoreDist,
   scanCoreSrc,
   scanFile,
+  scanPackageDist,
+  scanPackageSrc,
 } from "./check-runtime-portability";
 
 const tempRoots: string[] = [];
@@ -73,6 +76,7 @@ describe("classifyPortableSpecifier", () => {
     ["node:buffer", false],
     ["node:fs", false],
     ["bun:sqlite", false],
+    ["cloudflare:workers", false],
     ["crypto", false],
     ["buffer", false],
     ["fs", false],
@@ -137,4 +141,107 @@ describe("scanCoreDist (live monorepo, when built)", () => {
     }
     expect(result.violations).toEqual([]);
   });
+});
+
+describe("PORTABLE_PACKAGE_DIRS", () => {
+  it("includes core, webhooks, and store-contracts", () => {
+    expect([...PORTABLE_PACKAGE_DIRS]).toEqual(
+      expect.arrayContaining([
+        "packages/core",
+        "packages/webhooks",
+        "packages/store-contracts",
+      ]),
+    );
+  });
+});
+
+describe("scanPackageSrc fixture", () => {
+  it("flags node: in webhooks production src and ignores tests", () => {
+    const root = createTempRoot();
+    const src = join(root, "packages", "webhooks", "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(join(src, "engine.ts"), `import fs from "node:fs";\n`);
+    writeFileSync(
+      join(src, "engine.test.ts"),
+      `import { test } from "bun:test";\n`,
+    );
+    const violations = scanPackageSrc(root, "packages/webhooks");
+    expect(violations.some((v) => v.specifier === "node:fs")).toBe(true);
+    expect(violations.some((v) => v.file.includes("engine.test"))).toBe(false);
+  });
+
+  it("flags bun: and cloudflare: in store-contracts production src", () => {
+    const root = createTempRoot();
+    const src = join(root, "packages", "store-contracts", "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(
+      join(src, "contracts.ts"),
+      `import { DurableObject } from "cloudflare:workers";\n`,
+    );
+    writeFileSync(join(src, "sqlite.ts"), `import db from "bun:sqlite";\n`);
+    const violations = scanPackageSrc(root, "packages/store-contracts");
+    expect(violations.some((v) => v.specifier === "cloudflare:workers")).toBe(
+      true,
+    );
+    expect(violations.some((v) => v.specifier === "bun:sqlite")).toBe(true);
+  });
+});
+
+describe("scanPackageDist fixture", () => {
+  it("flags node: in webhooks dist", () => {
+    const root = createTempRoot();
+    const dist = join(root, "packages", "webhooks", "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(
+      join(dist, "index.js"),
+      `import { createHash } from "node:crypto";\nexport {};\n`,
+    );
+    const result = scanPackageDist(root, "packages/webhooks");
+    expect(result.skipped).toBe(false);
+    if (!result.skipped) {
+      expect(result.violations.some((v) => v.specifier === "node:crypto")).toBe(
+        true,
+      );
+    }
+  });
+
+  it("flags cloudflare: in store-contracts dist", () => {
+    const root = createTempRoot();
+    const dist = join(root, "packages", "store-contracts", "dist");
+    mkdirSync(dist, { recursive: true });
+    writeFileSync(
+      join(dist, "index.js"),
+      `import { DurableObject } from "cloudflare:workers";\nexport {};\n`,
+    );
+    const result = scanPackageDist(root, "packages/store-contracts");
+    expect(result.skipped).toBe(false);
+    if (!result.skipped) {
+      expect(
+        result.violations.some((v) => v.specifier === "cloudflare:workers"),
+      ).toBe(true);
+    }
+  });
+});
+
+describe("scanPackageSrc (live monorepo)", () => {
+  it("webhooks and store-contracts production sources have no banned runtime imports", () => {
+    const root = join(import.meta.dir, "..");
+    expect(scanPackageSrc(root, "packages/webhooks")).toEqual([]);
+    expect(scanPackageSrc(root, "packages/store-contracts")).toEqual([]);
+  });
+});
+
+describe("scanPackageDist (live monorepo, when built)", () => {
+  it.each(["packages/webhooks", "packages/store-contracts"] as const)(
+    "%s/dist has no banned imports when present",
+    (pkg) => {
+      const root = join(import.meta.dir, "..");
+      const result = scanPackageDist(root, pkg);
+      if (result.skipped) {
+        expect(result.reason).toMatch(/missing|build/i);
+        return;
+      }
+      expect(result.violations).toEqual([]);
+    },
+  );
 });

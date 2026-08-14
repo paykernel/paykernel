@@ -19,7 +19,11 @@ import type {
   PaymentStatus,
 } from "./types/payment.types";
 import type { WebhookEvent } from "./types/webhook.types";
-import { attachPaymentEvent } from "./types/payment-event";
+import {
+  attachPaymentEvent,
+  isPaymentEvent,
+  PAYMENT_EVENT_SCHEMA_VERSION,
+} from "./types/payment-event";
 import type {
   CreatePaymentClientOptions,
   PaymentClientConfig,
@@ -30,7 +34,11 @@ import { HooksManager } from "./hooks/hooks.manager";
 import { MoyasarGateway } from "./gateways/moyasar/moyasar.gateway";
 import { PayPalGateway } from "./gateways/paypal/paypal.gateway";
 import { PaymobGateway } from "./gateways/paymob/paymob.gateway";
-import { StripeGateway } from "./gateways/stripe/stripe.gateway";
+import {
+  StripeGateway,
+  demoteIncompleteRefundWebhookDualWrite,
+  demoteIncompleteSettledWebhookDualWrite,
+} from "./gateways/stripe/stripe.gateway";
 import {
   createGatewayRegistry,
   type GatewayMap,
@@ -665,7 +673,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
    * 1. `onWebhookReceived` (untrusted payload; failures logged, never block)
    * 2. Signature / authenticity verification — failures call `onWebhookFailed`
    * 3. Parse / normalize — failures throw without calling `onWebhookFailed`
-   * 4. Dual-write Phase 7 `PaymentEvent` if the gateway omitted `event`
+   * 4. Dual-write Phase 7 `PaymentEvent` if `event` is missing or not v1
    * 5. `onWebhookVerified` (trusted event; failures rethrown for provider retry)
    *
    * Return type remains {@link WebhookEvent} (0.x). Prefer discrimination via
@@ -757,11 +765,21 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       );
     }
 
-    // Safety net: built-in gateways already attach PaymentEvent (with
-    // gateway-specific mapContext + payloadHash). Custom gateways may not —
-    // attach here without overwriting richer gateway dual-write.
-    if (event.event === undefined) {
+    // Safety net: built-in gateways already attach a v1 PaymentEvent (with
+    // gateway-specific mapContext + payloadHash). Rebuild when `event` is
+    // missing or not a valid schemaVersion-1 PaymentEvent. Do not overwrite
+    // richer valid dual-write. After rebuild, apply Stripe incomplete-money /
+    // incomplete-refund demotes for stripe-like snapshots (P610-SAFE-1).
+    const dualWrite = event.event;
+    if (
+      dualWrite === undefined ||
+      !isPaymentEvent(dualWrite) ||
+      dualWrite.schemaVersion !== PAYMENT_EVENT_SCHEMA_VERSION
+    ) {
       event = attachPaymentEvent(event, { computePayloadHash: true });
+      event = demoteIncompleteRefundWebhookDualWrite(
+        demoteIncompleteSettledWebhookDualWrite(event),
+      );
     }
 
     // CORE-2: hooks receive a deep clone. Mutations to status/amount/ids/stableType

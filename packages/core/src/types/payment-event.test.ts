@@ -24,6 +24,8 @@ import {
   hashWebhookPayload,
   encryptRawWebhookPayload,
   redactWebhookPayloadSecrets,
+  stripRawFromPaymentEvent,
+  WEBHOOK_PAYLOAD_SECRET_KEYS,
   assertNoSecretsInEnvelope,
   buildProviderEventMetadata,
   paymentFromWebhookEvent,
@@ -490,17 +492,32 @@ describe("mapProviderEventTypeToStable tables", () => {
       });
     }
 
-    it("free-form status approved → payment.processing (not succeeded)", () => {
-      expect(
-        mapProviderEventTypeToStable("moyasar", "unknown_event", {
-          status: "approved",
-        }),
-      ).toBe("payment.processing");
+    it("P610-MAP-1: unknown type stays provider.unmapped even when status is paid", () => {
       expect(
         mapProviderEventTypeToStable("moyasar", "unknown_event", {
           status: "paid",
         }),
-      ).toBe("payment.succeeded");
+      ).toBe("provider.unmapped");
+      expect(
+        mapProviderEventTypeToStable("moyasar", "unknown_event", {
+          status: "approved",
+        }),
+      ).toBe("provider.unmapped");
+      expect(
+        mapProviderEventTypeToStable("moyasar", "card_auth_succeeded", {
+          status: "paid",
+        }),
+      ).toBe("provider.unmapped");
+
+      const pe = webhookEventToPaymentEvent(
+        baseWebhook({
+          type: "unknown_event",
+          gateway: "moyasar",
+          status: "paid",
+        }),
+      );
+      expect(pe.type).toBe("provider.unmapped");
+      expect(pe.provider.eventType).toBe("unknown_event");
     });
   });
 
@@ -744,6 +761,20 @@ describe("mapProviderEventTypeToStable tables", () => {
         }),
       ).toBe("capture.completed");
     });
+
+    it("P610-MAP-2: unknown type stays provider.unmapped even if flags.success", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "CARD_TOKENIZED", {
+          flags: { success: true },
+        }),
+      ).toBe("provider.unmapped");
+      expect(
+        mapProviderEventTypeToStable("paymob", "UNKNOWN_CALLBACK", {
+          status: "paid",
+          flags: { success: true, isRefund: true },
+        }),
+      ).toBe("provider.unmapped");
+    });
   });
 
   it("custom gateway unknown type → provider.unmapped", () => {
@@ -864,6 +895,119 @@ describe("envelope + hash + secrets", () => {
     );
     expect((out.outer as Record<string, unknown>).keep).toBe(1);
     expect(out.hmac).toBe("[REDACTED]");
+  });
+
+  it("P610-HASH-1: redactDeep / hashWebhookPayload parse JSON strings and redact", () => {
+    const secret = "super-secret-hash-value";
+    const asString = JSON.stringify({
+      id: "1",
+      secret_token: secret,
+      amount: 10,
+    });
+    const redacted = redactWebhookPayloadSecrets(asString);
+    const redactedText =
+      typeof redacted === "string" ? redacted : JSON.stringify(redacted);
+    expect(redactedText).not.toContain(secret);
+    expect(redactedText).toContain("[REDACTED]");
+
+    const nested = {
+      wrapper: JSON.stringify({ secret_token: "nested-secret-xyz", ok: true }),
+    };
+    expect(JSON.stringify(redactWebhookPayloadSecrets(nested))).not.toContain(
+      "nested-secret-xyz",
+    );
+
+    const h1 = hashWebhookPayload(
+      JSON.stringify({ id: "1", secret_token: "a", amount: 10 }),
+    );
+    const h2 = hashWebhookPayload(
+      JSON.stringify({ id: "1", secret_token: "[REDACTED]", amount: 10 }),
+    );
+    expect(h1).toBe(h2);
+
+    // WEBHOOKS-2: string vs object digests may still differ after redaction.
+    expect(hashWebhookPayload(JSON.stringify({ id: "1", amount: 10 }))).not.toBe(
+      hashWebhookPayload({ id: "1", amount: 10 }),
+    );
+  });
+
+  it("P610-HASH-2: hashes actual Uint8Array/Buffer bytes, not length markers", () => {
+    const a = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const b = new Uint8Array([8, 7, 6, 5, 4, 3, 2, 1]);
+    expect(a.length).toBe(b.length);
+    expect(hashWebhookPayload(a)).not.toBe(hashWebhookPayload(b));
+    expect(hashWebhookPayload(a)).toBe(hashWebhookPayload(new Uint8Array(a)));
+    expect(hashWebhookPayload(a)).toBe(hashWebhookPayload(Buffer.from(a)));
+    expect(hashWebhookPayload(Buffer.from(a))).toBe(
+      hashWebhookPayload(Buffer.from(a)),
+    );
+
+    const nestedA = hashWebhookPayload({ bin: new Uint8Array([1, 2, 3]) });
+    const nestedB = hashWebhookPayload({ bin: new Uint8Array([9, 8, 7]) });
+    expect(nestedA).not.toBe(nestedB);
+  });
+
+  it("P610-RED-1: camelCase secret aliases are redacted", () => {
+    expect(WEBHOOK_PAYLOAD_SECRET_KEYS).toEqual(
+      expect.arrayContaining([
+        "clientSecret",
+        "secretToken",
+        "webhookSecret",
+        "accessToken",
+      ]),
+    );
+
+    const out = redactWebhookPayloadSecrets({
+      clientSecret: "cs_live_xxx",
+      secretToken: "st_live_xxx",
+      webhookSecret: "whsec_xxx",
+      accessToken: "tok_xxx",
+      keep: 1,
+    }) as Record<string, unknown>;
+    expect(out.clientSecret).toBe("[REDACTED]");
+    expect(out.secretToken).toBe("[REDACTED]");
+    expect(out.webhookSecret).toBe("[REDACTED]");
+    expect(out.accessToken).toBe("[REDACTED]");
+    expect(out.keep).toBe(1);
+
+    expect(
+      hashWebhookPayload({ id: "1", clientSecret: "cs_live_xxx", n: 1 }),
+    ).toBe(
+      hashWebhookPayload({ id: "1", clientSecret: "[REDACTED]", n: 1 }),
+    );
+  });
+
+  it("P610-RED-1: stripRawFromPaymentEvent strips nested nextAction.clientSecret", () => {
+    const pe = webhookEventToPaymentEvent(baseWebhook());
+    if (!("payment" in pe) || !pe.payment) throw new Error("expected payment");
+    pe.payment.clientSecret = "cs_live_top";
+    pe.payment.nextAction = {
+      type: "redirect",
+      url: "https://example.com/3ds",
+      clientSecret: "cs_live_nested",
+    };
+
+    const stripped = stripRawFromPaymentEvent(pe);
+    if (!("payment" in stripped) || !stripped.payment) {
+      throw new Error("expected payment");
+    }
+    expect(stripped.payment.clientSecret).toBeUndefined();
+    expect(
+      (stripped.payment.nextAction as { clientSecret?: string } | undefined)
+        ?.clientSecret,
+    ).toBeUndefined();
+    expect(
+      (stripped.payment.nextAction as { url?: string } | undefined)?.url,
+    ).toBe("https://example.com/3ds");
+
+    const envelope = toPersistedPaymentEventEnvelope(pe, {
+      rawForHash: { id: "1" },
+    });
+    const json = JSON.stringify(envelope);
+    expect(json).not.toContain("cs_live_top");
+    expect(json).not.toContain("cs_live_nested");
+    expect(json).toContain("https://example.com/3ds");
+    assertNoSecretsInEnvelope(envelope);
   });
 
   it("encryptRawWebhookPayload roundtrips with fake codec", async () => {

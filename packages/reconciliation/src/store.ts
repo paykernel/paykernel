@@ -69,20 +69,15 @@ export class StoreLeaseLostError extends Error {
 }
 
 /**
- * True when `error` is a lease/fencing rejection (this package's class, or any
- * Error with `name === "StoreLeaseLostError"` / `code === "lease_lost"`).
+ * True when `error` is a lease/fencing rejection.
+ *
+ * Matches this class or `name === "StoreLeaseLostError"` (portable dual copies).
+ * Does **not** match bare `{ code: "lease_lost" }` domain throws (WEBHOOKS-6
+ * / store-contracts: adapters must throw the named error).
  */
 export function isStoreLeaseLostError(error: unknown): boolean {
   if (error instanceof StoreLeaseLostError) return true;
   if (error instanceof Error && error.name === "StoreLeaseLostError") return true;
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    (error as { code: unknown }).code === "lease_lost"
-  ) {
-    return true;
-  }
   return false;
 }
 

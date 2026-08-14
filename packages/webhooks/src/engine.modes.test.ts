@@ -4,6 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import { createWebhookInboxEngine } from "./engine";
 import { createMemoryWebhookInboxStore } from "./memory-store";
+import { StoreLeaseLostError, type WebhookInboxStore } from "./store";
 import { createTestClock } from "./test-clock";
 import { NonRetryableHandlerError } from "./types";
 
@@ -224,6 +225,44 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.payloadRef).not.toContain("sig-value");
     expect(rec?.payloadRef).toContain("[REDACTED]");
     expect(rec?.payloadRef).toContain("evt_ack_redact");
+  });
+
+  it("P610-ACK-2: park lease_lost does not return parked", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const wrapped: WebhookInboxStore = {
+      claim: store.claim.bind(store),
+      renew: store.renew.bind(store),
+      complete: store.complete.bind(store),
+      fail: async () => {
+        throw new StoreLeaseLostError("ackAfterClaim park lease_lost");
+      },
+      get: store.get.bind(store),
+      listRetryable: store.listRetryable.bind(store),
+      deleteExpired: store.deleteExpired.bind(store),
+    };
+    const engine = createWebhookInboxEngine({
+      store: wrapped,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_ack2_park",
+      payloadHash: "h",
+      envelope: { id: "evt_ack2_park", type: "payment.succeeded" },
+    });
+
+    expect(outcome.outcome).not.toBe("scheduled_for_retry");
+    expect(
+      outcome.outcome === "already_processing" ||
+        (outcome.outcome === "handler_failed" &&
+          "retryable" in outcome &&
+          outcome.retryable === true),
+    ).toBe(true);
+    // Park fail did not apply — row remains claimed, not pending for workers.
+    const rec = await store.get("stripe:evt_ack2_park");
+    expect(rec?.status).toBe("claimed");
   });
 
   it("ackAfterClaim with mode inline throws at construction", () => {

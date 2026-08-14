@@ -2,19 +2,36 @@
 
 import { PaymentAbortedError, NetworkError } from "../errors";
 
+/** Duck-type AbortSignal: boolean `aborted` plus `addEventListener`. */
+function isAbortSignalLike(value: unknown): value is AbortSignal {
+  if (value == null || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as {
+    aborted?: unknown;
+    addEventListener?: unknown;
+  };
+  return (
+    typeof candidate.aborted === "boolean" &&
+    typeof candidate.addEventListener === "function"
+  );
+}
+
 /**
  * Combine multiple abort signals into one that aborts when any input aborts.
  *
- * Uses `AbortSignal.any` when available; otherwise a portable AbortController
- * fan-in polyfill. Undefined/null entries are ignored. Returns `undefined`
+ * Uses `AbortSignal.any` when available and every input is a native
+ * `AbortSignal`. Otherwise a portable AbortController fan-in polyfill.
+ * Undefined/null/non-signal entries are ignored. Returns `undefined`
  * when no signals are provided.
+ *
+ * The polyfill tracks listeners and removes them when any input aborts
+ * (including a pre-aborted input after earlier listeners were attached).
  */
 export function combineAbortSignals(
   ...signals: Array<AbortSignal | undefined | null>
 ): AbortSignal | undefined {
-  const active = signals.filter(
-    (s): s is AbortSignal => s != null && typeof s === "object",
-  );
+  const active = signals.filter(isAbortSignalLike);
 
   if (active.length === 0) {
     return undefined;
@@ -28,13 +45,19 @@ export function combineAbortSignals(
       any?: (signals: AbortSignal[]) => AbortSignal;
     }
   ).any;
-  if (typeof anyFn === "function") {
+  const allNative =
+    typeof AbortSignal !== "undefined" &&
+    active.every((s) => s instanceof AbortSignal);
+  if (typeof anyFn === "function" && allNative) {
     return anyFn.call(AbortSignal, active);
   }
 
-  // Fan-in polyfill for runtimes without AbortSignal.any
+  // Fan-in polyfill for runtimes without AbortSignal.any, or duck-typed inputs.
   const controller = new AbortController();
+  const attached: AbortSignal[] = [];
+
   const onAbort = (event: Event) => {
+    cleanup();
     if (controller.signal.aborted) {
       return;
     }
@@ -50,6 +73,15 @@ export function combineAbortSignals(
     }
   };
 
+  function cleanup(): void {
+    for (const signal of attached) {
+      if (typeof signal.removeEventListener === "function") {
+        signal.removeEventListener("abort", onAbort);
+      }
+    }
+    attached.length = 0;
+  }
+
   for (const signal of active) {
     if (signal.aborted) {
       try {
@@ -57,9 +89,11 @@ export function combineAbortSignals(
       } catch {
         controller.abort();
       }
+      cleanup();
       return controller.signal;
     }
     signal.addEventListener("abort", onAbort, { once: true });
+    attached.push(signal);
   }
 
   return controller.signal;
@@ -67,36 +101,21 @@ export function combineAbortSignals(
 
 export interface TimeoutSignalHandle {
   signal: AbortSignal;
-  /** Clear the underlying timer (no-op when using AbortSignal.timeout). */
+  /** Clear the underlying timer so the signal will not abort. */
   clear(): void;
 }
 
 /**
  * Create an AbortSignal that aborts after `timeoutMs`.
  *
- * Prefer `AbortSignal.timeout` when available (Node 18+, modern Bun/Deno);
- * otherwise AbortController + setTimeout. Uses host timers (not {@link Clock})
- * because wall-clock injection cannot drive `setTimeout` without a scheduler
- * surface — inject a custom `fetch` that honors signals for test control.
+ * Always uses AbortController + setTimeout so {@link TimeoutSignalHandle.clear}
+ * cancels the timer. `AbortSignal.timeout` is not used — its timer cannot be
+ * cancelled. Uses host timers (not {@link Clock}) because wall-clock injection
+ * cannot drive `setTimeout` without a scheduler surface — inject a custom
+ * `fetch` that honors signals for test control.
  */
 export function createTimeoutSignal(timeoutMs: number): TimeoutSignalHandle {
   const ms = Math.max(0, timeoutMs);
-
-  const timeoutFn = (
-    AbortSignal as typeof AbortSignal & {
-      timeout?: (ms: number) => AbortSignal;
-    }
-  ).timeout;
-
-  if (typeof timeoutFn === "function") {
-    return {
-      signal: timeoutFn.call(AbortSignal, ms),
-      clear() {
-        /* AbortSignal.timeout is self-contained */
-      },
-    };
-  }
-
   const controller = new AbortController();
   const timer = setTimeout(() => {
     try {
@@ -128,6 +147,12 @@ export function createTimeoutSignal(timeoutMs: number): TimeoutSignalHandle {
 }
 
 /** True when `error` looks like a fetch/abort cancellation. */
+/** True for HTTP methods that may have been accepted as a money mutation. */
+export function isMutatingHttpMethod(method: string | undefined): boolean {
+  const normalized = (method ?? "GET").toUpperCase();
+  return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
+}
+
 export function isAbortError(error: unknown): boolean {
   if (error == null || typeof error !== "object") {
     return false;
@@ -167,10 +192,23 @@ export function mapHttpAbortError(
     networkMessage: string;
     /** Message when the abort is attributed to the caller signal. */
     callerAbortMessage?: string | undefined;
+    /**
+     * When true, the request was a money mutation that may already be
+     * accepted (P610-IND-1). GET/auth preflight must leave this unset.
+     */
+    afterProviderSubmit?: boolean | undefined;
   },
 ): PaymentAbortedError | NetworkError {
+  const network = (message: string, cause?: unknown) =>
+    new NetworkError(
+      message,
+      cause,
+      options.afterProviderSubmit === true
+        ? { afterProviderSubmit: true }
+        : undefined,
+    );
   if (!isAbortError(error)) {
-    return new NetworkError(options.networkMessage, error);
+    return network(options.networkMessage, error);
   }
 
   const callerAborted = options.callerSignal?.aborted === true;
@@ -185,7 +223,7 @@ export function mapHttpAbortError(
   }
 
   if (timeoutAborted && !callerAborted) {
-    return new NetworkError(options.timeoutMessage, error);
+    return network(options.timeoutMessage, error);
   }
 
   if (callerAborted) {
@@ -196,11 +234,12 @@ export function mapHttpAbortError(
   }
 
   // Abort without a tracked caller signal → treat as timeout (legacy behavior).
-  return new NetworkError(options.timeoutMessage, error);
+  return network(options.timeoutMessage, error);
 }
 
 /**
  * Extract an AbortSignal from operation params without throwing.
+ * Accepts native signals and duck-typed objects (`aborted` boolean + `addEventListener`).
  */
 export function extractAbortSignal(
   params: unknown,
@@ -212,10 +251,7 @@ export function extractAbortSignal(
     return undefined;
   }
   const value = (params as { signal?: unknown }).signal;
-  if (typeof AbortSignal !== "undefined" && value instanceof AbortSignal) {
-    return value;
-  }
-  return undefined;
+  return isAbortSignalLike(value) ? value : undefined;
 }
 
 /**

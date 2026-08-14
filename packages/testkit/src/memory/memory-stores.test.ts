@@ -250,6 +250,106 @@ describe("createMemoryIdempotencyStore", () => {
     });
     expect((await store.get("rnw"))?.status).toBe("completed");
   });
+
+  it("classifies completed and indeterminate before fingerprint_conflict", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryIdempotencyStore({ clock });
+    const done = await store.reserve({
+      key: "term_fp",
+      fingerprint: "fp-a",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(done.kind).toBe("acquired");
+    if (done.kind !== "acquired") return;
+    await store.complete({
+      key: "term_fp",
+      leaseToken: done.leaseToken,
+      result: { ok: true },
+    });
+    const again = await store.reserve({
+      key: "term_fp",
+      fingerprint: "fp-b-different",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("already_completed");
+
+    const park = await store.reserve({
+      key: "ind_fp",
+      fingerprint: "fp-a",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(park.kind).toBe("acquired");
+    if (park.kind !== "acquired") return;
+    await store.markIndeterminate({
+      key: "ind_fp",
+      leaseToken: park.leaseToken,
+    });
+    const blocked = await store.reserve({
+      key: "ind_fp",
+      fingerprint: "fp-b-different",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(blocked.kind).toBe("indeterminate");
+  });
+
+  it("maxEntries skips active reserved and evicts terminal; refuses when all leased", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryIdempotencyStore({ clock, maxEntries: 2 });
+    const keep = await store.reserve({
+      key: "id_keep",
+      fingerprint: "fp1",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(keep.kind).toBe("acquired");
+    const done = await store.reserve({
+      key: "id_done",
+      fingerprint: "fp2",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(done.kind).toBe("acquired");
+    if (done.kind !== "acquired") return;
+    await store.complete({
+      key: "id_done",
+      leaseToken: done.leaseToken,
+      result: { ok: true },
+    });
+
+    const next = await store.reserve({
+      key: "id_new",
+      fingerprint: "fp3",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(next.kind).toBe("acquired");
+    expect((await store.get("id_keep"))?.status).toBe("reserved");
+    expect(await store.get("id_done")).toBeUndefined();
+    expect((await store.get("id_new"))?.status).toBe("reserved");
+
+    const full = createMemoryIdempotencyStore({ clock, maxEntries: 1 });
+    const only = await full.reserve({
+      key: "id_only",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(only.kind).toBe("acquired");
+    await expect(
+      full.reserve({
+        key: "id_overflow",
+        fingerprint: "fp2",
+        owner: "w2",
+        leaseMs: 5_000,
+      }),
+    ).rejects.toThrow(/active lease|capacity/i);
+    expect((await full.get("id_only"))?.status).toBe("reserved");
+    expect(await full.get("id_overflow")).toBeUndefined();
+  });
 });
 
 describe("createMemoryWebhookInboxStore", () => {
@@ -375,6 +475,121 @@ describe("createMemoryWebhookInboxStore", () => {
       expect(late.record.attempts).toBe(1);
     }
   });
+
+  it("WEBHOOKS-2: fail after lease expiry with matching token records pending", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_fail_exp",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    expect(a.record.attempts).toBe(1);
+    clock.advance(1_001);
+    // Do not get/listRetryable first — those soft-release and would drop the token.
+    await store.fail({
+      key: "e_fail_exp",
+      leaseToken: a.leaseToken,
+      error: "handler_timeout",
+      retryAfterMs: 5_000,
+    });
+    const after = await store.get("e_fail_exp");
+    expect(after?.status).toBe("pending");
+    expect(after?.attempts).toBe(1);
+    expect(after?.lastError).toBe("handler_timeout");
+  });
+
+  it("WEBHOOKS-2: fail({ deadLetter: true }) after expiry records dead_letter", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_fail_dl_exp",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    clock.advance(1_001);
+    await store.fail({
+      key: "e_fail_dl_exp",
+      leaseToken: a.leaseToken,
+      error: "poison",
+      deadLetter: true,
+    });
+    expect((await store.get("e_fail_dl_exp"))?.status).toBe("dead_letter");
+  });
+
+  it("complete after lease expiry still requires an active lease", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_complete_exp",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    clock.advance(1_001);
+    await expect(
+      store.complete({ key: "e_complete_exp", leaseToken: a.leaseToken }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+  });
+
+  it("maxEntries skips active claimed and evicts terminal; refuses when all leased", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock, maxEntries: 2 });
+    const keep = await store.claim({
+      key: "wh_keep",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(keep.kind).toBe("acquired");
+    const done = await store.claim({
+      key: "wh_done",
+      payloadHash: "h2",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(done.kind).toBe("acquired");
+    if (done.kind !== "acquired") return;
+    await store.complete({ key: "wh_done", leaseToken: done.leaseToken });
+
+    const next = await store.claim({
+      key: "wh_new",
+      payloadHash: "h3",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(next.kind).toBe("acquired");
+    expect((await store.get("wh_keep"))?.status).toBe("claimed");
+    expect(await store.get("wh_done")).toBeUndefined();
+    expect((await store.get("wh_new"))?.status).toBe("claimed");
+
+    const full = createMemoryWebhookInboxStore({ clock, maxEntries: 1 });
+    const only = await full.claim({
+      key: "wh_only",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(only.kind).toBe("acquired");
+    await expect(
+      full.claim({
+        key: "wh_overflow",
+        payloadHash: "h2",
+        owner: "w2",
+        leaseMs: 5_000,
+      }),
+    ).rejects.toThrow(/active lease|capacity/i);
+    expect((await full.get("wh_only"))?.status).toBe("claimed");
+    expect(await full.get("wh_overflow")).toBeUndefined();
+  });
 });
 
 describe("createMemoryReconciliationStore", () => {
@@ -467,5 +682,70 @@ describe("createMemoryReconciliationStore", () => {
     // Soft-release must persist for subsequent get.
     const got = await store.get("r_list_soft");
     expect(got?.status).toBe("scheduled");
+  });
+
+  it("maxEntries skips active claimed and evicts terminal; refuses when all leased", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock, maxEntries: 2 });
+    await store.schedule({
+      key: "r_keep",
+      subjectId: "p1",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    await store.schedule({
+      key: "r_done",
+      subjectId: "p2",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    const keep = await store.claim({
+      key: "r_keep",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(keep.kind).toBe("acquired");
+    const done = await store.claim({
+      key: "r_done",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(done.kind).toBe("acquired");
+    if (done.kind !== "acquired") return;
+    await store.complete({ key: "r_done", leaseToken: done.leaseToken });
+
+    await store.schedule({
+      key: "r_new",
+      subjectId: "p3",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    expect((await store.get("r_keep"))?.status).toBe("claimed");
+    expect(await store.get("r_done")).toBeUndefined();
+    expect((await store.get("r_new"))?.status).toBe("scheduled");
+
+    const full = createMemoryReconciliationStore({ clock, maxEntries: 1 });
+    await full.schedule({
+      key: "r_only",
+      subjectId: "p",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    const only = await full.claim({
+      key: "r_only",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(only.kind).toBe("acquired");
+    await expect(
+      full.schedule({
+        key: "r_overflow",
+        subjectId: "p2",
+        reason: "x",
+        dueAt: clock.nowIso(),
+      }),
+    ).rejects.toThrow(/active lease|capacity/i);
+    expect((await full.get("r_only"))?.status).toBe("claimed");
+    expect(await full.get("r_overflow")).toBeUndefined();
   });
 });

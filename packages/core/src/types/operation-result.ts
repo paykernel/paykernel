@@ -281,8 +281,12 @@ export function paymentFromGatewayResult(
  *   (still not {@link isPaidOutcome}).
  * - Partial capture: gateways may set `outcome: requires_action` with status
  *   `partially_captured` (CORE-1); Phase-6 must not upgrade that to succeeded.
+ *   Bare `{ success: true, status: 'partially_captured' }` (no outcome) also
+ *   infers `requires_action` — open money is not a settled operation.
  * - Bare pending/processing without action still → `requires_action` so callers
  *   never fulfill on non-terminal state.
+ * - `success: false` + pending/processing/approved → `indeterminate` (not
+ *   `failed`): the mutation may have been accepted; do not forge a decline.
  */
 export function inferOperationOutcome(
     result: GatewayPaymentResult,
@@ -330,6 +334,15 @@ export function inferOperationOutcome(
         if (result.status === "failed") {
             return "declined";
         }
+        // P610-INF-2: non-terminal / pre-capture with API-not-ok is uncertain
+        // (request may have been accepted). Do not forge a definitive failure.
+        if (
+            result.status === "pending" ||
+            result.status === "processing" ||
+            result.status === "approved"
+        ) {
+            return "indeterminate";
+        }
         return "failed";
     }
 
@@ -341,11 +354,12 @@ export function inferOperationOutcome(
     if (
         result.status === "pending" ||
         result.status === "processing" ||
-        result.status === "approved"
+        result.status === "approved" ||
+        result.status === "partially_captured"
     ) {
-        // Non-terminal / pre-capture approval: never succeeded. Prefer
-        // requires_action so fulfillment gates stay closed (clientSecret, bare
-        // pending intention, PayPal buyer APPROVED before capture, etc.).
+        // Non-terminal / pre-capture / open partial capture: never succeeded.
+        // Prefer requires_action so fulfillment gates stay closed (clientSecret,
+        // bare pending intention, PayPal buyer APPROVED, leftover auth, etc.).
         return "requires_action";
     }
 
@@ -357,12 +371,15 @@ export function inferOperationOutcome(
     return "failed";
 }
 
-/** Statuses where API success implies operation outcome `succeeded`. */
+/**
+ * Statuses where API success implies operation outcome `succeeded`.
+ * Outcome-only: `isPaidOutcome` remains `paid` exclusively.
+ * `partially_captured` is open money — not settled-success.
+ */
 function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean {
     return (
         status === "paid" ||
         status === "authorized" ||
-        status === "partially_captured" ||
         status === "refunded" ||
         status === "partially_refunded"
     );
@@ -550,6 +567,10 @@ export type ApplyOutcomeGatewayBase = {
  * | `failed`           | `false` | Definitive failure |
  * | `indeterminate`    | `false` | **Not** a decline — always set `reconciliationRequired: true` |
  *
+ * `reconciliationRequired` is attached **only** for `outcome: 'indeterminate'`.
+ * After apply, stored `outcome` matches {@link inferOperationOutcome} (do not
+ * attach recon on a non-indeterminate write — that would flip infer).
+ *
  * **Do not fulfill on `success` alone.** Use {@link isPaidOutcome} or
  * `outcome === 'succeeded'` with a paid-like {@link PaymentStatus}.
  */
@@ -559,6 +580,12 @@ export function applyOutcomeToGatewayResult(
     extras?: {
         decline?: PaymentDecline;
         action?: PaymentAction;
+        /**
+         * Ignored unless `outcome` is `indeterminate`. Never attach
+         * `reconciliationRequired` on a settled/action/decline/failed write —
+         * that would make {@link inferOperationOutcome} disagree with stored
+         * `outcome`.
+         */
         reconciliationRequired?: boolean;
     },
 ): GatewayPaymentResult {
@@ -639,9 +666,10 @@ export function applyOutcomeToGatewayResult(
         result.decline = decline;
     }
 
+    // Only the indeterminate arm is a reconciliation signal. Attaching the
+    // flag on any other outcome makes infer() return indeterminate while
+    // stored `outcome` stays something else (dual-write lie).
     if (outcome === "indeterminate") {
-        result.reconciliationRequired = true;
-    } else if (extras?.reconciliationRequired === true) {
         result.reconciliationRequired = true;
     }
 
@@ -826,6 +854,10 @@ export function applyOutcomeToGatewayRefundResult(
     base: ApplyOutcomeGatewayRefundBase,
     outcome: RefundOperationOutcome,
     extras?: {
+        /**
+         * Ignored unless `outcome` is `indeterminate`. Never attach
+         * `reconciliationRequired` on a succeeded/pending/failed write.
+         */
         reconciliationRequired?: boolean;
     },
 ): GatewayRefundResult {
@@ -851,11 +883,57 @@ export function applyOutcomeToGatewayRefundResult(
 
     if (outcome === "indeterminate") {
         result.reconciliationRequired = true;
-    } else if (extras?.reconciliationRequired === true) {
-        result.reconciliationRequired = true;
     }
 
     return result;
+}
+
+/**
+ * Payment snapshot when a mutation left the process with no settled provider
+ * response (timeout / drop / 5xx after POST). Callers must reconcile — do not
+ * retry the mutation as a fresh failure.
+ */
+export function applyIndeterminatePaymentOutcome(input: {
+    gateway: string;
+    gatewayId: string;
+    message: string;
+    errorName: string;
+}): GatewayPaymentResult {
+    return applyOutcomeToGatewayResult(
+        {
+            gatewayId: input.gatewayId,
+            status: "processing",
+            rawResponse: {
+                indeterminate: true,
+                message: input.message,
+                name: input.errorName,
+            },
+            gateway: input.gateway,
+        },
+        "indeterminate",
+    );
+}
+
+/**
+ * Refund twin of {@link applyIndeterminatePaymentOutcome}.
+ */
+export function applyIndeterminateRefundOutcome(input: {
+    gatewayRefundId: string;
+    message: string;
+    errorName: string;
+}): GatewayRefundResult {
+    return applyOutcomeToGatewayRefundResult(
+        {
+            gatewayRefundId: input.gatewayRefundId,
+            status: "pending",
+            rawResponse: {
+                indeterminate: true,
+                message: input.message,
+                name: input.errorName,
+            },
+        },
+        "indeterminate",
+    );
 }
 
 /**

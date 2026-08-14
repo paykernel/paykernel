@@ -40,6 +40,9 @@ import {
   toPersistedPaymentEventEnvelope,
   hashWebhookPayload,
   encryptRawWebhookPayload,
+  redactWebhookPayloadSecrets,
+  stripRawFromPaymentEvent,
+  WEBHOOK_PAYLOAD_SECRET_KEYS,
   assertNoSecretsInEnvelope,
   buildProviderEventMetadata,
 } from "./index";
@@ -275,7 +278,8 @@ describe("Phase 7 AC — handlers receive discriminated events", () => {
       },
     });
 
-    // Minimal fixture shape matches moyasar.gateway tests (verify + parse).
+    // Minimal fixture matches moyasar.gateway tests (verify + parse).
+    // Finite `captured` is required for paid-like (P610-MOY-2).
     const payload = {
       id: "evt_hw_1",
       type: "payment_paid",
@@ -286,6 +290,7 @@ describe("Phase 7 AC — handlers receive discriminated events", () => {
         id: "pay_hw_1",
         status: "paid",
         amount: 1000,
+        captured: 1000,
         currency: "SAR",
         metadata: { paymentId: "order_hw_1" },
       },
@@ -525,6 +530,69 @@ describe("Phase 7 AC — sanitized envelope + raw retention", () => {
     expect(envJson).not.toContain(record.ciphertext);
     assertNoSecretsInEnvelope(envelope);
   });
+
+  it("P610-HASH-1: JSON string payloads are parsed and redacted before hash", () => {
+    const secret = "accept-secret-in-json-string";
+    const asString = JSON.stringify({
+      id: "evt",
+      secret_token: secret,
+      n: 1,
+    });
+    const redacted = redactWebhookPayloadSecrets(asString);
+    const text = typeof redacted === "string" ? redacted : JSON.stringify(redacted);
+    expect(text).not.toContain(secret);
+    expect(hashWebhookPayload(asString)).toBe(
+      hashWebhookPayload(
+        JSON.stringify({ id: "evt", secret_token: "[REDACTED]", n: 1 }),
+      ),
+    );
+    expect(hashWebhookPayload(asString)).not.toBe(
+      hashWebhookPayload({ id: "evt", secret_token: secret, n: 1 }),
+    );
+  });
+
+  it("P610-HASH-2: same-length binary payloads hash by bytes, not length", () => {
+    const a = new Uint8Array(8).fill(1);
+    const b = new Uint8Array(8).fill(2);
+    expect(hashWebhookPayload(a)).not.toBe(hashWebhookPayload(b));
+    expect(hashWebhookPayload(a)).toBe(hashWebhookPayload(Buffer.from(a)));
+  });
+
+  it("P610-RED-1: camelCase aliases + nextAction.clientSecret never persist", () => {
+    expect(WEBHOOK_PAYLOAD_SECRET_KEYS).toEqual(
+      expect.arrayContaining([
+        "clientSecret",
+        "secretToken",
+        "webhookSecret",
+        "accessToken",
+      ]),
+    );
+
+    const pe = webhookEventToPaymentEvent(baseWebhook());
+    if (!("payment" in pe) || !pe.payment) throw new Error("expected payment");
+    pe.payment.clientSecret = "cs_live_top";
+    pe.payment.nextAction = {
+      type: "redirect",
+      url: "https://example.com/3ds",
+      clientSecret: "cs_live_nested",
+    };
+    const stripped = stripRawFromPaymentEvent(pe);
+    if (!("payment" in stripped) || !stripped.payment) {
+      throw new Error("expected payment");
+    }
+    expect(
+      (stripped.payment.nextAction as { clientSecret?: string } | undefined)
+        ?.clientSecret,
+    ).toBeUndefined();
+
+    const envelope = toPersistedPaymentEventEnvelope(pe, {
+      rawForHash: { clientSecret: "cs_live_hash", keep: true },
+    });
+    const json = JSON.stringify(envelope);
+    expect(json).not.toContain("cs_live_top");
+    expect(json).not.toContain("cs_live_nested");
+    assertNoSecretsInEnvelope(envelope);
+  });
 });
 
 // ─── 7: Mapping policy ───────────────────────────────────────────────────────
@@ -588,6 +656,13 @@ describe("Phase 7 AC — mapping never invents payment.succeeded", () => {
       expectUnmapped: true,
     },
     {
+      gateway: "moyasar",
+      type: "unknown_event",
+      mapStatus: "paid",
+      webhookStatus: "paid",
+      expectUnmapped: true,
+    },
+    {
       gateway: "acme",
       type: "order.paid",
       mapStatus: "paid",
@@ -629,6 +704,37 @@ describe("Phase 7 AC — mapping never invents payment.succeeded", () => {
     expect(
       mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED"),
     ).not.toBe("payment.succeeded");
+  });
+
+  it("P610-MAP-1: Moyasar unknown type + paid is provider.unmapped, not payment.succeeded", () => {
+    expect(
+      mapProviderEventTypeToStable("moyasar", "unknown_event", {
+        status: "paid",
+      }),
+    ).toBe("provider.unmapped");
+    const pe = webhookEventToPaymentEvent(
+      baseWebhook({
+        type: "unknown_event",
+        gateway: "moyasar",
+        status: "paid",
+      }),
+    );
+    expect(pe.type).toBe("provider.unmapped");
+    expect(pe.provider.eventType).toBe("unknown_event");
+  });
+
+  it("P610-MAP-2: Paymob unknown type + flags.success is provider.unmapped", () => {
+    expect(
+      mapProviderEventTypeToStable("paymob", "CARD_TOKENIZED", {
+        flags: { success: true },
+      }),
+    ).toBe("provider.unmapped");
+    expect(
+      mapProviderEventTypeToStable("paymob", "UNKNOWN_CALLBACK", {
+        status: "paid",
+        flags: { success: true },
+      }),
+    ).toBe("provider.unmapped");
   });
 });
 

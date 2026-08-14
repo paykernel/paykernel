@@ -82,6 +82,10 @@ export type IdempotencyReserveDecision =
 /**
  * Decide reserve outcome for idempotency.
  * On acquire: generation = prior+1 (or 1), attempts = prior+1 (or 1).
+ *
+ * Classification order: `completed` / `indeterminate` **before**
+ * `fingerprint_conflict` so a terminal or A4-parked row re-used with a
+ * different digest still blocks replay (does not look like a conflict).
  */
 export function decideIdempotencyReserve(
   input: IdempotencyReserveInput,
@@ -105,14 +109,14 @@ export function decideIdempotencyReserve(
     };
   }
 
-  if (existing.fingerprint !== input.fingerprint) {
-    return { kind: "fingerprint_conflict" };
-  }
   if (existing.status === "completed") {
     return { kind: "already_completed" };
   }
   if (existing.status === "indeterminate") {
     return { kind: "indeterminate" };
+  }
+  if (existing.fingerprint !== input.fingerprint) {
+    return { kind: "fingerprint_conflict" };
   }
   if (existing.status === "reserved" && isLeaseActive(existing.leaseExpiresAt, clock.nowMs)) {
     return { kind: "in_progress" };
@@ -557,8 +561,9 @@ export type LeaseMutationInput = {
   leaseExpiresAt: string | null | undefined;
   nowMs: number;
   /**
-   * For renew: whether to require unexpired lease (default true).
-   * Complete/fail always require active lease.
+   * When false, matching token + expected status is enough even if the lease
+   * clock has passed (webhook `fail` WEBHOOKS-2 / `markIndeterminate` A4).
+   * Default true: `complete` / `renew` require an unexpired lease.
    */
   requireActiveLease?: boolean;
 };
@@ -572,11 +577,16 @@ export type LeaseMutationDecision =
 
 /**
  * Pure fencing decision for lease-gated mutators (complete/fail/renew/…).
- * Stale, wrong, or expired tokens → lease_lost; missing row → not_found;
+ * Stale or wrong tokens → lease_lost; missing row → not_found;
  * unexpected status → wrong_status.
  *
+ * `complete` / `renew` pass `requireActiveLease: true` (default).
+ * Webhook `fail` and `markIndeterminate` may pass `requireActiveLease: false`
+ * so matching token + claimed/reserved succeeds after expiry (WEBHOOKS-2 / A4).
+ *
  * Adapters MUST re-check this condition in the same atomic write as the status
- * transition (WHERE lease_token = $tok AND lease_expires_at > $now AND status = …).
+ * transition (WHERE lease_token = $tok AND status = …, plus lease_expires_at > $now
+ * when an active lease is required).
  */
 export function decideLeaseMutation(input: LeaseMutationInput): LeaseMutationDecision {
   if (!input.exists) {

@@ -60,6 +60,7 @@ import {
   combineAbortSignals,
   createTimeoutSignal,
   extractAbortSignal,
+  isMutatingHttpMethod,
   mapHttpAbortError,
 } from "../../runtime/abort";
 
@@ -681,7 +682,7 @@ export class PayPalGateway extends BaseGateway {
         // success remains true for pending API outcomes via requires_action dual-write;
         // callers must require outcome succeeded + status paid before fulfill.
         // Terminal failed statuses set success:false (outcome declined).
-        // partially_captured is operation-succeeded but not isPaidOutcome.
+        // partially_captured dual-writes requires_action (not succeeded).
         if (status === "pending") {
           this.logger.warn(
             "[PayPal] Capture returned pending status; do not fulfill until status is paid (webhook or poll)",
@@ -1326,10 +1327,13 @@ export class PayPalGateway extends BaseGateway {
     const attached = attachPaymentEvent(event, { computePayloadHash: true });
     // Non-final / partial captures must not dual-write fulfillment-ready types.
     // Demote to payment.processing so type-only handlers match isPaidOutcome.
+    // Incomplete refund_completed must dual-write refund.pending (not completed).
     // PAYPAL-5: AUTHORIZATION.CAPTURED without a capture id must not dual-write
     // capture.completed against a non-refundable authorization id.
     return this.demoteAuthCapturedWithoutCaptureId(
-      this.demotePartialCaptureWebhookDualWrite(attached),
+      this.demoteIncompleteRefundWebhookDualWrite(
+        this.demotePartialCaptureWebhookDualWrite(attached),
+      ),
       captureId,
     );
   }
@@ -1610,8 +1614,9 @@ export class PayPalGateway extends BaseGateway {
 
   /**
    * Map normalized PayPal payment status to operation outcome.
-   * Approval redirects, buyer `approved` (pre-capture), and pending captures
-   * are never `succeeded` — align with webhook `payment.processing` for APPROVED.
+   * Approval redirects, buyer `approved` (pre-capture), pending captures,
+   * and non-final `partially_captured` slices are never `succeeded`.
+   * Reversals are not charge success (`failed`).
    */
   private mapPayPalOutcome(
     status: PaymentStatus,
@@ -1624,17 +1629,19 @@ export class PayPalGateway extends BaseGateway {
       (typeof redirectUrl === "string" && redirectUrl.length > 0) ||
       status === "pending" ||
       status === "processing" ||
-      status === "approved"
+      status === "approved" ||
+      status === "partially_captured"
     ) {
       // Buyer APPROVED = pre-capture; funds not settled. Keep requires_action
       // so isPaidOutcome / poll helpers cannot treat approval as fulfillment.
+      // Non-final partial captures stay open (more may follow on the auth).
       return "requires_action";
     }
-    if (status === "cancelled") {
-      // voidPayment forces succeeded; other VOIDED reads are not charge success.
+    if (status === "cancelled" || status === "reversed") {
+      // voidPayment forces succeeded; VOIDED / REVERSED reads are not charge success.
       return "failed";
     }
-    // paid | authorized | partially_captured | refunded
+    // paid | authorized | refunded
     return "succeeded";
   }
 
@@ -1655,9 +1662,13 @@ export class PayPalGateway extends BaseGateway {
    * Get OAuth access token for PayPal API
    * Uses promise-based singleton to prevent race conditions
    */
-  private async getAccessToken(): Promise<string> {
-    // Return cached token if still valid
-    if (this.accessToken && this.tokenExpiry && this.tokenExpiry > new Date()) {
+  private async getAccessToken(callerSignal?: AbortSignal): Promise<string> {
+    // Return cached token if still valid (injectable clock, not wall `Date`).
+    if (
+      this.accessToken &&
+      this.tokenExpiry &&
+      this.tokenExpiry.getTime() > this.clock.nowMs()
+    ) {
       return this.accessToken;
     }
 
@@ -1667,7 +1678,7 @@ export class PayPalGateway extends BaseGateway {
     }
 
     // Start new token fetch
-    this.tokenFetchPromise = this.fetchAccessToken();
+    this.tokenFetchPromise = this.fetchAccessToken(callerSignal);
 
     try {
       return await this.tokenFetchPromise;
@@ -1693,7 +1704,7 @@ export class PayPalGateway extends BaseGateway {
       return { ...init, signal: callerSignal };
     };
 
-    let token = await this.getAccessToken();
+    let token = await this.getAccessToken(callerSignal);
     let response = await this.performFetch(url, withSignal(initFactory(token)));
 
     if (response.status !== 401) {
@@ -1701,7 +1712,7 @@ export class PayPalGateway extends BaseGateway {
     }
 
     this.invalidateAccessToken();
-    token = await this.getAccessToken();
+    token = await this.getAccessToken(callerSignal);
     response = await this.performFetch(url, withSignal(initFactory(token)));
     return response;
   }
@@ -1709,12 +1720,11 @@ export class PayPalGateway extends BaseGateway {
   /**
    * Fetch new access token from PayPal
    */
-  private async fetchAccessToken(): Promise<string> {
+  private async fetchAccessToken(callerSignal?: AbortSignal): Promise<string> {
     const credentials = btoa(
       `${this.paypalConfig.clientId}:${this.paypalConfig.clientSecret}`,
     );
 
-    // Token acquisition uses timeout only (shared across concurrent ops).
     const response = await this.performFetch(`${this.baseUrl}/v1/oauth2/token`, {
       method: "POST",
       headers: {
@@ -1722,6 +1732,7 @@ export class PayPalGateway extends BaseGateway {
         Authorization: `Basic ${credentials}`,
       },
       body: "grant_type=client_credentials",
+      ...(callerSignal !== undefined ? { signal: callerSignal } : {}),
     });
 
     const data = await this.parseJsonResponse<PayPalTokenResponse>(response);
@@ -1804,9 +1815,17 @@ export class PayPalGateway extends BaseGateway {
     const signal = combineAbortSignals(callerSignal, timeoutSignal);
 
     try {
-      return await this.fetch(url, {
+      const response = await this.fetch(url, {
         ...init,
         ...(signal !== undefined ? { signal } : {}),
+      });
+      // Keep timeout armed until the body is buffered (Stripe shape).
+      // Hung body reads must abort; callers then parse a replayable buffer.
+      const text = await response.text();
+      return new Response(text === "" ? null : text, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
       });
     } catch (error) {
       throw mapHttpAbortError(error, {
@@ -1815,6 +1834,10 @@ export class PayPalGateway extends BaseGateway {
         timeoutMessage: `PayPal API request timed out after ${timeoutMs}ms`,
         networkMessage: "PayPal network request failed",
         callerAbortMessage: "PayPal API request aborted by caller signal",
+        afterProviderSubmit:
+          isMutatingHttpMethod(
+            typeof init.method === "string" ? init.method : undefined,
+          ) && !url.includes("/v1/oauth2/token"),
       });
     } finally {
       clear();
@@ -3285,6 +3308,41 @@ export class PayPalGateway extends BaseGateway {
   ): boolean | undefined {
     const value = (resource as { final_capture?: unknown }).final_capture;
     return typeof value === "boolean" ? value : undefined;
+  }
+
+  /**
+   * Incomplete refund snapshots (`status === refund_completed`) must not
+   * dual-write `refund.completed` — type-only handlers would mark captures
+   * fully refunded from a this-op refund event (P610-PP-3).
+   * Stripe/Moyasar/Paymob: domain keeps incomplete marker; stable dual-write
+   * is `refund.pending`. Proven full/partial keep `refund.completed`.
+   * Provider-native `event.type` / `provider.eventType` stay unchanged.
+   */
+  private demoteIncompleteRefundWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (
+      event.status !== "refund_completed" ||
+      event.stableType !== "refund.completed" ||
+      !event.event ||
+      event.event.type !== "refund.completed" ||
+      !event.provider
+    ) {
+      return event;
+    }
+
+    const refund = event.event.refund;
+
+    return {
+      ...event,
+      stableType: "refund.pending",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "refund.pending",
+        refund,
+        provider: event.provider,
+      },
+    };
   }
 
   /**

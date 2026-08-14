@@ -132,7 +132,8 @@ export function isPaymentDomainStatus(
  * Statuses that mean money is settled / successfully captured for fulfillment.
  *
  * **Paid-like = funds captured/settled for ship-goods decisions.**
- * Does **not** include buyer approval (`approved`) or auth holds (`authorized`).
+ * Does **not** include buyer approval (`approved`), auth holds (`authorized`),
+ * or open partial captures (`partially_captured`).
  * PayPal order `APPROVED` is pre-capture; use capture/`paid` before fulfilling.
  */
 export const PAID_LIKE_PAYMENT_STATUSES = [
@@ -143,8 +144,9 @@ const PAID_LIKE_SET: ReadonlySet<string> = new Set(PAID_LIKE_PAYMENT_STATUSES);
 
 /**
  * True when a payment-domain (or legacy PaymentStatus) string is in the paid-like set.
- * Does **not** treat `authorized` or `approved` as paid — auth holds and buyer
- * approval are reserved / pre-capture, not settled for fulfillment.
+ * Does **not** treat `authorized`, `approved`, or `partially_captured` as paid —
+ * auth holds, buyer approval, and open partial captures are not settled for
+ * fulfillment.
  */
 export function isPaidLikePaymentStatus(status: string): boolean {
     return PAID_LIKE_SET.has(status);

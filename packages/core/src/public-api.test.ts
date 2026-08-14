@@ -157,6 +157,8 @@ describe("public API runtime surface", () => {
         ["mapGatewayResultToOperationResult", sdk.mapGatewayResultToOperationResult],
         ["applyOutcomeToGatewayResult", sdk.applyOutcomeToGatewayResult],
         ["applyOutcomeToGatewayRefundResult", sdk.applyOutcomeToGatewayRefundResult],
+        ["applyIndeterminatePaymentOutcome", sdk.applyIndeterminatePaymentOutcome],
+        ["applyIndeterminateRefundOutcome", sdk.applyIndeterminateRefundOutcome],
         ["successFromOutcome", sdk.successFromOutcome],
         ["isPaidOutcome", sdk.isPaidOutcome],
         ["isRequiresActionOutcome", sdk.isRequiresActionOutcome],
@@ -207,7 +209,7 @@ describe("public API runtime surface", () => {
         ["operationContextToTelemetryData", sdk.operationContextToTelemetryData],
       ];
 
-      expect(runtimeExports).toHaveLength(149);
+      expect(runtimeExports).toHaveLength(151);
       for (const [exportName, value] of runtimeExports) {
         expect(value, exportName).toBeDefined();
         expect(sdk).toHaveProperty(exportName);

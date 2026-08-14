@@ -18,7 +18,12 @@ import {
     InvalidRequestError,
     PaymentError,
     OperationNotSupportedError,
+    NetworkError,
 } from '../errors';
+import {
+    applyIndeterminatePaymentOutcome,
+    applyIndeterminateRefundOutcome,
+} from '../types/operation-result';
 import { createRedactingLogger, noopLogger, type Logger } from '../utils/logger';
 import type { Clock } from '../runtime/clock';
 import type {
@@ -429,6 +434,20 @@ export abstract class BaseGateway implements PaymentGateway {
             // Map to standardized error
             const mappedError = this.mapError(error);
 
+            // P610-IND-1: fetch timeout / 5xx / connection drop after a mutating
+            // POST may have been accepted by the provider. Return an explicit
+            // indeterminate arm instead of throwing NetworkError (which callers
+            // treat as "failed — retry create"). Queries still throw.
+            const indeterminate = tryIndeterminateFromNetworkError(
+                operation,
+                finalParams,
+                mappedError,
+                this.name,
+            );
+            if (indeterminate !== undefined) {
+                return indeterminate as R;
+            }
+
             // Error hooks are secondary: log failures but always rethrow the mapped error
             try {
                 await this.hooks.runError(ctx, mappedError);
@@ -531,4 +550,64 @@ export abstract class BaseGateway implements PaymentGateway {
      * Phase 7 PaymentEvent via `attachPaymentEvent` (see built-in gateways).
      */
     abstract parseWebhookEvent(payload: unknown): WebhookEvent;
+}
+
+function isPostSubmitMoneyMutation(operation: OperationType): boolean {
+    return (
+        operation === "createPayment" ||
+        operation === "authorizePayment" ||
+        operation === "capturePayment" ||
+        operation === "refundPayment" ||
+        operation === "voidPayment" ||
+        operation === "confirmStcPayOtp"
+    );
+}
+
+function providerObjectIdFromParams(params: unknown): string {
+    if (params === null || typeof params !== "object") {
+        return "unknown";
+    }
+    const record = params as Record<string, unknown>;
+    if (
+        typeof record.gatewayPaymentId === "string" &&
+        record.gatewayPaymentId.length > 0
+    ) {
+        return record.gatewayPaymentId;
+    }
+    if (typeof record.orderId === "string" && record.orderId.length > 0) {
+        return record.orderId;
+    }
+    return "unknown";
+}
+
+/**
+ * Convert a post-submit NetworkError on a money mutation into the Phase 6
+ * indeterminate result. Returns undefined for queries, aborts, and non-network errors.
+ */
+function tryIndeterminateFromNetworkError(
+    operation: OperationType,
+    params: unknown,
+    error: Error,
+    gateway: string,
+): GatewayPaymentResult | GatewayRefundResult | undefined {
+    if (!(error instanceof NetworkError) || error.afterProviderSubmit !== true) {
+        return undefined;
+    }
+    if (!isPostSubmitMoneyMutation(operation)) {
+        return undefined;
+    }
+    const providerObjectId = providerObjectIdFromParams(params);
+    if (operation === "refundPayment") {
+        return applyIndeterminateRefundOutcome({
+            gatewayRefundId: providerObjectId,
+            message: error.message,
+            errorName: error.name,
+        });
+    }
+    return applyIndeterminatePaymentOutcome({
+        gateway,
+        gatewayId: providerObjectId,
+        message: error.message,
+        errorName: error.name,
+    });
 }

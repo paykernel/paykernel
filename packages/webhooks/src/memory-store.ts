@@ -43,6 +43,10 @@ export type MemoryWebhookInboxStore = WebhookInboxStore & {
 
 export type CreateMemoryWebhookInboxStoreOptions = {
   clock?: MemoryClock;
+  /**
+   * Test-only cap. Must not evict `claimed` rows with an active lease —
+   * skip those victims or refuse the new write.
+   */
   maxEntries?: number;
 };
 
@@ -123,9 +127,18 @@ export function createMemoryWebhookInboxStore(
     if (maxEntries === undefined) return;
     if (entries.has(newKey)) return;
     while (entries.size >= maxEntries) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
+      let victim: WebhookEventKey | undefined;
+      for (const [key, rec] of entries) {
+        if (rec.status === "claimed" && isLeaseActive(rec, clock)) continue;
+        victim = key;
+        break;
+      }
+      if (victim === undefined) {
+        throw new Error(
+          "memory store at capacity: refusing to evict claimed row with active lease",
+        );
+      }
+      entries.delete(victim);
     }
   }
 

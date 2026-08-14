@@ -33,7 +33,9 @@
  *   `markIndeterminate`, `markManualReview`) **requires the current `leaseToken`**.
  * - Wrong/stale tokens (and tokens after reclaim/renew) → `StoreLeaseLostError`
  *   (or renew `{ ok: false, reason: "lease_lost" }`).
- * - `complete` / `fail` / `renew` typically also require an **unexpired** lease.
+ * - `complete` / `renew` require an **unexpired** lease.
+ * - Webhook `fail` succeeds with matching token + `status === "claimed"` even
+ *   after expiry (WEBHOOKS-2). Soft-release is get/listRetryable only.
  * - `markIndeterminate` is intentionally more permissive for A4 near-expiry parking:
  *   production SQL/Redis accept `status === "reserved"` + matching token even when
  *   the lease clock has passed, as long as the row has not been reclaimed. After
@@ -220,12 +222,24 @@ export class StorePayloadHashConflictError extends StoreError {
 }
 
 /**
- * True when `error` is a lease/fencing rejection (subclass or `StoreError` with
- * `code: "lease_lost"`). Used by conformance suites so adapters need not subclass
- * if they throw a plain {@link StoreError}.
+ * True when `error` is a lease/fencing rejection.
+ *
+ * **Adapters MUST throw `name === "StoreLeaseLostError"`** (prefer this
+ * subclass or a dual-package copy). Conformance also accepts a plain
+ * {@link StoreError} with `code: "lease_lost"`.
+ *
+ * Matches:
+ * - {@link StoreLeaseLostError} instances
+ * - Errors with `name === "StoreLeaseLostError"` (portable dual copies)
+ * - {@link StoreError} with `code: "lease_lost"`
+ *
+ * The webhook engine (`@paykernel/webhooks`) does **not** treat a bare
+ * `{ code: "lease_lost" }` domain throw as fencing (WEBHOOKS-6): handlers
+ * that reuse that code must still reach `store.fail`.
  */
 export function isStoreLeaseLostError(error: unknown): boolean {
   if (error instanceof StoreLeaseLostError) return true;
+  if (error instanceof Error && error.name === "StoreLeaseLostError") return true;
   return error instanceof StoreError && error.code === "lease_lost";
 }
 
@@ -352,6 +366,7 @@ export type MarkIndeterminateInput = {
  * `kind: "indeterminate"` and does not issue a lease. Operator/reconciliation must
  * resolve. `deleteExpired` must not delete indeterminate rows by default, and must
  * only remove terminal `completed` / `expired` rows (not reclaimable `reserved`).
+ * `reserve` classifies `completed` / `indeterminate` **before** `fingerprint_conflict`.
  */
 export interface IdempotencyStore extends WithTransaction {
   /**
@@ -434,8 +449,10 @@ export type WebhookInboxRecord = {
    * Handler attempt budget counter. Successful **pending** claim increments by 1.
    * Restored (not burned) by:
    * - `fail({ restoreAttempt: true })` parking claims
-   * - soft-release of expired `claimed` (crash/deploy reclaim)
+   * - soft-release of expired `claimed` via get/listRetryable (crash/deploy reclaim)
    * Direct reclaim of expired `claimed` does not increment (WEBHOOKS-1).
+   * **WEBHOOKS-2:** `fail` with a matching token succeeds even after lease expiry
+   * so hang/timeout still records the attempt (do not soft-release first).
    */
   attempts: number;
   lastError?: string | undefined;
@@ -495,7 +512,14 @@ export type CompleteWebhookInput = {
 
 export type FailWebhookInput = {
   key: WebhookEventKey;
-  /** Required active lease token. Wrong/stale/expired → {@link StoreLeaseLostError}. */
+  /**
+   * Matching lease token on a `claimed` row. Wrong/stale (or after reclaim)
+   * → {@link StoreLeaseLostError}.
+   *
+   * **WEBHOOKS-2:** matching token + `status === "claimed"` succeeds even after
+   * lease expiry so hang/timeout handlers still record pending/dead_letter.
+   * `complete` / `renew` still require an **unexpired** lease.
+   */
   leaseToken: LeaseToken;
   /** Sanitized error code/message only — never secrets or raw payloads. */
   error: string;
@@ -528,9 +552,9 @@ export type ListRetryableInput = {
  * Memory: single-isolate only (NON-DISTRIBUTED).
  *
  * ### Lease-gated mutators
- * After acquire, `renew` / `complete` / `fail` **require the active `leaseToken`**.
- * Wrong/stale/expired → {@link StoreLeaseLostError} or renew `lease_lost`.
- * After lease reclaim, the old token MUST fail.
+ * After acquire, `renew` / `complete` **require the active `leaseToken`**
+ * (unexpired). `fail` requires a matching token on `claimed` and **succeeds
+ * after expiry** (WEBHOOKS-2). After lease reclaim, the old token MUST fail.
  *
  * Same event key: second claim with same payload hash while in-progress → in_progress;
  * completed → already_completed; different hash → payload_hash_conflict;
@@ -566,7 +590,15 @@ export interface WebhookInboxStore extends WithTransaction {
 
   /**
    * Record sanitized failure; optionally dead-letter or schedule retry.
-   * **Requires active `leaseToken`.** Stale/wrong → {@link StoreLeaseLostError}.
+   * **Requires matching `leaseToken`** on a claimed row. Stale/wrong →
+   * {@link StoreLeaseLostError}.
+   *
+   * **WEBHOOKS-2:** matching token + `status === "claimed"` succeeds even when
+   * the lease has expired (do not soft-release-then-reject). That lets hang/
+   * timeout handlers record pending/dead_letter so engine `maxAttempts` is
+   * effective. Soft-restore of unfinished attempts remains on get/listRetryable
+   * only. `complete` / `renew` still require an unexpired lease.
+   *
    * Sets `availableAt` from `retryAfterMs` (claim gate + list filter).
    * When `restoreAttempt: true`, decrements `attempts` by 1 (floor 0).
    */

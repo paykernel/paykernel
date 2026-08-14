@@ -48,6 +48,7 @@ import {
   combineAbortSignals,
   createTimeoutSignal,
   extractAbortSignal,
+  isMutatingHttpMethod,
   mapHttpAbortError,
 } from "../../runtime/abort";
 import {
@@ -1078,6 +1079,86 @@ function toUrlEncoded(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * When domain status is `processing` on `payment_intent.succeeded` (incomplete
+ * settled snapshot — missing amount_received / amount_captured), demote
+ * Phase-7 dual-write from `payment.succeeded` → `payment.processing` so
+ * type-only fulfillment matches isPaidOutcome (STRIPE-3).
+ *
+ * Partial capture (`partially_captured`) is demoted in webhook-event-map;
+ * incomplete-settled `processing` is not always mapped there, so the gateway
+ * fail-closes dual-write here. Also demotes `partially_captured` if the map
+ * left `payment.succeeded` (belt-and-suspenders money honesty).
+ *
+ * Used by Stripe `parseWebhookEvent` and the client handleWebhook safety-net.
+ */
+export function demoteIncompleteSettledWebhookDualWrite(
+  event: WebhookEvent,
+): WebhookEvent {
+  const openMoney =
+    event.status === "processing" || event.status === "partially_captured";
+  if (
+    !openMoney ||
+    event.type !== "payment_intent.succeeded" ||
+    event.stableType !== "payment.succeeded" ||
+    !event.event ||
+    event.event.type !== "payment.succeeded" ||
+    !event.provider
+  ) {
+    return event;
+  }
+
+  const payment = event.event.payment ?? paymentFromWebhookEvent(event);
+
+  return {
+    ...event,
+    stableType: "payment.processing",
+    event: {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: "payment.processing",
+      payment,
+      provider: event.provider,
+    },
+  };
+}
+
+/**
+ * Incomplete refund snapshots (`status === refund_completed`) must not
+ * dual-write `refund.completed` — type-only handlers would mark orders fully
+ * refunded without proven `amount_refunded` / `refunded:true` (STRIPE-2).
+ * Paymob pattern: domain keeps incomplete marker; stable dual-write is
+ * `refund.pending`. Proven full/partial (`refunded` / `partially_refunded`)
+ * keep `refund.completed`.
+ *
+ * Used by Stripe `parseWebhookEvent` and the client handleWebhook safety-net.
+ */
+export function demoteIncompleteRefundWebhookDualWrite(
+  event: WebhookEvent,
+): WebhookEvent {
+  if (
+    event.status !== "refund_completed" ||
+    event.stableType !== "refund.completed" ||
+    !event.event ||
+    event.event.type !== "refund.completed" ||
+    !event.provider
+  ) {
+    return event;
+  }
+
+  const refund = event.event.refund;
+
+  return {
+    ...event,
+    stableType: "refund.pending",
+    event: {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: "refund.pending",
+      refund,
+      provider: event.provider,
+    },
+  };
+}
+
+/**
  * Stripe payment gateway implementation
  * Uses Stripe API directly via fetch
  * @see https://stripe.com/docs/api
@@ -2030,7 +2111,9 @@ export class StripeGateway extends BaseGateway {
           session.status === "complete"
         ) {
           // setup_completed only for true setup flows.
-          // payment-mode $0 / free / coupon → fulfillment-ready paid.
+          // payment-mode $0 / free / coupon → fulfillment-ready paid ONLY when
+          // amount_total is 0 (or unset + mode payment, documented). amount_total
+          // > 0 with no_payment_required is inconsistent — do not invent paid.
           // subscription-mode no_payment_required (trials, $0 first invoice)
           // is NOT paid — align with subscription lifecycle trialing→pending
           // so type-only handlers do not unlock fulfillment before collection
@@ -2045,7 +2128,11 @@ export class StripeGateway extends BaseGateway {
           } else if (session.mode === "subscription") {
             status = "pending";
           } else if (session.mode === "payment") {
-            status = "paid";
+            const total = session.amount_total;
+            status =
+              total === undefined || total === null || total === 0
+                ? "paid"
+                : "pending";
           } else {
             status = "pending";
           }
@@ -2232,8 +2319,8 @@ export class StripeGateway extends BaseGateway {
     // payment.succeeded — type-only handlers would over-fulfill (STRIPE-1).
     // Incomplete refund snapshots (status refund_completed) must not dual-write
     // refund.completed — type-only handlers would over-settle (STRIPE-2).
-    return this.demoteIncompleteRefundWebhookDualWrite(
-      this.demoteIncompleteSettledWebhookDualWrite(attached),
+    return demoteIncompleteRefundWebhookDualWrite(
+      demoteIncompleteSettledWebhookDualWrite(attached),
     );
   }
 
@@ -2384,6 +2471,7 @@ export class StripeGateway extends BaseGateway {
         timeoutMessage: `Stripe API request timed out after ${timeoutMs}ms`,
         networkMessage: "Failed to reach Stripe API",
         callerAbortMessage: "Stripe API request aborted by caller signal",
+        afterProviderSubmit: isMutatingHttpMethod(method),
       });
     } finally {
       clear();
@@ -2418,6 +2506,9 @@ export class StripeGateway extends BaseGateway {
         throw new NetworkError(
           data.error?.message ?? "Stripe API unavailable",
           data,
+          isMutatingHttpMethod(method)
+            ? { afterProviderSubmit: true }
+            : undefined,
         );
       }
 
@@ -2548,82 +2639,6 @@ export class StripeGateway extends BaseGateway {
     }
     // paid | authorized | partially_refunded | refunded | setup_completed
     return "succeeded";
-  }
-
-  /**
-   * When domain status is `processing` on `payment_intent.succeeded` (incomplete
-   * settled snapshot — missing amount_received / amount_captured), demote
-   * Phase-7 dual-write from `payment.succeeded` → `payment.processing` so
-   * type-only fulfillment matches isPaidOutcome (STRIPE-3).
-   *
-   * Partial capture (`partially_captured`) is demoted in webhook-event-map;
-   * incomplete-settled `processing` is not always mapped there, so the gateway
-   * fail-closes dual-write here. Also demotes `partially_captured` if the map
-   * left `payment.succeeded` (belt-and-suspenders money honesty).
-   */
-  private demoteIncompleteSettledWebhookDualWrite(
-    event: WebhookEvent,
-  ): WebhookEvent {
-    const openMoney =
-      event.status === "processing" || event.status === "partially_captured";
-    if (
-      !openMoney ||
-      event.type !== "payment_intent.succeeded" ||
-      event.stableType !== "payment.succeeded" ||
-      !event.event ||
-      event.event.type !== "payment.succeeded" ||
-      !event.provider
-    ) {
-      return event;
-    }
-
-    const payment = event.event.payment ?? paymentFromWebhookEvent(event);
-
-    return {
-      ...event,
-      stableType: "payment.processing",
-      event: {
-        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
-        type: "payment.processing",
-        payment,
-        provider: event.provider,
-      },
-    };
-  }
-
-  /**
-   * Incomplete refund snapshots (`status === refund_completed`) must not
-   * dual-write `refund.completed` — type-only handlers would mark orders fully
-   * refunded without proven `amount_refunded` / `refunded:true` (STRIPE-2).
-   * Paymob pattern: domain keeps incomplete marker; stable dual-write is
-   * `refund.pending`. Proven full/partial (`refunded` / `partially_refunded`)
-   * keep `refund.completed`.
-   */
-  private demoteIncompleteRefundWebhookDualWrite(
-    event: WebhookEvent,
-  ): WebhookEvent {
-    if (
-      event.status !== "refund_completed" ||
-      event.stableType !== "refund.completed" ||
-      !event.event ||
-      event.event.type !== "refund.completed" ||
-      !event.provider
-    ) {
-      return event;
-    }
-
-    const refund = event.event.refund;
-
-    return {
-      ...event,
-      stableType: "refund.pending",
-      event: {
-        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
-        type: "refund.pending",
-        refund,
-        provider: event.provider,
-      },
-    };
   }
 
   /**

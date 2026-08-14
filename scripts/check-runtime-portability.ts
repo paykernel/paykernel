@@ -3,7 +3,7 @@
  * check-runtime-portability.ts
  *
  * Phase 8.4 / 8.5 — fail if portable production sources or published dist
- * contain static `node:` / `bun:` / bare Node builtin imports that break
+ * contain static `node:` / `bun:` / `cloudflare:` / bare Node builtin imports that break
  * Deno / Cloudflare Workers consumers.
  *
  * Usage:
@@ -13,8 +13,9 @@
  * Exit 0 when clean. Exit 1 on any violation.
  *
  * Scope:
- * - packages/core/src production .ts (excludes *.test.ts / *.spec.ts / *.types.test.ts)
- * - packages/core/dist .js files (if dist present; skip with note when missing)
+ * - packages/core, packages/webhooks, packages/store-contracts production src
+ *   (excludes *.test.ts / *.spec.ts / *.types.test.ts)
+ * - those packages' dist .js files (if dist present; skip with note when missing)
  *
  * Deno / Workers functional smoke is aspirational when those runtimes are not
  * installed; this static gate is the CI-required substitute.
@@ -28,9 +29,13 @@ import { fileURLToPath } from "node:url";
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT = resolve(dirname(SCRIPT_PATH), "..");
-const CORE = join(ROOT, "packages", "core");
-const CORE_SRC = join(CORE, "src");
-const CORE_DIST = join(CORE, "dist");
+
+/** Portable production packages scanned for node: / bun: / cloudflare: imports. */
+export const PORTABLE_PACKAGE_DIRS = [
+  "packages/core",
+  "packages/webhooks",
+  "packages/store-contracts",
+] as const;
 
 // ---------------------------------------------------------------------------
 // Config
@@ -221,14 +226,17 @@ export function scanFile(
   return violations;
 }
 
-export function scanCoreSrc(root: string = ROOT): PortabilityViolation[] {
-  const srcDir = join(root, "packages", "core", "src");
+export function scanPackageSrc(
+  root: string,
+  packageDir: string,
+): PortabilityViolation[] {
+  const srcDir = join(root, packageDir, "src");
   if (!existsSync(srcDir)) {
     return [
       {
-        file: "packages/core/src",
+        file: `${packageDir}/src`,
         specifier: "",
-        reason: "packages/core/src missing",
+        reason: `${packageDir}/src missing`,
       },
     ];
   }
@@ -240,14 +248,17 @@ export function scanCoreSrc(root: string = ROOT): PortabilityViolation[] {
   return out;
 }
 
-export function scanCoreDist(
-  root: string = ROOT,
-): { skipped: true; reason: string } | { skipped: false; violations: PortabilityViolation[] } {
-  const distDir = join(root, "packages", "core", "dist");
+export function scanPackageDist(
+  root: string,
+  packageDir: string,
+):
+  | { skipped: true; reason: string }
+  | { skipped: false; violations: PortabilityViolation[] } {
+  const distDir = join(root, packageDir, "dist");
   if (!existsSync(distDir) || !existsSync(join(distDir, "index.js"))) {
     return {
       skipped: true,
-      reason: "packages/core/dist/index.js missing — run build first for dist gate",
+      reason: `${packageDir}/dist/index.js missing — run build first for dist gate`,
     };
   }
   const files = walkFiles(distDir).filter(isDistJsFile);
@@ -256,6 +267,18 @@ export function scanCoreDist(
     violations.push(...scanFile(f, root));
   }
   return { skipped: false, violations };
+}
+
+export function scanCoreSrc(root: string = ROOT): PortabilityViolation[] {
+  return scanPackageSrc(root, "packages/core");
+}
+
+export function scanCoreDist(
+  root: string = ROOT,
+):
+  | { skipped: true; reason: string }
+  | { skipped: false; violations: PortabilityViolation[] } {
+  return scanPackageDist(root, "packages/core");
 }
 
 /**
@@ -321,38 +344,46 @@ export function tryDenoImportSmoke(
 function main(): void {
   console.log("==> check runtime portability (Phase 8.4 / 8.5)");
   console.log(`    root: ${ROOT}`);
-  console.log(`    core: ${CORE}`);
-
-  const srcViolations = scanCoreSrc(ROOT);
-  const distResult = scanCoreDist(ROOT);
+  console.log(`    packages: ${PORTABLE_PACKAGE_DIRS.join(", ")}`);
 
   let failed = false;
 
-  if (srcViolations.length === 0) {
-    console.log("==> packages/core/src production sources: no banned node:/builtin imports");
-  } else {
-    failed = true;
-    console.error(
-      `\nerror: ${srcViolations.length} portable source violation(s) under packages/core/src:\n`,
-    );
-    for (const v of srcViolations) {
-      console.error(`  - ${v.file}: ${v.reason} (specifier: ${JSON.stringify(v.specifier)})`);
-    }
-  }
+  for (const packageDir of PORTABLE_PACKAGE_DIRS) {
+    const srcViolations = scanPackageSrc(ROOT, packageDir);
+    const distResult = scanPackageDist(ROOT, packageDir);
 
-  if (distResult.skipped) {
-    console.warn(`==> dist scan SKIP: ${distResult.reason}`);
-  } else if (distResult.violations.length === 0) {
-    console.log(
-      "==> packages/core/dist: no banned node:/builtin imports (Workers/Deno gate)",
-    );
-  } else {
-    failed = true;
-    console.error(
-      `\nerror: ${distResult.violations.length} portable dist violation(s):\n`,
-    );
-    for (const v of distResult.violations) {
-      console.error(`  - ${v.file}: ${v.reason} (specifier: ${JSON.stringify(v.specifier)})`);
+    if (srcViolations.length === 0) {
+      console.log(
+        `==> ${packageDir}/src production sources: no banned node:/bun:/cloudflare: imports`,
+      );
+    } else {
+      failed = true;
+      console.error(
+        `\nerror: ${srcViolations.length} portable source violation(s) under ${packageDir}/src:\n`,
+      );
+      for (const v of srcViolations) {
+        console.error(
+          `  - ${v.file}: ${v.reason} (specifier: ${JSON.stringify(v.specifier)})`,
+        );
+      }
+    }
+
+    if (distResult.skipped) {
+      console.warn(`==> ${packageDir}/dist scan SKIP: ${distResult.reason}`);
+    } else if (distResult.violations.length === 0) {
+      console.log(
+        `==> ${packageDir}/dist: no banned node:/bun:/cloudflare: imports (Workers/Deno gate)`,
+      );
+    } else {
+      failed = true;
+      console.error(
+        `\nerror: ${distResult.violations.length} portable dist violation(s) under ${packageDir}:\n`,
+      );
+      for (const v of distResult.violations) {
+        console.error(
+          `  - ${v.file}: ${v.reason} (specifier: ${JSON.stringify(v.specifier)})`,
+        );
+      }
     }
   }
 

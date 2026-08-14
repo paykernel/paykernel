@@ -7,6 +7,7 @@ import {
   createTimeoutSignal,
   isAbortError,
   mapHttpAbortError,
+  isMutatingHttpMethod,
   extractAbortSignal,
   stripAbortSignal,
   withAbortSignal,
@@ -21,6 +22,62 @@ type AbortSignalWithStatics = typeof AbortSignal & {
 const AbortSignalStatics = AbortSignal as AbortSignalWithStatics;
 const originalAny = AbortSignalStatics.any;
 const originalTimeout = AbortSignalStatics.timeout;
+
+type TrackedSignal = {
+  aborted: boolean;
+  reason: unknown;
+  listenerCount: number;
+  addEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: AddEventListenerOptions | boolean,
+  ): void;
+  removeEventListener(
+    type: string,
+    listener: EventListenerOrEventListenerObject,
+    options?: EventListenerOptions | boolean,
+  ): void;
+  abortTracked(reason?: unknown): void;
+};
+
+function createTrackedSignal(preAborted = false): TrackedSignal {
+  const listeners = new Set<EventListenerOrEventListenerObject>();
+  const signal: TrackedSignal = {
+    aborted: preAborted,
+    reason: preAborted ? "pre-aborted" : undefined,
+    listenerCount: 0,
+    addEventListener(type, listener) {
+      if (type !== "abort") {
+        return;
+      }
+      listeners.add(listener);
+      signal.listenerCount = listeners.size;
+    },
+    removeEventListener(type, listener) {
+      if (type !== "abort") {
+        return;
+      }
+      listeners.delete(listener);
+      signal.listenerCount = listeners.size;
+    },
+    abortTracked(reason) {
+      signal.aborted = true;
+      signal.reason = reason;
+      const event = {
+        type: "abort",
+        target: signal,
+      } as unknown as Event;
+      for (const listener of [...listeners]) {
+        if (typeof listener === "function") {
+          listener(event);
+        } else {
+          listener.handleEvent(event);
+        }
+      }
+    },
+  };
+  return signal;
+}
 
 afterEach(() => {
   if (originalAny === undefined) {
@@ -87,6 +144,52 @@ describe("combineAbortSignals", () => {
     const combined = combineAbortSignals(a.signal, b.signal);
     expect(combined!.aborted).toBe(true);
   });
+
+  it("polyfill removes abort listeners from remaining inputs when one fires (P610-ABT-2)", () => {
+    delete AbortSignalStatics.any;
+    const a = createTrackedSignal();
+    const b = createTrackedSignal();
+    const combined = combineAbortSignals(
+      a as unknown as AbortSignal,
+      b as unknown as AbortSignal,
+    );
+    expect(combined).toBeDefined();
+    expect(a.listenerCount).toBe(1);
+    expect(b.listenerCount).toBe(1);
+
+    a.abortTracked("polyfill-cleanup");
+    expect(combined!.aborted).toBe(true);
+    expect(a.listenerCount).toBe(0);
+    expect(b.listenerCount).toBe(0);
+  });
+
+  it("polyfill detaches already-attached listeners when a later input is pre-aborted (P610-ABT-2)", () => {
+    delete AbortSignalStatics.any;
+    const live = createTrackedSignal();
+    const dead = createTrackedSignal(true);
+    const combined = combineAbortSignals(
+      live as unknown as AbortSignal,
+      dead as unknown as AbortSignal,
+    );
+    expect(combined!.aborted).toBe(true);
+    expect(live.listenerCount).toBe(0);
+  });
+
+  it("uses the polyfill for duck-typed signals even when AbortSignal.any exists", () => {
+    expect(typeof AbortSignalStatics.any).toBe("function");
+    const a = createTrackedSignal();
+    const b = createTrackedSignal();
+    const combined = combineAbortSignals(
+      a as unknown as AbortSignal,
+      b as unknown as AbortSignal,
+    );
+    expect(combined).toBeDefined();
+    expect(combined!.aborted).toBe(false);
+    a.abortTracked("duck-combine");
+    expect(combined!.aborted).toBe(true);
+    expect(a.listenerCount).toBe(0);
+    expect(b.listenerCount).toBe(0);
+  });
 });
 
 describe("createTimeoutSignal", () => {
@@ -128,6 +231,81 @@ describe("createTimeoutSignal", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(signal.aborted).toBe(true);
     clear();
+  });
+
+  it("does not use AbortSignal.timeout so clear() can cancel (P610-ABT-1)", () => {
+    expect(typeof AbortSignalStatics.timeout).toBe("function");
+    let timeoutCalls = 0;
+    const nativeTimeout = AbortSignalStatics.timeout!;
+    AbortSignalStatics.timeout = ((ms: number) => {
+      timeoutCalls += 1;
+      return nativeTimeout.call(AbortSignal, ms);
+    }) as typeof nativeTimeout;
+    try {
+      const { signal, clear } = createTimeoutSignal(60_000);
+      expect(timeoutCalls).toBe(0);
+      expect(signal.aborted).toBe(false);
+      clear();
+    } finally {
+      AbortSignalStatics.timeout = nativeTimeout;
+    }
+  });
+
+  it("clear cancels the pending timer even when AbortSignal.timeout exists (P610-ABT-1)", async () => {
+    expect(typeof AbortSignalStatics.timeout).toBe("function");
+    const { signal, clear } = createTimeoutSignal(25);
+    clear();
+    await new Promise((r) => setTimeout(r, 60));
+    expect(signal.aborted).toBe(false);
+  });
+
+  it("unrefs the timer when the host handle exposes unref (P610-ABT-1)", () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalClearTimeout = globalThis.clearTimeout;
+    let unrefCalls = 0;
+    const innerIds = new WeakMap<object, ReturnType<typeof originalSetTimeout>>();
+
+    const patchedSetTimeout = ((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      const id = originalSetTimeout(
+        handler as Parameters<typeof originalSetTimeout>[0],
+        timeout,
+        ...args,
+      );
+      const handle = {
+        unref() {
+          unrefCalls += 1;
+          if (id && typeof id === "object" && "unref" in id) {
+            (id as { unref: () => void }).unref();
+          }
+        },
+      };
+      innerIds.set(handle, id);
+      return handle;
+    }) as typeof setTimeout;
+
+    const patchedClearTimeout = ((handle: unknown) => {
+      if (handle && typeof handle === "object" && innerIds.has(handle)) {
+        originalClearTimeout(innerIds.get(handle) as never);
+        return;
+      }
+      originalClearTimeout(handle as never);
+    }) as typeof clearTimeout;
+
+    globalThis.setTimeout = patchedSetTimeout;
+    globalThis.clearTimeout = patchedClearTimeout;
+    try {
+      const { signal, clear } = createTimeoutSignal(60_000);
+      expect(signal.aborted).toBe(false);
+      expect(unrefCalls).toBe(1);
+      clear();
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+      globalThis.clearTimeout = originalClearTimeout;
+    }
   });
 });
 
@@ -230,6 +408,19 @@ describe("isAbortError / mapHttpAbortError", () => {
     );
     expect(mapped).toBeInstanceOf(NetworkError);
     expect(mapped.message).toBe("gateway timed out");
+    expect((mapped as NetworkError).afterProviderSubmit).toBe(false);
+  });
+
+  it("tags afterProviderSubmit on mutating timeouts (P610-IND-1)", () => {
+    const mapped = mapHttpAbortError(new Error("ECONNRESET"), {
+      timeoutMessage: "timed out",
+      networkMessage: "network failed",
+      afterProviderSubmit: true,
+    });
+    expect(mapped).toBeInstanceOf(NetworkError);
+    expect((mapped as NetworkError).afterProviderSubmit).toBe(true);
+    expect(isMutatingHttpMethod("POST")).toBe(true);
+    expect(isMutatingHttpMethod("GET")).toBe(false);
   });
 });
 
@@ -242,6 +433,42 @@ describe("extract / strip / withAbortSignal", () => {
     expect(extractAbortSignal(undefined)).toBeUndefined();
     expect(extractAbortSignal("x")).toBeUndefined();
     expect(extractAbortSignal({ signal: "not-a-signal" })).toBeUndefined();
+  });
+
+  it("extracts duck-typed signals (aborted boolean + addEventListener) (P610-ABT-3)", () => {
+    const duck = {
+      aborted: false,
+      addEventListener() {},
+    };
+    expect(extractAbortSignal({ signal: duck })).toBe(duck);
+    expect(
+      extractAbortSignal({
+        signal: { aborted: true, addEventListener() {} },
+      }),
+    ).toEqual(expect.objectContaining({ aborted: true }));
+
+    expect(extractAbortSignal({ signal: { aborted: false } })).toBeUndefined();
+    expect(
+      extractAbortSignal({ signal: { addEventListener() {} } }),
+    ).toBeUndefined();
+    expect(
+      extractAbortSignal({
+        signal: { aborted: "no", addEventListener() {} },
+      }),
+    ).toBeUndefined();
+    expect(
+      extractAbortSignal({
+        signal: { aborted: false, addEventListener: 1 },
+      }),
+    ).toBeUndefined();
+  });
+
+  it("strips duck-typed signals from params", () => {
+    const duck = { aborted: false, addEventListener() {} };
+    const { rest, signal } = stripAbortSignal({ amount: 1, signal: duck });
+    expect(signal).toBe(duck);
+    expect(rest).not.toHaveProperty("signal");
+    expect((rest as { amount: number }).amount).toBe(1);
   });
 
   it("strips signal and reattaches without mutating when absent", () => {

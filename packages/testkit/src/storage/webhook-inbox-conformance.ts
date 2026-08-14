@@ -16,6 +16,8 @@
  * - `fail({ restoreAttempt: true })` decrements `attempts` by 1 (floor 0).
  * - Soft-release of expired claimed restores one attempt (WEBHOOKS-1); direct
  *   reclaim of expired claimed also must not burn attempts.
+ * - `fail` with matching token after lease expiry records pending/dead_letter
+ *   without a prior get/listRetryable soft-release (WEBHOOKS-2).
  */
 
 import type { WebhookInboxStore } from "./contracts";
@@ -420,6 +422,69 @@ export async function runWebhookInboxStoreConformanceSuite(
         assert(
           restored?.attempts === 1,
           `restoreAttempt: 2→1 (got ${restored?.attempts})`,
+        );
+      },
+    ),
+  );
+
+  results.push(
+    await runCase(
+      "WEBHOOKS-2: fail after lease expiry records pending (matching token)",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_fail_exp",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 1_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        if (a.kind !== "acquired") return;
+        assert(a.record.attempts === 1, "first claim attempts=1");
+        clock.advance(1_001);
+        // Must not get/listRetryable first — soft-release would drop the token.
+        await store.fail({
+          key: "evt_fail_exp",
+          leaseToken: a.leaseToken,
+          error: "handler_timeout",
+          retryAfterMs: 5_000,
+        });
+        const after = await store.get("evt_fail_exp");
+        assert(after?.status === "pending", `expected pending, got ${after?.status}`);
+        assert(
+          after?.attempts === 1,
+          `fail after expiry must keep attempts (got ${after?.attempts})`,
+        );
+      },
+    ),
+  );
+
+  results.push(
+    await runCase(
+      "WEBHOOKS-2: fail dead_letter after lease expiry records dead_letter",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const a = await store.claim({
+          key: "evt_fail_dl_exp",
+          payloadHash: "h1",
+          owner: "w1",
+          leaseMs: 1_000,
+        });
+        assert(a.kind === "acquired", "acquired");
+        if (a.kind !== "acquired") return;
+        clock.advance(1_001);
+        await store.fail({
+          key: "evt_fail_dl_exp",
+          leaseToken: a.leaseToken,
+          error: "poison",
+          deadLetter: true,
+        });
+        const after = await store.get("evt_fail_dl_exp");
+        assert(
+          after?.status === "dead_letter",
+          `expected dead_letter, got ${after?.status}`,
         );
       },
     ),

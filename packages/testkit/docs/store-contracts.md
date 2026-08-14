@@ -1,7 +1,7 @@
 # Store contracts and adapter manifests (Phase 9)
 
 **Package:** `@paykernel/testkit`  
-**Source of truth:** [`contracts.ts`](../src/storage/contracts.ts), [`adapter-manifest.ts`](../src/storage/adapter-manifest.ts)  
+**Source of truth:** [`@paykernel/store-contracts`](../../store-contracts) ([`contracts.ts`](../../store-contracts/src/contracts.ts)); testkit re-exports that package from [`src/storage/contracts.ts`](../src/storage/contracts.ts). Adapter manifests: [`adapter-manifest.ts`](../src/storage/adapter-manifest.ts).  
 **Conformance:** [`idempotency-conformance.ts`](../src/storage/idempotency-conformance.ts), [`webhook-inbox-conformance.ts`](../src/storage/webhook-inbox-conformance.ts), [`reconciliation-conformance.ts`](../src/storage/reconciliation-conformance.ts)  
 **Memory reference impl:** [`packages/testkit/src/memory/memory-stores.ts`](../src/memory/memory-stores.ts)
 
@@ -60,7 +60,7 @@ Prefer the type alias `LeaseAwareIdempotencyStore` when core 0.x `IdempotencySto
 | `deleteExpired(input)`     | Retention cleanup for terminal/expired rows. **Must not** delete `indeterminate` by default.                  |
 | `withTransaction?(fn)`     | Optional helper only — **not** a substitute for atomic `reserve`.                                             |
 
-`reserve` result kinds: `acquired` | `already_completed` | `in_progress` | `indeterminate` | `fingerprint_conflict`.
+`reserve` result kinds: `acquired` | `already_completed` | `in_progress` | `indeterminate` | `fingerprint_conflict`. Classify `completed` / `indeterminate` **before** `fingerprint_conflict`.
 
 ### 2.2 Webhook inbox
 
@@ -69,7 +69,7 @@ Prefer the type alias `LeaseAwareIdempotencyStore` when core 0.x `IdempotencySto
 | `claim(input)`         | **Atomic** claim (or re-claim after lease expiry). Issues `leaseToken`, increments `generation`. |
 | `renew(input)`         | Extend lease; **requires** current `leaseToken`; rotates token + generation on success.          |
 | `complete(input)`      | Terminal processed; **requires** current `leaseToken`.                                           |
-| `fail(input)`          | Sanitized failure; optional dead-letter / retry delay; **requires** current `leaseToken`.        |
+| `fail(input)`          | Sanitized failure; optional dead-letter / retry delay; **requires** matching `leaseToken` on `claimed` (succeeds after expiry — WEBHOOKS-2). `complete`/`renew` still need an active lease. |
 | `get(key)`             | Read row.                                                                                        |
 | `listRetryable(input)` | List rows eligible for retry.                                                                    |
 | `deleteExpired(input)` | Retention cleanup.                                                                               |
@@ -155,11 +155,12 @@ Store-specific fields (fingerprint, `payloadHash`, `subjectId`, `dueAt`, …) si
 
 Wrong or stale tokens → `StoreLeaseLostError` (or renew `{ ok: false, reason: "lease_lost" }`). A stale worker **must not** complete work after a newer worker reclaims or renews the lease.
 
-**`markIndeterminate` vs complete/renew (A4 near-expiry parking):**
+**`markIndeterminate` / webhook `fail` vs complete/renew:**
 
 | Mutator | Token check | Active lease clock |
 | --- | --- | --- |
 | `complete` / `renew` | Current token | Required (expired → `lease_lost`) |
+| Webhook `fail` | Current token + `status === "claimed"` | **Not required** (WEBHOOKS-2): matching token succeeds after expiry so hang/timeout still records pending/dead_letter. Soft-release is get/listRetryable only. After reclaim, prior token is fenced. |
 | `markIndeterminate` | Current token + `status === "reserved"` | **Not required** in production SQL/Redis: expired-but-unreclaimed may still park so a worker can preserve uncertainty near/at expiry. After reclaim, prior token is fenced. |
 
 Memory testkit soft-expires reserved rows on the read path (`expireIfNeeded`) before `markIndeterminate`, so post-expiry park can fail in tests while still succeeding on SQL/Redis if the row remains unreclaimed. That is a documented NON-PRODUCTION parity note — not a production fence hole (token fencing after reclaim still holds).
@@ -205,7 +206,7 @@ Normalized codes (`StoreErrorCode` / `STORE_ERROR_CODES`):
 
 Base class: `StoreError` with `code` and `retryable`. Adapters may throw subclasses or set `code` on `StoreError`.
 
-**Helper:** `isStoreLeaseLostError(error)` is `true` for `StoreLeaseLostError` **or** a plain `StoreError` with `code: "lease_lost"`. Conformance suites use this so adapters need not subclass if they throw a coded `StoreError`.
+**Helper:** `isStoreLeaseLostError(error)` (defined in `@paykernel/store-contracts`) is `true` for `StoreLeaseLostError`, errors with `name === "StoreLeaseLostError"`, **or** a plain `StoreError` with `code: "lease_lost"`. **Adapters MUST throw `name === "StoreLeaseLostError"`.** The webhook engine does **not** treat a bare `{ code: "lease_lost" }` domain throw as fencing (WEBHOOKS-6) so handlers that reuse that code still reach `store.fail`.
 
 ---
 
@@ -329,6 +330,8 @@ Factories:
 | Coordination                      | **Single-process** — no multi-process locks.                                                                            |
 
 Use only for unit tests, local examples, and conformance self-proof. Do **not** place these stores on a production payment path. `isProductionSafeCoordination(MEMORY_STORAGE_ADAPTER_MANIFEST)` is `false`.
+
+Optional `maxEntries` is a test-only cap. Eviction **must skip** `reserved`/`claimed` rows with an active lease (or **refuse** the new write). Silently dropping an in-flight money fence is forbidden.
 
 Crash injection: `simulateCrash()` arms the next mutation to throw before apply (test-only). Real crash model remains process death = empty store.
 

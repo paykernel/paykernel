@@ -469,6 +469,64 @@ describe("StripeGateway", () => {
       expect(event.event?.type).toBe("payment.succeeded");
     });
 
+    it("payment-mode no_payment_required with unset amount_total stays paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_checkout_free_unset_total",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_free_unset_total",
+            object: "checkout.session",
+            mode: "payment",
+            payment_status: "no_payment_required",
+            status: "complete",
+            currency: "usd",
+            metadata: { paymentId: "free_unset" },
+          },
+        },
+        livemode: false,
+      });
+
+      // Documented: mode payment + omitted amount_total is still $0/coupon paid.
+      expect(event.status).toBe("paid");
+      expect(event.status).not.toBe("setup_completed");
+      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.succeeded");
+    });
+
+    it("payment-mode no_payment_required with amount_total > 0 must not invent paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_checkout_npr_positive",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_npr_positive",
+            object: "checkout.session",
+            mode: "payment",
+            payment_status: "no_payment_required",
+            status: "complete",
+            amount_total: 2000,
+            currency: "usd",
+            payment_intent: "pi_npr_positive",
+            metadata: { paymentId: "order_npr_positive" },
+          },
+        },
+        livemode: false,
+      });
+
+      // Inconsistent snapshot: money is due but Stripe said no payment required.
+      // Do not invent paid / payment.succeeded.
+      expect(event.status).not.toBe("paid");
+      expect(event.status).toBe("pending");
+      expect(event.status).not.toBe("setup_completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.amount).toBe(20);
+      expect(event.gatewayPaymentId).toBe("pi_npr_positive");
+    });
+
     it("STRIPE-2: subscription-mode no_payment_required must not complete as paid", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_checkout_sub_trial",
@@ -4151,12 +4209,12 @@ describe("StripeGateway", () => {
         });
       }) as unknown as typeof fetch;
 
-      await expect(
-        timeoutGateway.createPayment({
-          amount: 10,
-          currency: "USD",
-        }),
-      ).rejects.toThrow("Stripe API request timed out after 1ms");
+      const timedOut = await timeoutGateway.createPayment({
+        amount: 10,
+        currency: "USD",
+      });
+      expect(timedOut.outcome).toBe("indeterminate");
+      expect(timedOut.reconciliationRequired).toBe(true);
     });
 
     it("should time out while reading a hanging Stripe response body", async () => {
@@ -4182,12 +4240,12 @@ describe("StripeGateway", () => {
         } as unknown as Response;
       }) as unknown as typeof fetch;
 
-      await expect(
-        timeoutGateway.createPayment({
-          amount: 10,
-          currency: "USD",
-        }),
-      ).rejects.toThrow("Stripe API request timed out after 1ms");
+      const hungBody = await timeoutGateway.createPayment({
+        amount: 10,
+        currency: "USD",
+      });
+      expect(hungBody.outcome).toBe("indeterminate");
+      expect(hungBody.reconciliationRequired).toBe(true);
     });
 
     it("rejects createPayment with pre-aborted signal without hanging", async () => {

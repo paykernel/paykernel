@@ -89,7 +89,11 @@ export type MemoryStoreOptions = {
    * this only injects failures for tests.
    */
   crash?: MemoryStoreCrashHook;
-  /** Max entries before oldest-key eviction on write (default unbounded for tests). */
+  /**
+   * Max entries before oldest-key eviction on write (default unbounded for tests).
+   * Must not evict `reserved`/`claimed` rows with an active lease — skip those
+   * victims or refuse the new write (fail-closed).
+   */
   maxEntries?: number;
 };
 
@@ -140,6 +144,37 @@ function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void {
   target.clear();
   for (const [k, v] of snapshot) {
     target.set(k, structuredClone(v));
+  }
+}
+
+function isActiveClaimedOrReserved(
+  rec: { status: string; leaseExpiresAt?: string | undefined },
+  clock: Clock,
+): boolean {
+  return (rec.status === "claimed" || rec.status === "reserved") && isLeaseActive(rec, clock);
+}
+
+function enforceMaxEntries<K, V>(
+  entries: Map<K, V>,
+  maxEntries: number | undefined,
+  newKey: K,
+  isProtected: (rec: V) => boolean,
+): void {
+  if (maxEntries === undefined) return;
+  if (entries.has(newKey)) return;
+  while (entries.size >= maxEntries) {
+    let victim: K | undefined;
+    for (const [key, rec] of entries) {
+      if (isProtected(rec)) continue;
+      victim = key;
+      break;
+    }
+    if (victim === undefined) {
+      throw new StoreUnavailableError(
+        "memory store at capacity: refusing to evict claimed/reserved row with active lease",
+      );
+    }
+    entries.delete(victim);
   }
 }
 
@@ -211,13 +246,9 @@ export function createMemoryIdempotencyStore(
   }
 
   function enforceCap(newKey: IdempotencyKey): void {
-    if (maxEntries === undefined) return;
-    if (entries.has(newKey)) return;
-    while (entries.size >= maxEntries) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
-    }
+    enforceMaxEntries(entries, maxEntries, newKey, (rec) =>
+      isActiveClaimedOrReserved(rec, clock),
+    );
   }
 
   const store: MemoryIdempotencyStore = {
@@ -257,14 +288,16 @@ export function createMemoryIdempotencyStore(
       const existing = entries.get(input.key);
       if (existing) {
         const rec = expireIfNeeded(input.key, existing);
-        if (rec.fingerprint !== input.fingerprint) {
-          return { kind: "fingerprint_conflict", record: rec };
-        }
+        // Terminal / A4 before fingerprint so completed+indeterminate re-use
+        // with a different digest still ACKs (does not look like a conflict).
         if (rec.status === "completed") {
           return { kind: "already_completed", record: rec };
         }
         if (rec.status === "indeterminate") {
           return { kind: "indeterminate", record: rec };
+        }
+        if (rec.fingerprint !== input.fingerprint) {
+          return { kind: "fingerprint_conflict", record: rec };
         }
         if (rec.status === "reserved" && isLeaseActive(rec, clock)) {
           return { kind: "in_progress", record: rec };
@@ -441,13 +474,9 @@ export function createMemoryWebhookInboxStore(
   }
 
   function enforceCap(newKey: WebhookEventKey): void {
-    if (maxEntries === undefined) return;
-    if (entries.has(newKey)) return;
-    while (entries.size >= maxEntries) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
-    }
+    enforceMaxEntries(entries, maxEntries, newKey, (rec) =>
+      isActiveClaimedOrReserved(rec, clock),
+    );
   }
 
   const store: MemoryWebhookInboxStore = {
@@ -583,18 +612,24 @@ export function createMemoryWebhookInboxStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("fail: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // WEBHOOKS-2: accept fail with matching token even after lease expiry.
+      // Soft-release-first would clear the token + restore attempts, making
+      // maxAttempts a no-op for hang/timeout handlers that still call fail.
+      // Crash reclaim (get/listRetryable) still soft-restores unfinished claims.
+      if (
+        existing.status !== "claimed" ||
+        existing.leaseToken !== input.leaseToken
+      ) {
         throw new StoreLeaseLostError("fail: lease token rejected");
       }
       const retryAfterMs = input.retryAfterMs ?? 0;
       const dead = input.deadLetter === true;
       const attempts =
         input.restoreAttempt === true
-          ? Math.max(0, rec.attempts - 1)
-          : rec.attempts;
+          ? Math.max(0, existing.attempts - 1)
+          : existing.attempts;
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: dead ? "dead_letter" : "pending",
         lastError: input.error,
         leaseToken: undefined,
@@ -700,13 +735,9 @@ export function createMemoryReconciliationStore(
   }
 
   function enforceCap(newKey: ReconciliationKey): void {
-    if (maxEntries === undefined) return;
-    if (entries.has(newKey)) return;
-    while (entries.size >= maxEntries) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
-    }
+    enforceMaxEntries(entries, maxEntries, newKey, (rec) =>
+      isActiveClaimedOrReserved(rec, clock),
+    );
   }
 
   const store: MemoryReconciliationStore = {

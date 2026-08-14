@@ -21,6 +21,8 @@ import {
   mapGatewayResultToOperationResult,
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
+  applyIndeterminatePaymentOutcome,
+  applyIndeterminateRefundOutcome,
   isPaidOutcome,
   isRequiresActionOutcome,
   isIndeterminateOutcome,
@@ -295,6 +297,29 @@ describe("operation-result helpers", () => {
     expect(isIndeterminateOutcome(ind)).toBe(true);
   });
 
+  it("P610-IND-1: network-error helpers emit indeterminate, not paid", () => {
+    const payment = applyIndeterminatePaymentOutcome({
+      gateway: "stripe",
+      gatewayId: "pi_timeout",
+      message: "Stripe API request timed out after 30000ms",
+      errorName: "NetworkError",
+    });
+    expect(payment.outcome).toBe("indeterminate");
+    expect(payment.reconciliationRequired).toBe(true);
+    expect(payment.success).toBe(false);
+    expect(isPaidOutcome(payment)).toBe(false);
+    expect(isIndeterminateOutcome(payment)).toBe(true);
+
+    const refund = applyIndeterminateRefundOutcome({
+      gatewayRefundId: "re_timeout",
+      message: "socket closed",
+      errorName: "NetworkError",
+    });
+    expect(refund.outcome).toBe("indeterminate");
+    expect(refund.reconciliationRequired).toBe(true);
+    expect(refund.success).toBe(false);
+  });
+
   it("successFromOutcome matches documented dual-write table", () => {
     expect(successFromOutcome("succeeded")).toBe(true);
     expect(successFromOutcome("requires_action")).toBe(true);
@@ -450,6 +475,77 @@ describe("operation-result helpers", () => {
     expect(isPaidOutcome(paidWithAction)).toBe(true);
   });
 
+  it("P610-INF-1: bare partially_captured is open money (requires_action, not succeeded)", () => {
+    const bare = baseResult({
+      success: true,
+      status: "partially_captured",
+    });
+    expect(inferOperationOutcome(bare)).toBe("requires_action");
+    expect(mapGatewayResultToOperationResult(bare).outcome).toBe(
+      "requires_action",
+    );
+    expect(isPaidOutcome(bare)).toBe(false);
+    expect(isRequiresActionOutcome(bare)).toBe(true);
+    expect(isPaidLikePaymentStatus("partially_captured")).toBe(false);
+
+    // Settled-success statuses still infer operation succeeded (outcome only).
+    expect(
+      inferOperationOutcome(baseResult({ success: true, status: "paid" })),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        baseResult({ success: true, status: "authorized" }),
+      ),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(baseResult({ success: true, status: "refunded" })),
+    ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        baseResult({ success: true, status: "partially_refunded" }),
+      ),
+    ).toBe("succeeded");
+    // isPaidOutcome stays paid-only — auth/refund settled ops are not fulfillment.
+    expect(
+      isPaidOutcome(baseResult({ success: true, status: "authorized" })),
+    ).toBe(false);
+    expect(
+      isPaidOutcome(baseResult({ success: true, status: "refunded" })),
+    ).toBe(false);
+    expect(
+      isPaidOutcome(
+        baseResult({ success: true, status: "partially_refunded" }),
+      ),
+    ).toBe(false);
+    expect(isPaidOutcome(baseResult({ success: true, status: "paid" }))).toBe(
+      true,
+    );
+  });
+
+  it("P610-INF-2: success:false + pending/processing/approved is indeterminate, not failed", () => {
+    for (const status of ["pending", "processing", "approved"] as const) {
+      const result = baseResult({ success: false, status });
+      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const op = mapGatewayResultToOperationResult(result);
+      expect(op.outcome).toBe("indeterminate");
+      if (op.outcome === "indeterminate") {
+        expect(op.reconciliationRequired).toBe(true);
+      }
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(isIndeterminateOutcome(result)).toBe(true);
+    }
+
+    // Definitive failure / decline paths stay closed.
+    expect(
+      inferOperationOutcome(
+        baseResult({ success: false, status: "cancelled" }),
+      ),
+    ).toBe("failed");
+    expect(
+      inferOperationOutcome(baseResult({ success: false, status: "failed" })),
+    ).toBe("declined");
+  });
+
   it("CORE-2: successful void (outcome succeeded + status cancelled) is not failed", () => {
     const voided = baseResult({
       success: true,
@@ -568,7 +664,7 @@ describe("operation-result helpers", () => {
       inferOperationOutcome(
         baseResult({ success: false, status: "pending" }),
       ),
-    ).toBe("failed");
+    ).toBe("indeterminate");
     expect(
       inferOperationOutcome(
         baseResult({ success: true, status: "processing" }),
@@ -644,7 +740,68 @@ describe("operation-result helpers", () => {
     expect(full.authorizationId).toBe("auth_1");
     expect(full.clientSecret).toBe("cs");
     expect(full.nextAction).toBeDefined();
-    expect(full.reconciliationRequired).toBe(true);
+    // extras.reconciliationRequired must not attach unless outcome is indeterminate
+    // (otherwise stored outcome requires_action but infer would flip).
+    expect(full.reconciliationRequired).toBeUndefined();
+    expect(full.outcome).toBe("requires_action");
+    expect(inferOperationOutcome(full)).toBe(full.outcome);
+  });
+
+  it("applyOutcome only attaches reconciliationRequired when outcome is indeterminate", () => {
+    const settled = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_paid",
+        status: "paid",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "succeeded",
+      { reconciliationRequired: true },
+    );
+    expect(settled.outcome).toBe("succeeded");
+    expect(settled.reconciliationRequired).toBeUndefined();
+    expect(inferOperationOutcome(settled)).toBe(settled.outcome);
+
+    const action = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_act",
+        status: "pending",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "requires_action",
+      { reconciliationRequired: true },
+    );
+    expect(action.outcome).toBe("requires_action");
+    expect(action.reconciliationRequired).toBeUndefined();
+    expect(inferOperationOutcome(action)).toBe(action.outcome);
+
+    const failed = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_fail",
+        status: "failed",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "failed",
+      { reconciliationRequired: true },
+    );
+    expect(failed.outcome).toBe("failed");
+    expect(failed.reconciliationRequired).toBeUndefined();
+    expect(inferOperationOutcome(failed)).toBe(failed.outcome);
+
+    const ind = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_unk",
+        status: "pending",
+        rawResponse: {},
+        gateway: "paymob",
+      },
+      "indeterminate",
+    );
+    expect(ind.outcome).toBe("indeterminate");
+    expect(ind.reconciliationRequired).toBe(true);
+    expect(inferOperationOutcome(ind)).toBe(ind.outcome);
   });
 
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {

@@ -17,13 +17,15 @@ import type {
 /**
  * Explicit processing mode. Set once on `createWebhookInboxEngine`.
  *
- * - `inline`: await handler; on throw → store.fail (retryable) → `handler_failed`.
+ * - `inline`: await handler; on throw → store.fail (`retryAfterMs: 0`) →
+ *   `handler_failed`. **Never** emits `scheduled_for_retry` (including
+ *   `not_available` → `handler_failed { retryable: true }`).
  * - `durable_retry`: await handler by default; on retryable throw → store.fail with
  *   delay → `scheduled_for_retry` (`reason: "handler_retry"`). When
  *   `ackAfterClaim: true`, claim persists and returns `scheduled_for_retry`
  *   (`reason: "parked"`) without running the handler (worker via
- *   `processRetryable`). The parking claim does **not** count toward `maxAttempts`
- *   (store `fail({ restoreAttempt: true })`).
+ *   `processRetryable`) **only if** `store.fail({ restoreAttempt: true })`
+ *   succeeds. The parking claim does **not** count toward `maxAttempts`.
  */
 export type WebhookProcessingMode = "inline" | "durable_retry";
 
@@ -36,10 +38,13 @@ export type WebhookProcessingMode = "inline" | "durable_retry";
  * ACK is unsafe when no worker will process the row:
  *
  * - `parked` — durable `ackAfterClaim` released work for `processRetryable`
- *   (safe 200 only when a worker is guaranteed).
+ *   (safe 200 only when a worker is guaranteed). Emitted only after
+ *   `store.fail({ restoreAttempt: true })` succeeds.
  * - `handler_retry` — handler threw retryable; `store.fail` recorded with backoff.
- * - `not_available` — claim backoff (`availableAt` still future); no handler ran.
+ * - `not_available` — durable claim backoff (`availableAt` still future); no handler ran.
  *   Prefer 5xx so the provider redelivers unless a durable scheduler owns the row.
+ *   **Inline engines never emit this** — they map the same claim kind to
+ *   `handler_failed { retryable: true }`.
  */
 export type ScheduledForRetryReason =
   | "parked"
@@ -161,6 +166,9 @@ export type ProcessVerifiedInput = {
    * **durable_retry:** when omitted, a redacted snapshot of `event` is stored
    * as `payloadRef` so `processRetryable` can redrive. `ackAfterClaim` still
    * requires a non-empty envelope (or event-derived payloadRef).
+   * Events/envelopes that still carry `rawPayload` or `headers` are converted
+   * via core `toPersistedPaymentEventEnvelope` when a PaymentEvent is present,
+   * otherwise refused (`invalid_webhook`) — never persisted (P610-SNAP-1).
    *
    * **Handler event (WEBHOOKS-2):** when `event` is omitted but `envelope` is
    * present, `processVerified` materializes `ctx.event` from the envelope /
@@ -179,8 +187,10 @@ export type ProcessVerifiedInput = {
   /**
    * Per-call override for durable_retry ack-after-claim (defaults to engine
    * option). When true, returns `scheduled_for_retry` (`reason: "parked"`) after
-   * durable claim without running the handler. Parking claim does not consume
-   * `maxAttempts`.
+   * durable claim without running the handler **only if**
+   * `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` returns
+   * `already_processing` or `handler_failed { retryable: true }` (never parked).
+   * Parking claim does not consume `maxAttempts`.
    *
    * **Requires `envelope`** (non-empty serializable payload for `payloadRef`).
    * Without a stored payload, workers cannot materialize the event — the engine
@@ -300,7 +310,9 @@ export type CreateWebhookInboxEngineOptions = {
   /**
    * durable_retry only: when true, `processVerified` returns
    * `scheduled_for_retry` (`reason: "parked"`) after successful claim without
-   * running the handler. Workers must call `processRetryable`.
+   * running the handler **only if** `store.fail({ restoreAttempt: true })`
+   * succeeds. Park `lease_lost` → `already_processing` or retryable
+   * `handler_failed`. Workers must call `processRetryable`.
    * Default: false (run handler in-process).
    * Parking does not consume handler attempt budget.
    * Requires a non-empty `envelope` on each parking `processVerified` call.
@@ -323,8 +335,9 @@ export type WebhookInboxEngine = {
    *
    * **Verify classification (WEBHOOKS-1 / WEBHOOKS-4):**
    * - `{ ok: false }` or forgery throw (`InvalidWebhookError`) → `invalid_webhook`
-   *   (never claims)
+   *   (never claims). `{ ok: false }.reason` is sanitized before return.
    * - Permanent structure/config throws → `handler_failed { retryable: false }`
+   *   (408 / 409 / 425 / 429 stay retryable)
    * - Infrastructure / unknown throws (NetworkError, RateLimitError, TypeError,
    *   generic Error, onWebhookVerified) → `handler_failed { retryable: true }`
    *
