@@ -19,7 +19,7 @@
 | `durability` | `"configuration-dependent"` | AOF/RDB / managed persistence required for Redis restart survival |
 | `supportsTransactions` | `false` | Claim path is Lua, not optional multi-statement SQL tx |
 | `supportsLeases` | `true` | Token + generation fencing |
-| `supportsRetentionCleanup` | `true` | `deleteExpired` (+ optional TTL) |
+| `supportsRetentionCleanup` | `true` | `deleteExpired` only — completed and terminal `dead_letter`/`failed`/`manual_review` fences are **not** `EXPIRE` |
 
 ## Manifest notes (summary)
 
@@ -48,7 +48,7 @@ Strong claims require:
 
 1. Single Lua script per ownership transition.
 2. No application get-then-set claim strategy across connections.
-3. Token-gated mutators that return `lease_lost` when fencing fails (wrong token **or** expired lease on complete/fail).
+3. Token-gated mutators that return `lease_lost` when fencing fails (wrong token **or** expired lease on complete / recon fail). Webhook `fail` accepts a matching token after expiry (WEBHOOKS-2) and is **not** the same fence as complete.
 4. Tagged script results mapped correctly (not ambiguous integers alone), including webhook `not_available` for pre-`available_ms` claim.
 
 If an operator reimplements claim as non-atomic get-then-set, they must **not** advertise this manifest.

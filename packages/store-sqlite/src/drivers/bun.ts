@@ -5,6 +5,9 @@
  *
  * Uses prepared statements (`db.prepare` / `db.query`) and `BEGIN IMMEDIATE`
  * (or native `db.transaction` with immediate behavior) for claim paths.
+ *
+ * BigInt: `run()` normalizes `changes` to a safe integer Number (parity with
+ * node:sqlite / better-sqlite3 bindings).
  */
 
 import { Database } from "bun:sqlite";
@@ -49,8 +52,22 @@ export type BunSqliteDatabase = {
 type BunSqliteStatement = {
   all: (...params: never[]) => unknown[];
   get: (...params: never[]) => unknown;
-  run: (...params: never[]) => { changes?: number };
+  run: (...params: never[]) => { changes?: number | bigint };
 };
+
+function normalizeChanges(changes: number | bigint | undefined): number {
+  if (typeof changes === "bigint") {
+    if (
+      changes >= BigInt(Number.MIN_SAFE_INTEGER) &&
+      changes <= BigInt(Number.MAX_SAFE_INTEGER)
+    ) {
+      return Number(changes);
+    }
+    // Extremely large change counts are not expected; clamp via Number.
+    return Number(changes);
+  }
+  return typeof changes === "number" ? changes : 0;
+}
 
 function bindParams(params?: readonly unknown[]): never[] {
   return (params === undefined ? [] : [...params]) as never[];
@@ -87,7 +104,7 @@ export function createExecutorFromBunSqlite(db: BunSqliteDatabase): SqliteExecut
     run(sql: string, params?: readonly unknown[]): { changes: number } {
       const stmt = prepareStmt(db, sql);
       const result = stmt.run(...bindParams(params));
-      return { changes: typeof result?.changes === "number" ? result.changes : 0 };
+      return { changes: normalizeChanges(result?.changes) };
     },
     transaction: scope.transaction,
     runInTransaction: scope.runInTransaction,

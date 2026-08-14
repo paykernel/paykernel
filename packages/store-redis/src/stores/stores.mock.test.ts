@@ -18,7 +18,7 @@ import {
   MAX_RESULT_JSON_BYTES,
   MAX_SANITIZED_ERROR_LENGTH,
 } from "../limits";
-import { msFromIso, serializeResultJson } from "./shared";
+import { canonicalizeIsoZ, msFromIso, serializeResultJson } from "./shared";
 
 type SendCall = { command: string; args: readonly string[] };
 
@@ -106,6 +106,43 @@ describe("idempotency store mock port", () => {
       leaseMs: 1000,
     });
     expect(r.kind).toBe("indeterminate");
+  });
+
+  it("P1315-REDIS-4: completed + other fingerprint => already_completed", async () => {
+    const pack = idempPack({ status: "completed", fingerprint: "other" });
+    const { port } = createMockPort(() => ["already_completed", ...pack]);
+    const store = createRedisIdempotencyStore({ port });
+    const r = await store.reserve({
+      key: "k1",
+      fingerprint: "fp-caller",
+      owner: "w1",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("already_completed");
+    if (r.kind === "already_completed") {
+      expect(r.record.fingerprint).toBe("other");
+    }
+  });
+
+  it("P1315-REDIS-4: indeterminate + other fingerprint => indeterminate", async () => {
+    const pack = idempPack({
+      status: "indeterminate",
+      fingerprint: "other",
+      lease_token: "",
+      lease_owner: "",
+    });
+    const { port } = createMockPort(() => ["indeterminate", ...pack]);
+    const store = createRedisIdempotencyStore({ port });
+    const r = await store.reserve({
+      key: "k1",
+      fingerprint: "fp-caller",
+      owner: "w1",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("indeterminate");
+    if (r.kind === "indeterminate") {
+      expect(r.record.fingerprint).toBe("other");
+    }
   });
 
   it("complete lease_lost throws StoreLeaseLostError", async () => {
@@ -327,7 +364,87 @@ describe("webhook store mock port", () => {
       }),
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
+
+  it("P1315-REDIS-3: webhook fail dead_letter with retentionTtlMs still invokes fail script", async () => {
+    let failArgv: readonly string[] | undefined;
+    const { port } = createMockPort((call) => {
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        failArgv = call.args;
+        return ["ok"];
+      }
+      return null;
+    });
+    const store = createRedisWebhookInboxStore({
+      port,
+      retentionTtlMs: 7 * 24 * 60 * 60 * 1000,
+    });
+    await store.fail({
+      key: "e1",
+      leaseToken: "lt_1",
+      error: "poison",
+      deadLetter: true,
+    });
+    expect(failArgv).toBeDefined();
+    expect(failArgv!.some((a) => a === "604800")).toBe(true);
+  });
+
+  it("P1315-REDIS-2: webhook claim EVAL ARGV includes leaseExpiresMs", async () => {
+    const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
+    const leaseMs = 15_000;
+    const { port, calls } = createMockPort(() => [
+      "acquired",
+      ...webhookPack({ status: "claimed", attempts: "1" }),
+      "lt_1",
+    ]);
+    const store = createRedisWebhookInboxStore({ port, clock });
+    await store.claim({
+      key: "e1",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs,
+    });
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall!.args.some((a) => a === String(clock.nowMs() + leaseMs))).toBe(
+      true,
+    );
+  });
 });
+
+function reconPack(overrides: Partial<Record<string, string>> = {}): string[] {
+  const base = {
+    key: "j1",
+    status: "scheduled",
+    subject_id: "subj",
+    reason: "r",
+    lease_owner: "",
+    lease_token: "",
+    lease_expires_at: "",
+    attempts: "0",
+    generation: "0",
+    due_at: "2026-01-01T00:00:00.000Z",
+    created_at: "2026-01-01T00:00:00.000Z",
+    updated_at: "2026-01-01T00:00:00.000Z",
+    last_error: "",
+  };
+  const m = { ...base, ...overrides };
+  return [
+    m.key,
+    m.status,
+    m.subject_id,
+    m.reason,
+    m.lease_owner,
+    m.lease_token,
+    m.lease_expires_at,
+    m.attempts,
+    m.generation,
+    m.due_at,
+    m.created_at,
+    m.updated_at,
+    m.last_error,
+  ];
+}
 
 describe("reconciliation store mock port", () => {
   it("schedule already_exists", async () => {
@@ -387,6 +504,123 @@ describe("reconciliation store mock port", () => {
       }),
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
+
+  it("P1315-REDIS-1: reclaim after lease expiry keeps attempts; listDue soft-release then scheduled reclaim nets to original", async () => {
+    // Store-visible sequence (Lua contracts in registry.test.ts):
+    // scheduled claim → attempts=1; get/listDue soft-release → 0; scheduled reclaim → 1.
+    // Direct expired-claimed reclaim (no soft-release) stays at 1.
+    const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
+    let phase: "claim1" | "list" | "claim2" | "reclaim" = "claim1";
+    const { port } = createMockPort((call) => {
+      if (call.command === "SCAN") return ["0", ["psdk:v1:recon:j1"]];
+      if (call.command === "ZRANGEBYSCORE") return ["j1"];
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        if (phase === "claim1") {
+          return ["acquired", ...reconPack({ status: "claimed", attempts: "1" }), "lt_1"];
+        }
+        if (phase === "list") {
+          return ["ok", ...reconPack({ status: "scheduled", attempts: "0" })];
+        }
+        if (phase === "claim2") {
+          return ["acquired", ...reconPack({ status: "claimed", attempts: "1" }), "lt_2"];
+        }
+        return ["acquired", ...reconPack({ status: "claimed", attempts: "1" }), "lt_3"];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({ port, clock });
+    const c1 = await store.claim({ key: "j1", owner: "w_dead", leaseMs: 1_000 });
+    expect(c1.kind).toBe("acquired");
+    if (c1.kind !== "acquired") return;
+    expect(c1.record.attempts).toBe(1);
+
+    phase = "list";
+    clock.advance(2_000);
+    const due = await store.listDue({ limit: 10 });
+    const soft = due.find((r) => r.key === "j1");
+    expect(soft?.status).toBe("scheduled");
+    expect(soft?.attempts).toBe(0);
+
+    phase = "claim2";
+    const c2 = await store.claim({ key: "j1", owner: "w_new", leaseMs: 1_000 });
+    expect(c2.kind).toBe("acquired");
+    if (c2.kind !== "acquired") return;
+    expect(c2.record.attempts).toBe(1);
+
+    phase = "reclaim";
+    const c3 = await store.claim({ key: "j1", owner: "w3", leaseMs: 5_000 });
+    expect(c3.kind).toBe("acquired");
+    if (c3.kind === "acquired") {
+      expect(c3.record.attempts).toBe(1);
+    }
+  });
+
+  it("P1315-REDIS-2: claim EVAL ARGV includes leaseExpiresMs (index scored at lease expiry)", async () => {
+    const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
+    const leaseMs = 30_000;
+    const { port, calls } = createMockPort(() => [
+      "acquired",
+      ...reconPack({ status: "claimed", attempts: "1" }),
+      "lt_1",
+    ]);
+    const store = createRedisReconciliationStore({ port, clock });
+    await store.claim({ key: "j1", owner: "w", leaseMs });
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    expect(evalCall!.args.some((a) => a === String(clock.nowMs() + leaseMs))).toBe(
+      true,
+    );
+  });
+
+  it("P1315-REDIS-2: listDue rediscovers via ZRANGEBYSCORE when SCAN is empty", async () => {
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "SCAN") return ["0", []];
+      if (call.command === "ZRANGEBYSCORE") return ["j1"];
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        return ["ok", ...reconPack({ status: "scheduled", attempts: "0" })];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({ port });
+    const due = await store.listDue({ limit: 10 });
+    expect(due.map((r) => r.key)).toContain("j1");
+    expect(calls.some((c) => c.command === "ZRANGEBYSCORE")).toBe(true);
+    expect(calls.some((c) => c.command === "SCAN")).toBe(true);
+  });
+
+  it("P1315-REDIS-3: recon terminal fail / markManualReview with retention still invoke scripts", async () => {
+    let failArgv: readonly string[] | undefined;
+    let markArgv: readonly string[] | undefined;
+    const { port } = createMockPort((call) => {
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        if (failArgv === undefined) {
+          failArgv = call.args;
+        } else {
+          markArgv = call.args;
+        }
+        return ["ok"];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({
+      port,
+      retentionTtlMs: 7 * 24 * 60 * 60 * 1000,
+    });
+    await store.fail({
+      key: "j1",
+      leaseToken: "lt_1",
+      error: "terminal",
+    });
+    await store.markManualReview({
+      key: "j1",
+      leaseToken: "lt_1",
+      note: "review",
+    });
+    expect(failArgv?.some((a) => a === "604800")).toBe(true);
+    expect(markArgv?.some((a) => a === "604800")).toBe(true);
+  });
 });
 
 describe("serializeResultJson / msFromIso honesty (audit REDIS-1 / REDIS-2)", () => {
@@ -404,6 +638,14 @@ describe("serializeResultJson / msFromIso honesty (audit REDIS-1 / REDIS-2)", ()
       expect(msg).toContain("max_result_json_bytes");
       expect(msg).not.toContain("_truncated");
     }
+  });
+
+  it("canonicalizeIsoZ maps offset forms to Date ISO Z", () => {
+    expect(canonicalizeIsoZ("2026-06-15T13:00:00.000+05:00")).toBe(
+      "2026-06-15T08:00:00.000Z",
+    );
+    expect(() => canonicalizeIsoZ("not-a-date")).toThrow(StoreInvalidSchemaError);
+    expect(() => canonicalizeIsoZ("")).toThrow(StoreInvalidSchemaError);
   });
 
   it("msFromIso fails closed on invalid ISO (never due_ms 0 / epoch)", () => {
@@ -524,5 +766,81 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
     expect(evalCall).toBeDefined();
     const args = evalCall!.args.map(String);
     expect(args[args.length - 1]).toBe(composite);
+  });
+
+  it("P1315-REDIS-5: offset before does not delete a later Z updated_at", async () => {
+    // updated_at 12:00Z; offset before 13:00+05:00 = 08:00Z (earlier instant).
+    // Lexical without canonicalize: T12 < T13 → would delete. Must skip.
+    const updatedAt = "2026-06-15T12:00:00.000Z";
+    const beforeOffset = "2026-06-15T13:00:00.000+05:00";
+    expect(updatedAt > beforeOffset).toBe(false);
+    expect(updatedAt > canonicalizeIsoZ(beforeOffset)).toBe(true);
+
+    let luaBefore: string | undefined;
+    const { port } = createMockPort((call) => {
+      if (call.command === "SCAN") {
+        return ["0", ["psdk:v1:idemp:k-later"]];
+      }
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        const args = call.args.map(String);
+        luaBefore = args.find((a) => a.endsWith("Z") && a.startsWith("2026-"));
+        // Simulate Lua lexical compare of stored Z vs ARGV beforeIso.
+        return updatedAt > (luaBefore ?? "") ? ["skipped"] : ["deleted"];
+      }
+      return null;
+    });
+    const store = createRedisIdempotencyStore({ port });
+    const result = await store.deleteExpired({ before: beforeOffset });
+    expect(luaBefore).toBe("2026-06-15T08:00:00.000Z");
+    expect(result.deleted).toBe(0);
+  });
+
+  it("P1315-REDIS-5: invalid before fails closed before SCAN", async () => {
+    let sendCount = 0;
+    const { port } = createMockPort(() => {
+      sendCount++;
+      return null;
+    });
+    const idemp = createRedisIdempotencyStore({ port });
+    const webhook = createRedisWebhookInboxStore({ port });
+    const recon = createRedisReconciliationStore({ port });
+    await expect(idemp.deleteExpired({ before: "not-a-date" })).rejects.toBeInstanceOf(
+      StoreInvalidSchemaError,
+    );
+    await expect(webhook.deleteExpired({ before: "" })).rejects.toBeInstanceOf(
+      StoreInvalidSchemaError,
+    );
+    await expect(recon.deleteExpired({ before: "nope" })).rejects.toBeInstanceOf(
+      StoreInvalidSchemaError,
+    );
+    expect(sendCount).toBe(0);
+  });
+
+  it("P1315-REDIS-5: listDue / listRetryable write canonical Z nowIso", async () => {
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "SCAN") {
+        const match = String(call.args[2] ?? "");
+        const key = match.includes("whinbox")
+          ? "psdk:v1:whinbox:e1"
+          : "psdk:v1:recon:j1";
+        return ["0", [key]];
+      }
+      if (call.command === "ZRANGEBYSCORE") return [];
+      return ["ok"];
+    });
+    const recon = createRedisReconciliationStore({ port });
+    const webhook = createRedisWebhookInboxStore({ port });
+    const offsetNow = "2026-06-15T13:00:00.000+05:00";
+    await recon.listDue({ now: offsetNow, limit: 1 });
+    await webhook.listRetryable({ now: offsetNow, limit: 1 });
+    const evalCalls = calls.filter(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCalls.length).toBeGreaterThan(0);
+    for (const call of evalCalls) {
+      const args = call.args.map(String);
+      expect(args).toContain("2026-06-15T08:00:00.000Z");
+      expect(args).not.toContain(offsetNow);
+    }
   });
 });

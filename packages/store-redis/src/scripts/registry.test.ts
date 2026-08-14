@@ -52,14 +52,24 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     );
   });
 
-  it("STORES-5: webhook/recon complete never EXPIREs completed fences", () => {
-    const wh = REDIS_SCRIPT_REGISTRY.webhookInbox.complete;
-    const recon = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
-    for (const complete of [wh, recon]) {
-      expect(complete).not.toMatch(/redis\.call\(\s*['"]EXPIRE['"]/i);
-      expect(complete).toMatch(/redis\.call\(\s*['"]PERSIST['"]/i);
-      expect(complete).toContain("'completed'");
+  it("STORES-5: webhook/recon complete, dead_letter, terminal fail, manual_review never EXPIRE", () => {
+    const scripts = [
+      REDIS_SCRIPT_REGISTRY.webhookInbox.complete,
+      REDIS_SCRIPT_REGISTRY.webhookInbox.fail,
+      REDIS_SCRIPT_REGISTRY.reconciliation.complete,
+      REDIS_SCRIPT_REGISTRY.reconciliation.fail,
+      REDIS_SCRIPT_REGISTRY.reconciliation.markManualReview,
+    ];
+    for (const script of scripts) {
+      expect(script).not.toMatch(/redis\.call\(\s*['"]EXPIRE['"]/i);
+      expect(script).toMatch(/redis\.call\(\s*['"]PERSIST['"]/i);
     }
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.complete).toContain("'completed'");
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.fail).toContain("dead_letter");
+    expect(REDIS_SCRIPT_REGISTRY.reconciliation.fail).toContain("'failed'");
+    expect(REDIS_SCRIPT_REGISTRY.reconciliation.markManualReview).toContain(
+      "manual_review",
+    );
   });
 
   it("webhook fail accepts matching token after expiry (WEBHOOKS-2; complete still fences)", () => {
@@ -98,7 +108,7 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
   });
 
 
-  it("recon fail requires unexpired lease (parity with complete / webhook fail)", () => {
+  it("recon fail requires unexpired lease (parity with complete, not webhook fail)", () => {
     const fail = REDIS_SCRIPT_REGISTRY.reconciliation.fail;
     const complete = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
     expect(fail).toContain("lease_expires_ms");
@@ -116,6 +126,56 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(mark).toContain("lease_lost");
     expect(mark).toContain("exp <= nowMs");
     expect(complete).toContain("exp <= nowMs");
+  });
+
+  it("P1315-REDIS-1: recon claim increments attempts only when scheduled", () => {
+    const claim = REDIS_SCRIPT_REGISTRY.reconciliation.claim;
+    // Must not unconditionally increment (expired claimed reclaim keeps attempts).
+    expect(claim).not.toMatch(
+      /local attempts = \(tonumber\(m\['attempts'\] or '0'\) or 0\) \+ 1/,
+    );
+    expect(claim).toMatch(/if status == 'scheduled'/);
+    expect(claim).toContain("prevAttempts");
+  });
+
+  it("P1315-REDIS-1: recon get soft-release restores unfinished attempt", () => {
+    const get = REDIS_SCRIPT_REGISTRY.reconciliation.get;
+    expect(get).toContain("attempts");
+    expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+  });
+
+  it("P1315-REDIS-2: claim ZADDs due/retry index at lease expiry (not ZREM)", () => {
+    const recon = REDIS_SCRIPT_REGISTRY.reconciliation.claim;
+    const webhook = REDIS_SCRIPT_REGISTRY.webhookInbox.claim;
+    for (const claim of [recon, webhook]) {
+      expect(claim).toMatch(
+        /redis\.call\(\s*['"]ZADD['"]\s*,\s*idx\s*,\s*tonumber\(leaseExpiresMs\)/,
+      );
+      expect(claim).not.toMatch(/redis\.call\(\s*['"]ZREM['"]/);
+    }
+    // Terminal paths still ZREM so completed/failed work leaves the index.
+    expect(REDIS_SCRIPT_REGISTRY.reconciliation.complete).toMatch(
+      /redis\.call\(\s*['"]ZREM['"]/,
+    );
+    expect(REDIS_SCRIPT_REGISTRY.reconciliation.fail).toMatch(
+      /redis\.call\(\s*['"]ZREM['"]/,
+    );
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.complete).toMatch(
+      /redis\.call\(\s*['"]ZREM['"]/,
+    );
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.fail).toMatch(
+      /redis\.call\(\s*['"]ZREM['"]/,
+    );
+  });
+
+  it("P1315-REDIS-4: reserve classifies completed then indeterminate then fingerprint", () => {
+    const reserve = REDIS_SCRIPT_REGISTRY.idempotency.reserve;
+    const completed = reserve.indexOf("status == 'completed'");
+    const indeterminate = reserve.indexOf("status == 'indeterminate'");
+    const fp = reserve.indexOf("fp ~= fingerprint");
+    expect(completed).toBeGreaterThan(-1);
+    expect(indeterminate).toBeGreaterThan(completed);
+    expect(fp).toBeGreaterThan(indeterminate);
   });
 
 });

@@ -70,11 +70,9 @@ local m = hgetall_map(rec)
 local status = m['status'] or ''
 local fp = m['fingerprint'] or ''
 
-if fp ~= fingerprint then
-  local p = pack(m)
-  return {'fingerprint_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]}
-end
-
+-- P1315-REDIS-4: same order as classifyIdempotencyReserveMiss —
+-- completed, then indeterminate, then fingerprint_conflict (money/lease
+-- terminal outcomes must not be reported as a fingerprint miss).
 if status == 'completed' then
   local p = pack(m)
   return {'already_completed', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]}
@@ -83,6 +81,11 @@ end
 if status == 'indeterminate' then
   local p = pack(m)
   return {'indeterminate', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]}
+end
+
+if fp ~= fingerprint then
+  local p = pack(m)
+  return {'fingerprint_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]}
 end
 
 if status == 'reserved' then
@@ -325,13 +328,16 @@ return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11]
 /**
  * KEYS[1]=scan cursor is not used; JS drives SCAN.
  * This script deletes a single terminal key when eligible.
- * KEYS[1]=record  ARGV: beforeMs (updated_at compared as ms stored? we store ISO — pass beforeIso and compare lexicographically for ISO)
+ * KEYS[1]=record  ARGV: beforeIso, beforeMs
  *
- * For safety we store updated_at as ISO-8601; lexicographic compare works for UTC ISO.
+ * beforeIso must be canonical millisecond UTC ISO (Z). Prefer numeric
+ * updated_ms vs beforeMs when present; otherwise lexical updated_at.
  * A4: never delete indeterminate.
  */
 export const IDEMPOTENCY_DELETE_IF_EXPIRED_LUA = `
 local rec = KEYS[1]
+-- P1315-REDIS-5: beforeIso must be canonical millisecond UTC ISO (Z).
+-- Prefer numeric updated_ms when present; otherwise lexical updated_at.
 local beforeIso = ARGV[1]
 
 local function hgetall_map(key)
@@ -353,9 +359,17 @@ if status == 'indeterminate' then
   return {'skipped'}
 end
 
-local updated = m['updated_at'] or ''
-if updated > beforeIso then
-  return {'skipped'}
+local updatedMs = tonumber(m['updated_ms'] or '')
+local beforeMs = tonumber(ARGV[2] or '')
+if updatedMs ~= nil and beforeMs ~= nil then
+  if updatedMs > beforeMs then
+    return {'skipped'}
+  end
+else
+  local updated = m['updated_at'] or ''
+  if updated > beforeIso then
+    return {'skipped'}
+  end
 end
 
 if status == 'completed' or status == 'expired' then

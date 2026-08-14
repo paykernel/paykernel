@@ -42,6 +42,8 @@ import {
 import type { RedisStoreOptions } from "../types";
 import { enforceMaxSanitizedError } from "../limits";
 import {
+  canonicalizeIsoZ,
+  msFromIso,
   newLeaseToken,
   normalizeScan,
   resolveRedisStoreContext,
@@ -226,6 +228,9 @@ export function createRedisIdempotencyStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
+        // P1315-REDIS-5: Lua compares updated_at lexically — require canonical Z.
+        const beforeIso = canonicalizeIsoZ(input.before);
+        const beforeMs = msFromIso(beforeIso);
         // Without a global registry of keys, SCAN for our prefix + idemp segment.
         const match = scanMatchForStore(ctx.keys, "idemp");
         const limit = input.limit ?? Number.POSITIVE_INFINITY;
@@ -247,7 +252,7 @@ export function createRedisIdempotencyStore(
             const raw = await ctx.eval.eval(
               IDEMPOTENCY_DELETE_IF_EXPIRED_LUA,
               [redisKey],
-              [input.before],
+              [beforeIso, beforeMs],
             );
             const tagged = parseTaggedResult(raw);
             if (tagged.tag === "deleted") deleted++;

@@ -120,6 +120,21 @@ describe("bun:sqlite driver binding", () => {
       db.close();
     }
   });
+
+  it("normalizes bigint changes from stmt.run (1n => 1)", () => {
+    const mockStmt = {
+      all: (..._params: never[]) => [],
+      get: (..._params: never[]) => undefined,
+      run: (..._params: never[]) => ({ changes: 1n }),
+    };
+    const mockDb = {
+      prepare: (_sql: string) => mockStmt,
+      query: (_sql: string) => mockStmt,
+      exec: (_sql: string) => {},
+    };
+    const executor = createExecutorFromBunSqlite(mockDb);
+    expect(executor.run("INSERT INTO t VALUES (1)").changes).toBe(1);
+  });
 });
 
 describe("node:sqlite driver binding", () => {

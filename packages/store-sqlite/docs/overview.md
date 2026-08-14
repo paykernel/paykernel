@@ -3,7 +3,8 @@
 **Package:** `@paykernel/store-sqlite`  
 **Path:** `packages/store-sqlite`  
 **Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
-**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (private shim: `internal/sql-store`)
+**Manifest type:** `StorageAdapterManifest` from `@paykernel/store-contracts`  
+**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) — **not** `internal/sql-store`
 
 This package is the **local/embedded single-host** production storage adapter. It implements durable (file-backed) **idempotency**, **webhook inbox**, and **reconciliation** stores against SQLite for Bun, Node, desktop, and single-host deployments.
 
@@ -13,11 +14,11 @@ This package is the **local/embedded single-host** production storage adapter. I
 
 | Concern | What this package provides |
 | ------- | -------------------------- |
-| Single-host claims | `BEGIN IMMEDIATE` (or equivalent) + sql-store sqlite templates in **one sync transaction** |
+| Single-host claims | `BEGIN IMMEDIATE` (or equivalent) + `@paykernel/sql-foundation` sqlite templates in **one sync transaction** |
 | File durability | Rows survive process restart when the DB is file-backed (WAL recommended) |
 | Explicit schema | `migrateSqliteAdapter` / `verifySqliteAdapterSchema` — never on import or default factory construction |
 | Driver choice | Isolated subpaths; **root entry imports no drivers** |
-| Conformance | Testkit suites + Bun memory/file proofs; node/better-sqlite3 skip-clean |
+| Conformance | Testkit suites + Bun memory/file proofs; node/better-sqlite3 `describe.skip` / `it.skip` when unavailable |
 
 ## What you get
 
@@ -42,7 +43,7 @@ import {
 
 | Concern | Approach |
 | ------- | -------- |
-| Claims | `BEGIN IMMEDIATE` + sql-store sqlite templates (`INSERT OR IGNORE` + conditional `UPDATE`) in **one sync transaction** |
+| Claims | `BEGIN IMMEDIATE` + `@paykernel/sql-foundation` sqlite templates (`INSERT OR IGNORE` + conditional `UPDATE`) in **one sync transaction** |
 | Drivers | Isolated subpaths (`/bun`, `/node`, `/better-sqlite3`); root imports **none** |
 | Migrate | Explicit `migrateSqliteAdapter` only |
 | Clock | Injectable (`FakeClock` works in conformance) |
@@ -100,12 +101,13 @@ Details: [drivers.md](./drivers.md).
 | `packages/core` | **Must not** depend on it |
 | `packages/webhooks` | **Must not** depend on it (inject store at app layer) |
 | `packages/testkit` | Contracts + conformance only |
-| `internal/sql-store` | Adapter **may** depend (`workspace:*`; private foundation) |
+| `@paykernel/sql-foundation` | Adapter **depends** (sqlite dialect templates + migrate) |
+| `internal/sql-store` | Private shim only — **not** the foundation this adapter uses |
 | `adapter-postgres` / `adapter-redis` | **Must not** depend on adapter-sqlite (and vice versa for postgres/redis deps) |
 
 ## Not this package
 
-- **Not** the sql-store NON_PRODUCTION bun reference store (`internal/sql-store` reference is test-only; this package is production code).
+- **Not** the `internal/sql-store` NON_PRODUCTION bun reference store (test-only). Foundation is `@paykernel/sql-foundation`.
 - **Not** Turso (`adapter-turso`), Cloudflare D1 (`adapter-cloudflare-d1`), or Durable Objects (Phase 17).
 - **Not** multi-host / multi-region coordination.
 - **Not** auto-migrate on import.

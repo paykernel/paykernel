@@ -128,49 +128,60 @@ describe("sqlite conformance (bun file-backed)", () => {
   });
 });
 
-describe("sqlite conformance (node:sqlite skip-clean)", () => {
-  it("passes all three suites when node:sqlite is available", async () => {
-    let openOk = false;
-    try {
-      const mod = await import("node:sqlite");
-      if (typeof mod.DatabaseSync !== "function") return;
+async function probeNodeSqlite(): Promise<boolean> {
+  try {
+    const mod = await import("node:sqlite");
+    return typeof mod.DatabaseSync === "function";
+  } catch {
+    return false;
+  }
+}
+
+async function probeBetterSqlite3(): Promise<boolean> {
+  try {
+    const Database = (await import("better-sqlite3")).default;
+    if (typeof Database !== "function") return false;
+    const probe = new Database(":memory:");
+    probe.close();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const hasNodeSqlite = await probeNodeSqlite();
+const hasBetterSqlite3 = await probeBetterSqlite3();
+
+// P1315-TEST-1: unavailable drivers must describe.skip / it.skip — never a
+// silent return that bun reports as a passing test with no expect.
+(hasNodeSqlite ? describe : describe.skip)(
+  "sqlite conformance (node:sqlite skip-clean)",
+  () => {
+    it("passes all three suites when node:sqlite is available", async () => {
       const { createInMemoryNodeSqliteExecutor } = await import("./drivers/node");
       const mem = createInMemoryNodeSqliteExecutor();
-      openOk = true;
       try {
         await runAllSuites("node-memory", mem.executor, "cn_");
       } finally {
         mem.close();
       }
-    } catch {
-      // Unavailable or native failure — clean skip (do not fail CI).
-      if (openOk) throw new Error("node:sqlite opened then failed mid-suite");
-      return;
-    }
-  });
-});
+    });
+  },
+);
 
-describe("sqlite conformance (better-sqlite3 skip-clean)", () => {
-  it("passes all three suites when better-sqlite3 loads", async () => {
-    let openOk = false;
-    try {
-      const Database = (await import("better-sqlite3")).default;
-      const probe = new Database(":memory:");
-      probe.close();
+(hasBetterSqlite3 ? describe : describe.skip)(
+  "sqlite conformance (better-sqlite3 skip-clean)",
+  () => {
+    it("passes all three suites when better-sqlite3 loads", async () => {
       const { createInMemoryBetterSqlite3Executor } = await import(
         "./drivers/better-sqlite3"
       );
       const mem = createInMemoryBetterSqlite3Executor();
-      openOk = true;
       try {
         await runAllSuites("bs3-memory", mem.executor, "cb_");
       } finally {
         mem.close();
       }
-    } catch {
-      if (openOk) throw new Error("better-sqlite3 opened then failed mid-suite");
-      // Native bindings missing under Bun ABI — clean skip.
-      return;
-    }
-  });
-});
+    });
+  },
+);

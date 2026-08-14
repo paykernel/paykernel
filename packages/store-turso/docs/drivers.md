@@ -41,10 +41,9 @@ Also exported (aliases):
 Notes:
 
 - Supports remote URLs (`libsql://`, `https://`), `file:`, and `:memory:` for CI.
-- Write transactions use `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` on the same client.
+- **Remote** write transactions use `client.transaction("write")` (interactive, one stream). `BEGIN IMMEDIATE` is **local `file:` / `:memory:` only** — libsql's local `transaction()` detaches the primary handle.
 - Optional `client.batch(..., "write")` for transactional multi-statement batches.
-- Interactive `client.transaction()` is avoided for `:memory:` catalog quirks on some libsql versions.
-- **Embedded replicas / legacy `syncUrl`:** reads may be local and writes go to cloud primary. This is **not** true offline multi-writer local-first sync. Do not advertise untested conflict resolution. Prefer a shared remote primary for multi-host claims.
+- **Embedded replicas / legacy `syncUrl`:** **not** multi-host. Reads may be local and writes go to cloud primary. This is **not** true offline multi-writer local-first sync and is **not** this adapter's `multi-host` claim. Do not advertise untested conflict resolution. Prefer a shared remote primary for multi-host claims.
 
 ## `@paykernel/store-turso/serverless`
 

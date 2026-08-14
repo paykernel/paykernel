@@ -6,7 +6,9 @@ import {
   createFakeClock,
 } from "@paykernel/testkit";
 import {
+  StoreInvalidSchemaError,
   StoreLeaseLostError,
+  StoreSerializationFailureError,
 } from "@paykernel/store-contracts";
 import {
   createSqliteIdempotencyStore,
@@ -817,4 +819,54 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     }
   });
 
+});
+
+describe("serializeResultJson honesty (STORES-3)", () => {
+  it("rejects oversized idempotency result instead of truncating", async () => {
+    const { serializeResultJson } = await import("./shared");
+    const { MAX_RESULT_JSON_BYTES } = await import("@paykernel/sql-foundation");
+    const ok = { status: "paid", amount: "10.00" };
+    expect(JSON.parse(serializeResultJson(ok))).toEqual(ok);
+    const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
+    expect(() => serializeResultJson(huge)).toThrow(StoreSerializationFailureError);
+  });
+});
+
+describe("namespace.sqlSchema rejected (SQLite has no CREATE SCHEMA)", () => {
+  function stubExecutor(): SqliteExecutor {
+    return {
+      query() {
+        return [];
+      },
+      run() {
+        return { changes: 0 };
+      },
+      transaction<T>(fn: () => T) {
+        return fn();
+      },
+    };
+  }
+
+  it("createSqlite*Store / resolveStoreContext rejects sqlSchema", async () => {
+    const { resolveStoreContext } = await import("./shared");
+    const executor = stubExecutor();
+    const namespace = { sqlSchema: "payments" };
+    expect(() => createSqliteIdempotencyStore({ executor, namespace })).toThrow(
+      StoreInvalidSchemaError,
+    );
+    expect(() => createSqliteWebhookInboxStore({ executor, namespace })).toThrow(
+      StoreInvalidSchemaError,
+    );
+    expect(() => createSqliteReconciliationStore({ executor, namespace })).toThrow(
+      StoreInvalidSchemaError,
+    );
+    expect(() => createSqliteStores({ executor, namespace })).toThrow(StoreInvalidSchemaError);
+    expect(() => resolveStoreContext({ executor, namespace })).toThrow(/CREATE SCHEMA/);
+  });
+
+  it("migrateSqliteAdapter rejects sqlSchema", async () => {
+    await expect(
+      migrateSqliteAdapter(stubExecutor(), { namespace: { sqlSchema: "payments" } }),
+    ).rejects.toThrow(/CREATE SCHEMA/);
+  });
 });

@@ -39,8 +39,8 @@ export function resolveRedisStoreContext(
 ): ResolvedRedisStoreContext {
   const keys: ResolvedKeyDesign = resolveKeyDesign(options.keys ?? {});
   const clock = options.clock ?? createSystemClock();
-  // retentionTtlSec is used by webhook/recon terminal EXPIRE only.
-  // Idempotency complete intentionally ignores it (REDIS-1 — no re-acquirable empty).
+  // retentionTtlSec is accepted for call-site parity; terminal scripts PERSIST
+  // (P1315-REDIS-3 / STORES-5) and ignore EXPIRE. Cleanup via deleteExpired.
   const retentionTtlMs = options.retentionTtlMs;
   const retentionTtlSec =
     retentionTtlMs !== undefined && retentionTtlMs > 0
@@ -93,6 +93,14 @@ export function msFromIso(iso: string): string {
   return String(n);
 }
 
+/**
+ * Canonical millisecond UTC ISO (`Date#toISOString`) for Lua lexical compares.
+ * Fail closed on invalid input — never pass offset / garbage to ARGV (P1315-REDIS-5).
+ */
+export function canonicalizeIsoZ(iso: string): string {
+  return new Date(Number(msFromIso(iso))).toISOString();
+}
+
 /** SCAN MATCH pattern for record keys of one store segment (excludes index keys). */
 export function scanMatchForStore(
   design: ResolvedKeyDesign,
@@ -123,8 +131,10 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
  * SCAN store record keys and run GET_LUA on each so expired `claimed` rows
  * soft-release + re-index into the due/retry ZSET.
  *
- * Claim paths ZREM the list index; without this bulk path, listDue / listRetryable
- * never rediscover abandoned work after lease expiry (SQL bulk soft-release parity).
+ * Extra / standalone-only: claim already ZADDs the due/retry index at
+ * `lease_expires_ms` so ZRANGEBYSCORE(-inf, now) rediscovers abandoned
+ * claimed keys with keyed ZSET ops (P1315-REDIS-2, Cluster-safe). SCAN must
+ * not be the only recovery path.
  */
 export async function softReleaseExpiredClaimedViaScan(options: {
   port: RedisCommandPort;

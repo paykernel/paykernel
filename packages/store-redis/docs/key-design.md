@@ -41,9 +41,12 @@ Hash tag body is `tenantId` or `_` so **record + index keys co-locate** on one C
 | ------- | ---------- | ------------------- |
 | Webhook retry / pending | `webhookRetryIndexKey` | `…:whinbox:retry` |
 | Reconciliation due | `reconciliationDueIndexKey` | `…:recon:due` |
+| Abandoned-claim recovery | keyed lease-expiry ZSET | scored by `lease_expires_ms` (not Cluster `SCAN`) |
 | Retention eligibility | `retentionIndexKey(store)` | `…:{store}:retain` |
 
 Scores use millisecond epochs aligned with injectable clock ARGV.
+
+**REDIS-2:** poll recovery (`listRetryable` / `listDue`) walks the **lease-expiry ZSET**, not Cluster `SCAN`. `SCAN` is an optional extra on standalone (housekeeping / `deleteExpired`). Cluster `SCAN` is per-node and is not a recovery claim.
 
 ## Size limits
 
@@ -59,9 +62,9 @@ Segments reject whitespace, newlines, and raw `{` / `}` (hash tags are applied o
 
 ## TTL / retention
 
-- Optional `retentionTtlMs` on store options may set Redis `EXPIRE` on terminal records after complete/fail.
-- `deleteExpired` remains the explicit retention API (must not delete indeterminate by default).
-- TTLs alone are **not** a substitute for audit history — see [persistence.md](./persistence.md).
+- **Completed** fences (idempotency, webhook, recon) and terminal **`dead_letter` / `failed` / `manual_review`** rows are **not** given Redis `EXPIRE` after complete/fail (REDIS-3). Silent eviction would re-open claim (reprocess paid / re-run recon / lose a terminal fail).
+- `deleteExpired` is the explicit retention API (must not delete indeterminate by default).
+- Optional `retentionTtlMs` is **not** “EXPIRE after complete/fail” and is **not** a substitute for audit history — see [persistence.md](./persistence.md).
 
 ## Schema version suffix
 

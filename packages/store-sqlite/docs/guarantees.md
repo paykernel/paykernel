@@ -1,7 +1,7 @@
 # Guarantees and storage manifest
 
 **Export:** `SQLITE_STORAGE_ADAPTER_MANIFEST` / `getSqliteStorageAdapterManifest()`  
-**Type:** `StorageAdapterManifest` from `@paykernel/testkit`  
+**Type:** `StorageAdapterManifest` from `@paykernel/store-contracts`  
 **Validated at module load** via `assertStorageAdapterManifest`.
 
 ## Declared fields
@@ -12,7 +12,7 @@
 | `contracts.idempotency` | `true` | Lease-aware Phase 9 idempotency store |
 | `contracts.webhookInbox` | `true` | Assignable to webhooks dual `WebhookInboxStore` |
 | `contracts.reconciliation` | `true` | Lease-aware reconciliation store |
-| `consistency.claims` | `"strong"` | Only with `BEGIN IMMEDIATE` (or equivalent) + conditional writes (sql-store templates) |
+| `consistency.claims` | `"strong"` | Only with `BEGIN IMMEDIATE` (or equivalent) + conditional writes (`@paykernel/sql-foundation` templates) |
 | `consistency.readAfterWrite` | `"strong"` | Same process / same file after commit |
 | `consistency.staleReadsPossible` | `false` | Under single-host local FS assumptions |
 | `coordinationScope` | **`"single-host"`** | **Never** multi-host / multi-region for a local SQLite file |
@@ -35,7 +35,7 @@ Advertising `coordinationScope: "multi-host"` or `"multi-region"` for local file
 Strong claims require:
 
 1. Reserved lock via `BEGIN IMMEDIATE` (or driver immediate transaction) **or** verified single-statement ON CONFLICT claim.
-2. Conditional SQL from sql-store sqlite templates inside that critical section.
+2. Conditional SQL from `@paykernel/sql-foundation` sqlite templates inside that critical section.
 3. **No** application get-then-set claim strategy across connections.
 4. Token-gated mutators that fail when zero rows match (`StoreLeaseLostError`).
 

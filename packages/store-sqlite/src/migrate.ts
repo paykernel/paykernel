@@ -20,8 +20,10 @@ import type {
 import type { SqliteExecutor } from "./executor";
 import { toSqlStoreExecutor } from "./executor";
 import { withMappedErrors } from "./errors";
+import { assertNoSqliteSqlSchema } from "./stores/shared";
 
 export type MigrateSqliteAdapterOptions = {
+  /** `sqlSchema` is rejected: SQLite has no CREATE SCHEMA. */
   namespace?: SchemaNamespaceConfig | ResolvedSchemaNamespace;
   /** ISO clock for applied_at (optional). */
   nowIso?: string;
@@ -43,6 +45,7 @@ export async function migrateSqliteAdapter(
   executor: SqliteExecutor,
   options: MigrateSqliteAdapterOptions = {},
 ): Promise<MigrateResult> {
+  assertNoSqliteSqlSchema(options.namespace);
   return withMappedErrors(async () => {
     const sqlExec = toSqlStoreExecutor(executor);
     const migrateOpts: MigrateOptions = {

@@ -52,6 +52,7 @@ import {
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
 import {
+  canonicalizeIsoZ,
   msFromIso,
   newLeaseToken,
   normalizeScan,
@@ -291,10 +292,13 @@ export function createRedisReconciliationStore(
             ? msFromIso(input.now)
             : clockNowMsString(ctx.clock);
         const nowIso =
-          input.now !== undefined ? input.now : clockNowIso(ctx.clock);
+          input.now !== undefined
+            ? canonicalizeIsoZ(input.now)
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // Claim ZREMs the due index; SCAN soft-release re-indexes expired claimed
-        // so claimDue/processDue rediscover work after crash (SQL/memory parity).
+        // P1315-REDIS-2: claim ZADDs due index at lease_expires_ms so
+        // ZRANGEBYSCORE(-inf, now) rediscovers abandoned claimed keys.
+        // SCAN bulk soft-release is extra; not the only recovery path.
         await softReleaseExpiredClaimedViaScan({
           port: ctx.port,
           eval: ctx.eval,
@@ -330,6 +334,9 @@ export function createRedisReconciliationStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
+        // P1315-REDIS-5: Lua compares updated_at lexically — require canonical Z.
+        const beforeIso = canonicalizeIsoZ(input.before);
+        const beforeMs = msFromIso(beforeIso);
         const match = scanMatchForStore(ctx.keys, "recon");
         const limit = input.limit ?? Number.POSITIVE_INFINITY;
         let deleted = 0;
@@ -358,7 +365,7 @@ export function createRedisReconciliationStore(
             const raw = await ctx.eval.eval(
               RECON_DELETE_IF_EXPIRED_LUA,
               [redisKey, dueIndex],
-              [input.before, logicalKey],
+              [beforeIso, beforeMs, logicalKey],
             );
             const tagged = parseTaggedResult(raw);
             if (tagged.tag === "deleted") deleted++;

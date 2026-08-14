@@ -43,6 +43,7 @@ import {
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
 import {
+  canonicalizeIsoZ,
   msFromIso,
   newLeaseToken,
   normalizeScan,
@@ -237,10 +238,13 @@ export function createRedisWebhookInboxStore(
             ? msFromIso(input.now)
             : clockNowMsString(ctx.clock);
         const nowIso =
-          input.now !== undefined ? input.now : clockNowIso(ctx.clock);
+          input.now !== undefined
+            ? canonicalizeIsoZ(input.now)
+            : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // Claim ZREMs the retry index; SCAN soft-release re-indexes expired claimed
-        // so processRetryable rediscovers work after crash (SQL/memory parity).
+        // P1315-REDIS-2: claim ZADDs retry index at lease_expires_ms so
+        // ZRANGEBYSCORE(-inf, now) rediscovers abandoned claimed keys.
+        // SCAN bulk soft-release is extra; not the only recovery path.
         await softReleaseExpiredClaimedViaScan({
           port: ctx.port,
           eval: ctx.eval,
@@ -276,6 +280,9 @@ export function createRedisWebhookInboxStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
+        // P1315-REDIS-5: Lua compares updated_at lexically — require canonical Z.
+        const beforeIso = canonicalizeIsoZ(input.before);
+        const beforeMs = msFromIso(beforeIso);
         const match = scanMatchForStore(ctx.keys, "whinbox");
         const limit = input.limit ?? Number.POSITIVE_INFINITY;
         let deleted = 0;
@@ -305,7 +312,7 @@ export function createRedisWebhookInboxStore(
             const raw = await ctx.eval.eval(
               WEBHOOK_DELETE_IF_EXPIRED_LUA,
               [redisKey, indexKey],
-              [input.before, logicalKey],
+              [beforeIso, beforeMs, logicalKey],
             );
             const tagged = parseTaggedResult(raw);
             if (tagged.tag === "deleted") deleted++;

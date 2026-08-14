@@ -1,13 +1,14 @@
 /**
  * Concurrent claim contention + consistency proofs (Phase 15.3).
  *
- * - libsql :memory: / file: when @libsql/client is available (CI path)
- * - live remote multi-connection when TURSO_ / LIBSQL_ env set (skip-clean otherwise)
+ * - libsql :memory: when @libsql/client loads (devDependency — throw if installed but open fails)
+ * - live remote multi-connection: describe.skipIf(!hasLiveTurso())
  *
  * Proves single-statement UPSERT claim atomicity under parallel reserves,
  * FakeClock lease reclaim, stale-token fencing, txn rollback, read-after-write,
  * and multi-instance (two store instances / two clients).
  */
+import { createRequire } from "node:module";
 import { describe, expect, it } from "bun:test";
 import { createFakeClock, StoreLeaseLostError } from "@paykernel/testkit";
 import {
@@ -15,6 +16,8 @@ import {
   createTursoWebhookInboxStore,
   migrateTursoAdapter,
 } from "./index";
+import { createLibsqlExecutor, type LibsqlClientLike } from "./drivers/libsql";
+import type { TursoExecutor } from "./executor";
 import {
   hasLiveTurso,
   isRemoteTursoUrl,
@@ -23,25 +26,51 @@ import {
   uniqueTablePrefix,
 } from "./test-utils/turso-env";
 
-async function openLibsqlMemory(): Promise<{
-  client: { close: () => void };
-  executor: import("./executor").TursoExecutor;
-} | null> {
+const require = createRequire(import.meta.url);
+
+type LibsqlCreateClient = (config: {
+  url: string;
+  authToken?: string;
+}) => LibsqlClientLike & { close: () => void };
+
+function tryLoadLibsql():
+  | { ok: true; createClient: LibsqlCreateClient }
+  | { ok: false; reason: string } {
   try {
-    const { createClient } = await import("@libsql/client");
-    const client = createClient({ url: ":memory:" });
-    const { createLibsqlExecutor } = await import("./drivers/libsql");
-    return { client, executor: createLibsqlExecutor(client) };
-  } catch {
-    return null;
+    const mod = require("@libsql/client") as {
+      createClient?: LibsqlCreateClient;
+    };
+    if (typeof mod.createClient !== "function") {
+      return { ok: false, reason: "@libsql/client has no createClient" };
+    }
+    return { ok: true, createClient: mod.createClient };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
-describe("turso claim concurrency (libsql skip-clean)", () => {
+const libsql = tryLoadLibsql();
+const liveRemoteTurso = hasLiveTurso() && isRemoteTursoUrl();
+
+function openLibsqlMemory(): {
+  client: { close: () => void };
+  executor: TursoExecutor;
+} {
+  if (!libsql.ok) {
+    throw new Error(
+      `@libsql/client is a package devDependency and must open; load failed: ${libsql.reason}`,
+    );
+  }
+  const client = libsql.createClient({ url: ":memory:" });
+  return { client, executor: createLibsqlExecutor(client) };
+}
+
+describe.skipIf(!libsql.ok)("turso claim concurrency (libsql)", () => {
   it("only one worker acquires a fresh key under parallel reserve", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "cx_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -82,9 +111,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("FakeClock lease expiry allows reclaim with generation++", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "lx_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -132,9 +159,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("stale lease complete/fail throws StoreLeaseLostError after reclaim", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "st_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -182,9 +207,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("read-after-write: get reflects claim immediately", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "rw_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -216,9 +239,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("multi-instance: two store instances same DB different owners → one winner", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "mi_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -262,9 +283,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("transaction rollback is atomic (batch/txn)", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       expect(typeof executor.transaction).toBe("function");
       await executor.execute(
@@ -308,9 +327,7 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 
   it("webhook concurrent claims: exactly one winner", async () => {
-    const opened = await openLibsqlMemory();
-    if (!opened) return;
-    const { client, executor } = opened;
+    const { client, executor } = openLibsqlMemory();
     try {
       const prefix = "wh_";
       await migrateTursoAdapter(executor, { namespace: { tablePrefix: prefix } });
@@ -341,27 +358,36 @@ describe("turso claim concurrency (libsql skip-clean)", () => {
   });
 });
 
-describe("turso claim concurrency (live remote skip-clean)", () => {
+if (!libsql.ok) {
+  describe.skip(
+    `turso claim concurrency skipped (@libsql/client unavailable: ${libsql.reason})`,
+    () => {
+      it("requires @libsql/client to run local concurrency proofs", () => {
+        expect(libsql.ok).toBe(false);
+      });
+    },
+  );
+}
+
+describe.skipIf(!liveRemoteTurso)("turso claim concurrency (live remote)", () => {
   it(
     "multi-connection parallel reserve on shared remote DB",
     async () => {
-      if (!hasLiveTurso() || !isRemoteTursoUrl()) {
-        return;
+      if (!libsql.ok) {
+        throw new Error(
+          `@libsql/client is a package devDependency and must open for live remote tests: ${libsql.reason}`,
+        );
       }
-      let openOk = false;
-      try {
-        const { createClient } = await import("@libsql/client");
-        const url = TURSO_DATABASE_URL!;
-        const authToken = TURSO_AUTH_TOKEN;
-        const makeClient = () => {
-          const cfg: { url: string; authToken?: string } = { url };
-          if (authToken) cfg.authToken = authToken;
-          return createClient(cfg);
-        };
+      const url = TURSO_DATABASE_URL!;
+      const authToken = TURSO_AUTH_TOKEN;
+      const makeClient = () => {
+        const cfg: { url: string; authToken?: string } = { url };
+        if (authToken) cfg.authToken = authToken;
+        return libsql.createClient(cfg);
+      };
 
-        const clients = [makeClient(), makeClient()];
-        openOk = true;
-        const { createLibsqlExecutor } = await import("./drivers/libsql");
+      const clients = [makeClient(), makeClient()];
+      try {
         const executors = clients.map((c) => createLibsqlExecutor(c));
         const prefix = uniqueTablePrefix("cc");
         await migrateTursoAdapter(executors[0]!, {
@@ -390,11 +416,8 @@ describe("turso claim concurrency (live remote skip-clean)", () => {
         );
         const acquired = results.filter((r) => r.kind === "acquired");
         expect(acquired.length).toBe(1);
-
+      } finally {
         for (const c of clients) c.close();
-      } catch (err) {
-        if (openOk) throw err;
-        return;
       }
     },
     { timeout: 60_000 },
@@ -403,22 +426,20 @@ describe("turso claim concurrency (live remote skip-clean)", () => {
   it(
     "multi-instance remote: two clients two owners → one winner + RAW",
     async () => {
-      if (!hasLiveTurso() || !isRemoteTursoUrl()) {
-        return;
+      if (!libsql.ok) {
+        throw new Error(
+          `@libsql/client is a package devDependency and must open for live remote tests: ${libsql.reason}`,
+        );
       }
-      let openOk = false;
+      const url = TURSO_DATABASE_URL!;
+      const makeClient = () => {
+        const cfg: { url: string; authToken?: string } = { url };
+        if (TURSO_AUTH_TOKEN) cfg.authToken = TURSO_AUTH_TOKEN;
+        return libsql.createClient(cfg);
+      };
+      const clientA = makeClient();
+      const clientB = makeClient();
       try {
-        const { createClient } = await import("@libsql/client");
-        const url = TURSO_DATABASE_URL!;
-        const makeClient = () => {
-          const cfg: { url: string; authToken?: string } = { url };
-          if (TURSO_AUTH_TOKEN) cfg.authToken = TURSO_AUTH_TOKEN;
-          return createClient(cfg);
-        };
-        const clientA = makeClient();
-        const clientB = makeClient();
-        openOk = true;
-        const { createLibsqlExecutor } = await import("./drivers/libsql");
         const execA = createLibsqlExecutor(clientA);
         const execB = createLibsqlExecutor(clientB);
         const prefix = uniqueTablePrefix("mi");
@@ -456,11 +477,9 @@ describe("turso claim concurrency (live remote skip-clean)", () => {
           expect(got?.leaseToken).toBe(winner.leaseToken);
           expect(got?.status).toBe("reserved");
         }
+      } finally {
         clientA.close();
         clientB.close();
-      } catch (err) {
-        if (openOk) throw err;
-        return;
       }
     },
     { timeout: 60_000 },
@@ -469,28 +488,21 @@ describe("turso claim concurrency (live remote skip-clean)", () => {
 
 /**
  * Serverless multi-connection path is independent from libsql (roadmap §30).
- * Skip cleanly without TURSO_DATABASE_URL (+ auth). Does not use file: (serverless is remote-only).
+ * describe.skipIf without TURSO_DATABASE_URL. Does not use file: (serverless is remote-only).
  */
-describe("turso serverless concurrency (live skip-clean)", () => {
+describe.skipIf(!liveRemoteTurso)("turso serverless concurrency (live)", () => {
   it(
-    "skips without remote Turso env; multi-connection when available",
+    "multi-connection when remote Turso env is set",
     async () => {
-      if (!hasLiveTurso() || !isRemoteTursoUrl()) {
-        // Clean skip — no throw. Documents timeout/reconnect: remote failures map via mapDriverError.
-        expect(hasLiveTurso() && isRemoteTursoUrl()).toBe(false);
-        return;
-      }
-      let openOk = false;
+      const { connect } = await import("@tursodatabase/serverless");
+      const cfg: { url: string; authToken?: string } = {
+        url: TURSO_DATABASE_URL!,
+      };
+      if (TURSO_AUTH_TOKEN) cfg.authToken = TURSO_AUTH_TOKEN;
+      // Separate connections for true parallelism (serverless single-stream per conn).
+      const connA = connect(cfg);
+      const connB = connect(cfg);
       try {
-        const { connect } = await import("@tursodatabase/serverless");
-        const cfg: { url: string; authToken?: string } = {
-          url: TURSO_DATABASE_URL!,
-        };
-        if (TURSO_AUTH_TOKEN) cfg.authToken = TURSO_AUTH_TOKEN;
-        // Separate connections for true parallelism (serverless single-stream per conn).
-        const connA = connect(cfg);
-        const connB = connect(cfg);
-        openOk = true;
         const { createTursoServerlessExecutor } = await import(
           "./drivers/serverless"
         );
@@ -525,11 +537,9 @@ describe("turso serverless concurrency (live skip-clean)", () => {
           }),
         ]);
         expect(results.filter((r) => r.kind === "acquired").length).toBe(1);
+      } finally {
         await connA.close?.();
         await connB.close?.();
-      } catch (err) {
-        if (openOk) throw err;
-        return;
       }
     },
     { timeout: 60_000 },

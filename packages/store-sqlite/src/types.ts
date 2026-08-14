@@ -25,7 +25,10 @@ export type SqliteStoreOptions = {
   executor: SqliteExecutor;
   /** Injectable clock for lease expiry / ISO timestamps (FakeClock-compatible). */
   clock?: StoreClock;
-  /** Schema/table namespace; validated identifiers only. */
+  /**
+   * Schema/table namespace; validated identifiers only.
+   * `sqlSchema` is rejected: SQLite has no CREATE SCHEMA.
+   */
   namespace?: SchemaNamespaceConfig;
 };
 

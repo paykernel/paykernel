@@ -18,7 +18,9 @@ There is no package subpath, no runtime helper, and no documentation path that c
 
 ---
 
-## Legacy embedded replica ≠ true local-first multi-writer
+## Legacy embedded replica ≠ multi-host
+
+An **embedded replica is not multi-host** coordination. Local replica files plus a cloud primary do **not** give this adapter’s `coordinationScope: "multi-host"` claim.
 
 Turso / libSQL ecosystems have historically discussed **embedded replicas** and sync clients (including packages such as `@tursodatabase/sync` in the broader ecosystem). Those modes are **distinct** from:
 

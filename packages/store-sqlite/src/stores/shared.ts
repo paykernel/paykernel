@@ -4,6 +4,7 @@
 
 import {
   createSchemaNamespace,
+  MAX_RESULT_JSON_BYTES,
   type ResolvedSchemaNamespace,
   type IdempotencyRecordShape,
   type WebhookInboxRecordShape,
@@ -15,10 +16,12 @@ import {
   webhookInboxRowToRecord,
   reconciliationRowToRecord,
 } from "@paykernel/sql-foundation";
-import type {
-  IdempotencyRecord,
-  WebhookInboxRecord,
-  ReconciliationRecord,
+import {
+  StoreInvalidSchemaError,
+  StoreSerializationFailureError,
+  type IdempotencyRecord,
+  type WebhookInboxRecord,
+  type ReconciliationRecord,
 } from "@paykernel/store-contracts";
 import type { SqliteExecutor } from "../executor";
 import type { StoreClock } from "../clock";
@@ -49,7 +52,19 @@ export type ResolvedStoreContext = {
   withStoreTransaction: <T>(fn: () => Promise<T> | T) => Promise<T>;
 };
 
+/** SQLite has no CREATE SCHEMA; fail closed instead of quoting `"schema"."table"`. */
+export function assertNoSqliteSqlSchema(namespace?: {
+  sqlSchema?: string | undefined;
+}): void {
+  if (namespace !== undefined && namespace.sqlSchema !== undefined) {
+    throw new StoreInvalidSchemaError(
+      "SQLite has no CREATE SCHEMA; namespace.sqlSchema is not supported",
+    );
+  }
+}
+
 export function resolveStoreContext(options: SqliteStoreOptions): ResolvedStoreContext {
+  assertNoSqliteSqlSchema(options.namespace);
   const namespace = createSchemaNamespace(options.namespace ?? {});
   const clock = options.clock ?? createSystemClock();
   const executor = options.executor;
@@ -172,8 +187,20 @@ function toReconciliationContract(shape: ReconciliationRecordShape): Reconciliat
   return rec;
 }
 
+/**
+ * Serialize an idempotency cached result for SQL TEXT `result_json`.
+ *
+ * Fail closed when JSON exceeds {@link MAX_RESULT_JSON_BYTES}: never store a
+ * truncated money outcome under the completed fence (STORES-3 / SQL-2).
+ */
 export function serializeResultJson(result: unknown): string {
-  return JSON.stringify(result);
+  const s = JSON.stringify(result);
+  if (s.length > MAX_RESULT_JSON_BYTES) {
+    throw new StoreSerializationFailureError(
+      `idempotency result JSON exceeds MAX_RESULT_JSON_BYTES (${MAX_RESULT_JSON_BYTES}); refusing to store truncated money outcome`,
+    );
+  }
+  return s;
 }
 
 /** Extract SQL statements from multi-step template comments. */

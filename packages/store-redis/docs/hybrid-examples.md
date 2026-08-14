@@ -78,6 +78,7 @@ Warnings:
 2. Eviction, failover lag, and bad `appendfsync` can lose terminals and leases.
 3. **Not** recommended as the sole long-term audit store (distinction #4).
 4. Operators must document RPO/RTO; the adapter will not invent false durability.
+5. Completed and terminal `dead_letter` / `failed` / `manual_review` fences are **not** Redis `EXPIRE` after complete/fail (REDIS-3). Use `deleteExpired` for cleanup — do not treat `retentionTtlMs` as “TTL the fence away.”
 
 ```ts
 import { createRedisStores } from "@paykernel/store-redis";
@@ -89,7 +90,8 @@ const client = new Redis(process.env.PAYMENTS_SDK_REDIS_URL!, {
 });
 const stores = createRedisStores({
   port: createPortFromIoredis(client),
-  retentionTtlMs: 7 * 24 * 60 * 60 * 1000, // explicit retention — not infinite audit
+  // Not EXPIRE-after-complete/fail. Cleanup is deleteExpired (REDIS-3).
+  retentionTtlMs: 7 * 24 * 60 * 60 * 1000,
 });
 ```
 

@@ -23,7 +23,7 @@ This document answers: if a worker dies before or after a side effect and before
 
 - **Claims** are engine-level: one Lua script per transition (reserve/claim, renew, complete, fail, markIndeterminate, …).
 - Never get-then-set across connections for claim correctness.
-- Mutators fence on current `lease_token` **and** unexpired lease inside the script (complete **and** fail). Tag `lease_lost` → `StoreLeaseLostError`.
+- Mutators fence on current `lease_token`. **Complete** (webhook + recon) and **recon fail** also require an unexpired lease. **Webhook fail** accepts a matching token after expiry (WEBHOOKS-2) — do **not** document it as the same fence as complete. Tag `lease_lost` → `StoreLeaseLostError`.
 - ZSET indexes (retry/due) update **inside** the same script as the HASH where applicable — not a separate non-atomic follow-up for the critical path.
 - **Pub/Sub is never** used for delivery correctness or retries.
 
@@ -91,18 +91,20 @@ See [scripts-atomicity.md](./scripts-atomicity.md).
 
 1. Lease expires (`lease_expires_ms` compared with injectable `nowMs` ARGV — **not** hard-dependent on Redis `TIME` alone so FakeClock works).
 2. Peer claim/reserve succeeds with **new** `leaseToken` and higher `generation`.
-3. Prior token fails all token-gated mutators (complete **and** fail require unexpired lease + matching token).
+3. Prior token fails token-gated mutators. Complete and recon fail require unexpired lease + matching token. Webhook fail accepts a matching token after expiry (WEBHOOKS-2); after peer reclaim the old token fails.
 4. Handler may run again (at-least-once). Idempotent side effects are mandatory for webhooks/recon.
 
 ### List-based recovery (webhook + recon)
 
-Claim removes the key from the retry/due ZSET. After lease expiry:
+Claim **ZADD**s the key onto the retry/due ZSET scored by `lease_expires_ms`. After lease expiry, recovery is that **keyed ZSET**, not Cluster `SCAN`:
 
 | Path | Behavior |
 | ---- | -------- |
-| Key-addressed `get` | Soft-releases expired `claimed` → `pending`/`scheduled` and **ZADD**s the index. |
-| `listRetryable` / `listDue` | **Bulk SCAN soft-release** (Approach A) re-indexes expired claimed rows, then `ZRANGEBYSCORE` — so `processRetryable` / `claimDue`/`processDue` rediscover abandoned work **without** a prior `get`. |
-| Key-addressed `claim` | Reclaims expired leases with a new token (attempts++). |
+| Key-addressed `get` | Soft-releases expired `claimed` → `pending`/`scheduled` (restores one unfinished attempt) and **ZADD**s the retry/due index. |
+| `listRetryable` / `listDue` | **`ZRANGEBYSCORE` the lease-expiry ZSET** up to `nowMs`, soft-release those claimed rows, re-index retry/due, then `ZRANGEBYSCORE` the due/retry index — so `processRetryable` / `claimDue`/`processDue` rediscover abandoned work **without** a prior `get`. |
+| Key-addressed `claim` | Reclaims expired leases with a new token. Pending/scheduled burns an attempt; expired `claimed` reclaim does not. |
+
+`SCAN` is optional extra on **standalone** only (housekeeping / `deleteExpired`). It is not Cluster-safe recovery (per-node cursor would miss keys).
 
 This matches SQL/memory list soft-release recovery for durable_retry / recon poll workers.
 

@@ -156,6 +156,103 @@ describe("libsql executor adapter", () => {
     expect(sqls[sqls.length - 1]).toBe("COMMIT");
   });
 
+  it("omitted protocol with transaction() uses interactive write (not BEGIN IMMEDIATE)", async () => {
+    const modes: string[] = [];
+    const clientSqls: string[] = [];
+    let committed = false;
+    const client = {
+      async execute(stmt: string | { sql: string; args?: unknown }) {
+        const sql = typeof stmt === "string" ? stmt : stmt.sql;
+        clientSqls.push(sql);
+        return { rows: [], rowsAffected: 0 };
+      },
+      async transaction(mode?: string) {
+        modes.push(mode ?? "default");
+        return {
+          async execute() {
+            return { rows: [], rowsAffected: 0 };
+          },
+          async commit() {
+            committed = true;
+          },
+          async rollback() {
+            throw new Error("should not rollback on success");
+          },
+        };
+      },
+    };
+    const exec = createLibsqlExecutor(client);
+    await exec.transaction!(async (tx) => {
+      await tx.execute("INSERT INTO t VALUES (1)", []);
+    });
+    expect(modes).toEqual(["write"]);
+    expect(committed).toBe(true);
+    expect(clientSqls.some((s) => s === "BEGIN IMMEDIATE")).toBe(false);
+  });
+
+  it("overlapping executor.transaction calls do not share a stream", async () => {
+    const txnObjects: object[] = [];
+    let releaseFirst!: () => void;
+    const firstHold = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    const client = {
+      protocol: "http",
+      async execute() {
+        return { rows: [], rowsAffected: 0 };
+      },
+      async transaction() {
+        const txn = {
+          async execute() {
+            return { rows: [], rowsAffected: 0 };
+          },
+          async commit() {},
+          async rollback() {},
+        };
+        txnObjects.push(txn);
+        return txn;
+      },
+    };
+    const exec = createLibsqlExecutor(client);
+    const first = exec.transaction!(async () => {
+      await firstHold;
+      return "a";
+    });
+    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await expect(exec.transaction!(async () => "b")).rejects.toThrow(
+      /already has a write transaction/i,
+    );
+    releaseFirst();
+    await expect(first).resolves.toBe("a");
+    expect(txnObjects.length).toBe(1);
+  });
+
+  it("refuses file protocol + syncUrl embedded replica by default", () => {
+    const client = {
+      protocol: "file",
+      async execute() {
+        return { rows: [], rowsAffected: 0 };
+      },
+    };
+    expect(() =>
+      createLibsqlStores({
+        client,
+        syncUrl: "libsql://example.turso.io",
+      }),
+    ).toThrow(/embedded replica|not multi-host/i);
+  });
+
+  it("refuses client with syncUrl replica field", () => {
+    const client = {
+      protocol: "file",
+      syncUrl: "libsql://example.turso.io",
+      async execute() {
+        return { rows: [], rowsAffected: 0 };
+      },
+    };
+    expect(() => createExecutorFromLibsql(client)).toThrow(/embedded replica/i);
+  });
+
   it("batch uses client.batch with write mode when available", async () => {
     const batches: Array<{ stmts: unknown; mode?: string }> = [];
     const client = {

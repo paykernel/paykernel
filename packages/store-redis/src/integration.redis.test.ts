@@ -166,8 +166,8 @@ describe.skipIf(!live)("integration: lease reclaim + stale token", () => {
 
 describe.skipIf(!live)("integration: abandoned claim re-index", () => {
   it("listRetryable rediscovers expired claimed without prior get", async () => {
-    // Claim ZREMs retry ZSET; listRetryable must bulk soft-release + re-index
-    // so processRetryable drains abandoned work after crash (SQL parity).
+    // Claim ZADDs retry ZSET at lease_expires_ms; after expiry
+    // ZRANGEBYSCORE(-inf, now) rediscovers abandoned work (P1315-REDIS-2).
     const { port, close } = await createLivePort();
     const prefix = uniqueKeyPrefix("abandon");
     try {
@@ -220,11 +220,11 @@ describe.skipIf(!live)("integration: abandoned claim re-index", () => {
         leaseMs: 1_000,
       });
       expect(claimed.kind).toBe("acquired");
-      // While claimed, off due index
+      // While claimed, due-index score is lease expiry (future) so not listed
       const mid = await store.listDue({ limit: 20 });
       expect(mid.some((r) => r.key === "job_abandon")).toBe(false);
       clock.advance(1_500);
-      // No get() — listDue alone must soft-release + re-index
+      // No get() — ZRANGEBYSCORE + GET_LUA soft-release rediscovers
       const due = await store.listDue({ limit: 20 });
       expect(due.some((r) => r.key === "job_abandon")).toBe(true);
       expect(due.find((r) => r.key === "job_abandon")?.status).toBe("scheduled");

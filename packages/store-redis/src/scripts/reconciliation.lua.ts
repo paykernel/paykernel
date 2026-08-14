@@ -141,7 +141,13 @@ if dueMs > nowMs then
 end
 
 local gen = (tonumber(m['generation'] or '0') or 0) + 1
-local attempts = (tonumber(m['attempts'] or '0') or 0) + 1
+local prevAttempts = tonumber(m['attempts'] or '0') or 0
+-- P1315-REDIS-1 / STORES-1: only scheduled (handler retry) burns an attempt;
+-- expired claimed reclaim is crash recovery and keeps attempts unchanged.
+local attempts = prevAttempts
+if status == 'scheduled' then
+  attempts = prevAttempts + 1
+end
 redis.call('HSET', rec,
   'status', 'claimed',
   'lease_owner', owner,
@@ -152,7 +158,10 @@ redis.call('HSET', rec,
   'generation', tostring(gen),
   'updated_at', nowIso
 )
-redis.call('ZREM', idx, logicalKey)
+-- P1315-REDIS-2: keep claimed keys on the due index scored at lease expiry so
+-- ZRANGEBYSCORE(-inf, now) rediscovers abandoned work with keyed ZSET ops
+-- only (Cluster-safe, same hash tag). Complete/fail/manual_review still ZREM.
+redis.call('ZADD', idx, tonumber(leaseExpiresMs), logicalKey)
 m = hgetall_map(rec)
 local p = pack(m)
 return {'acquired', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], leaseToken}
@@ -291,7 +300,8 @@ local mode = ARGV[5]
 local retryAt = ARGV[6]
 local retryMs = ARGV[7]
 local logicalKey = ARGV[8]
-local retentionTtlSec = tonumber(ARGV[9]) or 0
+-- ARGV[9] retentionTtlSec intentionally unused for terminal failed (P1315-REDIS-3)
+local _retentionTtlSec = tonumber(ARGV[9]) or 0
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -340,9 +350,10 @@ else
     'updated_at', nowIso
   )
   redis.call('ZREM', idx, logicalKey)
-  if retentionTtlSec > 0 then
-    redis.call('EXPIRE', rec, retentionTtlSec)
-  end
+  -- P1315-REDIS-3 / STORES-5: never EXPIRE terminal failed fences
+  -- (re-open → re-claim completed/failed work). Cleanup via deleteExpired.
+  -- retentionTtlSec accepted for API parity but ignored.
+  redis.call('PERSIST', rec)
 end
 return {'ok'}
 `.trim();
@@ -356,7 +367,8 @@ local nowIso = ARGV[2]
 local leaseToken = ARGV[3]
 local note = ARGV[4]
 local logicalKey = ARGV[5]
-local retentionTtlSec = tonumber(ARGV[6]) or 0
+-- ARGV[6] retentionTtlSec intentionally unused for manual_review (P1315-REDIS-3)
+local _retentionTtlSec = tonumber(ARGV[6]) or 0
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -391,9 +403,9 @@ redis.call('HSET', rec,
   'updated_at', nowIso
 )
 redis.call('ZREM', idx, logicalKey)
-if retentionTtlSec > 0 then
-  redis.call('EXPIRE', rec, retentionTtlSec)
-end
+-- P1315-REDIS-3 / STORES-5: never EXPIRE manual_review fences.
+-- retentionTtlSec accepted for API parity but ignored; use deleteExpired.
+redis.call('PERSIST', rec)
 return {'ok'}
 `.trim();
 
@@ -445,12 +457,19 @@ if (m['status'] or '') == 'claimed' then
   if exp <= nowMs then
     local logicalKey = m['key'] or ''
     local dueMs = tonumber(m['due_ms'] or tostring(nowMs)) or nowMs
+    -- P1315-REDIS-1: restore unfinished claim attempt so crash reclaim does not
+    -- burn maxAttempts (parity with WEBHOOK_GET_LUA / memory soft-release).
+    local attempts = tonumber(m['attempts'] or '0') or 0
+    if attempts > 0 then
+      attempts = attempts - 1
+    end
     redis.call('HSET', rec,
       'status', 'scheduled',
       'lease_owner', '',
       'lease_token', '',
       'lease_expires_at', '',
       'lease_expires_ms', '0',
+      'attempts', tostring(attempts),
       'updated_at', nowIso
     )
     if logicalKey ~= '' then
@@ -464,12 +483,15 @@ local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 `.trim();
 
-/** KEYS[1]=record KEYS[2]=dueIndex ARGV: beforeIso, logicalKey */
+/** KEYS[1]=record KEYS[2]=dueIndex ARGV: beforeIso, beforeMs, logicalKey */
 export const RECON_DELETE_IF_EXPIRED_LUA = `
 local rec = KEYS[1]
 local idx = KEYS[2]
+-- P1315-REDIS-5: beforeIso must be canonical millisecond UTC ISO (Z).
+-- ARGV: beforeIso, beforeMs, logicalKey
 local beforeIso = ARGV[1]
-local logicalKey = ARGV[2]
+local beforeMs = tonumber(ARGV[2] or '')
+local logicalKey = ARGV[3]
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -487,9 +509,16 @@ end
 
 local m = hgetall_map(rec)
 local status = m['status'] or ''
-local updated = m['updated_at'] or ''
-if updated > beforeIso then
-  return {'skipped'}
+local updatedMs = tonumber(m['updated_ms'] or '')
+if updatedMs ~= nil and beforeMs ~= nil then
+  if updatedMs > beforeMs then
+    return {'skipped'}
+  end
+else
+  local updated = m['updated_at'] or ''
+  if updated > beforeIso then
+    return {'skipped'}
+  end
 end
 if status == 'completed' or status == 'failed' or status == 'manual_review' then
   redis.call('DEL', rec)

@@ -22,7 +22,7 @@ This document answers: if a worker dies before or after a side effect and before
 
 ## Atomicity
 
-- **Claims** use `BEGIN IMMEDIATE` (or driver immediate transaction) + sql-store sqlite templates in **one synchronous** transaction.
+- **Claims** use `BEGIN IMMEDIATE` (or driver immediate transaction) + `@paykernel/sql-foundation` sqlite templates in **one synchronous** transaction.
 - Never get-then-set across connections for claim correctness.
 - Mutators fence with `WHERE lease_token = ?` (and status predicates). Zero rows → `StoreLeaseLostError`.
 - No `async`/`await` inside SQLite transaction callbacks.
@@ -79,9 +79,9 @@ See [claims.md](./claims.md).
 ---
 
 
-**Webhook abandoned claims:** `listRetryable` / `get` soft-release `status=claimed` rows whose `lease_expires_at <= now` back to `pending` (lease fields cleared, unfinished attempt restored) so `processRetryable` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases.
+**Webhook abandoned claims:** `listRetryable` / `get` soft-release `status=claimed` rows whose `lease_expires_at <= now` back to `pending` (lease fields cleared, unfinished attempt **restored** / decremented) so `processRetryable` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases.
 
-**Reconciliation abandoned claims:** `listDue` soft-releases `status=claimed` rows whose `lease_expires_at <= now` back to `scheduled` (lease fields cleared, attempts preserved) so `claimDue` / `processDue` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases. `markManualReview` requires an active (unexpired) lease, matching complete/fail.
+**Reconciliation abandoned claims:** `listDue` soft-releases `status=claimed` rows whose `lease_expires_at <= now` back to `scheduled` (lease fields cleared, unfinished attempt **restored** / decremented — not preserved) so `claimDue` / `processDue` can drain them after worker crash. Key-addressed `claim` also reclaims expired leases. `markManualReview` requires an active (unexpired) lease, matching complete/fail.
 ## Lease reclaim (dual fencing)
 
 1. Lease expires (`lease_expires_at` compared with **injectable** clock — FakeClock controls reclaim in tests).
@@ -127,14 +127,14 @@ When using `@paykernel/webhooks` with this adapter’s inbox store:
 ---
 
 
-## Clock fencing (multi-host)
+## Clock fencing (single-host only)
 
 Lease reclaim / complete / fail predicates bind an injectable client `now` (ISO TEXT) rather than dialect `NOW()` / `datetime('now')`. Reasons:
 
 1. Timestamps are stored as ISO-8601 **TEXT** for portability across Postgres/SQLite-family adapters; dialect clock functions return formats that do not lexicographically compare cleanly with ISO `T`/`Z` strings on all engines.
 2. Unit tests use **FakeClock** to advance time without wall-clock waits.
 
-**Production multi-host requirement:** keep worker host clocks NTP-synced (or otherwise tightly synchronized). Large skew can early-reclaim still-live leases or reject completes near expiry. Prefer one DB primary for these tables; do not run multi-primary active-active without a single consensus clock/leader.
+This adapter is **`single-host` only** — never multi-host / multi-region for a local SQLite file. Same-host processes that open the same file should keep clocks reasonably synchronized (NTP). Large skew can early-reclaim still-live leases or reject completes near expiry. Horizontal scale-out requires PostgreSQL, Redis, Turso, D1, or another shared service.
 
 ## Related
 

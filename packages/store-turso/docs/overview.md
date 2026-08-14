@@ -28,7 +28,7 @@ This package is the **multi-host remote SQLite-compatible** production storage a
 | `adapter-postgres` | Multi-host shared PostgreSQL | `postgres://…` |
 | `adapter-redis` | Optional multi-host coordination | Redis/Valkey/Upstash |
 
-Do **not** use this adapter as a drop-in for local SQLite `BEGIN IMMEDIATE` sync claims. Remote clients are **async** (HTTP/fetch); claims prefer **single-statement UPSERT**, not local reserved-lock multi-step without a write transaction/batch.
+Do **not** use this adapter as a drop-in for local SQLite `BEGIN IMMEDIATE` sync claims. Remote clients are **async** (HTTP/fetch); multi-statement writes use `client.transaction("write")`. `BEGIN IMMEDIATE` is **local `file:` only**. Claims prefer **single-statement UPSERT**. An embedded replica is **not** multi-host.
 
 ## Entry points
 
@@ -38,7 +38,7 @@ Do **not** use this adapter as a drop-in for local SQLite `BEGIN IMMEDIATE` sync
 | `@paykernel/store-turso/libsql` | `@libsql/client` | Remote URL, `file:`, `:memory:` for CI |
 | `@paykernel/store-turso/serverless` | `@tursodatabase/serverless` | Fetch-based remote Turso Cloud |
 
-There is **no** `./sync` export. Embedded replica / `@tursodatabase/sync` modes are **not** shipped or advertised as true local-first multi-writer. See [embedded-replicas.md](./embedded-replicas.md).
+There is **no** `./sync` export. Embedded replica / `@tursodatabase/sync` modes are **not** shipped, **not** multi-host, and **not** advertised as true local-first multi-writer. See [embedded-replicas.md](./embedded-replicas.md).
 
 `@tursodatabase/serverless` and `@libsql/client` are **not interchangeable** — use the matching subpath and test each path independently. Details: [drivers.md](./drivers.md).
 
@@ -75,7 +75,7 @@ Prefer engine-level single-statement:
 INSERT … ON CONFLICT DO UPDATE … WHERE … RETURNING …
 ```
 
-Multi-statement only inside `transaction` / transactional `batch`. **Never** unprotected get-then-set across round-trips. Details: [claims.md](./claims.md).
+Multi-statement only inside a write transaction / transactional `batch`. **Remote:** `client.transaction("write")`. **Local `file:`:** `BEGIN IMMEDIATE` on the same connection. **Never** unprotected get-then-set across round-trips. Details: [claims.md](./claims.md).
 
 ## Boundaries
 

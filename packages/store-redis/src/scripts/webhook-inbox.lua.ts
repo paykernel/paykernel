@@ -65,7 +65,9 @@ if exists == 0 then
     'available_ms', tostring(nowMs),
     'last_error', ''
   )
-  redis.call('ZREM', idx, logicalKey)
+  -- P1315-REDIS-2: score retry index at lease expiry (not ZREM) so
+  -- ZRANGEBYSCORE(-inf, now) rediscovers abandoned claimed keys.
+  redis.call('ZADD', idx, tonumber(leaseExpiresMs), logicalKey)
   local m = hgetall_map(rec)
   local p = pack(m)
   return {'acquired', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], leaseToken}
@@ -140,7 +142,9 @@ redis.call('HSET', rec,
   'available_at', nowIso,
   'available_ms', tostring(nowMs)
 )
-redis.call('ZREM', idx, logicalKey)
+-- P1315-REDIS-2: keep claimed keys on the retry index scored at lease expiry.
+-- Complete/fail/dead_letter still ZREM. GET_LUA still soft-releases expired claimed.
+redis.call('ZADD', idx, tonumber(leaseExpiresMs), logicalKey)
 m = hgetall_map(rec)
 local p = pack(m)
 return {'acquired', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], leaseToken}
@@ -280,7 +284,8 @@ local dead = ARGV[5]
 local availableAt = ARGV[6]
 local availableMs = ARGV[7]
 local logicalKey = ARGV[8]
-local retentionTtlSec = tonumber(ARGV[9]) or 0
+-- ARGV[9] retentionTtlSec intentionally unused for dead_letter (P1315-REDIS-3)
+local _retentionTtlSec = tonumber(ARGV[9]) or 0
 local restoreAttempt = ARGV[10] or '0'
 
 local function hgetall_map(key)
@@ -330,9 +335,10 @@ if status == 'pending' then
   redis.call('ZADD', idx, tonumber(availableMs), logicalKey)
 else
   redis.call('ZREM', idx, logicalKey)
-  if retentionTtlSec > 0 then
-    redis.call('EXPIRE', rec, retentionTtlSec)
-  end
+  -- P1315-REDIS-3 / STORES-5: never EXPIRE dead_letter fences
+  -- (re-open → reprocess paid). retentionTtlSec accepted for API parity
+  -- but ignored; use deleteExpired for cleanup.
+  redis.call('PERSIST', rec)
 end
 return {'ok'}
 `.trim();
@@ -412,12 +418,15 @@ local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 `.trim();
 
-/** KEYS[1]=record KEYS[2]=retryIndex ARGV: beforeIso, logicalKey — delete terminal */
+/** KEYS[1]=record KEYS[2]=retryIndex ARGV: beforeIso, beforeMs, logicalKey — delete terminal */
 export const WEBHOOK_DELETE_IF_EXPIRED_LUA = `
 local rec = KEYS[1]
 local idx = KEYS[2]
+-- P1315-REDIS-5: beforeIso must be canonical millisecond UTC ISO (Z).
+-- ARGV: beforeIso, beforeMs, logicalKey
 local beforeIso = ARGV[1]
-local logicalKey = ARGV[2]
+local beforeMs = tonumber(ARGV[2] or '')
+local logicalKey = ARGV[3]
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -435,9 +444,16 @@ end
 
 local m = hgetall_map(rec)
 local status = m['status'] or ''
-local updated = m['updated_at'] or ''
-if updated > beforeIso then
-  return {'skipped'}
+local updatedMs = tonumber(m['updated_ms'] or '')
+if updatedMs ~= nil and beforeMs ~= nil then
+  if updatedMs > beforeMs then
+    return {'skipped'}
+  end
+else
+  local updated = m['updated_at'] or ''
+  if updated > beforeIso then
+    return {'skipped'}
+  end
 end
 if status == 'completed' or status == 'dead_letter' then
   redis.call('DEL', rec)

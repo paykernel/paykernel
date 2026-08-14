@@ -5,6 +5,7 @@
  * Do not advertise embedded-replica / sync as true local-first multi-writer.
  */
 
+import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import type { TursoExecutor } from "../executor";
 import {
   createTursoIdempotencyStore,
@@ -51,18 +52,44 @@ export type LibsqlClientLike = {
    */
   protocol?: string;
   close?: () => void;
+  /**
+   * Unofficial / wrapped replica clients may expose this. Official
+   * `@libsql/client` Client does not — pass {@link LibsqlStoreOptions.syncUrl}.
+   */
+  syncUrl?: string;
 };
 
+function isLocalEmbeddedProtocol(protocol: string | undefined): boolean {
+  const p = (protocol ?? "").toLowerCase();
+  return p === "file" || p === ":memory:" || p.startsWith("file:");
+}
+
 /**
- * Remote HTTP/WebSocket needs interactive `client.transaction()`.
- * Local embedded (`file` / `:memory:`) must use same-connection BEGIN IMMEDIATE:
- * libsql's local `transaction()` detaches the main DB handle and opens a new
- * empty connection for later client ops (breaks :memory: schema visibility).
+ * Prefer interactive `client.transaction()` whenever it exists, unless the
+ * protocol is explicitly local `file` (or `:memory:`). Missing protocol on a
+ * client that has `transaction()` is treated as remote: sequential
+ * `client.execute("BEGIN IMMEDIATE")` does NOT share an HTTP/WS stream.
  */
 function preferInteractiveTransaction(client: LibsqlClientLike): boolean {
   if (typeof client.transaction !== "function") return false;
-  const protocol = (client.protocol ?? "").toLowerCase();
-  return protocol === "http" || protocol === "ws" || protocol === "wss";
+  return !isLocalEmbeddedProtocol(client.protocol);
+}
+
+function hasSyncUrl(value: string | undefined): boolean {
+  return typeof value === "string" && value.length > 0;
+}
+
+function assertNotEmbeddedReplica(
+  client: LibsqlClientLike,
+  options?: Pick<LibsqlStoreOptions, "syncUrl">,
+): void {
+  const optionSync = hasSyncUrl(options?.syncUrl);
+  const clientSync = hasSyncUrl(client.syncUrl);
+  if (clientSync || (optionSync && isLocalEmbeddedProtocol(client.protocol))) {
+    throw new StoreUnsupportedFeatureError(
+      "embedded replicas are not multi-host; refuse libsql file+syncUrl / replica clients (this adapter coordinates on a shared remote primary)",
+    );
+  }
 }
 
 export type LibsqlTransactionLike = {
@@ -126,10 +153,16 @@ function makeExecutorFromQueryable(
  * - Local embedded (`file`/`:memory:`): BEGIN IMMEDIATE on the same connection
  *   (libsql local `transaction()` detaches the primary DB handle).
  *
- * Nested transactions join the outer scope.
+ * Concurrent `transaction()` on the same executor is refused (do not join a
+ * live write stream). Nested same-callback store ALS does not need a driver
+ * join: inner `getExecutor()` is already the tx and has no `transaction()`.
  * Do not share one client across concurrent interactive write transactions.
  */
-export function createExecutorFromLibsql(client: LibsqlClientLike): TursoExecutor {
+export function createExecutorFromLibsql(
+  client: LibsqlClientLike,
+  options?: Pick<LibsqlStoreOptions, "syncUrl">,
+): TursoExecutor {
+  assertNotEmbeddedReplica(client, options);
   let txDepth = 0;
   /** Active execute surface inside a transaction (interactive txn or client). */
   let activeQueryable: Pick<LibsqlClientLike, "execute"> = client;
@@ -138,8 +171,9 @@ export function createExecutorFromLibsql(client: LibsqlClientLike): TursoExecuto
     fn: (tx: TursoExecutor) => Promise<T>,
   ): Promise<T> => {
     if (txDepth > 0) {
-      // Join outer transaction (same stream / connection).
-      return fn(makeExecutorFromQueryable(activeQueryable));
+      throw new StoreUnsupportedFeatureError(
+        "libsql client already has a write transaction; refusing to join concurrent withTransaction on a shared stream",
+      );
     }
     txDepth += 1;
     try {
@@ -235,11 +269,18 @@ export type LibsqlStoreOptions = {
   client: LibsqlClientLike;
   clock?: StoreClock;
   namespace?: SchemaNamespaceConfig;
+  /**
+   * Official Client does not expose `syncUrl`. Pass the `createClient({ syncUrl })`
+   * value here so we can refuse embedded-replica topology (file + remote primary).
+   */
+  syncUrl?: string;
 };
 
 function toOptions(opts: LibsqlStoreOptions): TursoStoreOptions {
+  const driverOpts: Pick<LibsqlStoreOptions, "syncUrl"> = {};
+  if (opts.syncUrl !== undefined) driverOpts.syncUrl = opts.syncUrl;
   const base: TursoStoreOptions = {
-    executor: createExecutorFromLibsql(opts.client),
+    executor: createExecutorFromLibsql(opts.client, driverOpts),
   };
   if (opts.clock !== undefined) base.clock = opts.clock;
   if (opts.namespace !== undefined) base.namespace = opts.namespace;

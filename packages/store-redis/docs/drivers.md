@@ -107,7 +107,7 @@ const stores = createRedisStoresFromIoredis({ client });
 
 **Offline queue:** with `enableOfflineQueue: true` (ioredis default), commands may buffer while disconnected and replay after reconnect — ambiguous for claims. Prefer `false` for payment-critical paths.
 
-Cluster-capable deployments may set `keys: { clusterKeys: true }` so record + index share a hash tag slot (see [key-design.md](./key-design.md)).
+Cluster-capable deployments may set `keys: { clusterKeys: true }` so record + index (retry/due **and** lease-expiry recovery ZSET) share a hash tag slot (see [key-design.md](./key-design.md)). Recovery is that keyed ZSET, **not** Cluster `SCAN`.
 
 ---
 
@@ -129,7 +129,7 @@ await client.connect();
 const stores = createRedisStoresFromNodeRedis({ client });
 ```
 
-Supports cluster hash-tag key layout when using Redis Cluster via node-redis cluster client (`keys: { clusterKeys: true }`).
+Supports cluster hash-tag key layout when using Redis Cluster via node-redis cluster client (`keys: { clusterKeys: true }`). Abandoned-claim recovery is the lease-expiry ZSET, not Cluster `SCAN`.
 
 ---
 
