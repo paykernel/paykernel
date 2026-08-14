@@ -539,6 +539,75 @@ WHERE key = ?
   };
 }
 
+/**
+ * Timestamp canonicalize repair after {@link classifyIdempotencyReserveMiss} === `claimable`.
+ *
+ * Fence: only mutates `status = expired` or free/expired-lease rows.
+ * Never overwrite an active reserved winner's `lease_expires_at` from a stale SELECT snapshot.
+ * Adapters bind canonical lease + now; then retry reserve once.
+ */
+export function idempotencyTimestampRepairTemplates(
+  namespace?: ResolvedSchemaNamespace,
+): ClaimTemplateSet {
+  const t = table(LOGICAL_TABLES.idempotency, namespace);
+  const intent =
+    "Canonicalize lease_expires_at only when status expired, lease null/expired, " +
+    "or the classified snapshot still matches (offset-form TEXT that Date.parse treats " +
+    "as expired but sorts after Z now). Never clobber a new active reserved lease.";
+
+  // params: key, leaseExpiresAt, now, oldLeaseExpiresAt
+  // oldLeaseExpiresAt is the exact TEXT we classified as claimable. Without it,
+  // `lease <= now` has the same lexical hole the claim miss already hit.
+  const postgresSql = `
+UPDATE ${t} SET
+  lease_expires_at = $2
+WHERE key = $1
+  AND status NOT IN ('completed', 'indeterminate')
+  AND (
+    status = 'expired'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= $3
+    OR lease_expires_at = $4
+  )
+`.trim();
+
+  // params: leaseExpiresAt, key, now, oldLeaseExpiresAt
+  const sqliteSql = `
+UPDATE ${t} SET
+  lease_expires_at = ?
+WHERE key = ?
+  AND status NOT IN ('completed', 'indeterminate')
+  AND (
+    status = 'expired'
+    OR lease_expires_at IS NULL
+    OR lease_expires_at <= ?
+    OR lease_expires_at = ?
+  )
+`.trim();
+
+  return {
+    intent,
+    postgres: {
+      dialect: "postgres",
+      sql: postgresSql,
+      params: ["key", "leaseExpiresAt", "now", "oldLeaseExpiresAt"],
+      intent,
+    },
+    sqlite: {
+      dialect: "sqlite",
+      sql: sqliteSql,
+      params: ["leaseExpiresAt", "key", "now", "oldLeaseExpiresAt"],
+      intent,
+    },
+    generic: {
+      dialect: "generic",
+      sql: `-- Portable idempotency timestamp repair (free-lease fence + snapshot CAS; see idempotencyTimestampRepairTemplates).`,
+      params: ["key", "leaseExpiresAt", "now", "oldLeaseExpiresAt"],
+      intent,
+    },
+  };
+}
+
 /** Select template fragment for a dialect. */
 export function pickClaimTemplate(set: ClaimTemplateSet, dialect: DialectId): SqlFragment {
   if (dialect === "postgres") return set.postgres;

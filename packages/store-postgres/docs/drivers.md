@@ -12,7 +12,7 @@ Enforced by `bun run check:boundaries` (`ADAPTER_OPTIONAL_DRIVERS` includes `pg`
 | `@paykernel/store-postgres/pg` | `pg` | `createExecutorFromPg` / `createPgPostgresExecutor`, `createPostgres*StoreFromPg` |
 | `@paykernel/store-postgres/postgres-js` | `postgres` | `createExecutorFromPostgresJs` / `createPostgresJsPostgresExecutor`, `createPostgres*StoreFromPostgresJs` |
 | `@paykernel/store-postgres/bun-sql` | Bun runtime (`bun:sql`) | `createExecutorFromBunSql` / `createBunSqlPostgresExecutor`, `createPostgres*StoreFromBunSql` |
-| `@paykernel/store-postgres/drizzle` | `drizzle-orm` (optional) | thin helpers + notes; no top-level `drizzle-orm` import required for store factories |
+| `@paykernel/store-postgres/drizzle` | `drizzle-orm` (optional peer; **not imported**) | **Notes + executor pass-through only.** Phase 12.3 optional Drizzle schema exports were **not** shipped. |
 
 Install peers as needed:
 
@@ -132,11 +132,19 @@ const stores = createPostgresStoresFromBunSql({ sql });
 
 ---
 
-## Drizzle (optional)
+## Drizzle (optional) — notes + executor pass-through
+
+`@paykernel/store-postgres/drizzle` is **not** a Drizzle schema package. Phase 12.3 optional schema exports (`pgTable` mirrors, generated Drizzle tables, dual-source DDL) were **not** shipped. The subpath is:
+
+- `DRIZZLE_ADAPTER_NOTES` — operator reminders
+- `createPostgres*StoreWithDrizzleExecutor` — pass-through to the same root factories, given a pre-built `PostgresExecutor`
+- re-exports of `migratePostgresAdapter` / manifest
+
+It does **not** import `drizzle-orm`, does **not** ship table definitions, and does **not** run claims through a Drizzle query builder.
 
 Drizzle is **not** required for stores. Prefer:
 
-1. Run foundation DDL via `migratePostgresAdapter` (sql-store), not dual Drizzle push for payment tables.
+1. Run foundation DDL via `migratePostgresAdapter` (sql-store), not dual Drizzle push for payment tables. When `sqlSchema` is set, migrate issues `CREATE SCHEMA IF NOT EXISTS` (operators still need `CREATE` privilege).
 2. Build a `PostgresExecutor` from the same `pg` / `postgres` / Bun client used under `drizzle(...)`.
 3. Call root or drizzle-subpath factories with that executor.
 

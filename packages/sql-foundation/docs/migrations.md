@@ -52,10 +52,18 @@ Physical name respects namespace prefix/schema like domain tables.
 
 Creates:
 
-- `payment_idempotency` (+ indexes for lease/status/tenant)
-- `payment_webhook_inbox` (+ lease/available/status/tenant/payload_hash indexes)
-- `payment_reconciliation_jobs` (+ lease/due/status/tenant indexes)
+- `payment_idempotency` (+ indexes for lease/status/`tenant_id`)
+- `payment_webhook_inbox` (+ lease/available/status/`tenant_id`/payload_hash indexes)
+- `payment_reconciliation_jobs` (+ lease/due/status/`tenant_id` indexes)
 - `payment_storage_migrations`
+
+When `sqlSchema` is set, `migrate()` also issues `CREATE SCHEMA IF NOT EXISTS` for that validated identifier (PostgreSQL). Operators still need `CREATE` privilege.
+
+**Tenant (v1):** `tenantColumn` enables a nullable `tenant_id` column + index **only**. Foundation v1 DDL always emits that column and a `tenant_id` index (the flag does not omit them). v1 does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). Primary key remains `key`. Operators who need isolation must prefix keys or wait for a later schema. Do not claim isolation.
+
+**Statuses (CHECK-legal vs adapter writes):** DDL CHECKs allow idempotency `expired` and webhook `failed`. Official postgres stores never write idempotency `expired` (reclaim uses `lease_expires_at`); webhook `fail` writes `pending` / `dead_letter`, not `failed`. Those statuses remain legal for operator SQL and memory expire-on-read.
+
+**Webhook operator columns:** `gateway`, `provider_event_id`, `first_received_at`, `last_received_at` exist for operator/index use. Store `claim()` does not populate them (`ClaimWebhookInput` has no `gateway`).
 
 DDL is dialect-tagged:
 
@@ -104,11 +112,12 @@ const result = await migrate(executor, {
 
 ### Behavior
 
-1. Ensure migrations ledger table exists (or create as part of foundation apply path).
-2. Read already-applied versions.
-3. Apply pending migrations in version order up to `targetVersion`.
-4. Record each apply in `payment_storage_migrations` with name/checksum/`applied_at`.
-5. Return which versions were newly applied vs already present.
+1. When `sqlSchema` is set, `CREATE SCHEMA IF NOT EXISTS` for that validated identifier (PostgreSQL). Operators still need `CREATE` privilege — migrate does not grant it.
+2. Ensure migrations ledger table exists (or create as part of foundation apply path).
+3. Read already-applied versions.
+4. Apply pending migrations in version order up to `targetVersion`.
+5. Record each apply in `payment_storage_migrations` with name/checksum/`applied_at`.
+6. Return which versions were newly applied vs already present.
 
 Failures throw `MigrationError` (`code: "migration_error"`).
 
@@ -170,10 +179,11 @@ Adapters should add multi-connection and real-driver migration tests in Phase 12
 ## Operator checklist
 
 1. Validate namespace config for the environment (prefix / schema / tenant). `tablePrefix` must leave room for the longest logical table (`payment_reconciliation_jobs`, 27 chars) under identifier max 63 → safe max prefix **36** (`MAX_SAFE_TABLE_PREFIX_LENGTH`).
-2. Run `migrate` against a maintenance connection with DDL privileges — **one host / serialized**.
+2. Run `migrate` against a maintenance connection with DDL privileges — **one host / serialized**. When `sqlSchema` is set, the migrator role also needs `CREATE` so `CREATE SCHEMA IF NOT EXISTS` can succeed.
 3. Run `verifySchema` in deploy health checks if desired.
 4. Never grant application workers blind DDL if policy forbids it — split migrator role from runtime role.
 5. On upgrade, deploy code that understands new schema **after** or **with** explicit migrate (document order per adapter).
+6. Do **not** treat `tenantColumn` as isolation. v1 DDL always includes nullable `tenant_id` + index (never a custom name); stores do not write it; PK remains `key`. Prefix keys (or wait for a later schema) if you need isolation.
 
 ---
 

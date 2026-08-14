@@ -8,6 +8,7 @@ import type { DialectId } from "../claims/dialect";
 import { assertDialectId } from "../claims/dialect";
 import {
   createSchemaNamespace,
+  quoteIdentifier,
   resolveUnqualifiedTableName,
   type ResolvedSchemaNamespace,
   type SchemaNamespaceConfig,
@@ -209,6 +210,11 @@ export async function migrate(
   const target = options.targetVersion ?? CURRENT_SCHEMA_VERSION;
   const nowIso = options.nowIso ?? new Date().toISOString();
 
+  // P11-SCHEMA-1: create the target schema before any CREATE TABLE.
+  if (dialect === "postgres" && ns.sqlSchema !== undefined) {
+    await runExecute(executor, `CREATE SCHEMA IF NOT EXISTS ${quoteIdentifier(ns.sqlSchema)}`);
+  }
+
   await ensureMigrationsTable(executor, dialect, ns);
   const appliedSet = await readAppliedVersions(executor, ns);
   const applied: number[] = [];
@@ -236,16 +242,17 @@ export async function migrate(
     const checksum = migration.checksum ?? checksumMigrationSql(migration.sql);
     const mig = migrationsTableSql(ns);
     // Bound params for user-facing values (version/name are from our constants).
+    // P11-MIG-1: conflict-safe bookkeeping only — not a portable advisory lock.
     if (dialect === "postgres") {
       await runExecute(
         executor,
-        `INSERT INTO ${mig} (version, name, applied_at, checksum) VALUES ($1, $2, $3, $4)`,
+        `INSERT INTO ${mig} (version, name, applied_at, checksum) VALUES ($1, $2, $3, $4) ON CONFLICT (version) DO NOTHING`,
         [migration.version, migration.name, nowIso, checksum],
       );
     } else {
       await runExecute(
         executor,
-        `INSERT INTO ${mig} (version, name, applied_at, checksum) VALUES (?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO ${mig} (version, name, applied_at, checksum) VALUES (?, ?, ?, ?)`,
         [migration.version, migration.name, nowIso, checksum],
       );
     }

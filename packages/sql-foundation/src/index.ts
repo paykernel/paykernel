@@ -1,8 +1,8 @@
 /**
  * @paykernel/sql-foundation
  *
- * Private shared relational foundation: schemas, codecs, migrations, claim algorithms.
- * NOT a public npm product / general SQL abstraction.
+ * Publishable shared relational foundation: schemas, codecs, migrations, claim algorithms.
+ * Not a general ORM. Not private-only.
  *
  * CRITICAL: migrate() is never invoked at module load or from this barrel's
  * top-level code. Callers must invoke migrate/verify explicitly.
@@ -130,6 +130,7 @@ export {
   decideIdempotencyReserve,
   decideWebhookClaim,
   decideReconciliationClaim,
+  classifyIdempotencyReserveMiss,
   classifyReconciliationClaimMiss,
   classifyWebhookClaimMiss,
   evaluateClaim,
@@ -144,6 +145,8 @@ export type {
   IdempotencyReserveInput,
   IdempotencyReserveDecision,
   IdempotencyExistingSnapshot,
+  IdempotencyReserveMissKind,
+  IdempotencyReserveMissSnapshot,
   WebhookClaimInput,
   WebhookClaimDecision,
   WebhookExistingSnapshot,
@@ -166,6 +169,7 @@ export {
   reconciliationClaimTemplates,
   reconciliationTimestampRepairTemplates,
   webhookTimestampRepairTemplates,
+  idempotencyTimestampRepairTemplates,
   idempotencyCompleteTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,

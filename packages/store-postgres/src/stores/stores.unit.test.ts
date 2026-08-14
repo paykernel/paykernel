@@ -169,6 +169,145 @@ describe("idempotency store unit (fake executor)", () => {
       store.reserve({ key: "ghost", fingerprint: "fp", owner: "w", leaseMs: 1000 }),
     ).rejects.toBeInstanceOf(StoreUnavailableError);
   });
+
+  it("P11-IDEM-1: completed + other fingerprint is already_completed (not fingerprint_conflict)", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) return [];
+        return [
+          {
+            key: "k",
+            status: "completed",
+            fingerprint: "original-fp",
+            lease_owner: null,
+            lease_token: null,
+            lease_expires_at: null,
+            attempts: 1,
+            generation: 1,
+            created_at: now,
+            updated_at: now,
+            result_json: '{"ok":true}',
+          },
+        ];
+      },
+    });
+    const store = createPostgresIdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k",
+      fingerprint: "other-fp",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("already_completed");
+    if (r.kind === "already_completed") {
+      expect(r.record.fingerprint).toBe("original-fp");
+    }
+  });
+
+  it("P11-IDEM-1: indeterminate + other fingerprint is indeterminate (not fingerprint_conflict)", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) return [];
+        return [
+          {
+            key: "k",
+            status: "indeterminate",
+            fingerprint: "original-fp",
+            lease_owner: null,
+            lease_token: null,
+            lease_expires_at: null,
+            attempts: 1,
+            generation: 1,
+            created_at: now,
+            updated_at: now,
+            result_json: null,
+          },
+        ];
+      },
+    });
+    const store = createPostgresIdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k",
+      fingerprint: "other-fp",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("indeterminate");
+    if (r.kind === "indeterminate") {
+      expect(r.record.fingerprint).toBe("original-fp");
+    }
+  });
+
+  it("P11-IDEM-2: offset-form expired lease_expires_at repairs and acquires", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    // Offset lease that is expired by Date.parse (09:00Z) but fails lexical TEXT vs Z now.
+    const leaseOffset = "2026-01-15T14:00:00+05:00";
+    const leaseZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    let reserveAttempts = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT")) {
+          reserveAttempts += 1;
+          if (reserveAttempts === 1) return [];
+          return [
+            {
+              key: "k-lex",
+              status: "reserved",
+              fingerprint: "fp",
+              lease_owner: "w",
+              lease_token: "lt_repaired",
+              lease_expires_at: new Date(clock.nowMs() + 1000).toISOString(),
+              attempts: 2,
+              generation: 2,
+              created_at: leaseZ,
+              updated_at: now,
+              result_json: null,
+            },
+          ];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          return [
+            {
+              key: "k-lex",
+              status: "reserved",
+              fingerprint: "fp",
+              lease_owner: "stale",
+              lease_token: "lt_old",
+              lease_expires_at: leaseOffset,
+              attempts: 1,
+              generation: 1,
+              created_at: leaseZ,
+              updated_at: leaseZ,
+              result_json: null,
+            },
+          ];
+        }
+        return [];
+      },
+      onExecute: () => ({ rowCount: 1 }),
+    });
+    const store = createPostgresIdempotencyStore({ executor, clock });
+    const r = await store.reserve({
+      key: "k-lex",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("acquired");
+    expect(reserveAttempts).toBe(2);
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("lease_expires_at") &&
+        !c.sql.includes("ON CONFLICT") &&
+        !c.sql.includes("INSERT"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.params).toEqual(["k-lex", leaseZ, now, leaseOffset]);
+  });
 });
 
 describe("webhook store unit", () => {
@@ -812,6 +951,38 @@ describe("serializeResultJson honesty (STORES-3)", () => {
     expect(JSON.parse(serializeResultJson(ok))).toEqual(ok);
     const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
     expect(() => serializeResultJson(huge)).toThrow(StoreSerializationFailureError);
+  });
+});
+
+describe("deleteExpired before canonical (P11-DEL-1)", () => {
+  const offsetBefore = "2026-01-15T14:00:00+05:00";
+  const canonicalBefore = "2026-01-15T09:00:00.000Z";
+
+  it("idempotency binds Z-form before when input is offset", async () => {
+    const executor = createScriptedExecutor({ onQuery: () => [] });
+    const store = createPostgresIdempotencyStore({ executor });
+    await store.deleteExpired({ before: offsetBefore });
+    const del = executor.calls.find((c) => c.sql.includes("DELETE"));
+    expect(del).toBeDefined();
+    expect(del!.params[0]).toBe(canonicalBefore);
+  });
+
+  it("webhook binds Z-form before when input is offset", async () => {
+    const executor = createScriptedExecutor({ onQuery: () => [] });
+    const store = createPostgresWebhookInboxStore({ executor });
+    await store.deleteExpired({ before: offsetBefore });
+    const del = executor.calls.find((c) => c.sql.includes("DELETE"));
+    expect(del).toBeDefined();
+    expect(del!.params[0]).toBe(canonicalBefore);
+  });
+
+  it("reconciliation binds Z-form before when input is offset", async () => {
+    const executor = createScriptedExecutor({ onQuery: () => [] });
+    const store = createPostgresReconciliationStore({ executor });
+    await store.deleteExpired({ before: offsetBefore });
+    const del = executor.calls.find((c) => c.sql.includes("DELETE"));
+    expect(del).toBeDefined();
+    expect(del!.params[0]).toBe(canonicalBefore);
   });
 });
 

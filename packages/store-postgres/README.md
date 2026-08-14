@@ -47,7 +47,7 @@ Root entry **never** statically imports optional drivers. Bindings live on isola
 | `@paykernel/store-postgres/pg` | `pg` (node-postgres) |
 | `@paykernel/store-postgres/postgres-js` | `postgres` (postgres.js) |
 | `@paykernel/store-postgres/bun-sql` | Bun SQL (`bun:sql`) — runtime-provided |
-| `@paykernel/store-postgres/drizzle` | Optional Drizzle notes / thin helpers |
+| `@paykernel/store-postgres/drizzle` | Notes + executor pass-through only. Phase 12.3 optional Drizzle schema exports were **not** shipped. |
 
 Example with `pg`:
 
@@ -101,6 +101,8 @@ if (!check.ok) throw new Error(check.errors.join("; "));
 - Migrations are **opt-in and explicit**.
 - Factories do **not** migrate by default.
 - Importing the package never touches the database.
+- When `sqlSchema` is set, `migratePostgresAdapter` issues `CREATE SCHEMA IF NOT EXISTS`. Operators still need `CREATE` privilege.
+- `tenantColumn` enables a nullable `tenant_id` column + index **only**. v1 DDL always emits that column and index (never a custom name). v1 does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). PK remains `key`. Prefix keys or wait for a later schema if you need isolation.
 
 See [docs/migrations.md](./docs/migrations.md).
 
@@ -112,7 +114,9 @@ Foundation schema stores lease and audit timestamps as **TEXT ISO-8601** strings
 
 - Reserve/claim: single-statement Postgres templates from `@paykernel/sql-foundation` (`INSERT ON CONFLICT DO UPDATE … WHERE … RETURNING` / conditional `UPDATE … RETURNING`).
 - Mutators (`complete`, `fail`, `renew`, …): conditional `UPDATE … WHERE lease_token = $n` — zero rows → `StoreLeaseLostError`.
-- `listDue` / batch paths may use `FOR UPDATE SKIP LOCKED` **only** for multi-worker fairness over durable rows. Advisory locks are never the only durable record of work.
+- `listDue` soft-releases expired `claimed` rows then `SELECT`s due `scheduled` work. `FOR UPDATE SKIP LOCKED` is optional fairness and is **not** used on the default scan. Advisory locks are never the only durable record of work.
+- Postgres never writes idempotency status `expired` (reclaim uses `lease_expires_at`). Webhook `fail` writes `pending` / `dead_letter`, not `failed`. `expired` / `failed` remain CHECK-legal for operator SQL and memory expire-on-read.
+- Webhook columns `gateway`, `provider_event_id`, `first_received_at`, `last_received_at` exist for operator/index use; `claim()` does not populate them (`ClaimWebhookInput` has no `gateway`).
 
 ## Manifest
 
@@ -140,7 +144,7 @@ See monorepo [`docs/adapter-selection.md`](../../docs/adapter-selection.md) for 
 | --- | ----- |
 | [docs/overview.md](./docs/overview.md) | Purpose, multi-process durability, boundaries |
 | [docs/crash-boundaries.md](./docs/crash-boundaries.md) | Crash before/after side effect vs complete |
-| [docs/drivers.md](./docs/drivers.md) | bun-sql / postgres-js / pg / drizzle |
+| [docs/drivers.md](./docs/drivers.md) | bun-sql / postgres-js / pg; `/drizzle` is notes + executor pass-through (no schema exports) |
 | [docs/migrations.md](./docs/migrations.md) | Explicit migrate / verify |
 | [docs/testing.md](./docs/testing.md) | `PAYMENTS_SDK_PG_URL`, docker-compose, conformance |
 | [docs/guarantees.md](./docs/guarantees.md) | Manifest honesty notes |

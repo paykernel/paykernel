@@ -32,7 +32,7 @@ import {
 ```
 
 - Factories take a narrow `PostgresExecutor` + optional injectable `clock` / namespace.
-- Driver bindings: `/pg`, `/postgres-js`, `/bun-sql`, `/drizzle` (see [drivers.md](./drivers.md)).
+- Driver bindings: `/pg`, `/postgres-js`, `/bun-sql`. `/drizzle` is **notes + executor pass-through** (Phase 12.3 optional Drizzle schema exports were **not** shipped) — see [drivers.md](./drivers.md).
 - Honest manifest: `multi-host`, `durable`, `claims: "strong"` (see [guarantees.md](./guarantees.md)).
 
 ## Multi-process durability
@@ -40,8 +40,8 @@ import {
 1. **Row is the work record.** Claims, leases, and terminal outcomes live in PostgreSQL tables from the sql-store foundation.
 2. **Atomic claims** serialize at the engine, not in application get-then-set races.
 3. **Lease fencing** uses opaque `leaseToken` + monotonic `generation`. Stale mutators fail with `StoreLeaseLostError`.
-4. **Advisory locks / `SKIP LOCKED`** may assist batch fairness; they are **never** the only durable record of work.
-5. Process crash mid-handler leaves a leased row until expiry; another worker reclaims with a new token.
+4. **`listDue`** soft-releases expired `claimed` rows, then `SELECT`s due `scheduled` work. `FOR UPDATE SKIP LOCKED` is optional multi-worker fairness and is **not** used on the default scan. Advisory locks / `SKIP LOCKED` are **never** the only durable record of work.
+5. Process crash mid-handler leaves a leased row until expiry; another worker reclaims with a new token. Reclaim uses `lease_expires_at` — postgres never writes idempotency status `expired`.
 
 Details: [crash-boundaries.md](./crash-boundaries.md).
 
@@ -54,7 +54,11 @@ const check = await verifyPostgresAdapterSchema(executor);
 
 - Importing the package does **not** touch the database.
 - `createPostgres*Store` does **not** migrate by default.
+- When `sqlSchema` is set, `migratePostgresAdapter` issues `CREATE SCHEMA IF NOT EXISTS`. Operators still need `CREATE` privilege.
 - Operators own upgrade windows.
+- `tenantColumn` enables a nullable `tenant_id` column + index **only**. v1 DDL always emits that column and index (never a custom name). v1 does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). PK remains `key`. Prefix keys or wait for a later schema if you need isolation.
+- Webhook `fail` writes `pending` / `dead_letter`, not `failed`. `expired` / `failed` remain CHECK-legal for operator SQL and memory expire-on-read.
+- Webhook columns `gateway`, `provider_event_id`, `first_received_at`, `last_received_at` exist for operator/index use; `claim()` does not populate them (`ClaimWebhookInput` has no `gateway`).
 
 Details: [migrations.md](./migrations.md).
 
@@ -63,7 +67,8 @@ Details: [migrations.md](./migrations.md).
 | Entry | Imports optional drivers? |
 | ----- | ------------------------- |
 | `@paykernel/store-postgres` (root) | **No** |
-| `…/pg`, `…/postgres-js`, `…/bun-sql`, `…/drizzle` | Yes (isolated) |
+| `…/pg`, `…/postgres-js`, `…/bun-sql` | Yes (isolated) |
+| `…/drizzle` | **No** `drizzle-orm` import. Notes + executor pass-through only; 12.3 schema exports were not shipped. |
 
 Details: [drivers.md](./drivers.md).
 

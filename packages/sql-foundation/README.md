@@ -4,10 +4,10 @@ Shared **relational foundation** for PayKernel durable SQL store adapters:
 
 | Area       | Contents                                                                                                |
 | ---------- | ------------------------------------------------------------------------------------------------------- |
-| Schema     | Canonical logical tables/columns for idempotency, webhook inbox, reconciliation jobs, migrations ledger |
-| Namespace  | Validated table prefix, PostgreSQL schema, optional tenant column                                       |
+| Schema     | Canonical logical tables/columns for idempotency, webhook inbox, reconciliation jobs, migrations ledger. Webhook `gateway` / `provider_event_id` / receive timestamps are operator columns — store `claim()` does not populate them. Idempotency `expired` and webhook `failed` are CHECK-legal; official postgres stores do not write them. |
+| Namespace  | Validated table prefix, PostgreSQL schema, optional `tenantColumn` flag. v1 enables a nullable `tenant_id` column + index **only** — it does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). PK remains `key`. Prefix keys or wait for a later schema if you need isolation. |
 | Codecs     | Row ↔ record mapping + shared validation (ISO timestamps, opaque tokens, max error size)                |
-| Migrations | Versioned DDL + explicit `migrate()` / `verifySchema()` (never auto on import)                          |
+| Migrations | Versioned DDL + explicit `migrate()` / `verifySchema()` (never auto on import). When `sqlSchema` is set, `migrate()` issues `CREATE SCHEMA IF NOT EXISTS`; operators still need `CREATE` privilege. |
 | Claims     | Pure `evaluateClaim` / `decide*` + dialect SQL templates + complete/fail fencing + A3 harness           |
 | Reference  | Memory-relational (mutex) + optional `reference/bun-sqlite-store.test` (sync txn; not on main export)        |
 

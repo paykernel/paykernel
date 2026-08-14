@@ -392,6 +392,7 @@ export function createSqliteWebhookInboxStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() => {
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         const limit = input.limit;
         const exec = ctx.getExecutor();
         if (limit !== undefined) {
@@ -404,7 +405,7 @@ export function createSqliteWebhookInboxStore(
                ORDER BY updated_at ASC
                LIMIT ?
              )`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: result.changes };
         }
@@ -412,7 +413,7 @@ export function createSqliteWebhookInboxStore(
           `DELETE FROM ${table}
            WHERE status IN ('completed', 'dead_letter')
              AND updated_at <= ?`,
-          [input.before],
+          [before],
         );
         return { deleted: result.changes };
       });

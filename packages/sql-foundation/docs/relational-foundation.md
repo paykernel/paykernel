@@ -24,7 +24,7 @@ Phase 11 provides **shared schemas and claim algorithms** without shipping a gen
 | In scope                                                                     | Out of scope                                                                        |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | Canonical logical tables / columns aligned with Phase 9 store records        | Shipping production drivers here (those live in `packages/adapter-*`)               |
-| Validated namespace (prefix, PG schema, optional tenant column)              | Auto-migrate on import or store construction                                        |
+| Validated namespace (prefix, PG schema, optional tenant column — **not** isolation) | Auto-migrate on import or store construction                                        |
 | Row codecs + shared validation (status enums, max error length, hash policy) | Public npm SQL product / general query builder                                      |
 | Versioned migrations + explicit `migrate()` / `verifySchema()`               | Core or webhooks depending on this package                                          |
 | Pure claim decision functions + dialect-tagged SQL templates                 | Pretending PostgreSQL === SQLite syntax                                             |
@@ -82,16 +82,18 @@ Authoritative exports: `IDEMPOTENCY_COLUMNS`, `WEBHOOK_INBOX_COLUMNS`, `RECONCIL
 - `lease_owner`, `lease_token`, `lease_expires_at`
 - `attempts`, `generation`
 - `created_at`, `updated_at`
-- optional `tenant_id` when namespace enables tenant column
+- nullable `tenant_id` (see [Tenant column honesty](#tenant-column-honesty-v1) — **not** isolation)
 
 **Store-specific highlights:**
 
 | Store          | Extra columns                                                                                                             |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | Idempotency    | `fingerprint`, `result_json`, `completed_at`, `indeterminate_at`, `error_sanitized`                                       |
-| Webhook inbox  | `payload_hash`, `gateway`, `provider_event_id`, `payload_ref`, `available_at`, receive timestamps, `last_error_sanitized` |
+| Webhook inbox  | `payload_hash`, `gateway`, `provider_event_id`, `payload_ref`, `available_at`, `first_received_at`, `last_received_at`, `last_error_sanitized` |
 | Reconciliation | `subject_id`, `reason`, `due_at`, `last_error_sanitized`, `completed_at`                                                  |
 | Migrations     | `version` (PK), `name`, `applied_at`, `checksum`                                                                          |
+
+Webhook `gateway`, `provider_event_id`, `first_received_at`, and `last_received_at` exist for **operator / index** use. Store `claim()` does **not** populate them (`ClaimWebhookInput` has no `gateway`).
 
 **Statuses (CHECK values):**
 
@@ -99,9 +101,11 @@ Authoritative exports: `IDEMPOTENCY_COLUMNS`, `WEBHOOK_INBOX_COLUMNS`, `RECONCIL
 - Webhook inbox: `pending` \| `claimed` \| `completed` \| `failed` \| `dead_letter`
 - Reconciliation: `scheduled` \| `claimed` \| `completed` \| `failed` \| `manual_review`
 
-**Index intent** (`TABLE_INDEX_INTENTS`): lease expiry, due/available times, status, tenant, payload_hash — created in migrations; adapters may add dialect-specific partial indexes.
+**Write-path honesty:** official adapters do not write every CHECK-legal status. Postgres never writes idempotency `expired` (reclaim uses `lease_expires_at`). Webhook `fail` writes `pending` / `dead_letter`, not `failed`. `expired` and `failed` remain CHECK-legal for operator SQL and for memory expire-on-read.
 
-Primary keys: business `key` for the three domain tables; `version` for migrations.
+**Index intent** (`TABLE_INDEX_INTENTS`): lease expiry, due/available times, status, `tenant_id`, payload_hash — created in migrations; adapters may add dialect-specific partial indexes. The `tenant_id` index is **not** tenant isolation.
+
+Primary keys: business `key` for the three domain tables; `version` for migrations. `tenant_id` is never part of the primary key.
 
 ---
 
@@ -112,8 +116,8 @@ Primary keys: business `key` for the three domain tables; `version` for migratio
 | Input          | Validation                                                                                          |
 | -------------- | --------------------------------------------------------------------------------------------------- |
 | `tablePrefix`  | `[A-Za-z0-9_]+`; safe max **36** (`MAX_SAFE_TABLE_PREFIX_LENGTH` = 63 − longest logical `payment_reconciliation_jobs` 27). Every foundation table is checked — not only short samples. |
-| `sqlSchema`    | Strict identifier `^[A-Za-z_][A-Za-z0-9_]*$`, max 63; rejects quotes, dots, spaces, `;`, `--`, `/*` |
-| `tenantColumn` | `true` → `tenant_id`; custom string → validated identifier; `false`/omitted → disabled              |
+| `sqlSchema`    | Strict identifier `^[A-Za-z_][A-Za-z0-9_]*$`, max 63; rejects quotes, dots, spaces, `;`, `--`, `/*`. When set, `migrate()` / `migratePostgresAdapter` issue `CREATE SCHEMA IF NOT EXISTS` for that identifier (operators still need `CREATE` privilege). |
+| `tenantColumn` | Namespace flag only. `true` → resolved name `tenant_id`; custom string → validated and stored as `tenantColumnName`; `false`/omitted → disabled. **v1 DDL always uses `tenant_id`** — a custom name is not applied to CREATE TABLE/INDEX. See honesty below. |
 | Logical table  | Must be one of `ALL_LOGICAL_TABLES` — unknown names refused                                         |
 
 API:
@@ -138,6 +142,10 @@ const table = resolveTableName("payment_idempotency", ns);
 
 Invalid config throws `SchemaNamespaceError` (`code: "invalid_namespace"`). Template builders and `migrate()` only qualify tables through these helpers.
 
+### Tenant column honesty (v1)
+
+`tenantColumn` enables a nullable `tenant_id` column + index **only**. Foundation v1 DDL always emits that column and a `tenant_id` index (the flag does not omit them). v1 does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). Primary key remains `key`. Operators who need isolation must prefix keys or wait for a later schema. **Do not claim isolation.**
+
 ---
 
 ## 5. Migration policy
@@ -148,6 +156,7 @@ Invalid config throws `SchemaNamespaceError` (`code: "invalid_namespace"`). Temp
 | Never auto on import                        | Package barrel and construction paths do **not** run migrations (covered by tests)           |
 | Never auto on production store construction | Adapters must not migrate as a side effect of `create*Store()`                               |
 | Versioned                                   | `CURRENT_SCHEMA_VERSION`, `MIGRATIONS` append-only list, `payment_storage_migrations` ledger |
+| Schema object                               | When `sqlSchema` is set, `migrate()` issues `CREATE SCHEMA IF NOT EXISTS` (PostgreSQL). Operators still need `CREATE` privilege. |
 | Verify                                      | `verifySchema()` checks applied versions / expected tables without applying DDL              |
 | Dialect-honest DDL                          | Separate postgres / sqlite bodies where syntax diverges                                      |
 

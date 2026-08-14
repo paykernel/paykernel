@@ -7,8 +7,12 @@
  */
 
 import {
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyIdempotencyReserveMiss,
   idempotencyCompleteTemplates,
   idempotencyReserveTemplates,
+  idempotencyTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -42,6 +46,13 @@ const SELECT_COLS = `key, status, fingerprint, lease_owner, lease_token, lease_e
               attempts, generation, created_at, updated_at, result_json,
               completed_at, indeterminate_at, error_sanitized, tenant_id`;
 
+function reserveMissToResult(
+  kind: Exclude<ReturnType<typeof classifyIdempotencyReserveMiss>, "claimable">,
+  existing: IdempotencyRecord,
+): IdempotencyReservation {
+  return { kind, record: existing };
+}
+
 export function createSqliteIdempotencyStore(
   options: SqliteStoreOptions,
 ): IdempotencyStore {
@@ -49,6 +60,7 @@ export function createSqliteIdempotencyStore(
   const table = resolveTableName(LOGICAL_TABLES.idempotency, ctx.namespace);
   const reserveTpl = idempotencyReserveTemplates(ctx.namespace).sqlite;
   const completeTpl = idempotencyCompleteTemplates(ctx.namespace).sqlite;
+  const repairTpl = idempotencyTimestampRepairTemplates(ctx.namespace).sqlite;
   const reserveSteps = extractSqliteSteps(reserveTpl.sql);
   const insertSql = reserveSteps[0]!;
   const updateSql = reserveSteps[1]!;
@@ -127,22 +139,82 @@ export function createSqliteIdempotencyStore(
           }
 
           // Classify without claiming (still inside IMMEDIATE txn for consistency).
+          // P11-IDEM-1: completed / indeterminate before fingerprint_conflict.
           const existing = selectByKey(input.key);
           if (!existing) {
             throw new StoreUnavailableError(
               "idempotency reserve: no row after claim attempt",
             );
           }
-          if (existing.fingerprint !== input.fingerprint) {
-            return { kind: "fingerprint_conflict" as const, record: existing };
+          const miss = classifyIdempotencyReserveMiss(
+            {
+              status: existing.status,
+              fingerprint: existing.fingerprint,
+              leaseExpiresAt: existing.leaseExpiresAt,
+            },
+            input.fingerprint,
+            ctx.clock.nowMs(),
+          );
+          if (miss !== "claimable") {
+            return reserveMissToResult(miss, existing);
           }
-          if (existing.status === "completed") {
-            return { kind: "already_completed" as const, record: existing };
+
+          // P11-IDEM-2: free expired reserved work; canonicalize lease and retry once.
+          const leaseZ =
+            canonicalizeOptionalIsoTimestamp(existing.leaseExpiresAt, "leaseExpiresAt") ??
+            null;
+          // params: leaseExpiresAt, key, now, oldLeaseExpiresAt (snapshot CAS)
+          exec.run(repairTpl.sql, [
+            leaseZ,
+            input.key,
+            now,
+            existing.leaseExpiresAt ?? null,
+          ]);
+
+          const retried = exec.run(updateSql, [
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+            input.key,
+            input.fingerprint,
+            now,
+          ]);
+          if (retried.changes === 1) {
+            const record = selectByKey(input.key);
+            if (!record) {
+              throw new StoreUnavailableError(
+                "idempotency reserve: update succeeded but row missing",
+              );
+            }
+            return {
+              kind: "acquired" as const,
+              record,
+              leaseToken: record.leaseToken ?? leaseToken,
+            };
           }
-          if (existing.status === "indeterminate") {
-            return { kind: "indeterminate" as const, record: existing };
+
+          const after = selectByKey(input.key);
+          if (!after) {
+            throw new StoreUnavailableError(
+              "idempotency reserve: no row after timestamp repair",
+            );
           }
-          return { kind: "in_progress" as const, record: existing };
+          const miss2 = classifyIdempotencyReserveMiss(
+            {
+              status: after.status,
+              fingerprint: after.fingerprint,
+              leaseExpiresAt: after.leaseExpiresAt,
+            },
+            input.fingerprint,
+            ctx.clock.nowMs(),
+          );
+          if (miss2 === "claimable") {
+            throw new StoreUnavailableError(
+              "idempotency reserve: free expired work failed after timestamp canonicalize; retry",
+            );
+          }
+          return reserveMissToResult(miss2, after);
         }, { mode: "immediate" });
       });
     },
@@ -254,6 +326,8 @@ export function createSqliteIdempotencyStore(
       return withMappedErrors(() => {
         const limit = input.limit;
         const exec = ctx.getExecutor();
+        // P11-DEL-1: TEXT lexical updated_at compares require canonical Z before.
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         // A4: never delete indeterminate by default.
         if (limit !== undefined) {
           const result = exec.run(
@@ -265,7 +339,7 @@ export function createSqliteIdempotencyStore(
                ORDER BY updated_at ASC
                LIMIT ?
              )`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: result.changes };
         }
@@ -273,7 +347,7 @@ export function createSqliteIdempotencyStore(
           `DELETE FROM ${table}
            WHERE status IN ('completed', 'expired')
              AND updated_at <= ?`,
-          [input.before],
+          [before],
         );
         return { deleted: result.changes };
       });

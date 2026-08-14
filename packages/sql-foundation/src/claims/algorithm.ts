@@ -138,6 +138,60 @@ export function decideIdempotencyReserve(
   };
 }
 
+/**
+ * Classification of an empty idempotency reserve RETURNING / 0-row UPDATE.
+ *
+ * Pure rules (same order as {@link decideIdempotencyReserve}): `completed`, then
+ * `indeterminate`, then fingerprint mismatch, then reserved + active lease →
+ * `in_progress`, else `claimable` (expired/null lease or status expired).
+ *
+ * When the pure decision would acquire (`claimable`), SQL adapters MUST NOT
+ * map the miss to permanent `in_progress`. Prefer canonicalize+retry
+ * (`idempotencyTimestampRepairTemplates`) so lexical TEXT lease mismatch
+ * cannot freeze reclaim.
+ *
+ * Repair UPDATE after `claimable` MUST be free-lease fenced
+ * (`status = expired` OR lease null/expired OR exact classified snapshot).
+ * Never overwrite an active reserved winner's lease from a stale SELECT.
+ */
+export type IdempotencyReserveMissKind =
+  | "already_completed"
+  | "indeterminate"
+  | "fingerprint_conflict"
+  | "in_progress"
+  | "claimable";
+
+export type IdempotencyReserveMissSnapshot = {
+  status: string;
+  fingerprint: string;
+  leaseExpiresAt?: string | undefined | null;
+};
+
+/**
+ * @param existing - Row selected after empty reserve RETURNING (adapters throw when missing).
+ * @param inputFingerprint - Caller's request fingerprint.
+ * @param nowMs - Claim clock epoch ms.
+ */
+export function classifyIdempotencyReserveMiss(
+  existing: IdempotencyReserveMissSnapshot,
+  inputFingerprint: string,
+  nowMs: number,
+): IdempotencyReserveMissKind {
+  if (existing.status === "completed") {
+    return "already_completed";
+  }
+  if (existing.status === "indeterminate") {
+    return "indeterminate";
+  }
+  if (existing.fingerprint !== inputFingerprint) {
+    return "fingerprint_conflict";
+  }
+  if (existing.status === "reserved" && isLeaseActive(existing.leaseExpiresAt, nowMs)) {
+    return "in_progress";
+  }
+  return "claimable";
+}
+
 // ─── Webhook claim ───────────────────────────────────────────────────────────
 
 export type WebhookExistingSnapshot = {

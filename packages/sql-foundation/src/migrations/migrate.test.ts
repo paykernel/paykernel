@@ -57,6 +57,12 @@ describe("migrate()", () => {
     const joined = state.statements.join("\n");
     expect(joined).toContain("pay_payment_idempotency");
     expect(joined).toContain("payments");
+    // P11-SCHEMA-1: CREATE SCHEMA before ensureMigrationsTable / CREATE TABLE.
+    expect(joined).toMatch(/CREATE SCHEMA IF NOT EXISTS\s+"payments"/i);
+    const schemaIdx = state.statements.findIndex((s) => /CREATE SCHEMA IF NOT EXISTS/i.test(s));
+    const tableIdx = state.statements.findIndex((s) => /CREATE TABLE IF NOT EXISTS/i.test(s));
+    expect(schemaIdx).toBeGreaterThanOrEqual(0);
+    expect(tableIdx).toBeGreaterThan(schemaIdx);
   });
 
   it("postgres and sqlite migration SQL differ (dialect honesty)", async () => {
@@ -68,14 +74,78 @@ describe("migrate()", () => {
     expect(pg.tables.has(LOGICAL_TABLES.idempotency)).toBe(true);
     expect(sq.tables.has(LOGICAL_TABLES.idempotency)).toBe(true);
     // Bookkeeping INSERT uses dialect placeholders ($n vs ?)
-    const pgInsert = pg.statements.find((s) => /INSERT INTO/i.test(s)) ?? "";
-    const sqInsert = sq.statements.find((s) => /INSERT INTO/i.test(s)) ?? "";
+    const pgInsert = pg.statements.find((s) => /INSERT(?:\s+OR\s+IGNORE)?\s+INTO/i.test(s)) ?? "";
+    const sqInsert = sq.statements.find((s) => /INSERT(?:\s+OR\s+IGNORE)?\s+INTO/i.test(s)) ?? "";
     expect(pgInsert).toContain("$1");
     expect(sqInsert).toContain("?");
     expect(pgInsert).not.toBe(sqInsert);
+    // P11-MIG-1: conflict-safe version bookkeeping (not a portable advisory lock).
+    expect(pgInsert).toMatch(/ON CONFLICT\s*\(\s*version\s*\)\s*DO NOTHING/i);
+    expect(sqInsert).toMatch(/INSERT OR IGNORE/i);
     // Foundation DDL is shared intent (TEXT + CHECK) but claim templates differ elsewhere
     expect(pg.migrations.get(1)?.name).toBe("create_payment_storage_foundation");
     expect(sq.migrations.get(1)?.name).toBe("create_payment_storage_foundation");
+  });
+
+  it("P11-MIG-1: second insert of the same version does not throw when simulated", async () => {
+    const seenVersions = new Set<number>();
+    const statements: string[] = [];
+    const simulateVersionInsert = (sql: string, params?: readonly unknown[]) => {
+      if (!/INSERT/i.test(sql) || !params || params.length < 1) return;
+      const version = Number(params[0]);
+      const conflictSafe =
+        /ON CONFLICT\s*\(\s*version\s*\)\s*DO NOTHING/i.test(sql) || /INSERT OR IGNORE/i.test(sql);
+      if (seenVersions.has(version) && !conflictSafe) {
+        throw new Error("unique_violation: version already applied");
+      }
+      seenVersions.add(version);
+    };
+    const makeExecutor = () => ({
+      execute(sql: string, params?: readonly unknown[]) {
+        statements.push(sql);
+        simulateVersionInsert(sql, params);
+        return { ok: true };
+      },
+      query() {
+        // Always appear unapplied so migrate hits the version INSERT path.
+        return [];
+      },
+    });
+
+    await migrate(makeExecutor(), {
+      dialect: "postgres",
+      nowIso: "2026-01-15T12:00:00.000Z",
+    });
+    const isVersionInsert = (s: string) => /INSERT(?:\s+OR\s+IGNORE)?\s+INTO/i.test(s);
+    const pgInsert = statements.find(isVersionInsert);
+    expect(pgInsert).toBeDefined();
+    expect(() =>
+      simulateVersionInsert(pgInsert!, [1, "create_payment_storage_foundation", "t", "c"]),
+    ).not.toThrow();
+
+    seenVersions.clear();
+    statements.length = 0;
+    await migrate(makeExecutor(), {
+      dialect: "sqlite",
+      nowIso: "2026-01-15T12:00:00.000Z",
+    });
+    const sqInsert = statements.find(isVersionInsert);
+    expect(sqInsert).toBeDefined();
+    expect(() =>
+      simulateVersionInsert(sqInsert!, [1, "create_payment_storage_foundation", "t", "c"]),
+    ).not.toThrow();
+
+    seenVersions.clear();
+    statements.length = 0;
+    await migrate(makeExecutor(), {
+      dialect: "generic",
+      nowIso: "2026-01-15T12:00:00.000Z",
+    });
+    const genericInsert = statements.find(isVersionInsert);
+    expect(genericInsert).toBeDefined();
+    expect(() =>
+      simulateVersionInsert(genericInsert!, [1, "create_payment_storage_foundation", "t", "c"]),
+    ).not.toThrow();
   });
 
   it("SQLFOUND-1: migrate has no portable lock and does not emit advisory lock SQL", async () => {

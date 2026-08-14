@@ -163,6 +163,147 @@ describe("idempotency store unit (fake executor)", () => {
     });
     expect(r.kind).toBe("indeterminate");
   });
+
+  it("P11-IDEM-1: completed + different fingerprint is already_completed (not fingerprint_conflict)", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) return [];
+        return [
+          {
+            key: "k",
+            status: "completed",
+            fingerprint: "fp-old",
+            lease_owner: null,
+            lease_token: null,
+            lease_expires_at: null,
+            attempts: 1,
+            generation: 1,
+            created_at: now,
+            updated_at: now,
+            result_json: null,
+          },
+        ];
+      },
+    });
+    const store = createD1IdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k",
+      fingerprint: "fp-new",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("already_completed");
+  });
+
+  it("P11-IDEM-1: indeterminate + different fingerprint is indeterminate (not fingerprint_conflict)", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) return [];
+        return [
+          {
+            key: "k",
+            status: "indeterminate",
+            fingerprint: "fp-old",
+            lease_owner: null,
+            lease_token: null,
+            lease_expires_at: null,
+            attempts: 1,
+            generation: 1,
+            created_at: now,
+            updated_at: now,
+            result_json: null,
+          },
+        ];
+      },
+    });
+    const store = createD1IdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k",
+      fingerprint: "fp-new",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("indeterminate");
+  });
+
+  it("P11-IDEM-2: offset-form expired lease_expires_at repairs and acquires", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const leaseOffset = "2026-01-15T14:00:00+05:00";
+    const leaseZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    let reserveAttempts = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT")) {
+          reserveAttempts += 1;
+          if (reserveAttempts === 1) return [];
+          return [
+            {
+              key: "k-lex",
+              status: "reserved",
+              fingerprint: "fp",
+              lease_owner: "w",
+              lease_token: "lt_repaired",
+              lease_expires_at: new Date(clock.nowMs() + 1000).toISOString(),
+              attempts: 2,
+              generation: 2,
+              created_at: leaseZ,
+              updated_at: now,
+              result_json: null,
+            },
+          ];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          return [
+            {
+              key: "k-lex",
+              status: "reserved",
+              fingerprint: "fp",
+              lease_owner: "stale",
+              lease_token: "lt_old",
+              lease_expires_at: leaseOffset,
+              attempts: 1,
+              generation: 1,
+              created_at: leaseZ,
+              updated_at: leaseZ,
+              result_json: null,
+            },
+          ];
+        }
+        return [];
+      },
+      onExecute: () => ({ changes: 1 }),
+    });
+    const store = createD1IdempotencyStore({ executor, clock });
+    const r = await store.reserve({
+      key: "k-lex",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("acquired");
+    expect(reserveAttempts).toBe(2);
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("lease_expires_at") &&
+        !c.sql.includes("ON CONFLICT") &&
+        !c.sql.includes("INSERT"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.params).toEqual([leaseZ, "k-lex", now, leaseOffset]);
+  });
+
+  it("P11-DEL-1: deleteExpired binds canonical Z before", async () => {
+    const executor = createScriptedExecutor({ onQuery: () => [] });
+    const store = createD1IdempotencyStore({ executor });
+    await store.deleteExpired({ before: "2026-01-15T17:00:00+05:00" });
+    const del = executor.calls.find((c) => c.sql.includes("DELETE"));
+    expect(del).toBeDefined();
+    expect(del!.params[0]).toBe("2026-01-15T12:00:00.000Z");
+  });
 });
 
 describe("webhook / recon unit (fake executor)", () => {
@@ -179,6 +320,21 @@ describe("webhook / recon unit (fake executor)", () => {
     const store = createD1ReconciliationStore({ executor });
     const r = await store.claim({ key: "missing", owner: "w", leaseMs: 1000 });
     expect(r.kind).toBe("not_found");
+  });
+
+  it("P11-DEL-1: webhook/recon deleteExpired binds canonical Z before", async () => {
+    const before = "2026-01-15T17:00:00+05:00";
+    const z = "2026-01-15T12:00:00.000Z";
+    const webhookExec = createScriptedExecutor({ onQuery: () => [] });
+    await createD1WebhookInboxStore({ executor: webhookExec }).deleteExpired({
+      before,
+    });
+    expect(webhookExec.calls.find((c) => c.sql.includes("DELETE"))?.params[0]).toBe(z);
+    const reconExec = createScriptedExecutor({ onQuery: () => [] });
+    await createD1ReconciliationStore({ executor: reconExec }).deleteExpired({
+      before,
+    });
+    expect(reconExec.calls.find((c) => c.sql.includes("DELETE"))?.params[0]).toBe(z);
   });
 });
 

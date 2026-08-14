@@ -117,6 +117,85 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(r.kind).toBe("fingerprint_conflict");
   });
 
+  it("P11-IDEM-1: completed + different fingerprint is already_completed (not fingerprint_conflict)", async () => {
+    const store = createSqliteIdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k-done-fp",
+      fingerprint: "fp1",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    await store.complete({
+      key: "k-done-fp",
+      leaseToken: r.leaseToken,
+      result: { ok: true },
+    });
+    const again = await store.reserve({
+      key: "k-done-fp",
+      fingerprint: "fp-other",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("already_completed");
+  });
+
+  it("P11-IDEM-1: indeterminate + different fingerprint is indeterminate (not fingerprint_conflict)", async () => {
+    const store = createSqliteIdempotencyStore({ executor });
+    const r = await store.reserve({
+      key: "k-indet-fp",
+      fingerprint: "fp1",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    await store.markIndeterminate({
+      key: "k-indet-fp",
+      leaseToken: r.leaseToken,
+      reason: "uncertain",
+    });
+    const again = await store.reserve({
+      key: "k-indet-fp",
+      fingerprint: "fp-other",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(again.kind).toBe("indeterminate");
+  });
+
+  it("P11-IDEM-2: reserve repairs non-canonical expired lease and acquires (not in_progress)", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteIdempotencyStore({ executor, clock });
+    const leaseOffset = "2026-01-15T14:00:00+05:00"; // 09:00Z, expired
+    const created = "2026-01-15T08:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    executor.run(
+      `INSERT INTO payment_idempotency (
+         key, status, fingerprint, lease_owner, lease_token, lease_expires_at,
+         attempts, generation, created_at, updated_at
+       ) VALUES (?, 'reserved', ?, ?, ?, ?, 1, 1, ?, ?)`,
+      ["k-lex-lease", "fp", "w_old", "lt_old", leaseOffset, created, created],
+    );
+    expect(leaseOffset <= now).toBe(false);
+    expect(Date.parse(leaseOffset) < clock.nowMs()).toBe(true);
+
+    const r = await store.reserve({
+      key: "k-lex-lease",
+      fingerprint: "fp",
+      owner: "w_new",
+      leaseMs: 5_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind === "acquired") {
+      expect(r.leaseToken).not.toBe("lt_old");
+      expect(r.record.generation).toBe(2);
+    }
+  });
+
   it("FakeClock controls lease reclaim", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteIdempotencyStore({ executor, clock });
@@ -427,6 +506,65 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(cleaned.deleted).toBe(0);
     const got = await store.get("ind");
     expect(got?.status).toBe("indeterminate");
+  });
+
+  it("P11-DEL-1: deleteExpired canonicalizes offset before vs Z updated_at", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const store = createSqliteIdempotencyStore({ executor, clock });
+    const r = await store.reserve({
+      key: "k-del-off",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    await store.complete({
+      key: "k-del-off",
+      leaseToken: r.leaseToken,
+      result: { ok: true },
+    });
+    const updatedZ = "2026-01-15T12:00:00.000Z";
+    executor.run(
+      `UPDATE payment_idempotency SET updated_at = ? WHERE key = ?`,
+      [updatedZ, "k-del-off"],
+    );
+    // 14:00Z, after updated_at, but lexically before Z (`T09` < `T12`).
+    const beforeOffset = "2026-01-15T09:00:00-05:00";
+    expect(updatedZ <= beforeOffset).toBe(false);
+    expect(Date.parse(updatedZ) <= Date.parse(beforeOffset)).toBe(true);
+    const cleaned = await store.deleteExpired({ before: beforeOffset });
+    expect(cleaned.deleted).toBe(1);
+    expect(await store.get("k-del-off")).toBeUndefined();
+  });
+
+  it("P11-DEL-1: webhook deleteExpired canonicalizes offset before vs Z updated_at", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
+    const inbox = createSqliteWebhookInboxStore({ executor, clock });
+    const claimed = await inbox.claim({
+      key: "evt-del-off",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    await inbox.complete({ key: "evt-del-off", leaseToken: claimed.leaseToken });
+    const updatedZ = "2026-01-15T12:00:00.000Z";
+    executor.run(`UPDATE payment_webhook_inbox SET updated_at = ? WHERE key = ?`, [
+      updatedZ,
+      "evt-del-off",
+    ]);
+    const beforeOffset = "2026-01-15T09:00:00-05:00";
+    expect(updatedZ <= beforeOffset).toBe(false);
+    expect(Date.parse(updatedZ) <= Date.parse(beforeOffset)).toBe(true);
+    const cleaned = await inbox.deleteExpired({ before: beforeOffset });
+    expect(cleaned.deleted).toBe(1);
+    expect(await inbox.get("evt-del-off")).toBeUndefined();
   });
 
   it("listRetryable surfaces abandoned expired claims after lease expiry", async () => {

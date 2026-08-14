@@ -183,8 +183,9 @@ export type MemoryRelationalStore = {
   completeWebhook(input: { key: string; leaseToken: string }): Promise<void>;
 
   /**
-   * Fail webhook claim. Requires active leaseToken.
-   * Stale → {@link ReferenceLeaseLostError}.
+   * Fail webhook claim. Matching leaseToken on claimed is enough
+   * (WEBHOOKS-2: succeeds after lease expiry). Stale/wrong token →
+   * {@link ReferenceLeaseLostError}.
    */
   failWebhook(input: {
     key: string;
@@ -670,6 +671,8 @@ export function createMemoryRelationalStore(
           providedToken: input.leaseToken,
           leaseExpiresAt: existing?.leaseExpiresAt,
           nowMs: clockMs,
+          // WEBHOOKS-2: hang/timeout handlers must still record fail after expiry.
+          requireActiveLease: false,
         });
         if (!decision.ok) {
           throw new ReferenceLeaseLostError(`failWebhook: ${decision.reason}`);

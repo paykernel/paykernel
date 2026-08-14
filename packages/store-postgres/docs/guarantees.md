@@ -43,8 +43,24 @@ If an operator reimplements claim as non-atomic get-then-set, they must **not** 
 | Mechanism | Role |
 | --------- | ---- |
 | Durable table row | **Source of truth** for work, lease, and terminal outcome |
-| `FOR UPDATE SKIP LOCKED` | Optional **batch fairness** for list/due workers |
+| `listDue` default path | Soft-releases expired `claimed` rows, then a plain `SELECT` of due `scheduled` work. **Does not** use `FOR UPDATE SKIP LOCKED`. |
+| `FOR UPDATE SKIP LOCKED` | Optional **batch fairness** only — not used on the default `listDue` scan |
 | Advisory locks | Must **not** be the only durable record of work |
+
+## Status write-path honesty
+
+CHECK constraints allow more statuses than this adapter writes:
+
+| Store | CHECK-legal extra | What postgres actually writes |
+| ----- | ----------------- | ----------------------------- |
+| Idempotency | `expired` | **Never** written. Reclaim uses `lease_expires_at`. `expired` remains legal for operator SQL and memory expire-on-read. |
+| Webhook inbox | `failed` | `fail()` writes `pending` or `dead_letter`, **not** `failed`. `failed` remains legal for operator SQL. |
+
+Webhook columns `gateway`, `provider_event_id`, `first_received_at`, `last_received_at` exist for operator/index use. `claim()` does not populate them (`ClaimWebhookInput` has no `gateway`).
+
+## Tenant column honesty (v1)
+
+`tenantColumn` enables a nullable `tenant_id` column + index **only**. Foundation v1 DDL always emits that column and a `tenant_id` index (the flag does not omit them). This adapter does **not** isolate tenants, does **not** write `tenant_id` from stores, and does **not** use a custom column name in DDL (always `tenant_id`). Primary key remains `key`. Operators who need isolation must prefix keys or wait for a later schema. Do not claim isolation.
 
 ## Crash notes (summary)
 

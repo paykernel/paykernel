@@ -352,10 +352,10 @@ export function createPostgresReconciliationStore(
              AND lease_expires_at <= $1`,
           [now],
         );
-        // SKIP LOCKED is for multi-worker fairness on durable rows only.
-        // listDue is a non-mutating scan; FOR UPDATE SKIP LOCKED is optional
-        // when selecting candidates inside a transaction. Default path is a
-        // plain durable SELECT (no advisory locks as sole work record).
+        // Soft-release above UPDATEs expired claimed rows first. SKIP LOCKED is
+        // for multi-worker fairness on durable rows only; default path is a
+        // durable SELECT (no advisory locks as sole work record). FOR UPDATE
+        // SKIP LOCKED is optional when selecting candidates inside a transaction.
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT key, status, subject_id, reason, due_at,
                   lease_owner, lease_token, lease_expires_at, attempts, generation,
@@ -374,6 +374,8 @@ export function createPostgresReconciliationStore(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
         const limit = input.limit;
+        // P11-DEL-1: TEXT lexical updated_at compares require canonical Z before.
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         if (limit !== undefined) {
           const rows = await ctx.getExecutor().query<{ key: string }>(
             `DELETE FROM ${table}
@@ -385,7 +387,7 @@ export function createPostgresReconciliationStore(
                LIMIT $2
              )
              RETURNING key`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: rows.length };
         }
@@ -394,7 +396,7 @@ export function createPostgresReconciliationStore(
            WHERE status IN ('completed', 'failed', 'manual_review')
              AND updated_at <= $1
            RETURNING key`,
-          [input.before],
+          [before],
         );
         return { deleted: rows.length };
       });

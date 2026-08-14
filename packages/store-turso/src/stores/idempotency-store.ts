@@ -10,6 +10,10 @@ import {
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
+  canonicalizeIsoTimestamp,
+  canonicalizeOptionalIsoTimestamp,
+  classifyIdempotencyReserveMiss,
+  idempotencyTimestampRepairTemplates,
 } from "@paykernel/sql-foundation";
 import type {
   CleanupInput,
@@ -67,12 +71,20 @@ RETURNING ${IDEMPOTENCY_SELECT_COLS}
 `.trim();
 }
 
+function reserveMissToResult(
+  kind: Exclude<ReturnType<typeof classifyIdempotencyReserveMiss>, "claimable">,
+  existing: IdempotencyRecord,
+): IdempotencyReservation {
+  return { kind, record: existing };
+}
+
 export function createTursoIdempotencyStore(
   options: TursoStoreOptions,
 ): IdempotencyStore {
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.idempotency, ctx.namespace);
   const claimSql = reserveSql(table);
+  const repairTpl = idempotencyTimestampRepairTemplates(ctx.namespace).sqlite;
 
   async function selectByKey(key: string): Promise<IdempotencyRecord | undefined> {
     const rows = await ctx.getExecutor().query<Record<string, unknown>>(
@@ -117,22 +129,80 @@ export function createTursoIdempotencyStore(
         }
 
         // No row returned: classify without claiming (read-only path).
+        // P11-IDEM-1: completed / indeterminate before fingerprint_conflict.
         const existing = await selectByKey(input.key);
         if (!existing) {
           throw new StoreUnavailableError(
             "idempotency reserve: no row after claim attempt",
           );
         }
-        if (existing.fingerprint !== input.fingerprint) {
-          return { kind: "fingerprint_conflict", record: existing };
+        const miss = classifyIdempotencyReserveMiss(
+          {
+            status: existing.status,
+            fingerprint: existing.fingerprint,
+            leaseExpiresAt: existing.leaseExpiresAt,
+          },
+          input.fingerprint,
+          ctx.clock.nowMs(),
+        );
+        if (miss !== "claimable") {
+          return reserveMissToResult(miss, existing);
         }
-        if (existing.status === "completed") {
-          return { kind: "already_completed", record: existing };
+
+        // P11-IDEM-2: free expired reserved work; canonicalize lease and retry once.
+        const leaseZ =
+          canonicalizeOptionalIsoTimestamp(existing.leaseExpiresAt, "leaseExpiresAt") ??
+          null;
+        // params: leaseExpiresAt, key, now, oldLeaseExpiresAt (snapshot CAS)
+        await ctx.getExecutor().execute(repairTpl.sql, [
+          leaseZ,
+          input.key,
+          now,
+          existing.leaseExpiresAt ?? null,
+        ]);
+
+        const retried = await ctx.getExecutor().query<Record<string, unknown>>(
+          claimSql,
+          [
+            input.key,
+            input.fingerprint,
+            input.owner,
+            leaseToken,
+            leaseExpiresAt,
+            now,
+            now,
+          ],
+        );
+        if (retried.length > 0) {
+          const record = mapIdempotencyRow(retried[0]!);
+          return {
+            kind: "acquired",
+            record,
+            leaseToken: record.leaseToken ?? leaseToken,
+          };
         }
-        if (existing.status === "indeterminate") {
-          return { kind: "indeterminate", record: existing };
+
+        const after = await selectByKey(input.key);
+        if (!after) {
+          throw new StoreUnavailableError(
+            "idempotency reserve: no row after timestamp repair",
+          );
         }
-        return { kind: "in_progress", record: existing };
+        const miss2 = classifyIdempotencyReserveMiss(
+          {
+            status: after.status,
+            fingerprint: after.fingerprint,
+            leaseExpiresAt: after.leaseExpiresAt,
+          },
+          input.fingerprint,
+          ctx.clock.nowMs(),
+        );
+        if (miss2 === "claimable") {
+          throw new StoreUnavailableError(
+            "idempotency reserve: free expired work failed after timestamp canonicalize; retry",
+          );
+        }
+        return reserveMissToResult(miss2, after);
       });
     },
 
@@ -248,6 +318,8 @@ export function createTursoIdempotencyStore(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
         const limit = input.limit;
+        // P11-DEL-1: TEXT lexical updated_at compares require canonical Z before.
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         // A4: never delete indeterminate by default.
         if (limit !== undefined) {
           const rows = await ctx.getExecutor().query<{ key: string }>(
@@ -260,7 +332,7 @@ export function createTursoIdempotencyStore(
                LIMIT ?
              )
              RETURNING key`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: rows.length };
         }
@@ -269,7 +341,7 @@ export function createTursoIdempotencyStore(
            WHERE status IN ('completed', 'expired')
              AND updated_at <= ?
            RETURNING key`,
-          [input.before],
+          [before],
         );
         return { deleted: rows.length };
       });

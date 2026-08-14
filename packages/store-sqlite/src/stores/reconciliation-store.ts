@@ -396,6 +396,7 @@ export function createSqliteReconciliationStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() => {
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         const limit = input.limit;
         const exec = ctx.getExecutor();
         if (limit !== undefined) {
@@ -408,7 +409,7 @@ export function createSqliteReconciliationStore(
                ORDER BY updated_at ASC
                LIMIT ?
              )`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: result.changes };
         }
@@ -416,7 +417,7 @@ export function createSqliteReconciliationStore(
           `DELETE FROM ${table}
            WHERE status IN ('completed', 'failed', 'manual_review')
              AND updated_at <= ?`,
-          [input.before],
+          [before],
         );
         return { deleted: result.changes };
       });

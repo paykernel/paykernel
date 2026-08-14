@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  classifyIdempotencyReserveMiss,
   classifyReconciliationClaimMiss,
   classifyWebhookClaimMiss,
   decideIdempotencyReserve,
@@ -12,6 +13,7 @@ import {
 import {
   idempotencyCompleteTemplates,
   idempotencyReserveTemplates,
+  idempotencyTimestampRepairTemplates,
   pickClaimTemplate,
   reconciliationClaimTemplates,
   reconciliationTimestampRepairTemplates,
@@ -21,6 +23,7 @@ import {
   webhookTimestampRepairTemplates,
   type ClaimTemplateSet,
 } from "./templates";
+import { createMemoryRelationalStore } from "../reference/memory-relational-store";
 import { createSchemaNamespace } from "../schema/namespace";
 import {
   IDEMPOTENCY_COLUMNS,
@@ -173,6 +176,61 @@ describe("decideIdempotencyReserve", () => {
       },
     });
     expect(d.kind).toBe("indeterminate");
+  });
+});
+
+describe("classifyIdempotencyReserveMiss (P11-IDEM-1)", () => {
+  const activeLease = "2026-01-15T12:01:00.000Z";
+
+  it.each([
+    {
+      name: "completed + other fingerprint",
+      existing: { status: "completed", fingerprint: "other", leaseExpiresAt: activeLease },
+      fingerprint: "fp-caller",
+      expected: "already_completed",
+    },
+    {
+      name: "indeterminate + other fingerprint",
+      existing: { status: "indeterminate", fingerprint: "other", leaseExpiresAt: activeLease },
+      fingerprint: "fp-caller",
+      expected: "indeterminate",
+    },
+    {
+      name: "reserved + other fingerprint",
+      existing: { status: "reserved", fingerprint: "other", leaseExpiresAt: activeLease },
+      fingerprint: "fp-caller",
+      expected: "fingerprint_conflict",
+    },
+    {
+      name: "reserved + expired lease",
+      existing: {
+        status: "reserved",
+        fingerprint: "fp",
+        leaseExpiresAt: "2026-01-15T11:59:00.000Z",
+      },
+      fingerprint: "fp",
+      expected: "claimable",
+    },
+    {
+      name: "reserved + active matching fingerprint",
+      existing: { status: "reserved", fingerprint: "fp", leaseExpiresAt: activeLease },
+      fingerprint: "fp",
+      expected: "in_progress",
+    },
+    {
+      name: "status expired",
+      existing: { status: "expired", fingerprint: "fp", leaseExpiresAt: activeLease },
+      fingerprint: "fp",
+      expected: "claimable",
+    },
+    {
+      name: "reserved + null lease",
+      existing: { status: "reserved", fingerprint: "fp", leaseExpiresAt: null },
+      fingerprint: "fp",
+      expected: "claimable",
+    },
+  ])("$name => $expected", ({ existing, fingerprint, expected }) => {
+    expect(classifyIdempotencyReserveMiss(existing, fingerprint, nowMs)).toBe(expected);
   });
 });
 
@@ -885,6 +943,30 @@ describe("decideLeaseMutation / isActiveLeaseToken", () => {
   });
 });
 
+describe("memory-relational failWebhook (WEBHOOKS-2 / P11-REF-1)", () => {
+  it("claim, advance clock past lease, failWebhook with same token succeeds", async () => {
+    const start = Date.parse("2026-01-15T12:00:00.000Z");
+    const store = createMemoryRelationalStore({ nowMs: start });
+    const claimed = await store.claimWebhook({
+      key: "wh-expire-fail",
+      payloadHash: "h1",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") throw new Error("expected acquired");
+
+    store.setNowMs(start + 5_000);
+
+    await store.failWebhook({
+      key: "wh-expire-fail",
+      leaseToken: claimed.leaseToken,
+      error: "handler timeout after lease expiry",
+    });
+    expect(store.getWebhook("wh-expire-fail")?.status).toBe("pending");
+  });
+});
+
 describe("dialect claim templates", () => {
   it("does not pretend postgres === sqlite", () => {
     const ns = createSchemaNamespace({ tablePrefix: "pay_" });
@@ -942,6 +1024,34 @@ describe("dialect claim templates", () => {
     }
     expect(whRepair.postgres.params).toEqual(["key", "availableAt", "leaseExpiresAt", "now"]);
     expect(whRepair.sqlite.params).toEqual(["availableAt", "leaseExpiresAt", "key", "now"]);
+
+    // P11-IDEM-2: idempotency timestamp repair — expired status or free/expired lease only.
+    const idRepair = idempotencyTimestampRepairTemplates(ns);
+    for (const frag of [idRepair.postgres, idRepair.sqlite]) {
+      expect(frag.sql).toContain("lease_expires_at");
+      expect(frag.sql).toContain("status = 'expired'");
+      expect(frag.sql).toMatch(/lease_expires_at IS NULL/i);
+      expect(frag.sql).toMatch(/lease_expires_at\s*<=/i);
+      expect(frag.sql).toContain("NOT IN ('completed', 'indeterminate')");
+      // Must not be an unfenced key-only repair that could clobber an active reserved lease.
+      expect(frag.sql).not.toMatch(
+        /WHERE key = \S+\s+AND status NOT IN \('completed', 'indeterminate'\)\s*$/i,
+      );
+    }
+    expect(idRepair.postgres.params).toEqual([
+      "key",
+      "leaseExpiresAt",
+      "now",
+      "oldLeaseExpiresAt",
+    ]);
+    expect(idRepair.sqlite.params).toEqual([
+      "leaseExpiresAt",
+      "key",
+      "now",
+      "oldLeaseExpiresAt",
+    ]);
+    expect(idRepair.postgres.sql).toMatch(/lease_expires_at = \$4/);
+    expect(idRepair.sqlite.sql).toMatch(/lease_expires_at = \?/);
   });
 
   it("never leaves unvalidated table placeholders like raw user input", () => {
@@ -1066,6 +1176,12 @@ describe("dialect claim templates", () => {
     expect(webhookDdl.has("last_error")).toBe(false);
 
     assertSetColsSubset("idempotencyReserve", idempotencyReserveTemplates(), idemMap, idemDdl);
+    assertSetColsSubset(
+      "idempotencyTimestampRepair",
+      idempotencyTimestampRepairTemplates(),
+      idemMap,
+      idemDdl,
+    );
     assertSetColsSubset("idempotencyComplete", idempotencyCompleteTemplates(), idemMap, idemDdl);
     assertSetColsSubset("webhookClaim", webhookClaimTemplates(), webhookMap, webhookDdl);
     assertSetColsSubset("webhookComplete", webhookCompleteTemplates(), webhookMap, webhookDdl);

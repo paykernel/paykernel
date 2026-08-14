@@ -337,6 +337,8 @@ export function createPostgresWebhookInboxStore(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
         const limit = input.limit;
+        // P11-DEL-1: TEXT lexical updated_at compares require canonical Z before.
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         if (limit !== undefined) {
           const rows = await ctx.getExecutor().query<{ key: string }>(
             `DELETE FROM ${table}
@@ -348,7 +350,7 @@ export function createPostgresWebhookInboxStore(
                LIMIT $2
              )
              RETURNING key`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: rows.length };
         }
@@ -357,7 +359,7 @@ export function createPostgresWebhookInboxStore(
            WHERE status IN ('completed', 'dead_letter')
              AND updated_at <= $1
            RETURNING key`,
-          [input.before],
+          [before],
         );
         return { deleted: rows.length };
       });

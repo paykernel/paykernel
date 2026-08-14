@@ -398,6 +398,7 @@ export function createD1ReconciliationStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
+        const before = canonicalizeIsoTimestamp(input.before, "before");
         const limit = input.limit;
         if (limit !== undefined) {
           const rows = await ctx.getExecutor().query<{ key: string }>(
@@ -410,7 +411,7 @@ export function createD1ReconciliationStore(
                LIMIT ?
              )
              RETURNING key`,
-            [input.before, limit],
+            [before, limit],
           );
           return { deleted: rows.length };
         }
@@ -419,7 +420,7 @@ export function createD1ReconciliationStore(
            WHERE status IN ('completed', 'failed', 'manual_review')
              AND updated_at <= ?
            RETURNING key`,
-          [input.before],
+          [before],
         );
         return { deleted: rows.length };
       });

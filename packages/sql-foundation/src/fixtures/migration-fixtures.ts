@@ -53,7 +53,7 @@ export function createFakeExecutor(
         if (name) state.tables.add(name);
         return { ok: true };
       }
-      if (/INSERT INTO/i.test(s) && params && params.length >= 3) {
+      if (/INSERT(?:\s+OR\s+IGNORE)?\s+INTO/i.test(s) && params && params.length >= 3) {
         // Migration bookkeeping or other inserts — detect by table name in SQL
         if (s.includes(migTable) || /payment_storage_migrations/.test(s)) {
           state.tables.add(migTable);
