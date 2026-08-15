@@ -81,13 +81,26 @@ export function createSqliteReconciliationStore(
 
         return exec.transaction(() => {
           const inserted = exec.run(
-            `INSERT OR IGNORE INTO ${table} (
+            `INSERT INTO ${table} (
                key, status, subject_id, reason, due_at,
                attempts, generation, created_at, updated_at
              ) VALUES (
                ?, 'scheduled', ?, ?, ?,
                0, 0, ?, ?
-             )`,
+             )
+             ON CONFLICT(key) DO UPDATE SET
+               status = 'scheduled',
+               subject_id = excluded.subject_id,
+               reason = excluded.reason,
+               due_at = excluded.due_at,
+               attempts = 0,
+               lease_owner = NULL,
+               lease_token = NULL,
+               lease_expires_at = NULL,
+               last_error_sanitized = NULL,
+               completed_at = NULL,
+               updated_at = excluded.updated_at
+             WHERE status IN ('completed', 'failed', 'manual_review')`,
             [input.key, input.subjectId, input.reason, dueAt, now, now],
           );
 

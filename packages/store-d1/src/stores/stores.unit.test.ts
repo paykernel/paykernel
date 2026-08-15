@@ -565,6 +565,42 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(repair!.params).toEqual([dueZ, null, "job-race", now]);
   });
 
+  it("schedule ON CONFLICT reopens only terminal statuses", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) {
+          expect(sql).toMatch(/ON CONFLICT/i);
+          expect(sql).toMatch(/DO UPDATE/i);
+          expect(sql).toMatch(/completed['"]?\s*,\s*['"]failed['"]?\s*,\s*['"]manual_review/i);
+          expect(sql).toMatch(/attempts\s*=\s*0/i);
+          return [];
+        }
+        return [
+          {
+            key: "job1",
+            status: "scheduled",
+            subject_id: "pay_1",
+            reason: "timeout",
+            due_at: now,
+            attempts: 0,
+            generation: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ];
+      },
+    });
+    const store = createD1ReconciliationStore({ executor });
+    const r = await store.schedule({
+      key: "job1",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt: now,
+    });
+    expect(r.kind).toBe("already_exists");
+  });
+
   it("listDue soft-releases expired claimed rows then selects scheduled", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();

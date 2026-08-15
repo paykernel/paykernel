@@ -748,4 +748,85 @@ describe("createMemoryReconciliationStore", () => {
     expect((await full.get("r_only"))?.status).toBe("claimed");
     expect(await full.get("r_overflow")).toBeUndefined();
   });
+
+  it("expired claimed listDue then claim does not burn attempts", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_attempts",
+      subjectId: "pay_1",
+      reason: "indeterminate",
+      dueAt: clock.nowIso(),
+    });
+    const first = await store.claim({
+      key: "r_attempts",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    expect(first.record.attempts).toBe(1);
+
+    clock.advance(1_001);
+    const due = await store.listDue({ now: clock.nowIso(), limit: 10 });
+    expect(due.some((r) => r.key === "r_attempts")).toBe(true);
+
+    const second = await store.claim({
+      key: "r_attempts",
+      owner: "w_new",
+      leaseMs: 30_000,
+    });
+    expect(second.kind).toBe("acquired");
+    if (second.kind !== "acquired") return;
+    expect(second.record.attempts).toBe(first.record.attempts);
+  });
+
+  it("schedule reopens terminal completed; claimed stays already_exists", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const first = await store.schedule({
+      key: "r_reopen",
+      subjectId: "pay_1",
+      reason: "first",
+      dueAt: clock.nowIso(),
+    });
+    expect(first.kind).toBe("scheduled");
+    const claimed = await store.claim({
+      key: "r_reopen",
+      owner: "w1",
+      leaseMs: 5_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+
+    const whileClaimed = await store.schedule({
+      key: "r_reopen",
+      subjectId: "pay_1",
+      reason: "steal",
+      dueAt: clock.nowIso(),
+    });
+    expect(whileClaimed.kind).toBe("already_exists");
+
+    await store.complete({ key: "r_reopen", leaseToken: claimed.leaseToken });
+    const reopened = await store.schedule({
+      key: "r_reopen",
+      subjectId: "pay_1",
+      reason: "reopen",
+      dueAt: clock.nowIso(),
+    });
+    expect(reopened.kind).toBe("scheduled");
+    if (reopened.kind !== "scheduled") return;
+    expect(reopened.record.status).toBe("scheduled");
+    expect(reopened.record.reason).toBe("reopen");
+    expect(reopened.record.attempts).toBe(0);
+    expect(reopened.record.generation).toBe(claimed.record.generation);
+
+    const again = await store.schedule({
+      key: "r_reopen",
+      subjectId: "pay_1",
+      reason: "again",
+      dueAt: clock.nowIso(),
+    });
+    expect(again.kind).toBe("already_exists");
+  });
 });

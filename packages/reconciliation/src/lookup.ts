@@ -53,6 +53,36 @@ export type ProviderLookupPort = {
   ): Promise<LookupOutcome>;
 };
 
+/**
+ * First-class `findByPaymentId` port over an app `getPayment` that already
+ * returns a normalized snapshot (or a {@link LookupOutcome}).
+ *
+ * Does not invent money fields — callers map gateway results to
+ * {@link ProviderPaymentSnapshot} before this seam.
+ */
+export function createGetPaymentLookupPort(input: {
+  getPayment: (args: {
+    gateway: string;
+    gatewayPaymentId: string;
+  }) => Promise<ProviderPaymentSnapshot | LookupOutcome | undefined>;
+}): ProviderLookupPort {
+  return {
+    async findByPaymentId(gateway, id): Promise<LookupOutcome> {
+      try {
+        const out = await input.getPayment({
+          gateway,
+          gatewayPaymentId: id,
+        });
+        if (out === undefined) return { kind: "not_found" };
+        if ("kind" in out) return out;
+        return { kind: "found", snapshots: [out] };
+      } catch {
+        return { kind: "unavailable" };
+      }
+    },
+  };
+}
+
 type LookupStep = {
   name: string;
   key: string | undefined;

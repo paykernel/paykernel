@@ -25,7 +25,7 @@ import {
 | --- | --- | --- |
 | `context` | yes | Started `OperationContext` |
 | `metrics` | no | `PaymentMetrics` |
-| `tracer` | no | `PaymentTracer` (`createNoopTracer` / OTEL bridge / custom) |
+| `tracer` | no | `PaymentTracer` (`createNoopTracer` / OTEL bridge / custom). Span attributes from `OperationContext` are passed through `redactAttributeBag` before `startSpan` (secret-shaped `internalReference` never reaches a custom tracer). |
 | `telemetry` | no | Raw or redacting `TelemetrySink` — **always** re-wrapped with `createRedactingTelemetrySink` before emit |
 | `clock` | no | Injectable `Clock` (default `systemClock`) |
 | `telemetryEvent` | no | Default `"payment.operation"` |

@@ -148,13 +148,19 @@ export function classifyFromOperationOutcome(
  * Classify submission state from outcome / error / explicit hints.
  *
  * Priority:
- * 1. Explicit `submissionState` if provided
+ * 1. Explicit `submissionState` **unless** it is a SAFE state that would
+ *    override money-moving / uncertain evidence (P21-EXPLICIT-STATE).
+ *    Expert override remains the only way to allow unsafe fallback.
  * 2. Known transport/uncertain error kinds (timeout, connection_reset, etc.)
  * 3. PaymentOperationOutcome when it indicates money may have moved / is
  *    uncertain (indeterminate / succeeded / requires_action / declined / failed)
  *    — **ROUTE-2:** these must not be overridden to `pre_submission_failure`
  *    by a mis-mapped `validation_error`
- * 4. Remaining error kinds / error object shapes (including validation_error)
+ * 4. Remaining error kinds / error object shapes.
+ *    Bare `errorKind: "validation_error"` is **indeterminate** (same class as
+ *    `invalid_request`). Only a ValidationError-shaped object
+ *    (`name === "ValidationError"` / `code === "validation_error"`) is
+ *    `pre_submission_failure` (P21-VALIDATION-ERROR).
  * 5. Default: `indeterminate` (fail-closed for fallback)
  *
  * **Never** maps indeterminate → pre_submission_failure.
@@ -196,22 +202,34 @@ export function classifySubmissionState(input: {
 }): SubmissionState {
   const abortAsNotSubmitted = input.expertUnsafeAbortAsNotSubmitted === true;
 
-  if (
-    input.submissionState !== undefined &&
-    ALL_STATES.has(input.submissionState)
-  ) {
-    return input.submissionState;
-  }
+  const explicit =
+    input.submissionState !== undefined && ALL_STATES.has(input.submissionState)
+      ? input.submissionState
+      : undefined;
 
   // Transport / uncertain error kinds still win (timeout, reset, 5xx, abort).
-  // Pre-submission-only kinds (validation_error, configuration_error) are
-  // deferred until after outcome so ROUTE-2 cannot auto-fallback after money moved.
+  // Pre-submission-only kinds (configuration_error, explicit not_submitted)
+  // are deferred until after outcome so ROUTE-2 cannot auto-fallback after
+  // money moved. Bare validation_error is indeterminate (not pre-submit).
   const fromErrorKind = classifyErrorKind(input.errorKind, abortAsNotSubmitted);
+  const fromError = classifyErrorObject(input.error, abortAsNotSubmitted);
+
+  // P21-EXPLICIT-STATE: explicit SAFE state must not override money-moving /
+  // uncertain evidence into a fallback-eligible state. Explicit still wins
+  // when there is no conflicting money evidence (or when it is already unsafe).
+  if (explicit !== undefined) {
+    if (
+      !isSafeFallbackEligible(explicit) ||
+      !hasConflictingMoneyEvidence(input, fromErrorKind, fromError)
+    ) {
+      return explicit;
+    }
+  }
+
   if (fromErrorKind !== null && !isPreSubmissionOnlyClassification(fromErrorKind)) {
     return fromErrorKind;
   }
 
-  const fromError = classifyErrorObject(input.error, abortAsNotSubmitted);
   if (fromError !== null && !isPreSubmissionOnlyClassification(fromError)) {
     return fromError;
   }
@@ -244,6 +262,75 @@ export function classifySubmissionState(input: {
 /** True for states that only mean "never reached provider" (safe fallback). */
 function isPreSubmissionOnlyClassification(state: SubmissionState): boolean {
   return state === "pre_submission_failure" || state === "not_submitted";
+}
+
+const MONEY_MOVING_OR_UNCERTAIN_OUTCOMES: ReadonlySet<string> = new Set([
+  "indeterminate",
+  "succeeded",
+  "failed",
+  "declined",
+  "requires_action",
+]);
+
+/**
+ * P21-EXPLICIT-STATE: evidence that money may have moved or is uncertain.
+ * Explicit SAFE submissionState must not override these into a fallback-eligible
+ * state. Expert override is the only allowed escape hatch.
+ */
+function hasConflictingMoneyEvidence(
+  input: {
+    outcome?: string;
+    result?: unknown;
+  },
+  fromErrorKind: SubmissionState | null,
+  fromError: SubmissionState | null,
+): boolean {
+  if (
+    input.outcome !== undefined &&
+    MONEY_MOVING_OR_UNCERTAIN_OUTCOMES.has(input.outcome)
+  ) {
+    return true;
+  }
+
+  if (resultIndicatesMoneyMovedOrUncertain(input.result)) {
+    return true;
+  }
+
+  return (
+    isUnsafeMoneyEvidenceState(fromErrorKind) ||
+    isUnsafeMoneyEvidenceState(fromError)
+  );
+}
+
+function isUnsafeMoneyEvidenceState(state: SubmissionState | null): boolean {
+  return (
+    state === "timeout" ||
+    state === "connection_reset" ||
+    state === "provider_5xx_uncertain" ||
+    state === "submitted" ||
+    state === "indeterminate"
+  );
+}
+
+function resultIndicatesMoneyMovedOrUncertain(result: unknown): boolean {
+  if (result === null || typeof result !== "object") return false;
+  if ("outcome" in result) {
+    const outcome = (result as { outcome?: unknown }).outcome;
+    if (typeof outcome === "string" && MONEY_MOVING_OR_UNCERTAIN_OUTCOMES.has(outcome)) {
+      return true;
+    }
+  }
+  if (
+    "success" in result &&
+    "gatewayId" in result &&
+    "status" in result &&
+    isIndeterminateOutcome(
+      result as Parameters<typeof isIndeterminateOutcome>[0],
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -311,13 +398,12 @@ function classifyErrorKind(
   ) {
     return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
-  // Local/schema validation & config errors are safely pre-submit.
-  // ROUTE-1: bare invalid_request may be post-accept provider validation —
-  // treat as indeterminate (not multi-gateway fallback-eligible) unless the
-  // caller proves non-submission via an explicit pre_submission_failure kind.
+  // Local/schema config errors are safely pre-submit.
+  // P21-VALIDATION-ERROR: bare errorKind "validation_error" is the same class
+  // as invalid_request (may be a mis-mapped provider 400) — indeterminate.
+  // Only a ValidationError-shaped *object* is pre_submission_failure.
   if (
     k === "pre_submission_failure" ||
-    k === "validation_error" ||
     k === "configuration_error" ||
     k === "auth_config_error"
   ) {
@@ -383,7 +469,9 @@ function classifyErrorObject(
   ) {
     return abortAsNotSubmitted ? "not_submitted" : "indeterminate";
   }
-  // ValidationError / validation_error: typically local schema (safe pre-submit).
+  // ValidationError-shaped object (name or code): local schema (safe pre-submit).
+  // Bare errorKind "validation_error" is handled in classifyErrorKind as
+  // indeterminate (P21-VALIDATION-ERROR) — apps must not map provider 400s.
   // InvalidRequestError / invalid_request: may be post-accept provider validation
   // or idempotency reuse — ROUTE-1 fail-closed to indeterminate (no multi-gateway retry).
   if (name === "validationerror" || code === "validation_error") {

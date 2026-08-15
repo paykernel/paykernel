@@ -26,6 +26,8 @@ describe("public API runtime surface", () => {
       ["createRedactingTelemetrySink", observability.createRedactingTelemetrySink],
       ["redactTelemetryData", observability.redactTelemetryData],
       ["redactAttributeBag", observability.redactAttributeBag],
+      ["sanitizeExceptionCode", observability.sanitizeExceptionCode],
+      ["sanitizeExceptionIdentity", observability.sanitizeExceptionIdentity],
       // OperationContext (core)
       ["createOperationContext", observability.createOperationContext],
       ["finalizeOperationContext", observability.finalizeOperationContext],

@@ -80,6 +80,8 @@ export type CreateDefaultGatewayContextOptions = Partial<
  *
  * Defaults come from {@link createPaymentRuntime} (globalThis fetch / Web Crypto /
  * system clock). Partial overrides replace individual fields. Does not accept secrets.
+ * Provided {@link TelemetrySink} instances are wrapped with
+ * {@link createRedactingTelemetrySink} (double-wrap is safe).
  */
 export function createDefaultGatewayContext(
   partial: CreateDefaultGatewayContextOptions = {},
@@ -120,7 +122,10 @@ export function createDefaultGatewayContext(
   };
 
   if (partial.telemetry !== undefined) {
-    ctx.telemetry = partial.telemetry;
+    // Same default-safe path as createRedactingLogger on gateway log sinks:
+    // wrap so card/secret bags never leave ctx.telemetry unredacted.
+    // Double-wrap is idempotent for already-redacted secrets.
+    ctx.telemetry = createRedactingTelemetrySink(partial.telemetry);
   }
 
   return ctx;

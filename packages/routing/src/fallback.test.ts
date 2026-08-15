@@ -124,7 +124,7 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
       "not_submitted",
     );
     expect(classifySubmissionState({ errorKind: "validation_error" })).toBe(
-      "pre_submission_failure",
+      "indeterminate",
     );
     // ROUTE-1: bare invalid_request is indeterminate (may be post-accept).
     expect(classifySubmissionState({ errorKind: "invalid_request" })).toBe(
@@ -156,20 +156,107 @@ describe("classifyFromOperationOutcome / classifySubmissionState", () => {
         }),
       }).allowed,
     ).toBe(false);
-    // Bare validation_error (no outcome) remains pre_submission_failure.
+    // Bare errorKind validation_error (no ValidationError-shaped object) is
+    // indeterminate — same class as invalid_request. Apps must not map
+    // provider 400s onto this kind.
     expect(classifySubmissionState({ errorKind: "validation_error" })).toBe(
-      "pre_submission_failure",
+      "indeterminate",
     );
   });
 
-  it("explicit submissionState wins", () => {
+  it("P21-VALIDATION-ERROR: ValidationError-shaped object remains pre_submission_failure", () => {
+    expect(
+      classifySubmissionState({
+        error: { name: "ValidationError", message: "schema" },
+      }),
+    ).toBe("pre_submission_failure");
+    expect(
+      classifySubmissionState({
+        error: { name: "Error", code: "validation_error" },
+      }),
+    ).toBe("pre_submission_failure");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          error: { name: "ValidationError" },
+        }),
+      }).allowed,
+    ).toBe(true);
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          errorKind: "validation_error",
+        }),
+      }).allowed,
+    ).toBe(false);
+  });
+
+  it("P21-EXPLICIT-STATE: explicit safe state does not override money-moving / uncertain evidence", () => {
     expect(
       classifySubmissionState({
         submissionState: "not_submitted",
         outcome: "indeterminate",
         errorKind: "timeout",
       }),
+    ).toBe("timeout");
+    expect(
+      classifySubmissionState({
+        submissionState: "not_submitted",
+        outcome: "indeterminate",
+      }),
+    ).toBe("indeterminate");
+    expect(
+      classifySubmissionState({
+        submissionState: "pre_submission_failure",
+        outcome: "succeeded",
+      }),
+    ).toBe("submitted");
+    expect(
+      classifySubmissionState({
+        submissionState: "not_submitted",
+        errorKind: "connection_reset",
+      }),
+    ).toBe("connection_reset");
+    expect(
+      classifySubmissionState({
+        submissionState: "not_submitted",
+        errorKind: "provider_5xx_uncertain",
+      }),
+    ).toBe("provider_5xx_uncertain");
+    expect(
+      classifySubmissionState({
+        submissionState: "pre_submission_failure",
+        errorKind: "submitted",
+      }),
+    ).toBe("submitted");
+    expect(
+      evaluateFallback({
+        submissionState: classifySubmissionState({
+          submissionState: "not_submitted",
+          outcome: "indeterminate",
+          errorKind: "timeout",
+        }),
+      }).allowed,
+    ).toBe(false);
+  });
+
+  it("P21-EXPLICIT-STATE: explicit state still wins without conflicting money evidence", () => {
+    expect(
+      classifySubmissionState({
+        submissionState: "not_submitted",
+      }),
     ).toBe("not_submitted");
+    expect(
+      classifySubmissionState({
+        submissionState: "pre_submission_failure",
+        errorKind: "configuration_error",
+      }),
+    ).toBe("pre_submission_failure");
+    expect(
+      classifySubmissionState({
+        submissionState: "timeout",
+      }),
+    ).toBe("timeout");
   });
 
   it("unknown defaults to indeterminate (fail-closed)", () => {
@@ -401,6 +488,90 @@ describe("trySelectFallbackGateway", () => {
         ),
       ).toThrow(UnsafeFallbackDeniedError);
     }
+  });
+
+  it("P21-EXCLUDE-HONESTY: attemptedGateways cannot send out-of-range amount to unconstrained fallback", () => {
+    const ranged = createPaymentRouter({
+      rules: [
+        route({
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    expect(() =>
+      trySelectFallbackGateway(
+        ranged,
+        { amount: { amount: "50.00", currency: "USD" } },
+        eligibility,
+        { attemptedGateways: ["enterprise-psp"] },
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+    expect(() =>
+      trySelectFallbackGateway(
+        ranged,
+        {
+          amount: { amount: "50.00", currency: "USD" },
+          excludeGateways: ["enterprise-psp"],
+        },
+        eligibility,
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+    expect(() =>
+      trySelectFallbackGateway(
+        ranged,
+        {
+          amount: { amount: "50.00", currency: "USD" },
+          health: { "enterprise-psp": false },
+        },
+        eligibility,
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+  });
+
+  it("P21-EXCLUDE-HONESTY: attemptedGateways cannot drop rule-level requiredCapabilities", () => {
+    const capped = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          requiredCapabilities: ["refunds"],
+        }).to("stripe"),
+      ],
+      fallback: "paypal",
+    });
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    const input = {
+      currency: "USD",
+      gatewayCapabilities: {
+        stripe: { refunds: true },
+        paypal: { payments: true },
+      },
+    };
+    expect(() =>
+      trySelectFallbackGateway(capped, input, eligibility, {
+        attemptedGateways: ["stripe"],
+      }),
+    ).toThrow(UnsafeFallbackDeniedError);
+    expect(() =>
+      trySelectFallbackGateway(
+        capped,
+        { ...input, excludeGateways: ["stripe"] },
+        eligibility,
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+    expect(() =>
+      trySelectFallbackGateway(
+        capped,
+        { ...input, health: { stripe: false } },
+        eligibility,
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
   });
 
   it("genuine evaluateFallback expertOverride still allows unsafe select", () => {

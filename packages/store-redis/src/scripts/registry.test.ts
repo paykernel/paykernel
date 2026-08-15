@@ -128,6 +128,15 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(complete).toContain("exp <= nowMs");
   });
 
+  it("P19-REOPEN: recon schedule reopens only terminal statuses", () => {
+    const schedule = REDIS_SCRIPT_REGISTRY.reconciliation.schedule;
+    expect(schedule).toMatch(/status == 'completed'/);
+    expect(schedule).toMatch(/status == 'failed'/);
+    expect(schedule).toMatch(/status == 'manual_review'/);
+    expect(schedule).toContain("'scheduled'");
+    expect(schedule).toMatch(/already_exists/);
+  });
+
   it("P1315-REDIS-1: recon claim increments attempts only when scheduled", () => {
     const claim = REDIS_SCRIPT_REGISTRY.reconciliation.claim;
     // Must not unconditionally increment (expired claimed reclaim keeps attempts).

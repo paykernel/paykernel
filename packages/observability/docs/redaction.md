@@ -42,7 +42,10 @@ import {
 > **OBS-2:** Core already allow-lists `authorized` in `SAFE_KEY_ALLOWLIST`, so
 > substring `auth` does **not** redact that flag today. The operational-key
 > restore for `authorized` is **defense-in-depth** only (no-op when core
-> preserves the value). Do not document it as “fixing a core over-match.”
+> preserves the value) and restores **only operational booleans** (`true` /
+> `false`). A secret-shaped value such as `{ authorized: "sk_live_…" }` stays
+> `[REDACTED]` — restore never unmasks a leaf core redacted because the value
+> looked like a credential. Do not document restore as “fixing a core over-match.”
 
 ### Redacting sink
 
@@ -106,8 +109,8 @@ Still redacted by substring patterns (unless exact allow-list hit): `secret`, `t
 
 - Free-form **event name** strings on `emit` (same residual as log **messages** — do not put secrets in the event string).
 - **Structured telemetry bags** go through `createRedactingTelemetrySink` / `redactTelemetryData` (core `redact()` + operational-key restore).
-- **Metric labels and span attributes (OBS-1 honesty):** the in-package metric registry (`createInMemoryPaymentMetrics`) and the OTEL bridge (`createOpenTelemetryBridge`) **do** auto-redact via `redactAttributeBag` as defense-in-depth. Still set only non-sensitive primitives — a custom `PaymentMetrics` / `PaymentTracer` implementation may not scrub, and redaction is key/pattern based (not a full DLP guarantee for free-form values).
-- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set). Span `recordException` is sanitized to name/code only so raw exception text never reaches OTEL exporters.
+- **Metric labels and span attributes (OBS-1 honesty):** the in-package metric registry (`createInMemoryPaymentMetrics`), the OTEL bridge (`createOpenTelemetryBridge`), and `withPaymentOperation` **do** auto-redact via `redactAttributeBag` as defense-in-depth (custom tracers used *through* `withPaymentOperation` do not see raw secret-shaped `internalReference`). Still set only non-sensitive primitives — a custom `PaymentMetrics` / a `PaymentTracer` started outside instrumentation may not scrub, and redaction is key/pattern based (not a full DLP guarantee for free-form values).
+- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set). Span `recordException` is sanitized to name + non-secret `code` only (secret-shaped codes such as `sk_live_x` are dropped) so raw exception text never reaches OTEL exporters.
 
 ## Double-wrapping
 
@@ -133,18 +136,16 @@ Note: `withPaymentOperation` always wraps the provided `telemetry` sink before e
 ## GatewayContext
 
 ```typescript
-import {
-  createDefaultGatewayContext,
-  createRedactingTelemetrySink,
-} from "@paykernel/core";
+import { createDefaultGatewayContext } from "@paykernel/core";
 
 const ctx = createDefaultGatewayContext({
-  telemetry: createRedactingTelemetrySink({
+  telemetry: {
     emit(event, data) {
       /* … */
     },
-  }),
+  },
 });
+// ctx.telemetry is already wrapped with createRedactingTelemetrySink
 ```
 
-`TelemetrySink` remains **optional** and additive for 0.x compatibility.
+`TelemetrySink` remains **optional** and additive for 0.x compatibility. `createDefaultGatewayContext` wraps a provided sink the same way gateways wrap loggers — pre-wrapping is still safe (double-wrap does not unmask secrets).

@@ -347,6 +347,32 @@ describe("createReconciliationScheduler (A3)", () => {
     expect((await store.get(key))?.status).toBe("completed");
   });
 
+  it("abandoned claimDue reclaim does not burn attempts", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      owner: "w1",
+      defaultLeaseMs: 1_000,
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_attempts" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "indeterminate_create",
+    });
+
+    const first = await scheduler.claimDue({ limit: 5 });
+    expect(first).toHaveLength(1);
+    expect(first[0]!.record.attempts).toBe(1);
+
+    clock.advance(1_001);
+    const rediscovered = await scheduler.claimDue({ limit: 5, owner: "w2" });
+    expect(rediscovered).toHaveLength(1);
+    expect(rediscovered[0]!.record.attempts).toBe(first[0]!.record.attempts);
+  });
+
   it("processDue rediscovers abandoned job after lease expiry via listDue", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });
@@ -574,5 +600,70 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(result.completed).toBeGreaterThanOrEqual(2);
     expect(handled.some((k) => k.includes(":moyasar:"))).toBe(true);
     expect(handled.filter((k) => k.includes(":stripe:")).length).toBe(1);
+  });
+
+  it("listDeadLetter with no args uses store.listTerminal", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      maxAttempts: 1,
+    });
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_dl" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "x",
+    });
+    await scheduler.processDue({
+      handler: async () => ({ disposition: "retry", error: "fail" }),
+    });
+    const dead = await scheduler.listDeadLetter();
+    expect(dead.length).toBe(1);
+    expect(dead[0]?.status).toBe("manual_review");
+  });
+
+  it("maxInFlightByGateway is shared across overlapping processDue calls", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const runAt = new Date(clock.nowMs()).toISOString();
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_a" },
+      runAt,
+      reason: "a",
+    });
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_b" },
+      runAt,
+      reason: "b",
+    });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const inHandler = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const first = scheduler.processDue({
+      maxInFlightByGateway: { stripe: 1 },
+      handler: async () => {
+        entered();
+        await held;
+        return { disposition: "complete" };
+      },
+    });
+    await inHandler;
+    const second = await scheduler.processDue({
+      maxInFlightByGateway: { stripe: 1 },
+      handler: async () => ({ disposition: "complete" }),
+    });
+    expect(second.processed).toBe(0);
+    release();
+    const firstResult = await first;
+    expect(firstResult.processed).toBe(1);
+    expect(firstResult.completed).toBe(1);
   });
 });

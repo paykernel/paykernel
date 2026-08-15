@@ -578,6 +578,116 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(call!.params).toContain(now);
   });
 
+  it("SQL-1: timestamp repair UPDATE is free-lease fenced (never unfenced key-only)", async () => {
+    const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
+    const dueOffset = "2026-01-15T14:00:00+05:00";
+    const dueZ = "2026-01-15T09:00:00.000Z";
+    const now = new Date(clock.nowMs()).toISOString();
+    const winnerLease = new Date(clock.nowMs() + 60_000).toISOString();
+    let selectN = 0;
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("UPDATE") && sql.includes("status = 'claimed'")) {
+          return [];
+        }
+        if (sql.includes("SELECT") && sql.includes("WHERE key")) {
+          selectN += 1;
+          if (selectN === 1) {
+            return [
+              {
+                key: "job-race",
+                status: "scheduled",
+                subject_id: "pay_1",
+                reason: "timeout",
+                due_at: dueOffset,
+                lease_owner: null,
+                lease_token: null,
+                lease_expires_at: null,
+                attempts: 0,
+                generation: 0,
+                last_error_sanitized: null,
+                tenant_id: null,
+                created_at: dueZ,
+                updated_at: dueZ,
+                completed_at: null,
+              },
+            ];
+          }
+          return [
+            {
+              key: "job-race",
+              status: "claimed",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: dueZ,
+              lease_owner: "winner",
+              lease_token: "lt_winner",
+              lease_expires_at: winnerLease,
+              attempts: 1,
+              generation: 1,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: dueZ,
+              updated_at: now,
+              completed_at: null,
+            },
+          ];
+        }
+        return [];
+      },
+      onRun: () => ({ changes: 0 }),
+    });
+    const store = createDoReconciliationStore({ executor, clock });
+    const r = await store.claim({ key: "job-race", owner: "loser", leaseMs: 1000 });
+    expect(r.kind).toBe("in_progress");
+    const repair = executor.calls.find(
+      (c) =>
+        c.sql.includes("UPDATE") &&
+        c.sql.includes("due_at") &&
+        !c.sql.includes("status = 'claimed'"),
+    );
+    expect(repair).toBeDefined();
+    expect(repair!.sql).toContain("status = 'scheduled'");
+    expect(repair!.sql).toMatch(/lease_expires_at IS NULL/i);
+    expect(repair!.sql).toMatch(/lease_expires_at\s*<=/i);
+    expect(repair!.params).toEqual([dueZ, null, "job-race", now]);
+  });
+
+  it("schedule ON CONFLICT reopens only terminal statuses", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) {
+          expect(sql).toMatch(/ON CONFLICT/i);
+          expect(sql).toMatch(/DO UPDATE/i);
+          expect(sql).toMatch(/completed['"]?\s*,\s*['"]failed['"]?\s*,\s*['"]manual_review/i);
+          return [];
+        }
+        return [
+          {
+            key: "job1",
+            status: "scheduled",
+            subject_id: "pay_1",
+            reason: "timeout",
+            due_at: now,
+            attempts: 0,
+            generation: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ];
+      },
+    });
+    const store = createDoReconciliationStore({ executor });
+    const r = await store.schedule({
+      key: "job1",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt: now,
+    });
+    expect(r.kind).toBe("already_exists");
+  });
+
   it("STORES-3: listDue canonicalizes offset input.now for soft-release and select", async () => {
     const clock = createFakeClock({ initialMs: Date.parse("2026-01-15T12:00:00.000Z") });
     const canonicalNow = "2026-01-15T12:00:00.000Z";

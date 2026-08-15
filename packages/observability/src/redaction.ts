@@ -7,7 +7,9 @@
  *
  * **OBS-2 honesty:** `authorized` restore is **defense-in-depth**. Core already
  * allow-lists `authorized` in `SAFE_KEY_ALLOWLIST` (substring `auth` does not
- * redact it). The restore only fires if a future core change over-matches.
+ * redact it). The restore only fires if a future core change over-matches the
+ * *key* — never when the *value* is secret-shaped (core `redact` already
+ * replaced it with `[REDACTED]`). Only operational booleans are restored.
  */
 
 import {
@@ -27,7 +29,17 @@ const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 6;
 
 /**
- * After core `redact`, restore known operational keys **if** they were redacted.
+ * Operational `authorized` restore is only for booleans (`true`/`false`).
+ * Never unmask a leaf core already replaced because the *value* was
+ * secret-shaped (sk_live / PAN / Bearer).
+ */
+function isRestorableOperationalPrimitive(value: unknown): boolean {
+  return typeof value === "boolean";
+}
+
+/**
+ * After core `redact`, restore known operational keys **if** they were redacted
+ * *and* the original leaf is a non-secret operational primitive (boolean).
  * No-op when core already preserved them (current SAFE_KEY_ALLOWLIST behavior).
  * Recurses into plain objects only (same depth budget as core).
  */
@@ -58,7 +70,7 @@ function restoreOperationalKeysIfRedacted(
     if (
       OPERATIONAL_KEY_RESTORE.has(lower) &&
       red[key] === REDACTED &&
-      origVal !== undefined
+      isRestorableOperationalPrimitive(origVal)
     ) {
       out[key] = origVal;
       continue;
@@ -79,7 +91,8 @@ function restoreOperationalKeysIfRedacted(
 
 /**
  * Scrub a structured telemetry bag with core `redact()`, then defense-in-depth
- * restore for operational keys (e.g. `authorized`) if ever over-redacted.
+ * restore for operational boolean keys (e.g. `authorized: false`) if ever
+ * over-redacted. Secret-shaped `authorized` leaves stay `[REDACTED]`.
  * Prefer {@link createRedactingTelemetrySink} when wrapping a sink end-to-end.
  */
 export function redactTelemetryData(
@@ -114,6 +127,46 @@ export function redactAttributeBag(
     }
   }
   return out;
+}
+
+/**
+ * Keep operational exception `code` strings; drop secret-shaped values
+ * (sk_live / PAN / Bearer) via core `redact`. Exception *name* is not filtered.
+ */
+export function sanitizeExceptionCode(code: unknown): string | undefined {
+  if (typeof code !== "string" || code.length === 0) return undefined;
+  return redact(code) === REDACTED ? undefined : code;
+}
+
+/** Name + optional non-secret code for span / OTEL exception export. */
+export function sanitizeExceptionIdentity(error: unknown): {
+  name: string;
+  code?: string;
+} {
+  if (error instanceof Error) {
+    const code = sanitizeExceptionCode(
+      "code" in error ? (error as { code?: unknown }).code : undefined,
+    );
+    return code !== undefined
+      ? { name: error.name || "Error", code }
+      : { name: error.name || "Error" };
+  }
+  if (typeof error === "string") {
+    return { name: "Error" };
+  }
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "name" in error &&
+    typeof (error as { name?: unknown }).name === "string"
+  ) {
+    const name = (error as { name: string }).name || "Error";
+    const code = sanitizeExceptionCode(
+      "code" in error ? (error as { code?: unknown }).code : undefined,
+    );
+    return code !== undefined ? { name, code } : { name };
+  }
+  return { name: "unknown" };
 }
 
 /**

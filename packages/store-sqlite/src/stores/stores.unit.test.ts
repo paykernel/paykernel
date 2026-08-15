@@ -269,6 +269,26 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     await store.complete({ key: "job1", leaseToken: c.leaseToken });
     const got = await store.get("job1");
     expect(got?.status).toBe("completed");
+
+    const reopened = await store.schedule({
+      key: "job1",
+      subjectId: "pay_1",
+      reason: "reopen",
+      dueAt,
+    });
+    expect(reopened.kind).toBe("scheduled");
+    if (reopened.kind === "scheduled") {
+      expect(reopened.record.reason).toBe("reopen");
+      expect(reopened.record.attempts).toBe(0);
+      expect(reopened.record.generation).toBe(c.record.generation);
+    }
+    const again = await store.schedule({
+      key: "job1",
+      subjectId: "pay_1",
+      reason: "again",
+      dueAt,
+    });
+    expect(again.kind).toBe("already_exists");
   });
 
   it("SQL-1/SQL-2: offset dueAt is stored as Z and free due work is claimable (not in_progress)", async () => {

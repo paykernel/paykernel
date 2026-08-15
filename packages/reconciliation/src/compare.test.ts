@@ -117,6 +117,20 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
     ]);
   });
 
+  it("surfaces provider capture vs local amount when local omitted capturedAmount", () => {
+    const diffs = compareSnapshots(
+      { amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_1",
+        status: "paid",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("4.00", "USD"),
+        providerStatus: "succeeded",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(true);
+  });
+
   it("matches captured/refunded when zero spelling differs", () => {
     const diffs = compareSnapshots(
       {

@@ -11,7 +11,11 @@ import {
   type TelemetrySink,
 } from "@paykernel/core";
 import type { PaymentMetrics } from "./metrics";
-import { createRedactingTelemetrySink } from "./redaction";
+import {
+  createRedactingTelemetrySink,
+  redactAttributeBag,
+  sanitizeExceptionIdentity,
+} from "./redaction";
 import type { PaymentTracer } from "./spans";
 import { spanNameForOperationType } from "./spans";
 
@@ -173,7 +177,9 @@ function spanAttributesFromContext(
   if (ctx.inboxEventKey !== undefined) {
     attrs.inboxEventKey = ctx.inboxEventKey;
   }
-  return attrs;
+  // Same as OTEL bridge: custom tracers must not see secret-shaped leaves
+  // (e.g. internalReference = "sk_live_…") even under allow-listed keys.
+  return redactAttributeBag(attrs) ?? attrs;
 }
 
 /**
@@ -262,39 +268,15 @@ function errorNameForTelemetry(error: unknown): string {
 }
 
 /**
- * Sanitize exceptions for span export: name (+ optional code) only.
+ * Sanitize exceptions for span export: name (+ optional non-secret code) only.
  * Never forward raw Error.message / stack (may carry tokens or card fragments).
+ * Secret-shaped `code` values (sk_live / PAN / Bearer) are dropped.
  */
 export function sanitizeExceptionForSpan(error: unknown): {
   name: string;
   code?: string;
 } {
-  if (error instanceof Error) {
-    const code =
-      "code" in error && typeof (error as { code?: unknown }).code === "string"
-        ? (error as { code: string }).code
-        : undefined;
-    return code !== undefined
-      ? { name: error.name || "Error", code }
-      : { name: error.name || "Error" };
-  }
-  if (typeof error === "string") {
-    return { name: "Error" };
-  }
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "name" in error &&
-    typeof (error as { name?: unknown }).name === "string"
-  ) {
-    const name = (error as { name: string }).name || "Error";
-    const code =
-      "code" in error && typeof (error as { code?: unknown }).code === "string"
-        ? (error as { code: string }).code
-        : undefined;
-    return code !== undefined ? { name, code } : { name };
-  }
-  return { name: "unknown" };
+  return sanitizeExceptionIdentity(error);
 }
 
 function emitRedactedOperationTelemetry(
@@ -313,6 +295,17 @@ function emitRedactedOperationTelemetry(
   sink.emit?.(event, data);
 }
 
+function setRedactedSpanAttribute(
+  span: ReturnType<PaymentTracer["startSpan"]>,
+  key: string,
+  value: string | number | boolean,
+): void {
+  const scrubbed = redactAttributeBag({ [key]: value });
+  const next = scrubbed?.[key];
+  if (next === undefined) return;
+  span.setAttribute(key, next);
+}
+
 function finalizeSpan(
   span: ReturnType<PaymentTracer["startSpan"]> | undefined,
   finished: OperationContext,
@@ -322,15 +315,15 @@ function finalizeSpan(
   if (span === undefined) return;
 
   if (finished.providerRequestId !== undefined) {
-    span.setAttribute("providerRequestId", finished.providerRequestId);
+    setRedactedSpanAttribute(span, "providerRequestId", finished.providerRequestId);
   }
   if (finished.providerObjectId !== undefined) {
-    span.setAttribute("providerObjectId", finished.providerObjectId);
+    setRedactedSpanAttribute(span, "providerObjectId", finished.providerObjectId);
   }
   if (finished.normalizedOutcome !== undefined) {
-    span.setAttribute("normalizedOutcome", finished.normalizedOutcome);
+    setRedactedSpanAttribute(span, "normalizedOutcome", finished.normalizedOutcome);
   }
-  span.setAttribute("durationMs", durationMs);
+  setRedactedSpanAttribute(span, "durationMs", durationMs);
 
   if (thrown !== undefined) {
     // Never recordException(raw Error) — message/stack can carry secrets.

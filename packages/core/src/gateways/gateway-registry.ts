@@ -2,7 +2,10 @@
 
 import { InvalidRequestError } from "../errors";
 import type { GatewayAdapter } from "./gateway-adapter";
-import type { GatewayContext } from "./gateway-context";
+import {
+    createRedactingTelemetrySink,
+    type GatewayContext,
+} from "./gateway-context";
 import type { GatewayManifest } from "./gateway-manifest";
 import type { PaymentGateway } from "./gateway.interface";
 import {
@@ -247,9 +250,10 @@ class ImmutableGatewayRegistryImpl<TMap extends GatewayMap>
 
     createAll(context: GatewayContext): { [K in keyof TMap]: TMap[K] } {
         const instances: Record<string, PaymentGateway> = {};
+        const safeContext = withRedactingTelemetry(context);
         for (const name of this.order) {
             const adapter = this.adaptersByName[name]!;
-            const gateway = adapter.create(context);
+            const gateway = adapter.create(safeContext);
             if (gateway.name !== name) {
                 throw new InvalidRequestError(
                     `Gateway adapter '${name}' created instance with name '${gateway.name}'`,
@@ -388,4 +392,13 @@ export function createDynamicGatewayRegistry(): GatewayRegistryBuilder<
     Record<string, PaymentGateway>
 > {
     return new GatewayRegistryBuilderImpl<Record<string, PaymentGateway>>();
+}
+
+/** Wrap a hand-built context sink so adapter.create never sees raw telemetry. */
+function withRedactingTelemetry(context: GatewayContext): GatewayContext {
+    if (context.telemetry === undefined) return context;
+    return {
+        ...context,
+        telemetry: createRedactingTelemetrySink(context.telemetry),
+    };
 }

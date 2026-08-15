@@ -17,10 +17,12 @@ export type RoutingInput = {
   paymentMethod?: string;
   /**
    * Money-shaped amount OR major-unit decimal string for range checks.
-   * When a plain string, pair with {@link amountCurrency}.
+   * When a plain string, pair with {@link amountCurrency} or inherit {@link currency}.
    */
   amount?: { amount: string; currency: string } | string;
-  /** Currency for plain-string {@link amount}. */
+  /**
+   * Currency for plain-string {@link amount}. When omitted, {@link currency} is used.
+   */
   amountCurrency?: string;
   tenant?: string;
   tenantConfig?: Record<string, string | number | boolean>;

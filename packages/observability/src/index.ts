@@ -64,6 +64,8 @@ export {
   createRedactingTelemetrySink,
   redactAttributeBag,
   redactTelemetryData,
+  sanitizeExceptionCode,
+  sanitizeExceptionIdentity,
 } from "./redaction";
 export type { TelemetrySink } from "./redaction";
 

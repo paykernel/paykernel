@@ -12,6 +12,7 @@ import {
   toMinorUnits,
   type Money,
 } from "@paykernel/core";
+import { moneyEquals } from "./compare";
 import type {
   LocalPaymentSnapshot,
   ProviderPaymentSnapshot,
@@ -243,6 +244,27 @@ function providerPaidWithRefunds(provider: ProviderPaymentSnapshot): boolean {
   return moneyIsNonZero(provider.refundedAmount);
 }
 
+/**
+ * P19-CAPTURE: paid-like status with a *present* capturedAmount that is zero
+ * while `amount` is non-zero, or not money-equal to `amount`.
+ *
+ * Missing `capturedAmount` stays allowed (many providers omit it). Present
+ * but unparseable amounts fail closed via `moneyEquals` / `moneyIsNonZero`.
+ */
+function providerPaidWithCaptureMismatch(
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (!isPaidLikePaymentStatus(provider.status)) return false;
+  if (provider.capturedAmount === undefined) return false;
+  if (
+    moneyIsNonZero(provider.amount) &&
+    !moneyIsNonZero(provider.capturedAmount)
+  ) {
+    return true;
+  }
+  return !moneyEquals(provider.capturedAmount, provider.amount);
+}
+
 function maySafeUpgradeToPaid(
   target: ReconciliationTarget,
   provider: ProviderPaymentSnapshot,
@@ -252,6 +274,9 @@ function maySafeUpgradeToPaid(
   if (!identityBoundToTarget(target, provider)) return false;
   // RECON-2: non-zero refundedAmount is not a clean paid upgrade.
   if (providerPaidWithRefunds(provider)) return false;
+  // P19-CAPTURE: present capturedAmount must match amount (zero vs non-zero
+  // amount, or any other money inequality, is not a clean paid upgrade).
+  if (providerPaidWithCaptureMismatch(provider)) return false;
   return true;
 }
 
@@ -270,10 +295,13 @@ function maySafeUpdateToFailed(
  *
  * Rules:
  * - consistent → mark_consistent (only when not sparse+open-provider incomplete,
- *   and not paid-like provider with non-zero refundedAmount — RECON-2)
+ *   and not paid-like provider with non-zero refundedAmount — RECON-2,
+ *   and not paid-like with present capturedAmount zero/≠ amount — P19-CAPTURE)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
- *   (RECON-2: not when provider.refundedAmount is non-zero)
+ *   (RECON-2: not when provider.refundedAmount is non-zero;
+ *   P19-CAPTURE: not when present capturedAmount is zero vs non-zero amount
+ *   or not money-equal to amount; omitted capturedAmount stays allowed)
  * - local pending/indeterminate + provider definitive failed + identity-bound →
  *   update_local_to_failed (RECON-1: not when capturedAmount/refundedAmount non-zero)
  * - sparse/indeterminate local + in-flight provider (`pending`/`processing`) →
@@ -321,6 +349,20 @@ export function decideReconciliationPolicy(
           safe: false,
           reason:
             "Provider is paid-like but refundedAmount is non-zero — refuse safe update_local_to_paid; surface refund state for review",
+        };
+      }
+      // P19-CAPTURE: paid + present capturedAmount zero/≠ amount is not a
+      // clean paid upgrade — review (omitted capturedAmount stays allowed).
+      if (
+        isIndeterminateLocal(local) &&
+        providerPaidWithCaptureMismatch(result.provider) &&
+        identityBoundToTarget(target, result.provider)
+      ) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider is paid-like but capturedAmount is zero or not money-equal to amount — refuse safe update_local_to_paid; surface capture mismatch for review",
         };
       }
       if (
@@ -382,6 +424,16 @@ export function decideReconciliationPolicy(
             "Provider is paid-like but refundedAmount is non-zero — refuse safe mark_consistent; surface refund drift for review",
         };
       }
+      // P19-CAPTURE: status-only local paid matching provider paid must not
+      // ignore a present capturedAmount that is zero or ≠ amount.
+      if (providerPaidWithCaptureMismatch(result.provider)) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Provider is paid-like but capturedAmount is zero or not money-equal to amount — refuse safe mark_consistent; surface capture mismatch for review",
+        };
+      }
       return {
         action: "mark_consistent",
         safe: true,
@@ -413,6 +465,20 @@ export function decideReconciliationPolicy(
         onlyStatus &&
         isIndeterminateLocal(local) &&
         providerPaidWithRefunds(result.provider) &&
+        identityBoundToTarget(target, result.provider)
+      ) {
+        return {
+          action: "apply_drift_review",
+          safe: false,
+          differences: result.differences,
+          provider: result.provider,
+        };
+      }
+      // P19-CAPTURE on status-only drift: paid + capture mismatch → review.
+      if (
+        onlyStatus &&
+        isIndeterminateLocal(local) &&
+        providerPaidWithCaptureMismatch(result.provider) &&
         identityBoundToTarget(target, result.provider)
       ) {
         return {

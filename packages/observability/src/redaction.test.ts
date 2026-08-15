@@ -108,6 +108,19 @@ describe("redactTelemetryData", () => {
     expect((out.nested as Record<string, unknown>).authorized).toBe(true);
     expect((out.nested as Record<string, unknown>).token).toBe("[REDACTED]");
   });
+
+  it("does not restore authorized when the VALUE is secret-shaped (P20-AUTH-RESTORE)", () => {
+    const secretShaped = redactTelemetryData({
+      authorized: "sk_live_abc123secret",
+    });
+    expect(secretShaped.authorized).toBe("[REDACTED]");
+    expect(JSON.stringify(secretShaped)).not.toContain("sk_live");
+
+    const operational = redactTelemetryData({
+      authorized: false,
+    });
+    expect(operational.authorized).toBe(false);
+  });
 });
 
 describe("redactAttributeBag", () => {

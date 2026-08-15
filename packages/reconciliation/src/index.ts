@@ -52,7 +52,11 @@ export type { ReconciliationDecision } from "./policy";
 export { compareSnapshots, comparePaymentSnapshots, moneyEquals } from "./compare";
 
 // Lookup
-export { resolveProviderSnapshot, safeLookup } from "./lookup";
+export {
+  resolveProviderSnapshot,
+  safeLookup,
+  createGetPaymentLookupPort,
+} from "./lookup";
 export type { LookupOutcome, ProviderLookupPort } from "./lookup";
 
 // Sanitize

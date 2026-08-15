@@ -93,16 +93,65 @@ Idempotent by key: second schedule → `{ kind: "already_exists", record }`.
 ## 4. Claim, complete, reschedule, manual review
 
 ```typescript
+import {
+  decideReconciliationPolicy,
+  type PaymentReconciler,
+  type ReconciliationTarget,
+} from "@paykernel/reconciliation";
+
+declare const reconciler: PaymentReconciler;
+declare function loadTarget(job: {
+  record: { subjectId: string };
+}): Promise<ReconciliationTarget>;
+
 const claimed = await scheduler.claimDue({ limit: 10 });
 // listDue → atomic store.claim each; skips not_due / in_progress / terminal
 
 for (const job of claimed) {
   try {
-    // await reconciler.reconcile(...); apply policy in app
-    await scheduler.complete({
-      key: job.key,
-      leaseToken: job.leaseToken,
-    });
+    const target = await loadTarget(job); // store row is subjectId + reason, not a full target
+    const result = await reconciler.reconcile(target);
+    const decision = decideReconciliationPolicy(result, target);
+    // Never complete on raw result.outcome === "consistent":
+    // sparse/pending local + provider pending/processing is still settling
+    // (retry_later), not recovery-complete.
+
+    if (
+      decision.action === "mark_consistent" ||
+      ((decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+        decision.safe)
+    ) {
+      // apply the safe local paid/failed update in YOUR app first, then:
+      await scheduler.complete({
+        key: job.key,
+        leaseToken: job.leaseToken,
+      });
+    } else if (decision.action === "retry_later") {
+      await scheduler.failAndReschedule({
+        key: job.key,
+        leaseToken: job.leaseToken,
+        error: new Error("retry_later"),
+        attempt: job.record.attempts,
+      });
+    } else if (decision.action === "do_not_create_replacement") {
+      // Never createPayment for the same intent; reschedule lookup if needed.
+      await scheduler.failAndReschedule({
+        key: job.key,
+        leaseToken: job.leaseToken,
+        error: new Error(decision.reason),
+        attempt: job.record.attempts,
+      });
+    } else if (
+      decision.action === "manual_review" ||
+      decision.action === "apply_drift_review"
+    ) {
+      await scheduler.markManualReview({
+        key: job.key,
+        leaseToken: job.leaseToken,
+        note: decision.action, // sanitized
+      });
+    }
   } catch (err) {
     if (job.record.attempts >= scheduler.maxAttempts) {
       await scheduler.markManualReview({
@@ -128,6 +177,10 @@ Uses exponential backoff + jitter to set `retryAt` on `store.fail`. Errors are p
 
 Default backoff: base 1s, max 15m, multiplier 2, jitter ratio 0.2. Inject `random` on `createExponentialBackoff` for deterministic tests.
 
+`listDeadLetter()` with no `keys` / `scan` uses `store.listTerminal()` when the adapter implements it (memory stores do). Durable adapters that omit `listTerminal` still need `keys` or `scan`.
+
+`maxInFlightByGateway` is enforced on the **scheduler instance** (overlapping `processDue` calls share the count). It is not a multi-worker store lock.
+
 ### `processDue`
 
 Claims due jobs and runs a handler. **Completion requires an explicit disposition** — returning without throwing is **not** success (policy outcomes like `retry_later` must not silently complete recovery).
@@ -137,12 +190,34 @@ await scheduler.processDue({
   limit: 20,
   maxInFlightByGateway: { stripe: 5, paypal: 3 },
   handler: async (job) => {
-    // reconcile + apply policy
-    // return { disposition: "complete" } | { disposition: "retry", error? } |
-    //        { disposition: "manual_review", note? }
+    const target = await loadTarget(job);
+    const result = await reconciler.reconcile(target);
+    const decision = decideReconciliationPolicy(result, target);
+    // complete ONLY for mark_consistent / applied safe paid/failed updates.
+    // retry_later → retry (never complete on raw outcome === "consistent").
+    if (
+      decision.action === "mark_consistent" ||
+      ((decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+        decision.safe)
+    ) {
+      return { disposition: "complete" };
+    }
+    if (
+      decision.action === "retry_later" ||
+      decision.action === "do_not_create_replacement"
+    ) {
+      return { disposition: "retry", error: new Error(decision.action) };
+    }
+    if (
+      decision.action === "manual_review" ||
+      decision.action === "apply_drift_review"
+    ) {
+      return { disposition: "manual_review", note: decision.action };
+    }
     // void / undefined → treated as retry (fail-closed)
     // throw → same as { disposition: "retry", error }
-    return { disposition: "complete" };
+    return { disposition: "retry" };
   },
 });
 // → { processed, rescheduled, manualReview, completed, leaseLost }
@@ -150,7 +225,7 @@ await scheduler.processDue({
 
 `leaseLost` counts fencing rejections on complete/fail/markManualReview (another worker owns the lease) — these are **not** counted as business reschedules or dead-letters.
 
-`maxInFlightByGateway` is a **per-processDue call** filter using the gateway segment of keys shaped `recon:{gateway}:{id}` (canonical) or app-supplied `{gateway}:{id}` (RECON-4). Keys without a parseable gateway segment map to `"unknown"`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others within the call. Applications should also bound global worker concurrency and per-provider rate limits (see [batch.md](./batch.md)).
+`maxInFlightByGateway` uses the gateway segment of keys shaped `recon:{gateway}:{id}` (canonical) or app-supplied `{gateway}:{id}` (RECON-4). Counts are shared across overlapping `processDue` calls on the **same scheduler instance**. Keys without a parseable gateway segment map to `"unknown"`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others. This is not a multi-worker store lock — bound workers at the app layer for that. See [batch.md](./batch.md).
 
 ### Re-scheduling terminal jobs
 
@@ -163,10 +238,13 @@ await scheduler.processDue({
 Terminal `manual_review` and terminal `failed` (without `retryAt`) are dead-letter style outcomes. The store does not require a separate queue.
 
 ```typescript
-const dead = await scheduler.listDeadLetter({
-  keys: ["recon:stripe:pi_123"], // app-tracked keys
-  // or:
-  // scan: async () => app.listCandidateRecords(),
+const dead = await scheduler.listDeadLetter();
+// memory stores implement listTerminal — no keys required.
+// durable adapters: pass keys or scan, unless they implement listTerminal.
+
+const tracked = await scheduler.listDeadLetter({
+  keys: ["recon:stripe:pi_123"],
+  // or: scan: async () => app.listCandidateRecords(),
 });
 // returns records with status manual_review | failed
 ```

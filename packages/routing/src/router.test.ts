@@ -202,6 +202,110 @@ describe("21.1 inputs affect matching", () => {
     ).toThrow(NoRouteMatchError);
   });
 
+  it("P21-AMOUNT-RESOLVE: string amount + input.currency is bounded (USD min 100)", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({ currency: "USD", amount: "50.00" }),
+    ).toThrow(NoRouteMatchError);
+    expect(
+      router.select({ currency: "USD", amount: "150.00" }).gateway,
+    ).toBe("enterprise-psp");
+  });
+
+  it("P21-AMOUNT-RESOLVE: missing amount against a range rule fails closed", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() => router.select({ currency: "USD" })).toThrow(NoRouteMatchError);
+  });
+
+  it("P21-AMOUNT-RESOLVE: invalid JPY fraction against a JPY range fails closed", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          amountMin: "1",
+          amountMax: "10000",
+          amountCurrency: "JPY",
+        }).to("jpy-psp"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({ currency: "JPY", amount: "10.50" }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("P21-EXCLUDE-HONESTY: exclude/unhealthy do not drop amount-range honesty", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("enterprise-psp"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({
+        amount: { amount: "50.00", currency: "USD" },
+        excludeGateways: ["enterprise-psp"],
+      }),
+    ).toThrow(NoRouteMatchError);
+    expect(() =>
+      router.select({
+        amount: { amount: "50.00", currency: "USD" },
+        health: { "enterprise-psp": false },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("P21-EXCLUDE-HONESTY: exclude/unhealthy do not drop rule-level requiredCapabilities", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          requiredCapabilities: ["refunds"],
+        }).to("stripe"),
+      ],
+      fallback: "paypal",
+    });
+    expect(() =>
+      router.select({
+        currency: "USD",
+        excludeGateways: ["stripe"],
+        gatewayCapabilities: {
+          stripe: { refunds: true },
+          paypal: { payments: true },
+        },
+      }),
+    ).toThrow(NoRouteMatchError);
+    expect(() =>
+      router.select({
+        currency: "USD",
+        health: { stripe: false },
+        gatewayCapabilities: {
+          stripe: { refunds: true },
+          paypal: { payments: true },
+        },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
   it("ROUTE-1: fallback still applies when no rule matches non-amount criteria", () => {
     const router = createPaymentRouter({
       rules: [

@@ -8,6 +8,7 @@ import {
   canonicalizeIsoTimestamp,
   canonicalizeOptionalIsoTimestamp,
   classifyReconciliationClaimMiss,
+  reconciliationTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
   enforceMaxSanitizedError,
@@ -86,6 +87,7 @@ export function createDoReconciliationStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = claimSql(table);
+  const repairTpl = reconciliationTimestampRepairTemplates(ctx.namespace).sqlite;
 
   function selectByKey(key: string): ReconciliationRecord | undefined {
     const rows = ctx.getExecutor().query<Record<string, unknown>>(
@@ -112,7 +114,19 @@ export function createDoReconciliationStore(
              ?, 'scheduled', ?, ?, ?,
              0, 0, ?, ?
            )
-           ON CONFLICT (key) DO NOTHING
+           ON CONFLICT (key) DO UPDATE SET
+             status = 'scheduled',
+             subject_id = excluded.subject_id,
+             reason = excluded.reason,
+             due_at = excluded.due_at,
+             attempts = 0,
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             last_error_sanitized = NULL,
+             completed_at = NULL,
+             updated_at = excluded.updated_at
+           WHERE status IN ('completed', 'failed', 'manual_review')
            RETURNING ${RECON_SELECT_COLS}`,
           [input.key, input.subjectId, input.reason, dueAt, now, now],
         );
@@ -159,19 +173,15 @@ export function createDoReconciliationStore(
           return claimMissToResult(miss, existing);
         }
 
-        // SQL-2: free due work; repair non-canonical TEXT timestamps and retry once.
+        // SQL-1/SQL-2: free due work; repair non-canonical TEXT timestamps and
+        // retry once. Free-lease fence so concurrent winners' active
+        // lease_expires_at cannot be wiped by a stale SELECT snapshot.
         const dueAtZ = canonicalizeIsoTimestamp(existing!.dueAt, "dueAt");
         const leaseZ =
           canonicalizeOptionalIsoTimestamp(existing!.leaseExpiresAt, "leaseExpiresAt") ??
           null;
-        exec.query(
-          `UPDATE ${table} SET
-             due_at = ?,
-             lease_expires_at = ?
-           WHERE key = ?
-             AND status NOT IN ('completed', 'failed', 'manual_review')`,
-          [dueAtZ, leaseZ, input.key],
-        );
+        // params: dueAt, leaseExpiresAt, key, now
+        exec.run(repairTpl.sql, [dueAtZ, leaseZ, input.key, now]);
 
         const retried = exec.query<Record<string, unknown>>(
           claimTpl,

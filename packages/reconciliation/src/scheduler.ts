@@ -114,8 +114,9 @@ export type ProcessDueOptions = {
   owner?: string;
   leaseMs?: number;
   /**
-   * Optional per-gateway max in-flight claims within this processDue call.
-   * Applications should also bound global concurrency at the worker level.
+   * Optional per-gateway max in-flight claims on this scheduler instance
+   * (shared across overlapping `processDue` calls). Not a store-wide
+   * multi-worker semaphore — bound workers at the app layer for that.
    */
   maxInFlightByGateway?: Record<string, number>;
   /**
@@ -170,8 +171,8 @@ export type ReconciliationScheduler = {
   failAndReschedule(input: FailAndRescheduleInput): Promise<void>;
   markManualReview(input: MarkManualReviewJobInput): Promise<void>;
   /**
-   * Inspect dead-letter / manual_review jobs.
-   * Prefer supplying keys or a scan() that returns candidate records.
+   * Inspect dead-letter / `manual_review` / `failed` jobs.
+   * Uses `keys`, `scan()`, or store.`listTerminal` when implemented.
    */
   listDeadLetter(
     options?: ListDeadLetterOptions,
@@ -216,6 +217,11 @@ export function createReconciliationScheduler(
       jitterRatio: 0.2,
     });
   const maxAttempts = options.maxAttempts ?? 10;
+  const liveByGateway: Record<string, number> = {};
+
+  const addLive = (gateway: string, delta: number): void => {
+    liveByGateway[gateway] = Math.max(0, (liveByGateway[gateway] ?? 0) + delta);
+  };
 
   return {
     store,
@@ -299,26 +305,23 @@ export function createReconciliationScheduler(
       options: ListDeadLetterOptions = {},
     ): Promise<ReconciliationRecord[]> {
       const out: ReconciliationRecord[] = [];
+      const pushTerminal = (rec: ReconciliationRecord): void => {
+        if (rec.status !== "manual_review" && rec.status !== "failed") return;
+        if (!out.some((r) => r.key === rec.key)) out.push(rec);
+      };
       if (options.keys) {
         for (const key of options.keys) {
           const rec = await store.get(key);
-          if (
-            rec &&
-            (rec.status === "manual_review" || rec.status === "failed")
-          ) {
-            out.push(rec);
-          }
+          if (rec) pushTerminal(rec);
         }
       }
       if (options.scan) {
         const scanned = await options.scan();
-        for (const rec of scanned) {
-          if (rec.status === "manual_review" || rec.status === "failed") {
-            if (!out.some((r) => r.key === rec.key)) {
-              out.push(rec);
-            }
-          }
-        }
+        for (const rec of scanned) pushTerminal(rec);
+      }
+      if (!options.keys && !options.scan && store.listTerminal) {
+        const scanned = await store.listTerminal();
+        for (const rec of scanned) pushTerminal(rec);
       }
       return out;
     },
@@ -347,9 +350,9 @@ export function createReconciliationScheduler(
           const gateway = gatewayFromKey(rec.key);
           const max = options.maxInFlightByGateway[gateway];
           if (max !== undefined) {
-            const n = counts[gateway] ?? 0;
+            const n = (counts[gateway] ?? 0) + (liveByGateway[gateway] ?? 0);
             if (n >= max) continue;
-            counts[gateway] = n + 1;
+            counts[gateway] = (counts[gateway] ?? 0) + 1;
           }
           candidates.push(rec);
         }
@@ -376,6 +379,8 @@ export function createReconciliationScheduler(
           leaseToken: claimResult.leaseToken,
           record: claimResult.record,
         };
+        const claimedGateway = gatewayFromKey(job.key);
+        addLive(claimedGateway, 1);
         processed++;
 
         let disposition: ProcessDueDisposition;
@@ -392,6 +397,7 @@ export function createReconciliationScheduler(
               key: job.key,
               leaseToken: job.leaseToken,
             });
+            addLive(claimedGateway, -1);
             completed++;
             continue;
           }
@@ -405,6 +411,7 @@ export function createReconciliationScheduler(
               reviewPayload.note = sanitizeReconciliationError(disposition.note);
             }
             await this.markManualReview(reviewPayload);
+            addLive(claimedGateway, -1);
             manualReview++;
             continue;
           }
@@ -419,6 +426,7 @@ export function createReconciliationScheduler(
               ),
             };
             await this.markManualReview(reviewPayload);
+            addLive(claimedGateway, -1);
             manualReview++;
           } else if (
             disposition.retryAfterMs !== undefined &&
@@ -437,6 +445,7 @@ export function createReconciliationScheduler(
               retryAt,
             });
             rescheduled++;
+            addLive(claimedGateway, -1);
           } else {
             await this.failAndReschedule({
               key: job.key,
@@ -447,11 +456,13 @@ export function createReconciliationScheduler(
               attempt: job.record.attempts,
             });
             rescheduled++;
+            addLive(claimedGateway, -1);
           }
         } catch (err) {
           // RECON-3: lease_lost after a successful handler (or during terminal
           // mutation) means another worker owns the job — do not treat as a
           // business failure / maxAttempts dead-letter.
+          addLive(claimedGateway, -1);
           if (isStoreLeaseLostError(err)) {
             leaseLost++;
             continue;

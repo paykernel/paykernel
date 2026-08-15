@@ -118,7 +118,7 @@ bun run validate:package → package validation OK (publint All good; attw green
 
 - Deno import smoke was skipped (`deno` binary not found); static `node:` scan still required and green (same as prior phases).
 - Live Postgres/Redis integration suites remain skip-clean without env URLs (15 skips) — expected; not Phase 20 regressions.
-- `GatewayContext.telemetry` is optional and not auto-wrapped; safe default is documented + `createRedactingTelemetrySink` / `withPaymentOperation` always redacts when used. Integrators attaching a raw sink without the wrapper are outside the “by default” path (explicit opt-out via raw injection).
+- `GatewayContext.telemetry` is optional. `createDefaultGatewayContext` auto-wraps a provided sink with `createRedactingTelemetrySink` (double-wrap stays safe). `withPaymentOperation` always redacts emit bags and span attributes.
 
 ---
 

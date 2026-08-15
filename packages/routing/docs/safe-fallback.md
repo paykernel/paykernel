@@ -121,29 +121,51 @@ Maps core `PaymentOperationOutcome` conservatively:
 
 Priority (money-moving / uncertain signals win over pre-submit-only kinds):
 
-1. Explicit `submissionState` if provided
+1. Explicit `submissionState` **only if** it does not override money-moving /
+   uncertain evidence into a SAFE state (P21-EXPLICIT-STATE). Safe explicit
+   state + unsafe evidence (outcome `indeterminate` / `succeeded` / `failed` /
+   `declined` / `requires_action`, or `timeout` / `connection_reset` /
+   `provider_5xx_uncertain` / `submitted` / abort kinds) → use the unsafe
+   evidence. Expert override remains the only way to allow unsafe fallback.
+   Explicit state still wins when there is no conflicting money evidence.
 2. Known **transport / uncertain** `errorKind` strings (`timeout`, `ECONNRESET`, `provider_5xx_uncertain`, abort shapes, …) — **not** deferred
 3. Matching **transport / uncertain** error object shape (name/code/message/statusCode)
 4. `outcome` / result `outcome` field / core `isIndeterminateOutcome` (e.g. succeeded / declined / indeterminate)
 5. Only then: deferred **pre-submission-only** classifications from `errorKind` / error
-   (`validation_error`, `configuration_error`, explicit `not_submitted` / `aborted_before_submit`)
+   (`configuration_error`, explicit `not_submitted` / `aborted_before_submit`,
+   or a **ValidationError-shaped object**)
 6. Default: **`indeterminate`** (fail-closed for fallback)
 
-**Why step 5 is last:** a validation-looking error kind must not classify as
+**`validation_error` is not pre-submit by itself (P21-VALIDATION-ERROR).** Bare
+`errorKind: "validation_error"` (no ValidationError-shaped object) classifies as
+**`indeterminate`** — the same class as `invalid_request`. Only
+`name === "ValidationError"` or `code === "validation_error"` on a
+ValidationError-shaped **object** is `pre_submission_failure`. **Apps must never
+map a provider HTTP 400 onto `errorKind: "validation_error"`** — that would
+teach unsafe post-accept multi-gateway fallback.
+
+**Why step 5 is last:** a validation-looking signal must not classify as
 `pre_submission_failure` (multi-gateway safe) when an operation outcome already
-indicates the request was accepted or money state is unknown. Docs that put
-`validation_error` ahead of outcome would teach unsafe post-accept fallback.
+indicates the request was accepted or money state is unknown.
 
 ```typescript
 classifyFromOperationOutcome("indeterminate"); // → "indeterminate"
 
 classifySubmissionState({ errorKind: "timeout" }); // → "timeout"
 classifySubmissionState({ errorKind: "ECONNRESET" }); // → "connection_reset"
-classifySubmissionState({ errorKind: "validation_error" }); // → "pre_submission_failure"
+classifySubmissionState({ errorKind: "validation_error" }); // → "indeterminate"
+classifySubmissionState({
+  error: { name: "ValidationError" },
+}); // → "pre_submission_failure"
 classifySubmissionState({ errorKind: "not_submitted" }); // → "not_submitted"
 classifySubmissionState({ errorKind: "aborted_before_submit" }); // → "not_submitted"
 classifySubmissionState({ errorKind: "provider_5xx_uncertain" }); // → "provider_5xx_uncertain"
 classifySubmissionState({ outcome: "indeterminate" }); // → "indeterminate"
+classifySubmissionState({
+  submissionState: "not_submitted",
+  outcome: "indeterminate",
+  errorKind: "timeout",
+}); // → "timeout" (explicit SAFE does not override money evidence)
 classifySubmissionState({}); // → "indeterminate" (fail-closed)
 // AbortError / abort_error → "indeterminate" (NOT fallback-eligible)
 // expertUnsafeAbortAsNotSubmitted: true → "not_submitted" (legacy; app owns risk)
@@ -181,7 +203,9 @@ Note: `expertUnsafeAbortAsNotSubmitted` on `classifySubmissionState` only change
 ### Alternate gateway helper
 
 ```typescript
-const state = classifySubmissionState({ errorKind: "validation_error" });
+const state = classifySubmissionState({
+  error: { name: "ValidationError", message: "local schema" },
+});
 const eligibility = evaluateFallback({ submissionState: state });
 
 if (eligibility.allowed) {

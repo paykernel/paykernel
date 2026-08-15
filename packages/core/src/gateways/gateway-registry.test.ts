@@ -3,7 +3,10 @@ import {
   createGatewayRegistry,
   createDynamicGatewayRegistry,
 } from "./gateway-registry";
-import { createDefaultGatewayContext } from "./gateway-context";
+import {
+  createDefaultGatewayContext,
+  createRedactingTelemetrySink,
+} from "./gateway-context";
 import type { GatewayAdapter } from "./gateway-adapter";
 import type { PaymentGateway } from "./gateway.interface";
 import { defineGatewayCapabilities } from "./gateway-capabilities";
@@ -203,6 +206,31 @@ describe("createGatewayRegistry", () => {
       callbackUrl: "https://example.com/cb",
     });
     expect(result.gatewayId).toBe("count_pay");
+  });
+
+  it("createAll wraps hand-built telemetry so secrets do not reach the sink", () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const adapter: GatewayAdapter<"t", PaymentGateway<"t">> = {
+      name: "t",
+      manifest: { name: "t" },
+      create(ctx) {
+        ctx.telemetry?.emit?.("x", { cardNumber: "4242424242424242" });
+        return createMockGateway("t");
+      },
+    };
+    createGatewayRegistry()
+      .register(adapter)
+      .build()
+      .createAll({
+        ...createDefaultGatewayContext(),
+        telemetry: {
+          emit(_event, data) {
+            seen.push(data);
+          },
+        },
+      });
+    expect(seen[0]?.cardNumber).toBe("[REDACTED]");
+    expect(JSON.stringify(seen[0])).not.toContain("4242424242424242");
   });
 
   it("rejects adapter when manifest.name does not match adapter.name", () => {
@@ -419,5 +447,45 @@ describe("createDefaultGatewayContext", () => {
     expect(ctx.telemetry).toBeDefined();
     ctx.telemetry?.emit?.("test.event");
     expect(events).toEqual(["test.event"]);
+  });
+
+  it("wraps provided telemetry so cardNumber/secret emits are redacted (P20-TELEMETRY-WRAP)", () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const ctx = createDefaultGatewayContext({
+      telemetry: {
+        emit(_event, data) {
+          seen.push(data);
+        },
+      },
+    });
+    ctx.telemetry?.emit?.("payment.operation", {
+      cardNumber: "4242424242424242",
+      secret: "sk_live_abc123secret",
+      providerRequestId: "req_ok",
+    });
+    const data = seen[0]!;
+    expect(data.cardNumber).toBe("[REDACTED]");
+    expect(data.secret).toBe("[REDACTED]");
+    expect(data.providerRequestId).toBe("req_ok");
+    expect(JSON.stringify(data)).not.toContain("4242424242424242");
+    expect(JSON.stringify(data)).not.toContain("sk_live");
+  });
+
+  it("double-wraps already-redacting telemetry without unmasking secrets (P20-TELEMETRY-WRAP)", () => {
+    const seen: Array<Record<string, unknown> | undefined> = [];
+    const ctx = createDefaultGatewayContext({
+      telemetry: createRedactingTelemetrySink({
+        emit(_event, data) {
+          seen.push(data);
+        },
+      }),
+    });
+    ctx.telemetry?.emit?.("payment.operation", {
+      cardNumber: "4111111111111111",
+      token: "tok_secret",
+    });
+    expect(seen[0]!.cardNumber).toBe("[REDACTED]");
+    expect(seen[0]!.token).toBe("[REDACTED]");
+    expect(JSON.stringify(seen[0])).not.toContain("4111111111111111");
   });
 });

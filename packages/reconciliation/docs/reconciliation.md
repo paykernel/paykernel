@@ -193,12 +193,12 @@ switch (decision.action) {
 
 | `action` | `safe` | When |
 | -------- | ------ | ---- |
-| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set; **not** when `provider.refundedAmount` is non-zero (RECON-2) |
+| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus`; **not** `approved` / `authorized` / `partially_captured`); status-only drift pending→paid; provider must match `target.gatewayPaymentId` when set; **not** when `provider.refundedAmount` is non-zero (RECON-2); **not** when `capturedAmount` is present and is zero while `amount` is non-zero, or not money-equal to `amount` (P19-CAPTURE — omitted `capturedAmount` stays allowed) |
 | `update_local_to_failed` | `true` | Indeterminate local + provider **definitive** `failed` / `cancelled` / `canceled` (identity-bound); **not** when `capturedAmount` or `refundedAmount` is non-zero (RECON-1 — funds may have moved; escalate to manual_review / apply_drift_review) |
-| `mark_consistent` | `true` | Consistent snapshot without upgrade path; **not** sparse local + open incomplete provider; **not** paid-like provider with non-zero `refundedAmount` (RECON-2 — surface refund drift) |
+| `mark_consistent` | `true` | Consistent snapshot without upgrade path; **not** sparse local + open incomplete provider; **not** paid-like provider with non-zero `refundedAmount` (RECON-2 — surface refund drift); **not** paid-like provider with present `capturedAmount` zero/≠ `amount` (P19-CAPTURE) |
 | `apply_drift_review` | `false` | Non-trivial drift (money totals, multi-field, identity mismatch, **authorized/partially_captured → paid**, etc.) |
 | `retry_later` | `false` | Temporarily unavailable (reschedule lookup; never invent failed); **sparse/indeterminate local + in-flight provider `pending`/`processing`** (RECON-3 — still settling) |
-| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; paid-like + non-zero refunds; **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work; not in-flight pending/processing) |
+| `manual_review` | `false` | Ambiguous matches (never pick first); non-retryable not-found; incomplete inputs; paid-like + non-zero refunds; paid-like + present `capturedAmount` zero/≠ `amount` (P19-CAPTURE); **sparse/indeterminate local + open incomplete provider** (auth/approved/partial/`refund_pending`/`refund_failed`/`refund_completed`/`setup_completed` — surface capture/refund work; not in-flight pending/processing) |
 | `do_not_create_replacement` | `false` | **All** retryable `provider_not_found` (incl. terminal failed/cancelled local — RECON-2); never recreate while original may still settle |
 
 ### Replacement charge rule
@@ -222,6 +222,8 @@ Returns `true` when:
   with non-zero `capturedAmount` / `refundedAmount` (RECON-1 — funds moved)
 
 **Never** convert `temporarily_unavailable` or retryable `provider_not_found` into local `failed` without a definitive provider response.
+
+**Scheduler completion:** after `claimDue` / `processDue`, call `decideReconciliationPolicy` (or `decideReconciliationAction`). `complete` only for `mark_consistent` or an applied `safe` paid/failed update. `retry_later` → `failAndReschedule` / `retry`. Never `complete` on raw `outcome === "consistent"` — pending/processing is still settling. `do_not_create_replacement` reschedules lookup only (never `createPayment`). `manual_review` / `apply_drift_review` → `markManualReview`. See [scheduling.md](./scheduling.md).
 
 ---
 

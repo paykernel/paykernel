@@ -100,12 +100,15 @@ export function createMemoryReconciliationStore(
       rec.leaseExpiresAt &&
       Date.parse(rec.leaseExpiresAt) <= clock.nowMs()
     ) {
+      // STORES-1: restore unfinished claim so crash/listDue reclaim does not
+      // burn maxAttempts (parity with SQL CASE WHEN status=claimed THEN attempts).
       const released: ReconciliationRecord = {
         ...rec,
         status: "scheduled",
         leaseToken: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        attempts: Math.max(0, rec.attempts - 1),
         updatedAt: iso(clock),
       };
       entries.set(key, released);
@@ -226,13 +229,17 @@ export function createMemoryReconciliationStore(
       }
       const generation = rec.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
+      // STORES-1: increment only from scheduled. Soft-release restored one
+      // attempt, so expired-claimed reclaim nets to the prior count.
+      const attempts =
+        rec.status === "scheduled" ? rec.attempts + 1 : rec.attempts;
       const updated: ReconciliationRecord = {
         ...rec,
         status: "claimed",
         leaseOwner: input.owner,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
-        attempts: rec.attempts + 1,
+        attempts,
         generation,
         updatedAt: iso(clock),
       };
@@ -357,6 +364,18 @@ export function createMemoryReconciliationStore(
         if (Date.parse(rec.dueAt) > nowMs) continue;
         out.push(rec);
         if (out.length >= limit) break;
+      }
+      return out;
+    },
+
+    async listTerminal(input?: { limit?: number }): Promise<ReconciliationRecord[]> {
+      const limit = input?.limit ?? 100;
+      const out: ReconciliationRecord[] = [];
+      for (const [, rec] of entries) {
+        if (rec.status === "manual_review" || rec.status === "failed") {
+          out.push(rec);
+          if (out.length >= limit) break;
+        }
       }
       return out;
     },

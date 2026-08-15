@@ -350,6 +350,29 @@ describe("withPaymentOperation", () => {
     expect(seen[0]?.normalizedOutcome).toBe("indeterminate");
   });
 
+  it("redacts secret-shaped internalReference before custom tracers see span attrs (P20-TRACER)", async () => {
+    const { tracer, spans } = recordingTracer();
+    const ctx = createOperationContext({
+      operationId: "op_secret_ref",
+      gateway: "stripe",
+      operationType: "payment.create",
+      internalReference: "sk_live_abc123secret",
+    });
+
+    await withPaymentOperation(
+      { context: ctx, tracer, clock: fakeClock([0, 1]) },
+      async () => ({
+        result: true,
+        contextPatch: { normalizedOutcome: "succeeded" },
+      }),
+    );
+
+    expect(spans).toHaveLength(1);
+    expect(spans[0]!.attributes.internalReference).toBe("[REDACTED]");
+    expect(JSON.stringify(spans[0]!.attributes)).not.toContain("sk_live");
+    expect(JSON.stringify(spans[0]!.attributes)).not.toContain("abc123secret");
+  });
+
   it("starts span with operation type name and ends ok", async () => {
     const { tracer, spans } = recordingTracer();
     const ctx = createOperationContext({
@@ -570,6 +593,21 @@ describe("sanitizeExceptionForSpan", () => {
     expect(sanitizeExceptionForSpan("raw string secret")).toEqual({
       name: "Error",
     });
+  });
+
+  it("drops secret-shaped error codes so sk_live_x never appears (P20-ERROR-CODE)", () => {
+    class SecretCodeError extends Error {
+      code = "sk_live_x";
+      constructor() {
+        super("card declined");
+        this.name = "GatewayApiError";
+      }
+    }
+    const sanitized = sanitizeExceptionForSpan(new SecretCodeError());
+    expect(sanitized.name).toBe("GatewayApiError");
+    expect(sanitized.code).toBeUndefined();
+    expect(JSON.stringify(sanitized)).not.toContain("sk_live");
+    expect(JSON.stringify(sanitized)).not.toContain("sk_live_x");
   });
 });
 

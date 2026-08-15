@@ -25,7 +25,7 @@
 | `tenant` | Exact string equality |
 | `tenantConfig` | Exact equality for every specified key |
 | `requiredCapabilities` | All keys `true` on `gatewayCapabilities[gateway]` (fail-closed if map missing) |
-| `merchantPreference` (on rule) | Exact match to `input.merchantPreference` |
+| `merchantPreference` (on rule) | Case-insensitive trim match to `input.merchantPreference` |
 
 Unspecified criteria are **wildcards**. See [routing-inputs.md](./routing-inputs.md) for full tables, money-safe range edge cases, health, and cost.
 

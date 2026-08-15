@@ -50,12 +50,19 @@ if (decision.action === "update_local_to_paid" && decision.safe) {
 
 ```typescript
 import {
+  createPaymentReconciler,
   createReconciliationScheduler,
+  decideReconciliationPolicy,
+  type ProviderLookupPort,
   type ReconciliationStore,
+  type ReconciliationTarget,
 } from "@paykernel/reconciliation";
 
 declare const store: ReconciliationStore; // testkit memory in tests; adapter in production
+declare const lookup: ProviderLookupPort;
+declare function loadTarget(job: { record: { subjectId: string } }): Promise<ReconciliationTarget>;
 
+const reconciler = createPaymentReconciler({ lookup });
 const scheduler = createReconciliationScheduler({ store, maxAttempts: 8 });
 
 await scheduler.schedule({
@@ -70,9 +77,45 @@ await scheduler.schedule({
 
 const claimed = await scheduler.claimDue({ limit: 10 });
 for (const job of claimed) {
-  // run reconcile, then:
-  await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
-  // or failAndReschedule / markManualReview
+  const target = await loadTarget(job); // store row is subjectId + reason, not a full target
+  const result = await reconciler.reconcile(target);
+  const decision = decideReconciliationPolicy(result, target);
+  // Never complete on raw result.outcome === "consistent" — pending/processing
+  // still settling maps to retry_later, not recovery-complete.
+
+  if (
+    decision.action === "mark_consistent" ||
+    ((decision.action === "update_local_to_paid" ||
+      decision.action === "update_local_to_failed") &&
+      decision.safe)
+  ) {
+    // apply the safe local paid/failed update in YOUR app first, then:
+    await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
+  } else if (decision.action === "retry_later") {
+    await scheduler.failAndReschedule({
+      key: job.key,
+      leaseToken: job.leaseToken,
+      error: new Error("retry_later"),
+      attempt: job.record.attempts,
+    });
+  } else if (decision.action === "do_not_create_replacement") {
+    // Never createPayment for the same intent; reschedule lookup if needed.
+    await scheduler.failAndReschedule({
+      key: job.key,
+      leaseToken: job.leaseToken,
+      error: new Error(decision.reason),
+      attempt: job.record.attempts,
+    });
+  } else if (
+    decision.action === "manual_review" ||
+    decision.action === "apply_drift_review"
+  ) {
+    await scheduler.markManualReview({
+      key: job.key,
+      leaseToken: job.leaseToken,
+      note: decision.action,
+    });
+  }
 }
 ```
 

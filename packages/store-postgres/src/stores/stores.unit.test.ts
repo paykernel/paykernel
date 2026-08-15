@@ -724,6 +724,45 @@ describe("reconciliation store unit", () => {
     }
   });
 
+  it("schedule ON CONFLICT reopens only terminal statuses", async () => {
+    const now = new Date().toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT")) {
+          expect(sql).toMatch(/ON CONFLICT/i);
+          expect(sql).toMatch(/DO UPDATE/i);
+          expect(sql).toMatch(/completed['"]?\s*,\s*['"]failed['"]?\s*,\s*['"]manual_review/i);
+          expect(sql).toMatch(/attempts\s*=\s*0/i);
+          return [];
+        }
+        return [
+          {
+            key: "job1",
+            status: "scheduled",
+            subject_id: "pay_1",
+            reason: "timeout",
+            due_at: now,
+            lease_owner: null,
+            lease_token: null,
+            lease_expires_at: null,
+            attempts: 0,
+            generation: 0,
+            created_at: now,
+            updated_at: now,
+          },
+        ];
+      },
+    });
+    const store = createPostgresReconciliationStore({ executor });
+    const r = await store.schedule({
+      key: "job1",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt: now,
+    });
+    expect(r.kind).toBe("already_exists");
+  });
+
   it("schedule already_exists when insert returns empty", async () => {
     const now = new Date().toISOString();
     const executor = createScriptedExecutor({

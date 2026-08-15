@@ -45,6 +45,28 @@ end
 
 if redis.call('EXISTS', rec) == 1 then
   local m = hgetall_map(rec)
+  local status = m['status'] or ''
+  -- RECON-7: reopen terminal rows under the same key; active stay already_exists.
+  if status == 'completed' or status == 'failed' or status == 'manual_review' then
+    redis.call('HSET', rec,
+      'status', 'scheduled',
+      'subject_id', subjectId,
+      'reason', reason,
+      'due_at', dueAt,
+      'due_ms', dueMs,
+      'lease_owner', '',
+      'lease_token', '',
+      'lease_expires_at', '',
+      'lease_expires_ms', '0',
+      'attempts', '0',
+      'updated_at', nowIso,
+      'last_error', ''
+    )
+    redis.call('ZADD', idx, tonumber(dueMs), logicalKey)
+    m = hgetall_map(rec)
+    local p = pack(m)
+    return {'scheduled', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+  end
   local p = pack(m)
   return {'already_exists', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 end

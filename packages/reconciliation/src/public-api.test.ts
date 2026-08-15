@@ -19,6 +19,7 @@ describe("public API runtime surface", () => {
       ["moneyEquals", recon.moneyEquals],
       ["resolveProviderSnapshot", recon.resolveProviderSnapshot],
       ["safeLookup", recon.safeLookup],
+      ["createGetPaymentLookupPort", recon.createGetPaymentLookupPort],
       ["sanitizeReconciliationError", recon.sanitizeReconciliationError],
       ["DEFAULT_SANITIZE_MAX_LENGTH", recon.DEFAULT_SANITIZE_MAX_LENGTH],
       ["StoreLeaseLostError", recon.StoreLeaseLostError],

@@ -132,6 +132,99 @@ export async function runReconciliationStoreConformanceSuite(
   );
 
   results.push(
+    await runCase(
+      "schedule reopens terminal completed; second schedule while scheduled is already_exists",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const dueAt = new Date(clock.nowMs()).toISOString();
+        const first = await store.schedule({
+          key: "rec_reopen",
+          subjectId: "pay_reopen",
+          reason: "first",
+          dueAt,
+        });
+        assert(first.kind === "scheduled", `got ${first.kind}`);
+        const c = await store.claim({
+          key: "rec_reopen",
+          owner: "w1",
+          leaseMs: 30_000,
+        });
+        assert(c.kind === "acquired", "acquired");
+        await store.complete({
+          key: "rec_reopen",
+          leaseToken: c.leaseToken,
+        });
+        const reopened = await store.schedule({
+          key: "rec_reopen",
+          subjectId: "pay_reopen",
+          reason: "reopen",
+          dueAt: new Date(clock.nowMs() + 1_000).toISOString(),
+        });
+        assert(
+          reopened.kind === "scheduled",
+          `terminal reopen must be scheduled, got ${reopened.kind}`,
+        );
+        if (reopened.kind === "scheduled") {
+          assert(reopened.record.status === "scheduled", "reopened status");
+          assert(reopened.record.reason === "reopen", "reason reset");
+          assert(reopened.record.attempts === 0, "attempts reset");
+          assert(
+            reopened.record.createdAt === first.record.createdAt,
+            "created_at kept",
+          );
+          assert(
+            reopened.record.generation === c.record.generation,
+            "generation kept",
+          );
+        }
+        const again = await store.schedule({
+          key: "rec_reopen",
+          subjectId: "pay_reopen",
+          reason: "again",
+          dueAt: new Date(clock.nowMs()).toISOString(),
+        });
+        assert(
+          again.kind === "already_exists",
+          `active scheduled must stay already_exists, got ${again.kind}`,
+        );
+      },
+    ),
+  );
+
+  results.push(
+    await runCase("schedule does not reopen claimed", async () => {
+      const clock = createClock();
+      const store = await options.createStore({ clock });
+      const dueAt = new Date(clock.nowMs()).toISOString();
+      await store.schedule({
+        key: "rec_claimed_no_reopen",
+        subjectId: "pay_claimed",
+        reason: "first",
+        dueAt,
+      });
+      const c = await store.claim({
+        key: "rec_claimed_no_reopen",
+        owner: "w1",
+        leaseMs: 30_000,
+      });
+      assert(c.kind === "acquired", "acquired");
+      const s2 = await store.schedule({
+        key: "rec_claimed_no_reopen",
+        subjectId: "pay_claimed",
+        reason: "steal",
+        dueAt,
+      });
+      assert(
+        s2.kind === "already_exists",
+        `claimed must stay already_exists, got ${s2.kind}`,
+      );
+      const got = await store.get("rec_claimed_no_reopen");
+      assert(got?.status === "claimed", "claimed row must remain claimed");
+    }),
+  );
+
+  results.push(
     await runCase("complete terminal; stale token rejected", async () => {
       const clock = createClock();
       const store = await options.createStore({ clock });
@@ -325,6 +418,54 @@ export async function runReconciliationStoreConformanceSuite(
           key: "rec_list_abandon",
           leaseToken: c2.leaseToken,
         });
+      },
+    ),
+  );
+
+  results.push(
+    await runCase(
+      "expired claimed listDue then claim does not burn attempts",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const dueAt = new Date(clock.nowMs()).toISOString();
+        await store.schedule({
+          key: "rec_attempts",
+          subjectId: "pay_attempts",
+          reason: "indeterminate",
+          dueAt,
+        });
+        const first = await store.claim({
+          key: "rec_attempts",
+          owner: "w_dead",
+          leaseMs: 1_000,
+        });
+        assert(first.kind === "acquired", "acquired");
+        assert(
+          first.record.attempts === 1,
+          `first acquire attempts=${first.record.attempts}`,
+        );
+
+        clock.advance(1_001);
+        const due = await store.listDue({
+          now: new Date(clock.nowMs()).toISOString(),
+          limit: 50,
+        });
+        assert(
+          due.some((r) => r.key === "rec_attempts"),
+          "listDue must rediscover expired claimed",
+        );
+
+        const second = await store.claim({
+          key: "rec_attempts",
+          owner: "w_new",
+          leaseMs: 30_000,
+        });
+        assert(second.kind === "acquired", `second acquire got ${second.kind}`);
+        assert(
+          second.record.attempts === first.record.attempts,
+          `crash reclaim must keep attempts=${first.record.attempts} (got ${second.record.attempts})`,
+        );
       },
     ),
   );

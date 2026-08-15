@@ -114,19 +114,21 @@ function selectImpl(
   }
 
   if (candidates.length === 0) {
-    // ROUTE-1: amount-range honesty — do not use unconstrained select-time
-    // fallback when at least one non-excluded healthy rule matches all
-    // non-amount criteria but fails amount range. Falling back would silently
-    // accept amounts outside configured money bounds.
-    if (hasAmountRangeOnlyReject(input, rules, exclude, healthThreshold)) {
+    // ROUTE-1 / P21-EXCLUDE-HONESTY: amount-range honesty — do not use
+    // unconstrained select-time fallback when at least one rule matches all
+    // non-amount criteria but fails amount range, even if that rule's gateway
+    // is excluded or unhealthy. Falling back would silently accept amounts
+    // outside configured money bounds.
+    if (hasAmountRangeOnlyReject(input, rules)) {
       throw new NoRouteMatchError(
         "No routing rule matched: input amount is outside configured rule amount ranges (select-time fallback does not bypass amount bounds)",
         input,
       );
     }
-    // ROUTE-2: capability honesty — do not use unconstrained select-time
-    // fallback when a nearly-matching rule requires capabilities the fallback
-    // gateway lacks (rule-level requiredCapabilities must not be ignored).
+    // ROUTE-2 / P21-EXCLUDE-HONESTY: capability honesty — do not use
+    // unconstrained select-time fallback when a nearly-matching rule requires
+    // capabilities the fallback gateway lacks (rule-level requiredCapabilities
+    // must not be ignored), even if that rule's gateway is excluded/unhealthy.
     if (
       hasRequiredCapabilitiesOnlyReject(
         input,
@@ -149,20 +151,20 @@ function selectImpl(
 }
 
 /**
- * True when a resolvable input amount is outside inclusive min/max on at least
- * one non-excluded healthy rule whose non-amount criteria already match.
- * Cross-currency / missing-amount / other criterion failures do not count
- * (fallback may still apply for those).
+ * True when a configured amount range would be dishonestly bypassed by
+ * unconstrained select-time fallback (ROUTE-1 / P21-EXCLUDE-HONESTY /
+ * P21-AMOUNT-RESOLVE).
+ *
+ * Still considers rules whose gateway is excluded or unhealthy — post-attempt
+ * `excludeGateways` / `attemptedGateways` / unhealthy maps must not drop
+ * amount bounds. Cross-currency with a resolvable different currency does not
+ * count (other criteria; fallback may still apply).
  */
 function hasAmountRangeOnlyReject(
   input: RoutingInput,
   rules: readonly RoutingRule[],
-  exclude: ReadonlySet<string>,
-  healthThreshold: number,
 ): boolean {
   for (const rule of rules) {
-    if (exclude.has(rule.gateway.trim().toLowerCase())) continue;
-    if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
     if (!ruleMatchesIgnoringAmount(rule, input)) continue;
     if (amountOutsideConfiguredRange(input, rule.match)) {
       return true;
@@ -172,11 +174,12 @@ function hasAmountRangeOnlyReject(
 }
 
 /**
- * True when at least one non-excluded healthy rule matches all non-amount,
- * non-capability criteria and declares requiredCapabilities that the
- * select-time fallback gateway lacks (ROUTE-2).
+ * True when at least one rule matches all non-amount, non-capability criteria
+ * and declares requiredCapabilities that the select-time fallback gateway
+ * lacks (ROUTE-2 / P21-EXCLUDE-HONESTY).
  *
- * Unconstrained fallback must not silently drop rule-level capability bounds.
+ * Unconstrained fallback must not silently drop rule-level capability bounds,
+ * even when the rule's own gateway is excluded or unhealthy.
  * When no fallback is configured this returns false (selectFallback throws).
  */
 function hasRequiredCapabilitiesOnlyReject(
@@ -191,8 +194,7 @@ function hasRequiredCapabilitiesOnlyReject(
   if (!isGatewayHealthy(fallback, input, healthThreshold)) return false;
 
   for (const rule of rules) {
-    if (exclude.has(rule.gateway.trim().toLowerCase())) continue;
-    if (!isGatewayHealthy(rule.gateway, input, healthThreshold)) continue;
+    // P21-EXCLUDE-HONESTY: do not skip excluded / unhealthy rule gateways.
     // Non-amount non-cap criteria (currency/country/…) must already match.
     if (!ruleMatchesIgnoringAmountAndCapabilities(rule, input)) continue;
     // Amount range on the nearly-matching rule must still pass (or be absent);

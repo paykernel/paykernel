@@ -9,8 +9,10 @@ import type { RouteMatchCriteria, RoutingInput } from "./types";
 
 /**
  * Resolve the input payment amount to a major-unit decimal string + currency.
- * Returns null when the input has no amount (range criteria then fail-closed
- * only if the rule requires a range; see {@link amountInRange}).
+ * String amounts inherit {@link RoutingInput.currency} when `amountCurrency`
+ * is omitted. Returns null when the input has no amount or no currency
+ * (range criteria then fail-closed only if the rule requires a range; see
+ * {@link amountInRange}).
  */
 export function resolveInputAmount(
   input: RoutingInput,
@@ -25,10 +27,14 @@ export function resolveInputAmount(
     return { amount, currency };
   }
   const amount = String(input.amount).trim();
-  const currency =
+  // P21-AMOUNT-RESOLVE: amountCurrency wins; otherwise inherit input.currency.
+  const fromAmountCurrency =
     input.amountCurrency !== undefined
       ? String(input.amountCurrency).trim()
       : "";
+  const fromInputCurrency =
+    input.currency !== undefined ? String(input.currency).trim() : "";
+  const currency = fromAmountCurrency || fromInputCurrency;
   if (!amount || !currency) return null;
   return { amount, currency };
 }
@@ -116,14 +122,14 @@ export function amountInRange(
 
 /**
  * True when select-time fallback would dishonestly bypass configured amount
- * bounds (ROUTE-1):
+ * bounds (ROUTE-1 / P21-AMOUNT-RESOLVE):
  * - Rule has amount min/max **without** `amountCurrency` (misconfigured bound)
- * - Or input amount is resolvable in the **same** currency and outside
- *   inclusive min/max
+ * - Input amount is missing, unparseable, or invalid against a range whose
+ *   currency is present (or inherited onto the input via {@link resolveInputAmount})
+ * - Input amount is resolvable in the **same** currency and outside inclusive min/max
  *
- * Cross-currency, missing amount, or invalid decimals return false when the
- * rule currency is present (those are not amount-range honesty violations —
- * fallback may still apply for non-matching criteria).
+ * Cross-currency with a **resolvable** different currency is **not** an
+ * amount-range honesty violation (other criteria; fallback may still apply).
  */
 export function amountOutsideConfiguredRange(
   input: RoutingInput,
@@ -148,7 +154,9 @@ export function amountOutsideConfiguredRange(
 
   const resolved = resolveInputAmount(input);
   if (!resolved) {
-    return false;
+    // P21-AMOUNT-RESOLVE: configured range + missing/unresolvable amount must
+    // not be silently accepted by unconstrained select-time fallback.
+    return true;
   }
 
   if (
@@ -163,7 +171,9 @@ export function amountOutsideConfiguredRange(
   try {
     inputMinor = toMinorUnits(resolved.amount, ruleCurrency, zeroOk);
   } catch {
-    return false;
+    // Invalid / unparseable input amount (e.g. JPY "10.50") is an honesty
+    // violation — fallback must not treat "cannot compare" as unconstrained.
+    return true;
   }
 
   if (hasMin && match.amountMin !== undefined) {
@@ -175,7 +185,7 @@ export function amountOutsideConfiguredRange(
       );
       if (inputMinor < minMinor) return true;
     } catch {
-      return false;
+      return true;
     }
   }
 
@@ -188,7 +198,7 @@ export function amountOutsideConfiguredRange(
       );
       if (inputMinor > maxMinor) return true;
     } catch {
-      return false;
+      return true;
     }
   }
 

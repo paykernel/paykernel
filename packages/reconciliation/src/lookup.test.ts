@@ -1,6 +1,10 @@
 import { describe, it, expect } from "bun:test";
 import type { Money } from "@paykernel/core";
-import { resolveProviderSnapshot, type ProviderLookupPort } from "./lookup";
+import {
+  resolveProviderSnapshot,
+  createGetPaymentLookupPort,
+  type ProviderLookupPort,
+} from "./lookup";
 import { decideReconciliationPolicy } from "./policy";
 import {
   buildProviderPaymentSnapshot,
@@ -326,5 +330,34 @@ describe("safe lookup order", () => {
     );
     expect(result.outcome).toBe("temporarily_unavailable");
     expect(idemCalls).toBe(0);
+  });
+});
+
+describe("createGetPaymentLookupPort", () => {
+  it.each([
+    [
+      "snapshot",
+      async () => snap("pi_1"),
+      "consistent",
+    ],
+    [
+      "undefined",
+      async () => undefined,
+      "provider_not_found",
+    ],
+    [
+      "throw",
+      async () => {
+        throw new Error("network");
+      },
+      "temporarily_unavailable",
+    ],
+  ] as const)("maps getPayment %s to %s", async (_label, getPayment, outcome) => {
+    const port = createGetPaymentLookupPort({ getPayment });
+    const result = await resolveProviderSnapshot(
+      { gateway: "stripe", gatewayPaymentId: "pi_1" },
+      port,
+    );
+    expect(result.outcome).toBe(outcome);
   });
 });

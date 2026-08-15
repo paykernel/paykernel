@@ -101,6 +101,22 @@ describe("createOpenTelemetryBridge", () => {
     expect(s.ended).toBe(true);
   });
 
+  it("drops secret-shaped exception codes (sk_live_x) from recordException (P20-ERROR-CODE)", () => {
+    const mock = createMockOtelApi();
+    const tracer = createOpenTelemetryBridge(mock.api);
+    const span = tracer.startSpan(PAYMENT_SPAN_NAMES.refund);
+    const err = Object.assign(new Error("safe message"), {
+      name: "GatewayApiError",
+      code: "sk_live_x",
+    });
+    span.recordException?.(err);
+    span.end({ code: "error", message: "GatewayApiError" });
+
+    const s = mock.spans[0]!;
+    expect(s.exceptions).toEqual([{ name: "GatewayApiError" }]);
+    expect(JSON.stringify(s.exceptions)).not.toContain("sk_live");
+  });
+
   it("auto-redacts span attributes on start and setAttribute (OBS-2)", () => {
     const mock = createMockOtelApi();
     const tracer = createOpenTelemetryBridge(mock.api);

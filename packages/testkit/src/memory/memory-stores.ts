@@ -693,6 +693,7 @@ export type MemoryReconciliationStore = ReconciliationStore & {
   clear(): void;
   readonly size: number;
   withTransaction<T>(fn: () => Promise<T> | T): Promise<T>;
+  listTerminal(input?: { limit?: number }): Promise<ReconciliationRecord[]>;
 };
 
 export function createMemoryReconciliationStore(
@@ -720,12 +721,15 @@ export function createMemoryReconciliationStore(
       rec.leaseExpiresAt &&
       Date.parse(rec.leaseExpiresAt) <= clock.nowMs()
     ) {
+      // STORES-1: restore unfinished claim so crash/listDue reclaim does not
+      // burn maxAttempts (parity with SQL CASE WHEN status=claimed THEN attempts).
       const released: ReconciliationRecord = {
         ...rec,
         status: "scheduled",
         leaseToken: undefined,
         leaseOwner: undefined,
         leaseExpiresAt: undefined,
+        attempts: Math.max(0, rec.attempts - 1),
         updatedAt: iso(clock),
       };
       entries.set(key, released);
@@ -776,6 +780,33 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (existing) {
+        // RECON-7: terminal jobs may be re-opened under the same key so
+        // operators can re-reconcile after completion/dead-letter without
+        // minting a new key. Active scheduled/claimed rows stay already_exists.
+        if (
+          existing.status === "completed" ||
+          existing.status === "failed" ||
+          existing.status === "manual_review"
+        ) {
+          const now = iso(clock);
+          const record: ReconciliationRecord = {
+            key: input.key,
+            status: "scheduled",
+            subjectId: input.subjectId,
+            reason: input.reason,
+            attempts: 0,
+            dueAt: input.dueAt,
+            createdAt: existing.createdAt,
+            updatedAt: now,
+            generation: existing.generation,
+            leaseOwner: undefined,
+            leaseToken: undefined,
+            leaseExpiresAt: undefined,
+            lastError: undefined,
+          };
+          entries.set(input.key, record);
+          return { kind: "scheduled", record };
+        }
         return { kind: "already_exists", record: existing };
       }
       enforceCap(input.key);
@@ -815,13 +846,17 @@ export function createMemoryReconciliationStore(
       }
       const generation = rec.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
+      // STORES-1: increment only from scheduled. Soft-release restored one
+      // attempt, so expired-claimed reclaim nets to the prior count.
+      const attempts =
+        rec.status === "scheduled" ? rec.attempts + 1 : rec.attempts;
       const updated: ReconciliationRecord = {
         ...rec,
         status: "claimed",
         leaseOwner: input.owner,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
-        attempts: rec.attempts + 1,
+        attempts,
         generation,
         updatedAt: iso(clock),
       };
@@ -941,6 +976,18 @@ export function createMemoryReconciliationStore(
         if (Date.parse(rec.dueAt) > nowMs) continue;
         out.push(rec);
         if (out.length >= limit) break;
+      }
+      return out;
+    },
+
+    async listTerminal(input?: { limit?: number }): Promise<ReconciliationRecord[]> {
+      const limit = input?.limit ?? 100;
+      const out: ReconciliationRecord[] = [];
+      for (const [, rec] of entries) {
+        if (rec.status === "manual_review" || rec.status === "failed") {
+          out.push(rec);
+          if (out.length >= limit) break;
+        }
       }
       return out;
     },

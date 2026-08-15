@@ -363,6 +363,114 @@ describe("decideReconciliationPolicy", () => {
     }
   });
 
+  it("P19-CAPTURE: pending local + paid provider captured 4 vs amount 10 is not update_local_to_paid", () => {
+    const paidPartialCapture = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("4.00", "USD"),
+      providerStatus: "succeeded",
+    });
+    for (const outcome of ["consistent", "drift_detected"] as const) {
+      const result: ReconciliationResult =
+        outcome === "consistent"
+          ? { outcome: "consistent", provider: paidPartialCapture }
+          : {
+              outcome: "drift_detected",
+              provider: paidPartialCapture,
+              differences: [
+                { field: "status", local: "pending", provider: "paid" },
+              ],
+            };
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_1",
+        expected: { status: "pending" },
+      };
+      const d = decideReconciliationPolicy(result, target);
+      expect(d.action).not.toBe("update_local_to_paid");
+      expect(d.safe).toBe(false);
+      if (outcome === "consistent") {
+        expect(d.action).toBe("manual_review");
+      } else {
+        expect(d.action).toBe("apply_drift_review");
+      }
+    }
+  });
+
+  it("P19-CAPTURE: paid provider captured 0 + amount 10 is not a safe paid upgrade", () => {
+    const paidZeroCapture = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("0", "USD"),
+      providerStatus: "succeeded",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: paidZeroCapture,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "pending" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).not.toBe("update_local_to_paid");
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+    expect(d.action).toBe("manual_review");
+  });
+
+  it("P19-CAPTURE: capturedAmount money-equal to amount still allows paid upgrade", () => {
+    const paidFullCapture = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("10", "USD"),
+      providerStatus: "succeeded",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: paidFullCapture,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "pending" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).toBe("update_local_to_paid");
+    if (d.action === "update_local_to_paid") {
+      expect(d.safe).toBe(true);
+    }
+  });
+
+  it("P19-CAPTURE: status-only local paid + provider paid + captured 4 is not mark_consistent", () => {
+    const paidPartialCapture = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("4.00", "USD"),
+      providerStatus: "succeeded",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: paidPartialCapture,
+    };
+    // Status-only local paid (no capturedAmount field) — compare reports
+    // consistent on status, but policy must refuse mark_consistent.
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_1",
+      expected: { status: "paid" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+    expect(d.action).toBe("manual_review");
+  });
+
   it("RECON-2: status-only local paid + provider refundedAmount is not mark_consistent safe", () => {
     const paidWithRefund = buildProviderPaymentSnapshot({
       gatewayPaymentId: "pi_1",

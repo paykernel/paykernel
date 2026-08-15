@@ -7,7 +7,7 @@
  * @packageDocumentation
  */
 
-import { redactAttributeBag } from "./redaction";
+import { redactAttributeBag, sanitizeExceptionIdentity } from "./redaction";
 import type { PaymentSpan, PaymentSpanStatus, PaymentTracer } from "./spans";
 
 /**
@@ -56,38 +56,14 @@ const OTEL_STATUS_ERROR = 2;
 
 /**
  * Sanitize exceptions before OTEL `recordException`.
- * Name (+ optional code) only — never raw message/stack (secret risk).
+ * Name (+ optional non-secret code) only — never raw message/stack.
+ * Secret-shaped `code` values (sk_live / PAN / Bearer) are dropped.
  */
 function sanitizeOtelException(error: unknown): {
   name: string;
   code?: string;
 } {
-  if (error instanceof Error) {
-    const code =
-      "code" in error && typeof (error as { code?: unknown }).code === "string"
-        ? (error as { code: string }).code
-        : undefined;
-    return code !== undefined
-      ? { name: error.name || "Error", code }
-      : { name: error.name || "Error" };
-  }
-  if (typeof error === "string") {
-    return { name: "Error" };
-  }
-  if (
-    error !== null &&
-    typeof error === "object" &&
-    "name" in error &&
-    typeof (error as { name?: unknown }).name === "string"
-  ) {
-    const name = (error as { name: string }).name || "Error";
-    const code =
-      "code" in error && typeof (error as { code?: unknown }).code === "string"
-        ? (error as { code: string }).code
-        : undefined;
-    return code !== undefined ? { name, code } : { name };
-  }
-  return { name: "unknown" };
+  return sanitizeExceptionIdentity(error);
 }
 
 function applyOtelSpanStatus(

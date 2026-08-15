@@ -20,6 +20,21 @@ describe("resolveInputAmount", () => {
     ).toEqual({ amount: "9.5", currency: "USD" });
   });
 
+  it("P21-AMOUNT-RESOLVE: string amount inherits input.currency when amountCurrency omitted", () => {
+    expect(resolveInputAmount({ currency: "USD", amount: "50.00" })).toEqual({
+      amount: "50.00",
+      currency: "USD",
+    });
+    // Explicit amountCurrency still wins over input.currency.
+    expect(
+      resolveInputAmount({
+        currency: "EUR",
+        amount: "9.5",
+        amountCurrency: "USD",
+      }),
+    ).toEqual({ amount: "9.5", currency: "USD" });
+  });
+
   it("returns null without amount or currency", () => {
     expect(resolveInputAmount({})).toBeNull();
     expect(resolveInputAmount({ amount: "10" })).toBeNull();
@@ -125,6 +140,39 @@ describe("amountInRange money-safe", () => {
       amountOutsideConfiguredRange(
         { amount: { amount: "50", currency: "USD" } },
         { amountMin: "10", amountMax: "100", amountCurrency: "USD" },
+      ),
+    ).toBe(false);
+  });
+
+  it("P21-AMOUNT-RESOLVE: missing / unparseable / invalid amount is an honesty violation", () => {
+    const usdRange: RouteMatchCriteria = {
+      amountMin: "100.00",
+      amountCurrency: "USD",
+    };
+    expect(amountOutsideConfiguredRange({}, usdRange)).toBe(true);
+    expect(amountOutsideConfiguredRange({ currency: "USD" }, usdRange)).toBe(
+      true,
+    );
+    expect(
+      amountOutsideConfiguredRange(
+        { amount: "not-a-decimal", amountCurrency: "USD" },
+        usdRange,
+      ),
+    ).toBe(true);
+    // JPY is zero-decimal — fractional major units are invalid.
+    expect(
+      amountOutsideConfiguredRange(
+        { amount: { amount: "10.50", currency: "JPY" } },
+        { amountMin: "1", amountMax: "10000", amountCurrency: "JPY" },
+      ),
+    ).toBe(true);
+  });
+
+  it("P21-AMOUNT-RESOLVE: resolvable cross-currency is not an amount-honesty violation", () => {
+    expect(
+      amountOutsideConfiguredRange(
+        { amount: { amount: "50.00", currency: "EUR" } },
+        { amountMin: "100.00", amountCurrency: "USD" },
       ),
     ).toBe(false);
   });

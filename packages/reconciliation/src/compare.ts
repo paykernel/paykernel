@@ -122,6 +122,19 @@ export function compareSnapshots(
       if (pCap !== undefined) d.provider = pCap;
       diffs.push(d);
     }
+  } else if (
+    local.amount !== undefined &&
+    provider.capturedAmount !== undefined &&
+    !moneyEquals(local.amount, provider.capturedAmount)
+  ) {
+    // Local omitted capturedAmount but quoted a charge amount; a present
+    // provider capture that does not match is still money drift.
+    diffs.push({
+      field: "capturedAmount",
+      local: local.amount,
+      provider: provider.capturedAmount,
+      message: "capturedAmount mismatch",
+    });
   }
 
   if (local.refundedAmount !== undefined) {

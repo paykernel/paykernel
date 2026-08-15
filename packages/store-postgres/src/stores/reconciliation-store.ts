@@ -75,7 +75,8 @@ export function createPostgresReconciliationStore(
         const now = clockNowIso(ctx.clock);
         // Canonical Z form so TEXT lexical due_at compares match Date.parse (SQL-1).
         const dueAt = canonicalizeIsoTimestamp(input.dueAt, "dueAt");
-        // Insert-if-absent; RETURNING only on insert.
+        // Insert-if-absent, or reopen terminal rows under the same key.
+        // Active scheduled/claimed stay already_exists (ON CONFLICT WHERE).
         const inserted = await ctx.getExecutor().query<Record<string, unknown>>(
           `INSERT INTO ${table} (
              key, status, subject_id, reason, due_at,
@@ -84,7 +85,19 @@ export function createPostgresReconciliationStore(
              $1, 'scheduled', $2, $3, $4,
              0, 0, $5, $5
            )
-           ON CONFLICT (key) DO NOTHING
+           ON CONFLICT (key) DO UPDATE SET
+             status = 'scheduled',
+             subject_id = EXCLUDED.subject_id,
+             reason = EXCLUDED.reason,
+             due_at = EXCLUDED.due_at,
+             attempts = 0,
+             lease_owner = NULL,
+             lease_token = NULL,
+             lease_expires_at = NULL,
+             last_error_sanitized = NULL,
+             completed_at = NULL,
+             updated_at = EXCLUDED.updated_at
+           WHERE ${table}.status IN ('completed', 'failed', 'manual_review')
            RETURNING key, status, subject_id, reason, due_at,
                      lease_owner, lease_token, lease_expires_at, attempts, generation,
                      last_error_sanitized, tenant_id, created_at, updated_at, completed_at`,

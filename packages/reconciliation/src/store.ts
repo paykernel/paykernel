@@ -236,5 +236,11 @@ export interface ReconciliationStore extends WithTransaction {
 
   get(key: ReconciliationKey): Promise<ReconciliationRecord | undefined>;
   listDue(input: ListDueInput): Promise<ReconciliationRecord[]>;
+  /**
+   * Optional scan of terminal `failed` / `manual_review` rows for dead-letter
+   * inspection. Memory stores implement this; durable adapters may omit it
+   * (scheduler then requires `keys` or `scan`).
+   */
+  listTerminal?(input?: { limit?: number }): Promise<ReconciliationRecord[]>;
   deleteExpired(input: CleanupInput): Promise<CleanupResult>;
 }
