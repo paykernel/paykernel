@@ -77,13 +77,19 @@ new_sqlite_classes = ["PaymentsStoreDurableObject"]
 
 Use **`new_sqlite_classes`** (not legacy KV-only `new_classes`) so `storage.sql` / `transactionSync` are available.
 
+### Required DO RPC methods
+
+Forward every name in `REQUIRED_DO_RPC_METHODS` from your `PaymentsStoreDurableObject` wrapper. Hash sharding **requires** `bindHashPartitionLayout` (DO-1). See [docs/wrangler.md](./docs/wrangler.md).
+
+`tableNamespace` is sent on every store RPC and applied inside the DO.
+
 ## Sharding
 
 | Strategy | Behavior |
 | -------- | -------- |
 | `key` | One object per key — strongest per-key serialization |
-| `hash` | Bounded partitions (`partitions >= 1`, recommend ≥ 16) |
-| `tenant` | One object per tenant |
+| `hash` | Bounded partitions (`partitions >= 1`, recommend ≥ 16). **`partitions = 1` is a single partition** (all keys share one DO; not a silent global default). |
+| `tenant` | One object per tenant. Worker strategy: **static `tenantId` string**, or a function of **key only** (store contracts have no `tenantId`). |
 
 - **Within a shard:** requests serialize (single-threaded DO).
 - **Across shards:** no global total order.
@@ -121,7 +127,9 @@ Cross-partition: no global order. Full notes: `DO_STORAGE_ADAPTER_MANIFEST` / [d
 
 ## Optional alarms (default-off)
 
-One alarm **per DO** + due queue table; handlers are **at-least-once** and must re-check lease/claim state. Bounded retries + backoff/jitter. See [docs/alarms.md](./docs/alarms.md).
+One alarm **per DO** + due queue table; handlers are **at-least-once** and must re-check lease/claim state. Bounded retries + backoff/jitter.
+
+Alarms are **not** wired to `failWebhook` — webhook recovery is **pull-only** (`listRetryable`). See [docs/alarms.md](./docs/alarms.md).
 
 ## Docs
 

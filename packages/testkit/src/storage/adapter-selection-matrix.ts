@@ -27,7 +27,12 @@ export type SelectionDistributed =
   | "no"
   | "yes-partitioned"
   /** Multi-host when shared Redis is up; Bun Cluster/Sentinel unsupported. */
-  | "yes-except-bun-cluster-sentinel";
+  | "yes-except-bun-cluster-sentinel"
+  /**
+   * Remote Turso/libSQL is multi-host; the same binding may open `file:`,
+   * which is single-host testing only — never a flat distributed yes.
+   */
+  | "yes-remote-local-file-single-host";
 
 /** How the selection guide answers the roadmap “Durable audit?” column. */
 export type SelectionDurableAudit = "yes" | "no" | "configuration-dependent";
@@ -80,7 +85,7 @@ export interface AdapterSelectionMatrixRow {
    */
   redisOptional: boolean;
   /**
-   * Local file SQLite bindings only (`adapter-sqlite` subpaths).
+   * Local file SQLite bindings only (`store-sqlite` subpaths).
    * Must never claim multi-host / multi-region.
    */
   isLocalSqlite: boolean;
@@ -245,7 +250,7 @@ export const ADAPTER_SELECTION_MATRIX: readonly AdapterSelectionMatrixRow[] = [
     isMemory: false,
     productionRecommended: true,
     importantLimitation:
-      "Remote/async txn semantics; not local adapter-sqlite; no /sync export",
+      "Remote/async txn semantics; not local @paykernel/store-sqlite; no /sync export",
   },
   {
     rowId: "turso-libsql",
@@ -253,7 +258,7 @@ export const ADAPTER_SELECTION_MATRIX: readonly AdapterSelectionMatrixRow[] = [
     packageName: "@paykernel/store-turso",
     subpath: "libsql",
     manifestName: "turso",
-    distributed: "yes",
+    distributed: "yes-remote-local-file-single-host",
     coordinationScope: "multi-host",
     partitioned: false,
     durability: "durable",
@@ -266,7 +271,7 @@ export const ADAPTER_SELECTION_MATRIX: readonly AdapterSelectionMatrixRow[] = [
     isMemory: false,
     productionRecommended: true,
     importantLimitation:
-      "Local file: is single-host testing only; embedded-replica/offline multi-writer not advertised; no /sync",
+      "Remote multi-host; local file: is single-host testing only; embedded-replica/offline multi-writer not advertised; no /sync",
   },
   {
     rowId: "cloudflare-d1",

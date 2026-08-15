@@ -48,8 +48,12 @@ const EXPECTED_RUNTIME = [
   "clockAddMsIso",
   "mapDriverError",
   "withMappedErrors",
+  "reconstructStoreError",
   "withMappedTransaction",
   "isLikelyDriverFailure",
+  "REQUIRED_DO_RPC_METHODS",
+  "REQUIRED_DO_STORE_RPC_METHODS",
+  "REQUIRED_DO_HASH_RPC_METHODS",
   "StoreError",
   "StoreLeaseLostError",
   "StoreUnavailableError",
@@ -118,8 +122,8 @@ describe("public API surface", () => {
     const notes = api.DO_STORAGE_ADAPTER_MANIFEST.notes?.join(" ") ?? "";
     expect(notes.toLowerCase()).toContain("new_sqlite_classes");
     expect(notes.toLowerCase()).toContain("not packages/store-d1");
-    expect(notes.toLowerCase()).toContain("not adapter-sqlite");
-    expect(notes.toLowerCase()).toContain("not adapter-turso");
+    expect(notes.toLowerCase()).toContain("not store-sqlite");
+    expect(notes.toLowerCase()).toContain("not store-turso");
     expect(notes.toLowerCase()).toContain("never route all payment work");
     expect(notes.toLowerCase()).toContain("global durable object");
     expect(notes.toLowerCase()).toContain("sharding");

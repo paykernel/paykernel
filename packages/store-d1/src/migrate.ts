@@ -4,7 +4,7 @@
  * NEVER call migrate at package import time or inside createD1PaymentStores
  * by default. Operators and tests invoke these explicitly.
  *
- * Dialect: sqlite (sql-store foundation schema + SQLITE claim templates).
+ * Dialect: sqlite (sql-foundation schema + SQLITE claim templates).
  * Migration SQL must not wrap statements in BEGIN/COMMIT for D1 apply path.
  */
 
@@ -47,6 +47,7 @@ export type VerifyD1AdapterOptions = {
 /**
  * Prefer a pure executor (query/execute only). When the value is a D1 binding
  * (prepare+batch), wrap it — even if it also happens to look like an executor.
+ * Raw bindings get the same first-primary session default as createD1Executor.
  */
 function resolveExecutor(executorOrDb: D1Executor | D1DatabaseLike): D1Executor {
   if (isD1DatabaseLike(executorOrDb)) {

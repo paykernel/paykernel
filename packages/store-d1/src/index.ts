@@ -42,6 +42,7 @@ export {
 
 export type {
   D1Executor,
+  D1ExecutorOptions,
   D1DatabaseLike,
   D1PreparedStatementLike,
   D1StoreOptions,

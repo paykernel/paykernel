@@ -15,6 +15,10 @@
  */
 
 import { Database, type SQLQueryBindings } from "bun:sqlite";
+import {
+  D1_SAME_CONNECTION_SQLITE,
+  type D1SameConnectionSqliteHook,
+} from "../executor";
 import type {
   D1DatabaseLike,
   D1PreparedStatementLike,
@@ -230,6 +234,30 @@ export function createMockD1(options: MockD1Options = {}): MockD1Handle {
         return makeDb(constraintOrBookmark ?? sessionTag);
       };
     }
+
+    // Prove same-connection SQLite so createD1Executor may attach
+    // withTransaction. BEGIN IMMEDIATE stays here — never on live D1.
+    const hook: D1SameConnectionSqliteHook = {
+      async runTransaction<T>(fn: () => Promise<T>): Promise<T> {
+        sqlite.exec("BEGIN IMMEDIATE");
+        try {
+          const result = await fn();
+          sqlite.exec("COMMIT");
+          return result;
+        } catch (err) {
+          try {
+            sqlite.exec("ROLLBACK");
+          } catch {
+            /* ignore */
+          }
+          throw err;
+        }
+      },
+    };
+    Object.defineProperty(db, D1_SAME_CONNECTION_SQLITE, {
+      value: hook,
+      enumerable: false,
+    });
 
     return db;
   }

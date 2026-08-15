@@ -26,6 +26,8 @@ Default CI path uses **mock DO SQL** (no Workers runtime). Live/miniflare suites
 - **Same-key concurrency** — one winner under concurrent reserve
 - **Cross-partition isolation** — different shards do not share rows
 - **Worker client path** — async stub RPC over mock namespace
+- **`tableNamespace`** — sent by `createDoPaymentStores`; the mock does **not**
+  auto-inject a prefix the Worker client never forwarded
 
 ## FakeClock / leases
 

@@ -125,7 +125,11 @@ export type DoClientStoreOptions = {
    */
   sharding: DoShardingStrategy;
   clock?: StoreClock;
-  /** Optional logical table prefix (applied inside each DO). */
+  /**
+   * Optional logical table prefix. The Worker client forwards this on every
+   * store RPC; {@link PaymentsStoreObject} applies it (constructor `namespace`
+   * is the default when the arg is omitted). Not injected by mock namespaces.
+   */
   tableNamespace?: SchemaNamespaceConfig;
   /**
    * Optional name prefix for shard object names (e.g. `"payments-v1"`).

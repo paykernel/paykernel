@@ -1,5 +1,5 @@
 /**
- * Live Cloudflare Durable Object smoke Worker for payments-adapter-cloudflare-do.
+ * Live Cloudflare Durable Object smoke Worker for @paykernel/store-durable-objects.
  *
  * Account: Manhali.official (see smoke/wrangler.toml).
  *
@@ -68,120 +68,156 @@ export class PaymentsStoreDurableObject extends DurableObject<Env> {
     await this.init;
   }
 
+  /**
+   * Required RPC (hash sharding / DO-1). First writer seals `partitions`.
+   * See REQUIRED_DO_RPC_METHODS — do not omit the next layout method.
+   */
+  async bindHashPartitionLayout(partitions: number) {
+    await this.ready();
+    return this.inner.bindHashPartitionLayout(partitions);
+  }
+
   // ── Idempotency RPC ──────────────────────────────────────────────────────
 
-  async reserveIdempotency(input: unknown) {
+  async reserveIdempotency(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.reserveIdempotency(input as never);
+    return this.inner.reserveIdempotency(input as never, tableNamespace as never);
   }
 
-  async renewIdempotency(input: unknown) {
+  async renewIdempotency(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.renewIdempotency(input as never);
+    return this.inner.renewIdempotency(input as never, tableNamespace as never);
   }
 
-  async completeIdempotency(input: unknown) {
+  async completeIdempotency(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.completeIdempotency(input as never);
+    return this.inner.completeIdempotency(input as never, tableNamespace as never);
   }
 
-  async markIdempotencyIndeterminate(input: unknown) {
+  async markIdempotencyIndeterminate(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.markIdempotencyIndeterminate(input as never);
+    return this.inner.markIdempotencyIndeterminate(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async getIdempotency(key: unknown) {
+  async getIdempotency(key: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.getIdempotency(key as never);
+    return this.inner.getIdempotency(key as never, tableNamespace as never);
   }
 
-  async deleteExpiredIdempotency(input: unknown) {
+  async deleteExpiredIdempotency(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.deleteExpiredIdempotency(input as never);
+    return this.inner.deleteExpiredIdempotency(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
   // ── Webhook RPC ──────────────────────────────────────────────────────────
 
-  async claimWebhook(input: unknown) {
+  async claimWebhook(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.claimWebhook(input as never);
+    return this.inner.claimWebhook(input as never, tableNamespace as never);
   }
 
-  async renewWebhook(input: unknown) {
+  async renewWebhook(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.renewWebhook(input as never);
+    return this.inner.renewWebhook(input as never, tableNamespace as never);
   }
 
-  async completeWebhook(input: unknown) {
+  async completeWebhook(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.completeWebhook(input as never);
+    return this.inner.completeWebhook(input as never, tableNamespace as never);
   }
 
-  async failWebhook(input: unknown) {
+  async failWebhook(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.failWebhook(input as never);
+    return this.inner.failWebhook(input as never, tableNamespace as never);
   }
 
-  async getWebhook(key: unknown) {
+  async getWebhook(key: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.getWebhook(key as never);
+    return this.inner.getWebhook(key as never, tableNamespace as never);
   }
 
-  async listRetryableWebhooks(input: unknown) {
+  async listRetryableWebhooks(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.listRetryableWebhooks(input as never);
+    return this.inner.listRetryableWebhooks(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async deleteExpiredWebhooks(input: unknown) {
+  async deleteExpiredWebhooks(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.deleteExpiredWebhooks(input as never);
+    return this.inner.deleteExpiredWebhooks(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
   // ── Reconciliation RPC ───────────────────────────────────────────────────
 
-  async scheduleReconciliation(input: unknown) {
+  async scheduleReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.scheduleReconciliation(input as never);
+    return this.inner.scheduleReconciliation(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async claimReconciliation(input: unknown) {
+  async claimReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.claimReconciliation(input as never);
+    return this.inner.claimReconciliation(input as never, tableNamespace as never);
   }
 
-  async renewReconciliation(input: unknown) {
+  async renewReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.renewReconciliation(input as never);
+    return this.inner.renewReconciliation(input as never, tableNamespace as never);
   }
 
-  async completeReconciliation(input: unknown) {
+  async completeReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.completeReconciliation(input as never);
+    return this.inner.completeReconciliation(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async failReconciliation(input: unknown) {
+  async failReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.failReconciliation(input as never);
+    return this.inner.failReconciliation(input as never, tableNamespace as never);
   }
 
-  async markReconciliationManualReview(input: unknown) {
+  async markReconciliationManualReview(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.markReconciliationManualReview(input as never);
+    return this.inner.markReconciliationManualReview(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async getReconciliation(key: unknown) {
+  async getReconciliation(key: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.getReconciliation(key as never);
+    return this.inner.getReconciliation(key as never, tableNamespace as never);
   }
 
-  async listDueReconciliation(input: unknown) {
+  async listDueReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.listDueReconciliation(input as never);
+    return this.inner.listDueReconciliation(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
-  async deleteExpiredReconciliation(input: unknown) {
+  async deleteExpiredReconciliation(input: unknown, tableNamespace?: unknown) {
     await this.ready();
-    return this.inner.deleteExpiredReconciliation(input as never);
+    return this.inner.deleteExpiredReconciliation(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
   // ── Alarms (optional 17.4) ───────────────────────────────────────────────

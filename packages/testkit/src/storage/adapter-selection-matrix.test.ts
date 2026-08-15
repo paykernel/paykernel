@@ -134,15 +134,32 @@ describe("ADAPTER_SELECTION_MATRIX honesty — D1 / DO / Turso / multi-region", 
     expect(dO.importantLimitation).toMatch(/sharding|global DO/i);
   });
 
-  it("Turso rows are multi-host remote (not local sqlite)", () => {
-    for (const id of ["turso-serverless", "turso-libsql"] as const) {
-      const row = byId(id);
-      expect(row.manifestName).toBe("turso");
-      expect(row.isLocalSqlite).toBe(false);
-      expect(row.coordinationScope).toBe("multi-host");
-      expect(row.distributed).toBe("yes");
-      expect(row.importantLimitation).toMatch(/no \/sync/i);
-    }
+  it("Turso serverless is multi-host remote (not local sqlite)", () => {
+    const row = byId("turso-serverless");
+    expect(row.manifestName).toBe("turso");
+    expect(row.isLocalSqlite).toBe(false);
+    expect(row.coordinationScope).toBe("multi-host");
+    expect(row.distributed).toBe("yes");
+    expect(row.importantLimitation).toMatch(/no \/sync/i);
+    expect(row.importantLimitation).not.toMatch(/adapter-sqlite/);
+    expect(row.importantLimitation).toMatch(
+      /store-sqlite|@paykernel\/store-sqlite/,
+    );
+  });
+
+  it("libSQL does not claim flat distributed yes (file: is single-host testing only)", () => {
+    const row = byId("turso-libsql");
+    expect(row.manifestName).toBe("turso");
+    expect(row.isLocalSqlite).toBe(false);
+    expect(row.coordinationScope).toBe("multi-host");
+    // Binding also opens file:; a flat "yes" would overclaim local-file deployments.
+    expect(row.distributed).not.toBe("yes");
+    expect(row.distributed).toBe("yes-remote-local-file-single-host");
+    expect(row.importantLimitation).toMatch(/remote multi-host/i);
+    expect(row.importantLimitation).toMatch(
+      /local file: is single-host testing only/i,
+    );
+    expect(row.importantLimitation).toMatch(/no \/sync/i);
   });
 
   it("never invents multi-region coordinationScope", () => {

@@ -13,6 +13,10 @@ import { PaymentsStoreObject } from "../object/payments-store-object";
 
 export type MockDoNamespaceOptions = {
   clock?: StoreClock;
+  /**
+   * Ignored. Prefixes must be sent by `createDoPaymentStores({ tableNamespace })`
+   * on each RPC. Kept so existing test option objects still typecheck.
+   */
   tableNamespace?: SchemaNamespaceConfig;
   alarms?: DoAlarmOptions;
   /** Auto-migrate each new partition on first access. Default true for tests. */
@@ -52,13 +56,12 @@ export function createMockDoNamespace(
     const objOpts: {
       storage: DoStorageLike;
       clock?: StoreClock;
-      namespace?: SchemaNamespaceConfig;
       alarms?: DoAlarmOptions;
     } = { storage: handle.storage };
     if (options.clock !== undefined) objOpts.clock = options.clock;
-    if (options.tableNamespace !== undefined) {
-      objOpts.namespace = options.tableNamespace;
-    }
+    // Do not inject tableNamespace here. The Worker client must send it on
+    // each RPC; PaymentsStoreObject applies it. Tests must not rely on the
+    // mock auto-prefixing a namespace the client never forwarded.
     if (options.alarms !== undefined) objOpts.alarms = options.alarms;
 
     const obj = new PaymentsStoreObject(objOpts);

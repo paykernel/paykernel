@@ -106,50 +106,52 @@ describe("do partition isolation", () => {
     }
   });
 
-  it("tenant strategy: different tenants isolate", async () => {
+  it("tenant strategy: one namespace, two tenant strategies isolate the same key", async () => {
     const prefix = uniqueTablePrefix("tn");
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
-    const ns = createMockDoNamespace({
-      clock,
-      tableNamespace: { tablePrefix: prefix },
-    });
+    // ONE namespace; tenant isolation is by shard name, not by mock handle.
+    const ns = createMockDoNamespace({ clock });
     try {
-      // Simpler: two stores with fixed tenant strategies.
-      const ns2 = createMockDoNamespace({
+      const acmeName = resolveDoShardName(
+        { kind: "tenant", tenantId: "acme" },
+        { key: "shared-key" },
+      );
+      const globexName = resolveDoShardName(
+        { kind: "tenant", tenantId: "globex" },
+        { key: "shared-key" },
+      );
+      expect(acmeName).toBe("tenant:acme");
+      expect(globexName).toBe("tenant:globex");
+      expect(acmeName).not.toBe(globexName);
+
+      const t1 = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "tenant", tenantId: "acme" },
         clock,
         tableNamespace: { tablePrefix: prefix },
       });
-      try {
-        const t1 = createDoPaymentStores({
-          namespace: ns.namespace,
-          sharding: { kind: "tenant", tenantId: "acme" },
-          clock,
-          tableNamespace: { tablePrefix: prefix },
-        });
-        const t2 = createDoPaymentStores({
-          namespace: ns2.namespace,
-          sharding: { kind: "tenant", tenantId: "globex" },
-          clock,
-          tableNamespace: { tablePrefix: prefix },
-        });
-        // Same key on different tenant objects — both acquire (isolated state).
-        const a = await t1.idempotency.reserve({
-          key: "shared-key",
-          fingerprint: "fp",
-          owner: "w",
-          leaseMs: 10_000,
-        });
-        const b = await t2.idempotency.reserve({
-          key: "shared-key",
-          fingerprint: "fp",
-          owner: "w",
-          leaseMs: 10_000,
-        });
-        expect(a.kind).toBe("acquired");
-        expect(b.kind).toBe("acquired");
-      } finally {
-        ns2.close();
-      }
+      const t2 = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "tenant", tenantId: "globex" },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      const a = await t1.idempotency.reserve({
+        key: "shared-key",
+        fingerprint: "fp",
+        owner: "w",
+        leaseMs: 10_000,
+      });
+      const b = await t2.idempotency.reserve({
+        key: "shared-key",
+        fingerprint: "fp",
+        owner: "w",
+        leaseMs: 10_000,
+      });
+      expect(a.kind).toBe("acquired");
+      expect(b.kind).toBe("acquired");
+      expect(ns.partitions.has("tenant:acme")).toBe(true);
+      expect(ns.partitions.has("tenant:globex")).toBe(true);
     } finally {
       ns.close();
     }
@@ -489,6 +491,85 @@ describe("do multi-partition discovery fan-out", () => {
           leaseMs: 30_000,
         }),
       ).rejects.toThrow(/DO-1|partitions sealed|partitions changed/i);
+    } finally {
+      ns.close();
+    }
+  });
+
+  it("P17-CLEAN: bounded deleteExpired does not starve later hash partitions", async () => {
+    const prefix = uniqueTablePrefix("cln");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const ns = createMockDoNamespace({ clock });
+    try {
+      const partitions = 2;
+      const stores = createDoPaymentStores({
+        namespace: ns.namespace,
+        sharding: { kind: "hash", partitions },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+
+      const keysForPart = (part: number, count: number): string[] => {
+        const keys: string[] = [];
+        for (let i = 0; keys.length < count; i++) {
+          const key = `cln${part}_${i}`;
+          const shard = resolveDoShardName(
+            { kind: "hash", partitions },
+            { key },
+          );
+          if (shard.endsWith(`:${part}`)) keys.push(key);
+        }
+        return keys;
+      };
+
+      // Partition 0 has more than `limit` eligible rows; partition 1 also has some.
+      const part0 = keysForPart(0, 8);
+      const part1 = keysForPart(1, 4);
+      expect(part0).toHaveLength(8);
+      expect(part1).toHaveLength(4);
+
+      for (const key of [...part0, ...part1]) {
+        await stores.reconciliation.schedule({
+          key,
+          subjectId: `sub_${key}`,
+          reason: "timeout",
+          dueAt: now,
+        });
+        const claim = await stores.reconciliation.claim({
+          key,
+          owner: "w",
+          leaseMs: 30_000,
+        });
+        expect(claim.kind).toBe("acquired");
+        if (claim.kind !== "acquired") return;
+        await stores.reconciliation.complete({
+          key,
+          leaseToken: claim.leaseToken,
+        });
+      }
+
+      clock.advance(60_000);
+      const before = new Date(clock.nowMs()).toISOString();
+      const limit = 3;
+
+      const result = await stores.reconciliation.deleteExpired({
+        before,
+        limit,
+      });
+      expect(result.deleted).toBe(limit);
+
+      const gone = async (keys: string[]) => {
+        const rows = await Promise.all(keys.map((k) => stores.reconciliation.get(k)));
+        return rows.filter((r) => r === undefined).length;
+      };
+
+      const gone0 = await gone(part0);
+      const gone1 = await gone(part1);
+      // Single limited delete must not exclusively drain index 0 while
+      // partition 1 still has eligible rows.
+      expect(gone0).toBeGreaterThan(0);
+      expect(gone1).toBeGreaterThan(0);
     } finally {
       ns.close();
     }

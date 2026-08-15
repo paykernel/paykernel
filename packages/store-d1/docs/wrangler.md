@@ -10,7 +10,10 @@
 ```toml
 name = "payments-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+# Bumped for node:async_hooks (AsyncLocalStorage). Required so a Worker
+# that copies this config does not fail on `import … from "node:async_hooks"`.
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "PAYMENTS_DB"
@@ -61,7 +64,7 @@ npx wrangler d1 migrations apply payments --local
 npx wrangler d1 migrations apply payments --remote
 ```
 
-Prefer `migrateD1Adapter(env.PAYMENTS_DB)` for parity with sql-store foundation DDL.  
+Prefer `migrateD1Adapter(env.PAYMENTS_DB)` for parity with `@paykernel/sql-foundation` DDL.  
 Details: [migrations.md](./migrations.md). Reference SQL: `migrations/0001_foundation.sql`.
 
 ---
@@ -71,8 +74,9 @@ Details: [migrations.md](./migrations.md). Reference SQL: `migrations/0001_found
 - Normal operation uses the **Workers binding only** — no Cloudflare REST / account API token for store construction.
 - Optional peer `@cloudflare/workers-types` improves `D1Database` typing; the package uses structural types so portable monorepo typecheck does not require `cloudflare:workers`.
 - Do not leak `cloudflare:workers` imports into core/webhooks/testkit.
+- **`compatibility_flags = ["nodejs_compat"]` is required.** `@paykernel/store-d1` imports `node:async_hooks` (`AsyncLocalStorage`) for `withTransaction` isolation. A Worker copying `examples/wrangler.toml` without this flag fails at module load. `nodejs_als` is an acceptable narrower substitute.
 - Batch size and D1 platform limits apply; prefer single-statement claims ([limits.md](./limits.md)).
-- Read replication: [sessions-and-replication.md](./sessions-and-replication.md).
+- Read replication: [sessions-and-replication.md](./sessions-and-replication.md). Defaults to `session: "first-primary"` when `db.withSession` exists.
 - Multi-host honesty: all instances must share **one** D1 database id.
 
 ---

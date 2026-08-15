@@ -42,7 +42,7 @@ Details: [sharding.md](./sharding.md).
 
 ## Comparison matrix
 
-| Concern | **adapter-cloudflare-do** | adapter-cloudflare-d1 | adapter-sqlite | adapter-turso |
+| Concern | **store-durable-objects** | store-d1 | store-sqlite | store-turso |
 | ------- | ------------------------- | --------------------- | -------------- | ------------- |
 | Coordination | **Multi-host partitioned** DO (strong **within** partition) | **Multi-host shared** D1 | **Single-host** local file | **Multi-host** remote Turso/libSQL |
 | API | Worker stub RPC + sync in-object SQL | Workers D1 binding async | Sync `BEGIN IMMEDIATE` | Async libSQL/serverless clients |
@@ -53,7 +53,7 @@ Details: [sharding.md](./sharding.md).
 
 Do **not**:
 
-- Merge this package into `adapter-cloudflare-d1` or invent a generic `adapter-cloudflare`
+- Merge this package into `store-d1` or invent a generic `adapter-cloudflare` / umbrella Cloudflare store
 - Treat DO as a drop-in for local SQLite or Turso
 - Default all payment work to one global Durable Object
 - Use legacy KV-only DO (`new_classes` without SQLite) — this adapter needs `new_sqlite_classes` / `storage.sql`

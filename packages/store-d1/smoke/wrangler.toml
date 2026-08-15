@@ -9,7 +9,10 @@
 
 name = "paykernel-d1-smoke"
 main = "worker.ts"
-compatibility_date = "2024-09-23"
+# Bumped for node:async_hooks (AsyncLocalStorage). store-d1 imports
+# node:async_hooks; Workers without nodejs_compat fail at module load.
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 account_id = "53fb41ede04e54b276ce3fd9bfd270b6"
 

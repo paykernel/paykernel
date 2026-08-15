@@ -12,7 +12,7 @@ import type {
 import type { D1Executor } from "./executor";
 import type { StoreClock } from "./clock";
 
-export type { D1Executor } from "./executor";
+export type { D1Executor, D1ExecutorOptions } from "./executor";
 export type { StoreClock } from "./clock";
 export type { SchemaNamespaceConfig, ResolvedSchemaNamespace };
 
@@ -26,10 +26,12 @@ export type D1PreparedStatementLike = {
   all<T = Record<string, unknown>>(): Promise<{
     results: T[];
     success: boolean;
+    error?: string;
     meta?: unknown;
   }>;
   run(): Promise<{
     success: boolean;
+    error?: string;
     meta?: { changes?: number; [key: string]: unknown };
     results?: unknown[];
   }>;
@@ -76,6 +78,7 @@ export type D1BindingStoreOptions = {
    *
    * - **Default (omitted):** `"first-primary"` when `db.withSession` exists — primary-first
    *   session so post-claim SELECTs are not served from a stale replica.
+   *   Same default as `createD1Executor` / `migrateD1Adapter` on a raw binding.
    * - **string:** explicit constraint/bookmark (e.g. `"first-primary"`, `"first-unconstrained"`, bookmark).
    * - **`false`:** opt out of sessions (stale replica reads possible under D1 read replication).
    *

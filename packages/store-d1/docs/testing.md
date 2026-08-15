@@ -66,7 +66,7 @@ From monorepo root (safety net including D1):
 
 ```bash
 bun test packages/store-d1
-bun test packages/core packages/testkit packages/webhooks internal/sql-store \
+bun test packages/core packages/testkit packages/webhooks packages/sql-foundation \
   packages/store-postgres packages/store-redis packages/store-sqlite \
   packages/store-turso packages/store-d1
 ```

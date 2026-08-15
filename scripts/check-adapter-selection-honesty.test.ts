@@ -261,6 +261,33 @@ describe("docs/adapter-selection.md honesty phrases match matrix", () => {
     );
   });
 
+  it("libSQL matrix + guide do not claim a flat distributed yes", () => {
+    const libsql = ADAPTER_SELECTION_MATRIX.find(
+      (r) => r.rowId === "turso-libsql",
+    );
+    expect(libsql).toBeDefined();
+    expect(libsql!.distributed).not.toBe("yes");
+    expect(libsql!.distributed).toBe("yes-remote-local-file-single-host");
+    expect(libsql!.importantLimitation).toMatch(/remote multi-host/i);
+    expect(libsql!.importantLimitation).toMatch(
+      /local file: is single-host testing only/i,
+    );
+    expect(guide).toMatch(
+      /Yes\*{0,2}\s+remote multi-host;\s+local `file:` is single-host testing only/i,
+    );
+  });
+
+  it("turso-serverless limitation names store-sqlite, not adapter-sqlite", () => {
+    const serverless = ADAPTER_SELECTION_MATRIX.find(
+      (r) => r.rowId === "turso-serverless",
+    );
+    expect(serverless).toBeDefined();
+    expect(serverless!.importantLimitation).not.toMatch(/adapter-sqlite/);
+    expect(serverless!.importantLimitation).toMatch(
+      /store-sqlite|@paykernel\/store-sqlite/,
+    );
+  });
+
   it("cheat sheet lists each manifest family with its matrix coordinationScope", () => {
     // Matrix is the only honesty source; guide must still show that scope per family.
     const families: Array<{ manifestName: string; guideLabel: string }> = [
@@ -284,5 +311,178 @@ describe("docs/adapter-selection.md honesty phrases match matrix", () => {
       );
       expect(guide).toMatch(rowPattern);
     }
+  });
+});
+
+type MermaidEdge = { from: string; via: string; to: string };
+
+function stripMermaidMarkup(s: string): string {
+  return s.replace(/<br\s*\/?>/gi, " ").replace(/\s+/g, " ").trim();
+}
+
+function extractMermaidBlock(guide: string): string {
+  const m = guide.match(/```mermaid\n([\s\S]*?)```/);
+  if (!m) throw new Error("docs/adapter-selection.md is missing a mermaid block");
+  return m[1]!;
+}
+
+function extractNumberedQa(guide: string): string {
+  const m = guide.match(
+    /### 3\.2 Numbered questions[\s\S]*?(?=\n---\n|\n## 4\))/,
+  );
+  if (!m) throw new Error("docs/adapter-selection.md is missing §3.2 numbered Q&A");
+  return m[0]!;
+}
+
+function parseMermaidGraph(src: string): {
+  nodes: Map<string, string>;
+  edges: MermaidEdge[];
+} {
+  const nodes = new Map<string, string>();
+  const edges: MermaidEdge[] = [];
+  const nodeRe =
+    /(\w+)(?:\["([^"]+)"\]|\{([^}]+)\}|\(\[([^\]]+)\]\))/g;
+  const edgeRe = /(\w+)\s*(?:-->|-.->)(?:\|([^|]+)\|)?\s*(\w+)/g;
+
+  for (const raw of src.split("\n")) {
+    const line = raw.trim();
+    if (!line || line.startsWith("flowchart") || line.startsWith("%%")) {
+      continue;
+    }
+    for (const m of line.matchAll(nodeRe)) {
+      nodes.set(m[1]!, stripMermaidMarkup(m[2] ?? m[3] ?? m[4] ?? ""));
+    }
+    for (const m of line.matchAll(edgeRe)) {
+      edges.push({
+        from: m[1]!,
+        via: stripMermaidMarkup(m[2] ?? ""),
+        to: m[3]!,
+      });
+    }
+  }
+  return { nodes, edges };
+}
+
+function reachableFrom(
+  edges: MermaidEdge[],
+  start: string,
+  skip?: (edge: MermaidEdge) => boolean,
+): Set<string> {
+  const seen = new Set<string>();
+  const stack = [start];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const edge of edges) {
+      if (edge.from !== id) continue;
+      if (skip?.(edge)) continue;
+      stack.push(edge.to);
+    }
+  }
+  return seen;
+}
+
+describe("docs/adapter-selection.md decision tree — Workers / fail-closed", () => {
+  const guidePath = join(
+    import.meta.dir,
+    "..",
+    "docs",
+    "adapter-selection.md",
+  );
+  const guide = readFileSync(guidePath, "utf8");
+  const mermaid = extractMermaidBlock(guide);
+  const qa = extractNumberedQa(guide);
+  const graph = parseMermaidGraph(mermaid);
+
+  it("after Q1 no-postgres, Workers Yes path is D1 or DO — never store-sqlite or Turso", () => {
+    const q1 = [...graph.nodes.entries()].find(([, label]) =>
+      /Existing PostgreSQL/i.test(label),
+    );
+    expect(q1).toBeDefined();
+    const q1No = graph.edges.find(
+      (e) => e.from === q1![0] && /^No$/i.test(e.via),
+    );
+    expect(q1No).toBeDefined();
+
+    const workersId = q1No!.to;
+    const workersLabel = graph.nodes.get(workersId) ?? "";
+    expect(workersLabel).toMatch(/Cloudflare Workers/i);
+    // Must not hide DO (or greenfield D1) behind "already on D1".
+    expect(workersLabel).not.toMatch(/already on D1/i);
+
+    const workersYes = graph.edges.find(
+      (e) => e.from === workersId && /^Yes$/i.test(e.via),
+    );
+    expect(workersYes).toBeDefined();
+
+    const yesReachable = reachableFrom(graph.edges, workersYes!.to);
+    yesReachable.add(workersYes!.to);
+    const yesLabels = [...yesReachable].map(
+      (id) => graph.nodes.get(id) ?? id,
+    );
+    const yesBlob = yesLabels.join("\n");
+
+    expect(yesBlob).toMatch(/store-d1/i);
+    expect(yesBlob).toMatch(/store-durable-objects/i);
+    expect(yesBlob).not.toMatch(/store-sqlite/i);
+    expect(yesBlob).not.toMatch(/store-turso/i);
+  });
+
+  it("Workers Yes path can still reach DO when already on D1 (per-key not hidden)", () => {
+    const q1 = [...graph.nodes.entries()].find(([, label]) =>
+      /Existing PostgreSQL/i.test(label),
+    );
+    const q1No = graph.edges.find(
+      (e) => e.from === q1![0] && /^No$/i.test(e.via),
+    );
+    const workersYes = graph.edges.find(
+      (e) => e.from === q1No!.to && /^Yes$/i.test(e.via),
+    );
+    const yesReachable = reachableFrom(graph.edges, workersYes!.to);
+    yesReachable.add(workersYes!.to);
+
+    const doNode = [...yesReachable].find((id) =>
+      /store-durable-objects/i.test(graph.nodes.get(id) ?? ""),
+    );
+    expect(doNode).toBeDefined();
+    expect(graph.nodes.get(doNode!) ?? "").toMatch(/never global/i);
+
+    const pathLabels = [...yesReachable]
+      .map((id) => graph.nodes.get(id) ?? "")
+      .concat(graph.edges.filter((e) => yesReachable.has(e.from)).map((e) => e.via))
+      .join(" ");
+    expect(pathLabels).toMatch(/per-key|per-partition/i);
+    expect(pathLabels).toMatch(/already on D1/i);
+  });
+
+  it("fail-closed STOP covers multi-isolate + only local file", () => {
+    const stop = [...graph.nodes.entries()].find(
+      ([id, label]) => id === "STOP" || /FAIL-CLOSED/i.test(label),
+    );
+    expect(stop).toBeDefined();
+    const incoming = graph.edges.filter((e) => e.to === stop![0]);
+    const context = [stop![1], ...incoming.map((e) => e.via)].join(" ");
+    expect(context).toMatch(/multi-isolate/i);
+    expect(context).toMatch(/local file|local SQLite/i);
+    expect(qa).toMatch(/multi-isolate/i);
+    expect(qa).toMatch(/FAIL-CLOSED/i);
+  });
+
+  it("numbered Q&A: Workers get D1 or DO, never store-sqlite; greenfield default is D1", () => {
+    const q2 = qa.match(
+      /2\.\s+\*\*Cloudflare Workers[\s\S]*?(?=\n\d+\.\s|\n\*\*Fail-closed)/,
+    );
+    expect(q2).toBeTruthy();
+    const block = q2![0];
+    expect(block).toMatch(/@paykernel\/store-d1/);
+    expect(block).toMatch(/@paykernel\/store-durable-objects/);
+    expect(block).toMatch(/Worker-native/i);
+    expect(block).toMatch(/never.*store-sqlite|not.*@paykernel\/store-sqlite/i);
+    expect(block).not.toMatch(/@paykernel\/store-turso/);
+    expect(block).toMatch(
+      /already (?:on|use|using) D1|including if you already/i,
+    );
+    expect(block).toMatch(/Never.*global Durable Object|never global/i);
   });
 });

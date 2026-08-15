@@ -6,11 +6,13 @@
  */
 
 import {
+  StoreConflictError,
   StoreCorruptedRecordError,
   StoreUnsupportedFeatureError,
   StoreError,
   StoreInvalidSchemaError,
   StoreLeaseLostError,
+  StorePayloadHashConflictError,
   StoreSerializationFailureError,
   StoreTimeoutError,
   StoreUnavailableError,
@@ -54,7 +56,109 @@ function readCode(err: unknown): string | undefined {
 function readMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (typeof err === "string") return err;
+  if (err !== null && typeof err === "object") {
+    const m = (err as { message?: unknown }).message;
+    if (typeof m === "string") return m;
+  }
   return "";
+}
+
+function readName(err: unknown): string | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  const n = (err as { name?: unknown }).name;
+  return typeof n === "string" && n.length > 0 ? n : undefined;
+}
+
+/** CF RPC clones Error as `{ name, message }` — no prototype / no `code`. */
+const STORE_ERROR_BY_NAME: Record<
+  string,
+  new (message?: string, cause?: unknown) => StoreError
+> = {
+  StoreLeaseLostError,
+  StoreUnsupportedFeatureError,
+  StoreInvalidSchemaError,
+  StoreUnavailableError,
+  StoreTimeoutError,
+  StoreSerializationFailureError,
+  StoreCorruptedRecordError,
+  StoreConflictError,
+  StorePayloadHashConflictError,
+};
+
+function storeErrorFromCode(
+  code: string,
+  message: string,
+  cause?: unknown,
+): StoreError | undefined {
+  switch (code) {
+    case "lease_lost":
+      return new StoreLeaseLostError(message, cause);
+    case "unsupported_feature":
+      return new StoreUnsupportedFeatureError(message, cause);
+    case "invalid_schema":
+      return new StoreInvalidSchemaError(message, cause);
+    case "unavailable":
+      return new StoreUnavailableError(message, cause);
+    case "timeout":
+      return new StoreTimeoutError(message, cause);
+    case "serialization_failure":
+      return new StoreSerializationFailureError(message, cause);
+    case "corrupted_record":
+      return new StoreCorruptedRecordError(message, cause);
+    case "conflict":
+      return new StoreConflictError(message, cause);
+    case "payload_hash_conflict":
+      return new StorePayloadHashConflictError(message, cause);
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Rebuild a StoreError after a Worker stub hop.
+ *
+ * Cloudflare RPC clones `Error` as `{ name, message }` only (no prototype).
+ * Match `err.name` (`StoreLeaseLostError`, …) and/or a serializable envelope
+ * `{ __pkStoreError, code }`. Never treat `lease_lost` as retryable unavailable.
+ */
+export function reconstructStoreError(err: unknown): StoreError | undefined {
+  if (err instanceof StoreError) return err;
+  if (err === null || typeof err !== "object") return undefined;
+
+  const e = err as {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    __pkStoreError?: unknown;
+  };
+  const rawMsg = readMessage(err);
+  const msg = sanitizeMessage(rawMsg, "Store operation failed");
+
+  if (e.__pkStoreError === true) {
+    const envelopeCode =
+      typeof e.code === "string"
+        ? e.code
+        : typeof e.code === "number"
+          ? String(e.code)
+          : undefined;
+    if (envelopeCode) {
+      const fromEnvelope = storeErrorFromCode(envelopeCode, msg, err);
+      if (fromEnvelope) return fromEnvelope;
+    }
+  }
+
+  const name = readName(err);
+  if (name && name in STORE_ERROR_BY_NAME) {
+    const Ctor = STORE_ERROR_BY_NAME[name]!;
+    return new Ctor(msg, err);
+  }
+
+  const code = readCode(err);
+  if (code === "lease_lost") {
+    return new StoreLeaseLostError(msg, err);
+  }
+
+  return undefined;
 }
 
 /**
@@ -63,15 +167,14 @@ function readMessage(err: unknown): string {
 export function mapDriverError(err: unknown): StoreError {
   if (err instanceof StoreError) return err;
 
+  const reconstructed = reconstructStoreError(err);
+  if (reconstructed) return reconstructed;
+
   const code = readCode(err);
   const rawMsg = readMessage(err);
   const msg = sanitizeMessage(rawMsg, "Store operation failed");
   const lower = rawMsg.toLowerCase();
   const codeUpper = (code ?? "").toUpperCase();
-
-  if (code === "lease_lost") {
-    return new StoreLeaseLostError(msg, err);
-  }
 
   if (
     codeUpper === "SQLITE_BUSY" ||
@@ -195,6 +298,10 @@ export async function withMappedErrors<T>(fn: () => Promise<T> | T): Promise<T> 
     return await fn();
   } catch (err) {
     if (err instanceof StoreError) throw err;
+    const reconstructed = reconstructStoreError(err);
+    if (reconstructed) throw reconstructed;
+    // Programming / stub-surface errors stay TypeError (e.g. missing RPC).
+    if (err instanceof TypeError) throw err;
     throw mapDriverError(err);
   }
 }
@@ -209,6 +316,8 @@ export async function withMappedTransaction<T>(
     return await run();
   } catch (err) {
     if (err instanceof StoreError) throw err;
+    const reconstructed = reconstructStoreError(err);
+    if (reconstructed) throw reconstructed;
     if (isLikelyDriverFailure(err)) throw mapDriverError(err);
     throw err;
   }
@@ -224,4 +333,6 @@ export {
   StoreInvalidSchemaError,
   StoreCorruptedRecordError,
   StoreUnsupportedFeatureError,
+  StoreConflictError,
+  StorePayloadHashConflictError,
 };

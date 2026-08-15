@@ -15,6 +15,9 @@ Alarms are **optional** and **default-off**. Enable only when a partition needs 
 4. **Bounded retries** + exponential **backoff with jitter**.
 5. Never hold `transactionSync` open across external provider I/O inside alarm handlers.
 6. Do **not** treat alarms as exactly-once delivery.
+7. **`failWebhook` is not wired to alarms.** Default recovery is **pull-only**
+   (`listRetryable` / `listDue`). Enable the optional alarm queue only when you
+   explicitly enqueue work — do not assume `fail` schedules a platform alarm.
 
 ## Handler sketch
 

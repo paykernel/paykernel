@@ -13,7 +13,10 @@
 
 name = "payments-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+# Bumped for node:async_hooks (AsyncLocalStorage). store-d1 imports
+# node:async_hooks; Workers without nodejs_compat fail at module load.
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "PAYMENTS_DB"          # env.PAYMENTS_DB in Worker
@@ -36,8 +39,8 @@ database_id = "<your-d1-id>"
 #
 #     const stores = createD1PaymentStores({
 #       db: env.PAYMENTS_DB,
-#       // Optional: session for read-after-write under D1 read replication
-#       // session: "first-primary",
+#       // Defaults to session: "first-primary" when db.withSession exists.
+#       // Opt out: session: false
 #     });
 #
 #     const r = await stores.idempotency.reserve({

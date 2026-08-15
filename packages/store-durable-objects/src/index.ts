@@ -103,6 +103,7 @@ export { createSystemClock, clockNowIso, clockAddMsIso } from "./clock";
 
 export {
   mapDriverError,
+  reconstructStoreError,
   withMappedErrors,
   withMappedTransaction,
   isLikelyDriverFailure,
@@ -116,6 +117,13 @@ export {
   StoreUnsupportedFeatureError,
 } from "./errors";
 export type { StoreErrorCode } from "./errors";
+
+export {
+  REQUIRED_DO_RPC_METHODS,
+  REQUIRED_DO_STORE_RPC_METHODS,
+  REQUIRED_DO_HASH_RPC_METHODS,
+} from "./rpc";
+export type { RequiredDoRpcMethod } from "./rpc";
 
 export { PaymentsStoreObject } from "./object/payments-store-object";
 export type { PaymentsStoreObjectOptions } from "./object/payments-store-object";

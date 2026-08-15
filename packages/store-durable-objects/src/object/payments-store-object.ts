@@ -74,34 +74,30 @@ export type PaymentsStoreObjectOptions = {
 /**
  * Encapsulates schema ensure + claim RPC methods for one Durable Object partition.
  */
+type CachedNamespaceStores = {
+  idempotency: ReturnType<typeof createDoIdempotencyStore>;
+  webhookInbox: ReturnType<typeof createDoWebhookInboxStore>;
+  reconciliation: ReturnType<typeof createDoReconciliationStore>;
+  schemaReady: boolean;
+  schemaPromise: Promise<void> | undefined;
+};
+
 export class PaymentsStoreObject {
   readonly storage: DoStorageLike;
   readonly clock: StoreClock;
   private readonly namespace: SchemaNamespaceConfig | undefined;
+  private readonly executor: ReturnType<typeof createDoExecutor>;
   private readonly alarmsEnabled: boolean;
   private alarmScheduler: AlarmScheduler | undefined;
-  private schemaReady = false;
-  private schemaPromise: Promise<void> | undefined;
-
-  private idempotency: ReturnType<typeof createDoIdempotencyStore>;
-  private webhookInbox: ReturnType<typeof createDoWebhookInboxStore>;
-  private reconciliation: ReturnType<typeof createDoReconciliationStore>;
+  private readonly storeCache = new Map<string, CachedNamespaceStores>();
 
   constructor(options: PaymentsStoreObjectOptions) {
     this.storage = options.storage;
     this.clock = options.clock ?? createSystemClock();
     this.namespace = options.namespace;
     this.alarmsEnabled = options.alarms?.enabled === true;
-
-    const executor = createDoExecutor(options.storage);
-    const storeOpts = {
-      executor,
-      clock: this.clock,
-      ...(options.namespace !== undefined ? { namespace: options.namespace } : {}),
-    };
-    this.idempotency = createDoIdempotencyStore(storeOpts);
-    this.webhookInbox = createDoWebhookInboxStore(storeOpts);
-    this.reconciliation = createDoReconciliationStore(storeOpts);
+    this.executor = createDoExecutor(options.storage);
+    this.getOrCreateStores(options.namespace);
 
     if (this.alarmsEnabled) {
       ensureAlarmQueueSchema(options.storage);
@@ -128,25 +124,76 @@ export class PaymentsStoreObject {
     }
   }
 
+  private nsCacheKey(ns?: SchemaNamespaceConfig): string {
+    if (ns === undefined) return "";
+    return JSON.stringify({
+      p: ns.tablePrefix ?? "",
+      s: ns.sqlSchema ?? "",
+      t: ns.tenantColumn ?? false,
+    });
+  }
+
+  private getOrCreateStores(ns?: SchemaNamespaceConfig): CachedNamespaceStores {
+    const key = this.nsCacheKey(ns);
+    let cached = this.storeCache.get(key);
+    if (cached) return cached;
+    const storeOpts = {
+      executor: this.executor,
+      clock: this.clock,
+      ...(ns !== undefined ? { namespace: ns } : {}),
+    };
+    cached = {
+      idempotency: createDoIdempotencyStore(storeOpts),
+      webhookInbox: createDoWebhookInboxStore(storeOpts),
+      reconciliation: createDoReconciliationStore(storeOpts),
+      schemaReady: false,
+      schemaPromise: undefined,
+    };
+    this.storeCache.set(key, cached);
+    return cached;
+  }
+
+  private ensureCachedSchema(
+    cached: CachedNamespaceStores,
+    ns?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    if (cached.schemaReady) return Promise.resolve();
+    if (cached.schemaPromise) return cached.schemaPromise;
+    const opts = ns !== undefined ? { namespace: ns } : {};
+    cached.schemaPromise = ensureDoSchema(this.storage, opts)
+      .then(() => {
+        cached.schemaReady = true;
+      })
+      .catch((err) => {
+        cached.schemaPromise = undefined;
+        throw err;
+      });
+    return cached.schemaPromise;
+  }
+
   /**
    * Explicit schema ensure (sql-store sqlite foundation).
    * Call from DO constructor (e.g. blockConcurrencyWhile) or ops — never on package import.
    */
-  async ensureSchema(): Promise<void> {
-    if (this.schemaReady) return;
-    if (this.schemaPromise) return this.schemaPromise;
-    const opts =
-      this.namespace !== undefined ? { namespace: this.namespace } : {};
-    this.schemaPromise = ensureDoSchema(this.storage, opts)
-      .then(() => {
-        this.schemaReady = true;
-      })
-      .catch((err) => {
-        // Allow a later retry after a transient ensure failure.
-        this.schemaPromise = undefined;
-        throw err;
-      });
-    return this.schemaPromise;
+  async ensureSchema(namespace?: SchemaNamespaceConfig): Promise<void> {
+    const ns = namespace ?? this.namespace;
+    const cached = this.getOrCreateStores(ns);
+    return this.ensureCachedSchema(cached, ns);
+  }
+
+  /**
+   * Resolve stores for an RPC. When the Worker sent `tableNamespace`, apply it
+   * (constructor default is used when omitted) and ensure that prefix's schema.
+   */
+  private async readyStores(
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<CachedNamespaceStores> {
+    const ns = tableNamespace ?? this.namespace;
+    const cached = this.getOrCreateStores(ns);
+    if (tableNamespace !== undefined) {
+      await this.ensureCachedSchema(cached, ns);
+    }
+    return cached;
   }
 
   /**
@@ -169,32 +216,38 @@ export class PaymentsStoreObject {
       );
     }
     try {
-      this.storage.sql.exec(
-        `CREATE TABLE IF NOT EXISTS pk_do_hash_layout (
-          id INTEGER PRIMARY KEY CHECK (id = 1),
-          partitions INTEGER NOT NULL
-        )`,
-      );
-      const rows = this.storage.sql
-        .exec(`SELECT partitions AS partitions FROM pk_do_hash_layout WHERE id = 1`)
-        .toArray();
-      if (rows.length === 0) {
-        this.storage.sql.exec(
-          `INSERT INTO pk_do_hash_layout (id, partitions) VALUES (1, ?)`,
-          partitions,
-        );
-        return Promise.resolve();
-      }
-      const sealed = Number(rows[0]!["partitions"]);
-      if (sealed !== partitions) {
-        return Promise.reject(
-          new TypeError(
+      this.storage.transactionSync(() => {
+        this.storage.sql
+          .exec(
+            `CREATE TABLE IF NOT EXISTS pk_do_hash_layout (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              partitions INTEGER NOT NULL
+            )`,
+          )
+          .toArray();
+        const rows = this.storage.sql
+          .exec(
+            `SELECT partitions AS partitions FROM pk_do_hash_layout WHERE id = 1`,
+          )
+          .toArray();
+        if (rows.length === 0) {
+          this.storage.sql
+            .exec(
+              `INSERT INTO pk_do_hash_layout (id, partitions) VALUES (1, ?)`,
+              partitions,
+            )
+            .toArray();
+          return;
+        }
+        const sealed = Number(rows[0]!["partitions"]);
+        if (sealed !== partitions) {
+          throw new TypeError(
             `sharding DO-1: hash partitions sealed as ${sealed} but config is ${partitions}. ` +
               `Changing N re-routes keys and orphans Durable Object state. ` +
               `Keep partitions fixed, or use a new layoutId/objectNamePrefix and migrate — never silently route to empty DOs.`,
-          ),
-        );
-      }
+          );
+        }
+      });
       return Promise.resolve();
     } catch (err) {
       return Promise.reject(err);
@@ -203,106 +256,184 @@ export class PaymentsStoreObject {
 
   // ── Idempotency RPC ──────────────────────────────────────────────────────
 
-  reserveIdempotency(
+  async reserveIdempotency(
     input: ReserveIdempotencyInput,
+    tableNamespace?: SchemaNamespaceConfig,
   ): Promise<IdempotencyReservation> {
-    return this.idempotency.reserve(input);
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.reserve(input);
   }
 
-  renewIdempotency(
+  async renewIdempotency(
     input: RenewIdempotencyReservationInput,
+    tableNamespace?: SchemaNamespaceConfig,
   ): Promise<RenewReservationResult> {
-    return this.idempotency.renew(input);
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.renew(input);
   }
 
-  completeIdempotency(input: CompleteIdempotencyInput): Promise<void> {
-    return this.idempotency.complete(input);
+  async completeIdempotency(
+    input: CompleteIdempotencyInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.complete(input);
   }
 
-  markIdempotencyIndeterminate(input: MarkIndeterminateInput): Promise<void> {
-    return this.idempotency.markIndeterminate(input);
+  async markIdempotencyIndeterminate(
+    input: MarkIndeterminateInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.markIndeterminate(input);
   }
 
-  getIdempotency(key: IdempotencyKey): Promise<IdempotencyRecord | undefined> {
-    return this.idempotency.get(key);
+  async getIdempotency(
+    key: IdempotencyKey,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<IdempotencyRecord | undefined> {
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.get(key);
   }
 
-  deleteExpiredIdempotency(input: CleanupInput): Promise<CleanupResult> {
-    return this.idempotency.deleteExpired(input);
+  async deleteExpiredIdempotency(
+    input: CleanupInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<CleanupResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.idempotency.deleteExpired(input);
   }
 
   // ── Webhook RPC ──────────────────────────────────────────────────────────
 
-  claimWebhook(input: ClaimWebhookInput): Promise<ClaimWebhookResult> {
-    return this.webhookInbox.claim(input);
+  async claimWebhook(
+    input: ClaimWebhookInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<ClaimWebhookResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.claim(input);
   }
 
-  renewWebhook(input: RenewWebhookLeaseInput): Promise<RenewWebhookLeaseResult> {
-    return this.webhookInbox.renew(input);
+  async renewWebhook(
+    input: RenewWebhookLeaseInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<RenewWebhookLeaseResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.renew(input);
   }
 
-  completeWebhook(input: CompleteWebhookInput): Promise<void> {
-    return this.webhookInbox.complete(input);
+  async completeWebhook(
+    input: CompleteWebhookInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.complete(input);
   }
 
-  failWebhook(input: FailWebhookInput): Promise<void> {
-    return this.webhookInbox.fail(input);
+  async failWebhook(
+    input: FailWebhookInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.fail(input);
   }
 
-  getWebhook(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-    return this.webhookInbox.get(key);
+  async getWebhook(
+    key: WebhookEventKey,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<WebhookInboxRecord | undefined> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.get(key);
   }
 
-  listRetryableWebhooks(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
-    return this.webhookInbox.listRetryable(input);
+  async listRetryableWebhooks(
+    input: ListRetryableInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<WebhookInboxRecord[]> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.listRetryable(input);
   }
 
-  deleteExpiredWebhooks(input: CleanupInput): Promise<CleanupResult> {
-    return this.webhookInbox.deleteExpired(input);
+  async deleteExpiredWebhooks(
+    input: CleanupInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<CleanupResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.deleteExpired(input);
   }
 
   // ── Reconciliation RPC ───────────────────────────────────────────────────
 
-  scheduleReconciliation(
+  async scheduleReconciliation(
     input: ScheduleReconciliationInput,
+    tableNamespace?: SchemaNamespaceConfig,
   ): Promise<ScheduleResult> {
-    return this.reconciliation.schedule(input);
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.schedule(input);
   }
 
-  claimReconciliation(input: ClaimReconciliationInput): Promise<ClaimResult> {
-    return this.reconciliation.claim(input);
+  async claimReconciliation(
+    input: ClaimReconciliationInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<ClaimResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.claim(input);
   }
 
-  renewReconciliation(
+  async renewReconciliation(
     input: RenewReconciliationLeaseInput,
+    tableNamespace?: SchemaNamespaceConfig,
   ): Promise<RenewReconciliationLeaseResult> {
-    return this.reconciliation.renew(input);
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.renew(input);
   }
 
-  completeReconciliation(input: CompleteReconciliationInput): Promise<void> {
-    return this.reconciliation.complete(input);
+  async completeReconciliation(
+    input: CompleteReconciliationInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.complete(input);
   }
 
-  failReconciliation(input: FailReconciliationInput): Promise<void> {
-    return this.reconciliation.fail(input);
+  async failReconciliation(
+    input: FailReconciliationInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.fail(input);
   }
 
-  markReconciliationManualReview(input: MarkManualReviewInput): Promise<void> {
-    return this.reconciliation.markManualReview(input);
+  async markReconciliationManualReview(
+    input: MarkManualReviewInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<void> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.markManualReview(input);
   }
 
-  getReconciliation(
+  async getReconciliation(
     key: ReconciliationKey,
+    tableNamespace?: SchemaNamespaceConfig,
   ): Promise<ReconciliationRecord | undefined> {
-    return this.reconciliation.get(key);
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.get(key);
   }
 
-  listDueReconciliation(input: ListDueInput): Promise<ReconciliationRecord[]> {
-    return this.reconciliation.listDue(input);
+  async listDueReconciliation(
+    input: ListDueInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<ReconciliationRecord[]> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.listDue(input);
   }
 
-  deleteExpiredReconciliation(input: CleanupInput): Promise<CleanupResult> {
-    return this.reconciliation.deleteExpired(input);
+  async deleteExpiredReconciliation(
+    input: CleanupInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<CleanupResult> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.deleteExpired(input);
   }
 
   // ── Alarms (optional) ────────────────────────────────────────────────────

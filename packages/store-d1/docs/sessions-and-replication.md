@@ -41,11 +41,12 @@ import {
   supportsD1Sessions,
 } from "@paykernel/store-d1";
 
-// Ergonomic: binding factories default to session "first-primary" when
-// db.withSession exists (safe RAW under read replication).
+// Binding factories and createD1Executor default to session "first-primary"
+// when db.withSession exists (safe RAW under read replication).
 const stores = createD1PaymentStores({
   db: env.PAYMENTS_DB,
 });
+const executor = createD1Executor(env.PAYMENTS_DB);
 
 // Explicit constraint / bookmark
 const storesBookmarked = createD1PaymentStores({
@@ -61,21 +62,21 @@ const storesNoSession = createD1PaymentStores({
 
 // Or wrap binding / executor
 const db = withD1Session(env.PAYMENTS_DB, D1_SESSION_FIRST_PRIMARY);
-const executor = createSessionScopedExecutor(env.PAYMENTS_DB);
+const scoped = createSessionScopedExecutor(env.PAYMENTS_DB);
 
 if (supportsD1Sessions(env.PAYMENTS_DB)) {
   // binding exposes withSession
 }
 ```
 
-### Default guidance (binding factories)
+### Default guidance (binding factories and createD1Executor)
 
 | Call | Session behavior |
 | ---- | ---------------- |
 | `createD1PaymentStores({ db })` (session omitted) | **`first-primary`** when `db.withSession` exists; otherwise unbound |
+| `createD1Executor(db)` / `migrateD1Adapter(db)` | Same default: **`first-primary`** when `db.withSession` exists |
 | `session: "first-primary"` / bookmark | Explicit session constraint |
-| `session: false` | Opt out — stale reads possible under D1 read replication |
-| `createD1Executor(db)` / low-level stores | No default session — pass `{ session }` or use `createSessionScopedExecutor` |
+| `session: false` | Opt out — stay unbound; stale reads possible under D1 read replication |
 
 **Why default:** after a claim UPSERT returns empty, stores may `SELECT` to classify the outcome. Without a session under read replication, that SELECT can hit a replica and misclassify (e.g. treat as missing / wrong state).
 

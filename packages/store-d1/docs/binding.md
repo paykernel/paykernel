@@ -55,7 +55,8 @@ import {
 // Preferred ergonomic path
 const stores = createD1PaymentStores({ db: env.PAYMENTS_DB });
 
-// Or explicit executor (tests, advanced session wrapping)
+// Or explicit executor (tests, advanced session wrapping).
+// Defaults to session: "first-primary" when db.withSession exists.
 const executor = createD1Executor(env.PAYMENTS_DB);
 await migrateD1Adapter(executor);
 ```
@@ -83,7 +84,7 @@ Do not require operators to embed account tokens in the Worker for store APIs. M
 | `db.exec` with interpolated SQL for claims | Injection + non-portable; use prepare/bind |
 | Unprotected get-then-set across two `.all()` round-trips | Not engine-atomic under concurrency |
 | Static `import … from "cloudflare:workers"` in portable packages | Leaks Workers types into core/webhooks/testkit typecheck |
-| Treating D1 as `bun:sqlite` / `better-sqlite3` | Different package (`adapter-sqlite`); different concurrency model |
+| Treating D1 as `bun:sqlite` / `better-sqlite3` | Different package (`@paykernel/store-sqlite`); different concurrency model |
 
 ---
 

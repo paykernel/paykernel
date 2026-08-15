@@ -16,17 +16,17 @@ This package is the **multi-host partitioned Durable Object** production storage
 
 1. **In-object store logic** — sync `storage.sql.exec` claims (UPSERT + RETURNING) and optional `transactionSync` multi-statement (sync only).
 2. **Worker-side client** — async Phase 9 interfaces; routes each op via sharding → DO stub RPC.
-3. **Deterministic sharding** — `key` | `hash` | `tenant`. Never one global DO for all payment work.
+3. **Deterministic sharding** — `key` | `hash` | `tenant`. Never one global DO for all payment work. `hash partitions=1` is a single partition (warn: singleton hot-key risk), not a global-default bypass.
 4. **Explicit schema** — `ensureDoSchema` / `migrateDoAdapter` (DO lifecycle or ops), never on npm import.
 
 ## When to use
 
 | Adapter | Scope | Typical surface |
 | ------- | ----- | --------------- |
-| **`adapter-cloudflare-do`** | **Multi-host partitioned DO** | Workers `env.PAYMENTS_DO` + sharding |
-| `adapter-cloudflare-d1` | Multi-host shared D1 | Workers `env.PAYMENTS_DB` |
-| `adapter-sqlite` | Single-host local only | `file:./app.db` |
-| `adapter-turso` | Multi-host shared remote Turso | `libsql://…` |
+| **`store-durable-objects`** | **Multi-host partitioned DO** | Workers `env.PAYMENTS_DO` + sharding |
+| `store-d1` | Multi-host shared D1 | Workers `env.PAYMENTS_DB` |
+| `store-sqlite` | Single-host local only | `file:./app.db` |
+| `store-turso` | Multi-host shared remote Turso | `libsql://…` |
 
 Prefer DO when you want **per-key or per-partition single-threaded coordination** with strong local RAW. Prefer D1 when you want a **shared relational** multi-tenant DB without managing partitions.
 

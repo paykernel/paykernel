@@ -42,7 +42,7 @@ Prefer a **one-shot Worker**, CI step, or ops script — not every request.
 
 | Artifact | Role |
 | -------- | ---- |
-| sql-store `FOUNDATION_SQL_SQLITE` | Authoritative DDL + ledger apply path used by `migrateD1Adapter` |
+| `@paykernel/sql-foundation` `FOUNDATION_SQL_SQLITE` | Authoritative DDL + ledger apply path used by `migrateD1Adapter` |
 | `migrations/0001_foundation.sql` | Full foundation table/index DDL snapshot for Wrangler `d1 migrations`; **no BEGIN/COMMIT** (keep in sync with `FOUNDATION_SQL_SQLITE`) |
 | `examples/wrangler.toml` | Binding example (`[[d1_databases]]`) |
 
@@ -62,7 +62,7 @@ Requirements:
 
 - Each statement must be D1-compatible SQLite.
 - **Omit** `BEGIN` / `COMMIT` wrappers (D1 apply path and this adapter’s packaging reject them).
-- Prefer `migrateD1Adapter` in a controlled job for schema parity with other relational adapters (postgres/sqlite/turso all use sql-store migrate helpers).
+- Prefer `migrateD1Adapter` in a controlled job for schema parity with other relational adapters (postgres/sqlite/turso all use sql-foundation migrate helpers).
 
 See also [wrangler.md](./wrangler.md) and [binding.md](./binding.md).
 
@@ -72,4 +72,4 @@ See also [wrangler.md](./wrangler.md) and [binding.md](./binding.md).
 
 - [overview.md](./overview.md)  
 - [testing.md](./testing.md) — migrate suite  
-- sql-store [migrations.md](../../../internal/sql-store/docs/migrations.md)  
+- sql-foundation [migrations.md](../../sql-foundation/docs/migrations.md)  

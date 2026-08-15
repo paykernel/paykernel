@@ -91,4 +91,15 @@ describe("isLikelyDriverFailure / withMappedTransaction", () => {
       }),
     ).rejects.toBeInstanceOf(StoreUnavailableError);
   });
+
+  it("maps rejected BEGIN IMMEDIATE-style D1 errors to StoreUnavailableError", () => {
+    // Live D1 must not issue BEGIN IMMEDIATE: a rejected BEGIN would surface as
+    // unavailable (not StoreUnsupportedFeatureError). createD1Executor omits TX.
+    const err = Object.assign(
+      new Error("D1_ERROR: cannot execute BEGIN IMMEDIATE"),
+      { code: "D1_ERROR" },
+    );
+    expect(mapDriverError(err)).toBeInstanceOf(StoreUnavailableError);
+    expect(mapDriverError(err).code).toBe("unavailable");
+  });
 });

@@ -3,7 +3,7 @@
 **Package:** `@paykernel/store-d1`  
 **Path:** `packages/store-d1`  
 **Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
-**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**; private shim: `internal/sql-store`)
+**Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**)
 
 This package is the **multi-host Workers-native D1** production storage adapter for **shared** Cloudflare D1 databases. It implements durable **idempotency**, **webhook inbox**, and **reconciliation** stores via the **Workers/Pages D1 binding**.
 
@@ -20,18 +20,18 @@ This package is the **multi-host Workers-native D1** production storage adapter 
 | Shared D1 store | Safe when all Workers bind the **same** D1 database |
 | Explicit schema | `migrateD1Adapter` / `verifyD1AdapterSchema` — never on import or default factory |
 | Workers binding | `createD1PaymentStores({ db })` — no REST/account token for normal operation |
-| Sessions | Optional `withSession('first-primary')` for read-after-write under replication |
+| Sessions | Defaults to `withSession('first-primary')` when the binding supports Sessions; pass `session: false` to opt out |
 | Conformance | Testkit suites + mock D1 (bun:sqlite test-only) CI path |
 
 ## When to use
 
 | Adapter | Scope | Typical surface |
 | ------- | ----- | --------------- |
-| **`adapter-cloudflare-d1`** | **Multi-host shared D1** | Workers `env.PAYMENTS_DB` binding |
-| `adapter-cloudflare-do` | Multi-host **partitioned** SQLite-backed DO | Workers `env.PAYMENTS_DO` + sharding — [separate package](../../store-durable-objects/docs/overview.md) |
-| `adapter-sqlite` | Single-host local only | `file:./app.db`, Bun/Node embedded |
-| `adapter-turso` | Multi-host shared remote Turso | `libsql://…`, Turso HTTPS |
-| `adapter-postgres` | Multi-host shared PostgreSQL | `postgres://…` |
+| **`@paykernel/store-d1`** | **Multi-host shared D1** | Workers `env.PAYMENTS_DB` binding |
+| `@paykernel/store-durable-objects` | Multi-host **partitioned** SQLite-backed DO | Workers `env.PAYMENTS_DO` + sharding — [separate package](../../store-durable-objects/docs/overview.md) |
+| `@paykernel/store-sqlite` | Single-host local only | `file:./app.db`, Bun/Node embedded |
+| `@paykernel/store-turso` | Multi-host shared remote Turso | `libsql://…`, Turso HTTPS |
+| `@paykernel/store-postgres` | Multi-host shared PostgreSQL | `postgres://…` |
 
 Do **not** use this adapter as a drop-in for local SQLite `BEGIN IMMEDIATE` sync claims. D1 is **async** (Workers Binding API); claims prefer **single-statement UPSERT**, not local reserved-lock multi-step without `batch()`.
 
@@ -61,7 +61,8 @@ await migrateD1Adapter(env.PAYMENTS_DB);
 
 const stores = createD1PaymentStores({
   db: env.PAYMENTS_DB,
-  // clock?, namespace?, session: "first-primary"?
+  // clock?, namespace?
+  // session defaults to "first-primary" when db.withSession exists
 });
 ```
 
@@ -99,5 +100,5 @@ Details: [binding.md](./binding.md).
 
 - `paymentsSdk.runtime: "cloudflare-only"` (non-portable).
 - Must not be depended on by core / webhooks / testkit / other adapters.
-- May depend on testkit + private sql-store only among workspace packages.
+- May depend on testkit + `@paykernel/sql-foundation` only among workspace packages.
 - Optional peer `@cloudflare/workers-types` for DX — structural types work without it.

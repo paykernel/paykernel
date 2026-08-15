@@ -96,4 +96,35 @@ describe("d1 batch atomicity (mock)", () => {
       handle.close();
     }
   });
+
+  it("batch throws when a statement reports success:false without throwing", async () => {
+    const db = {
+      prepare() {
+        return {
+          bind() {
+            return this;
+          },
+          async first() {
+            return null;
+          },
+          async all() {
+            return { results: [], success: true };
+          },
+          async run() {
+            return { success: true, meta: { changes: 0 } };
+          },
+        };
+      },
+      async batch() {
+        return [
+          { success: true, results: [] },
+          { success: false, error: "constraint failed" },
+        ];
+      },
+    };
+    const executor = createD1Executor(db);
+    await expect(
+      executor.batch!([{ sql: "SELECT 1" }, { sql: "SELECT 2" }]),
+    ).rejects.toBeDefined();
+  });
 });

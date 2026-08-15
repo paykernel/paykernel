@@ -5,8 +5,12 @@
  *
  * Strategies:
  * - `key`: one object per idempotency/event key (strongest per-key serialization)
- * - `hash`: bounded hash partitions (partitions >= 1; recommend >= 16)
- * - `tenant`: one object per tenant id
+ * - `hash`: bounded hash partitions (partitions >= 1; recommend >= 16).
+ *   `partitions = 1` is a **single partition** (not a silent global DO) —
+ *   all keys share one object (hot-key risk). Prefer >= 16.
+ * - `tenant`: one object per tenant id. Worker client store contracts have
+ *   **no** `tenantId` field — use a static `tenantId` string, or a function
+ *   of **key only** (`(input) => fromKey(input.key)`).
  *
  * Ordering: within a shard/object, requests serialize (single-threaded DO).
  * Across shards, there is no global total order.
@@ -52,6 +56,11 @@ export type DoShardingStrategy =
   | DoHashShardingStrategy
   | {
       kind: "tenant";
+      /**
+       * Worker tenant strategy: a static tenant id, or a function of `input.key`
+       * only. Store RPCs never pass `tenantId` — `input.tenantId` is unset on
+       * the Worker client path.
+       */
       tenantId: string | ((input: DoShardInput) => string);
     };
 
@@ -61,7 +70,11 @@ export const DO_HASH_LAYOUT_META_SUFFIX = "__pk_layout__";
 export type DoShardInput = {
   /** Primary routing key (idempotency key, webhook event key, recon job key). */
   key: string;
-  /** Optional tenant for tenant strategy or dual-aware hashing. */
+  /**
+   * Optional tenant for standalone `resolveDoShardName` callers.
+   * Worker `createDoPaymentStores` never sets this (store contracts have no
+   * tenantId) — prefer strategy `tenantId` string or `f(key)`.
+   */
   tenantId?: string;
 };
 

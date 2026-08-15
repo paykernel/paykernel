@@ -12,7 +12,7 @@ Phase 17 **multi-host partitioned Cloudflare SQLite-backed Durable Object** adap
 
 | Area | Result |
 | --- | --- |
-| Full safety net + adapters | **1614 pass, 15 skip, 0 fail** (`core` + `testkit` + `webhooks` + `sql-store` + `adapter-postgres` + `adapter-redis` + `adapter-sqlite` + `adapter-turso` + `adapter-cloudflare-d1` + `adapter-cloudflare-do`) |
+| Full safety net + adapters | **1614 pass, 15 skip, 0 fail** (`core` + `testkit` + `webhooks` + `sql-store` + `store-postgres` + `store-redis` + `store-sqlite` + `store-turso` + `store-d1` + `store-durable-objects`) |
 | Adapter-cloudflare-do focused | **60 pass, 0 fail** (public API, import-no-migrate, sharding, errors, conformance, concurrency, partitions, transaction, restart, alarms, migrate, stores unit) |
 | typecheck (all workspace packages) | exit 0 |
 | typecheck:types (core) | exit 0 |
@@ -50,7 +50,7 @@ Phase 17 **multi-host partitioned Cloudflare SQLite-backed Durable Object** adap
 | Injectable clock / FakeClock | **PASS** | `StoreClock` + `createSystemClock` / `clockNowIso` / `clockAddMsIso`; stores use `ctx.clock`; conformance/concurrency/restart/alarms inject `createFakeClock()`; lease reclaim advances FakeClock |
 | Explicit migrate / ensure only; never on package import | **PASS** | `import-no-migrate.test.ts`; `createDoPaymentStores` does not migrate; only `migrateDoAdapter` / `ensureDoSchema` / `PaymentsStoreObject.ensureSchema` (DO lifecycle docs) |
 | Phase 0–16 safety net still green | **PASS** | 1614 pass / 15 skip / 0 fail including prior packages + DO |
-| Boundaries; no illegal reverse deps | **PASS** | `check:boundaries` OK; DO deps only `payments-internal-sql-store` + `payments-testkit`; optional peer `@cloudflare/workers-types`; core/webhooks/testkit do **not** depend on adapter-cloudflare-do |
+| Boundaries; no illegal reverse deps | **PASS** | `check:boundaries` OK; DO deps only `payments-internal-sql-store` + `payments-testkit`; optional peer `@cloudflare/workers-types`; core/webhooks/testkit do **not** depend on store-durable-objects |
 | Separate from D1; no generic `adapter-cloudflare` | **PASS** | Distinct package path/name; no `packages/adapter-cloudflare`; docs/manifest contrast D1/sqlite/turso |
 | Monorepo scripts / build / dist | **PASS** | Root `build` / `test` / `typecheck` / `test:adapter-cloudflare-do` wire DO; dist entrypoints present |
 | Docs complete | **PASS** | overview, sharding, transactions, claims, crash-boundaries, guarantees, limits, migrations, testing, wrangler, alarms + README + CHANGELOG + examples/wrangler.toml |

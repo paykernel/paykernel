@@ -52,6 +52,8 @@ import {
   migrateD1Adapter,
 } from "@paykernel/store-d1";
 
+// Defaults to session: "first-primary" when db.withSession exists.
+// Opt out with { session: false }.
 const executor = createD1Executor(env.PAYMENTS_DB);
 await migrateD1Adapter(executor);
 const store = createD1IdempotencyStore({ executor });
@@ -68,7 +70,9 @@ See [`examples/wrangler.toml`](./examples/wrangler.toml):
 ```toml
 name = "payments-worker"
 main = "src/index.ts"
-compatibility_date = "2024-09-23"
+# Required: store-d1 imports node:async_hooks (AsyncLocalStorage).
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
 
 [[d1_databases]]
 binding = "PAYMENTS_DB"

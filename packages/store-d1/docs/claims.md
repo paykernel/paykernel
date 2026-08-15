@@ -2,10 +2,10 @@
 
 **Package:** `@paykernel/store-d1`  
 **Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)  
-**Templates / algorithms:** private [`internal/sql-store` atomic claims](../../../internal/sql-store/docs/atomic-claims.md)
+**Templates / algorithms:** [`@paykernel/sql-foundation` atomic claims](../../sql-foundation/docs/atomic-claims.md)
 
 How Phase 9 `reserve` / `claim` atomicity is achieved on **async multi-host D1**.  
-Contrast: local [`adapter-sqlite`](../../store-sqlite/docs/claims.md) (`BEGIN IMMEDIATE` sync); remote [`adapter-turso`](../../store-turso/docs/claims.md) (libSQL clients — different package).
+Contrast: local [`@paykernel/store-sqlite`](../../store-sqlite/docs/claims.md) (`BEGIN IMMEDIATE` sync); remote [`@paykernel/store-turso`](../../store-turso/docs/claims.md) (libSQL clients — different package).
 
 ---
 

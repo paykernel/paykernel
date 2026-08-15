@@ -6,7 +6,7 @@
 https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 
 How multi-statement atomicity works **inside** a SQLite-backed Durable Object.  
-This is **not** D1 `batch()`, **not** local `BEGIN IMMEDIATE` from `adapter-sqlite`, and **not** Turso client transactions.
+This is **not** D1 `batch()`, **not** local `BEGIN IMMEDIATE` from `store-sqlite`, and **not** Turso client transactions.
 
 ---
 

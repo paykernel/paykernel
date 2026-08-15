@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-d1`  
 **Manifest:** `coordinationScope: "multi-host"`, `durability: "durable"` — shared D1 only  
-**Not:** local single-host SQLite · Turso/libSQL clients · Durable Objects ([`adapter-cloudflare-do`](../../store-durable-objects/README.md), Phase 17)
+**Not:** local single-host SQLite · Turso/libSQL clients · Durable Objects ([`@paykernel/store-durable-objects`](../../store-durable-objects/README.md), Phase 17)
 
 This document records operational limits and comparison notes so the multi-host claim is **honest**.
 
@@ -38,8 +38,8 @@ Details: [crash-boundaries.md](./crash-boundaries.md).
 
 ## Comparison matrix
 
-| Concern | **adapter-cloudflare-d1** | adapter-sqlite | adapter-turso | Durable Objects (Phase 17, not this package) |
-| ------- | ------------------------- | -------------- | ------------- | -------------------------------------------- |
+| Concern | **`@paykernel/store-d1`** | `@paykernel/store-sqlite` | `@paykernel/store-turso` | Durable Objects (Phase 17, not this package) |
+| ------- | ------------------------- | ------------------------- | ------------------------ | -------------------------------------------- |
 | Coordination | **Multi-host** shared D1 | **Single-host** local file | **Multi-host** remote Turso/libSQL | Per-object single-threaded (different model) |
 | API | Workers binding async | Sync `BEGIN IMMEDIATE` | Async libSQL/serverless clients | DO storage / RPC |
 | Deploy | Workers/Pages only (binding) | Bun/Node process | Any runtime with client | Workers + DO classes |
@@ -48,7 +48,7 @@ Details: [crash-boundaries.md](./crash-boundaries.md).
 
 Do **not**:
 
-- Drop D1 code into `adapter-sqlite` or vice versa  
+- Drop D1 code into `@paykernel/store-sqlite` or vice versa  
 - Advertise DO-style single-object linearizability for D1  
 - Use local file SQLite as multi-host edge storage  
 

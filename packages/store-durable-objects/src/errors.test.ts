@@ -6,6 +6,9 @@ import {
   StoreLeaseLostError,
   StoreError,
   StoreTimeoutError,
+  StoreUnsupportedFeatureError,
+  StoreInvalidSchemaError,
+  withMappedErrors,
   withMappedTransaction,
 } from "./errors";
 
@@ -56,6 +59,59 @@ describe("mapDriverError", () => {
     const mapped = mapDriverError(new Error("weird"));
     expect(mapped).toBeInstanceOf(StoreError);
     expect(mapped.code).toBe("unavailable");
+  });
+});
+
+describe("P17-ERR reconstruct StoreError after RPC clone", () => {
+  it("cloned Error { name: StoreLeaseLostError } through withMappedErrors is StoreLeaseLostError not StoreUnavailableError", async () => {
+    const cloned = new Error("Lease lost or fencing token rejected");
+    cloned.name = "StoreLeaseLostError";
+    expect(cloned instanceof StoreLeaseLostError).toBe(false);
+    expect(cloned instanceof StoreError).toBe(false);
+
+    let caught: unknown;
+    try {
+      await withMappedErrors(() => {
+        throw cloned;
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(StoreLeaseLostError);
+    expect(caught).not.toBeInstanceOf(StoreUnavailableError);
+    expect((caught as StoreLeaseLostError).code).toBe("lease_lost");
+    expect((caught as StoreLeaseLostError).retryable).toBe(false);
+  });
+
+  it("does not treat lease_lost as retryable unavailable via mapDriverError", () => {
+    const cloned = new Error("Durable Object lease lost");
+    cloned.name = "StoreLeaseLostError";
+    const mapped = mapDriverError(cloned);
+    expect(mapped).toBeInstanceOf(StoreLeaseLostError);
+    expect(mapped).not.toBeInstanceOf(StoreUnavailableError);
+    expect(mapped.retryable).toBe(false);
+    expect(mapped.code).toBe("lease_lost");
+  });
+
+  it("reconstructs other StoreError names and __pkStoreError envelopes", async () => {
+    const unsupported = new Error("listDue unsupported");
+    unsupported.name = "StoreUnsupportedFeatureError";
+    await expect(
+      withMappedErrors(() => {
+        throw unsupported;
+      }),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+
+    const envelope = {
+      __pkStoreError: true,
+      code: "invalid_schema" as const,
+      name: "StoreInvalidSchemaError",
+      message: "no such table",
+    };
+    const mapped = mapDriverError(envelope);
+    expect(mapped).toBeInstanceOf(StoreInvalidSchemaError);
+    expect(mapped.code).toBe("invalid_schema");
+    expect(mapped.retryable).toBe(false);
   });
 });
 

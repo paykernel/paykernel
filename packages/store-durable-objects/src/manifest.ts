@@ -21,7 +21,7 @@ import {
  * - Cross-partition: no global total order.
  * - Never route all payment work through one global Durable Object.
  * - SQLite-backed only (`new_sqlite_classes`); not legacy KV-only DO storage.
- * - Not D1 shared DB, not local adapter-sqlite, not Turso.
+ * - Not D1 shared DB, not local store-sqlite, not store-turso.
  */
 export const DO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
   name: "cloudflare-do",
@@ -45,9 +45,9 @@ export const DO_STORAGE_ADAPTER_MANIFEST: StorageAdapterManifest = {
     "SQLite-backed Durable Objects only (new_sqlite_classes). Not legacy KV-only DO storage.",
     "Strong per-partition coordination; not a shared multi-primary global store.",
     "Strong read-after-write within a single DO instance; cross-partition no global total order.",
-    "Not packages/store-d1 (shared D1). Not adapter-sqlite local file. Not adapter-turso.",
+    "Not packages/store-d1 (shared D1). Not store-sqlite local file. Not store-turso.",
     "Never route all payment work through one global Durable Object.",
-    "Sharding strategies: key | hash-partitioned | tenant — document ordering and hot-key risks.",
+    "Sharding strategies: key | hash-partitioned | tenant — document ordering and hot-key risks. hash partitions=1 is a single partition (not a silent global DO); prefer >= 16.",
     "DO-1: hash partitions are sealed on a stable layout meta DO (hash:{layoutId|default}:__pk_layout__). Changing N under the same layout hard-throws — never silently route to empty partition objects. Use a new layoutId/objectNamePrefix to reshard after migration.",
     "Claims use sql.exec UPSERT/RETURNING and/or transactionSync; never get-then-set.",
     "transactionSync callbacks must be synchronous; no await external I/O inside storage transactions.",

@@ -142,7 +142,7 @@
       "isLocalSqlite": false,
       "isMemory": false,
       "productionRecommended": true,
-      "importantLimitation": "Remote/async txn semantics; not local adapter-sqlite; no /sync export"
+      "importantLimitation": "Remote/async txn semantics; not local @paykernel/store-sqlite; no /sync export"
     },
     {
       "rowId": "turso-libsql",
@@ -150,7 +150,7 @@
       "packageName": "@paykernel/store-turso",
       "subpath": "libsql",
       "manifestName": "turso",
-      "distributed": "yes",
+      "distributed": "yes-remote-local-file-single-host",
       "coordinationScope": "multi-host",
       "partitioned": false,
       "durability": "durable",
@@ -162,7 +162,7 @@
       "isLocalSqlite": false,
       "isMemory": false,
       "productionRecommended": true,
-      "importantLimitation": "Local file: is single-host testing only; embedded-replica/offline multi-writer not advertised; no /sync"
+      "importantLimitation": "Remote multi-host; local file: is single-host testing only; embedded-replica/offline multi-writer not advertised; no /sync"
     },
     {
       "rowId": "cloudflare-d1",

@@ -45,6 +45,24 @@ const stores = createDoPaymentStores({
 
 No REST credentials or account IDs required for store construction.
 
+## Required DO RPC methods
+
+Worker wrappers must forward every name in `REQUIRED_DO_RPC_METHODS` onto
+`PaymentsStoreObject`. Hash sharding **requires** `bindHashPartitionLayout`
+(DO-1 layout seal) — do not omit the next layout/meta method when one is added;
+extend that list.
+
+| RPC | Why |
+| --- | --- |
+| `bindHashPartitionLayout` | Hash sharding / DO-1 — first writer seals `N` |
+| Store claim/list/cleanup (`reserveIdempotency`, `claimWebhook`, …) | Phase 9 contracts |
+
+`tableNamespace` (when set on `createDoPaymentStores`) is the last RPC argument
+and is applied inside the DO. `failWebhook` is **pull-only** recovery
+(`listRetryable`) — do not auto-wire it to optional alarms.
+
+See [`examples/wrangler.toml`](../examples/wrangler.toml) and `smoke/worker.ts`.
+
 ## Related
 
 - [migrations.md](./migrations.md) — explicit migrate only  

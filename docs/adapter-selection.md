@@ -81,15 +81,17 @@ Columns align with the roadmap Phase 18 **Initial Matrix**, expanded with **pack
 flowchart TD
   start([Need payment storage adapter]) --> Q1{Existing PostgreSQL<br/>you will share?}
   Q1 -->|Yes| PG["@paykernel/store-postgres<br/>general production default"]
-  Q1 -->|No| Q2{Cloudflare Workers<br/>already on D1?}
-  Q2 -->|Yes| D1["@paykernel/store-d1<br/>shared D1; use Sessions for RAW"]
-  Q2 -->|No| Q3{Cloudflare Workers + need<br/>strong per-key serialization?}
-  Q3 -->|Yes| DO["@paykernel/store-durable-objects<br/>sharded DO — never global singleton"]
-  Q3 -->|No| Q4{Bun + single host /<br/>local file OK?}
+  Q1 -->|No| Q2{Cloudflare Workers?}
+  Q2 -->|Yes| Q2b{Need strong per-key<br/>per-partition serialization?}
+  Q2b -->|Yes — including already on D1| DO["@paykernel/store-durable-objects<br/>sharded DO — never global singleton"]
+  Q2b -->|No — shared relational<br/>Worker-native default| D1["@paykernel/store-d1<br/>greenfield OK; use Sessions for RAW"]
+  Q2 -->|No| Q3{Ephemeral serverless FS<br/>or no durable local disk?}
+  Q3 -->|Yes| Q5{Need global remote<br/>SQLite-compatible multi-host?}
+  Q3 -->|No| Q4{Bun + single host /<br/>durable local file OK?}
   Q4 -->|Yes| SQLITE_BUN["@paykernel/store-sqlite /bun<br/>single-host only"]
-  Q4 -->|No| Q4b{Node single host /<br/>local file OK?}
+  Q4 -->|No| Q4b{Node single host /<br/>durable local file OK?}
   Q4b -->|Yes Node SQLite| SQLITE_NODE["@paykernel/store-sqlite /node or /better-sqlite3"]
-  Q4b -->|No| Q5{Need global remote<br/>SQLite-compatible multi-host?}
+  Q4b -->|No| Q5
   Q5 -->|Yes| TURSO["@paykernel/store-turso /serverless or /libsql<br/>remote primary; no /sync"]
   Q5 -->|No| Q6{Already have<br/>Redis / Valkey / Upstash?}
   Q6 -->|Yes| Q7{Binding?}
@@ -100,7 +102,7 @@ flowchart TD
   Q7 -->|ioredis / node-redis| REDIS_NODE["matching /ioredis or /node-redis"]
   Q6 -->|No| Q8{Moderate load;<br/>no Redis today?}
   Q8 -->|Yes| SQL_PRIMARY["Pick primary SQL / D1 / DO<br/>Do not add Redis only for PayKernel"]
-  Q8 -->|Need multi-host but only<br/>local SQLite available| STOP["FAIL-CLOSED: STOP<br/>Choose Postgres, Turso, D1, or DO"]
+  Q8 -->|Need multi-host or multi-isolate<br/>but only local file| STOP["FAIL-CLOSED: STOP<br/>Choose Postgres, Turso, D1, or DO"]
 
   REDIS_B -.->|optional hybrid| HYBRID["Optional: Redis claims + SQL durable audit"]
   REDIS_IO -.->|optional hybrid| HYBRID
@@ -115,11 +117,14 @@ Answer in order; stop at the first clear fit.
 1. **Do you already run PostgreSQL that all workers will share?**  
    → **`@paykernel/store-postgres`** (general production default).
 
-2. **Cloudflare Workers and you already use D1 for this data plane?**  
-   → **`@paykernel/store-d1`**. Prefer Sessions (`first-primary` / bookmarks) when read replication is on.
+2. **Cloudflare Workers?** (including greenfield; do **not** jump to Turso; **never** `@paykernel/store-sqlite` — Workers are multi-isolate with no durable local FS)  
+   - Need strong **per-key / per-partition** serialization (including if you already use D1)?  
+     → **`@paykernel/store-durable-objects`** with an explicit sharding strategy. **Never** route all payment work through one global Durable Object.  
+   - Shared relational / greenfield (no existing D1)?  
+     → **`@paykernel/store-d1`** as the **Worker-native** default. Prefer Sessions (`first-primary` / bookmarks) when read replication is on.
 
-3. **Cloudflare Workers and you need strong per-key (per-partition) serialization / DO-native ops?**  
-   → **`@paykernel/store-durable-objects`** with an explicit sharding strategy. **Never** route all payment work through one global Durable Object.
+3. **Ephemeral serverless FS / no durable local disk (not Workers)?**  
+   → Do **not** use `@paykernel/store-sqlite`. Continue to remote SQLite (Turso), optional Redis, or STOP.
 
 4. **Bun app, single host, durable local file is acceptable?**  
    → **`@paykernel/store-sqlite/bun`**.
@@ -139,7 +144,7 @@ Answer in order; stop at the first clear fit.
 8. **No Redis today and moderate load?**  
    → Pick the **primary** relational / D1 / DO adapter from above. **Do not add Redis** only because PayKernel exists.
 
-**Fail-closed default:** if **multi-host** coordination is required and the only option under consideration is **local SQLite** (`store-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts.
+**Fail-closed default:** if **multi-host** or **multi-isolate** coordination is required and the only option under consideration is **local SQLite** (`store-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts or isolates.
 
 **Tests / examples only:** `createMemoryStores()` from `@paykernel/testkit` — **NON-PRODUCTION**.
 
@@ -238,7 +243,7 @@ When recommending an adapter:
 
 1. State **package name + subpath** (if any).
 2. State **`coordinationScope` and `durability`** from the manifest, not assumptions.
-3. For multi-host need + local SQLite only → **refuse** and offer Postgres / Turso / D1 / DO.
+3. For multi-host or multi-isolate need + local SQLite only → **refuse** and offer Postgres / Turso / D1 / DO. For Cloudflare Workers → D1 or DO, **never** `store-sqlite`.
 4. For Redis → say **optional**; mention Bun Cluster/Sentinel rejection when relevant.
 5. For D1 → mention **session** RAW / stale-read caveat under replication.
 6. For DO → require **sharding**; forbid global singleton.

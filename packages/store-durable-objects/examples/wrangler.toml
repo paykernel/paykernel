@@ -73,9 +73,22 @@ new_sqlite_classes = ["PaymentsStoreDurableObject"]
 #     });
 #   }
 #
-#   // Expose RPC methods matching PaymentsStoreObject (reserveIdempotency, …)
-#   reserveIdempotency(input: unknown) {
-#     return this.stores.reserveIdempotency(input as never);
+#   // REQUIRED_DO_RPC_METHODS — forward every name (do not omit the next
+#   // hash-layout method). Hash sharding needs bindHashPartitionLayout (DO-1).
+#   // Store RPCs: reserveIdempotency, renewIdempotency, completeIdempotency,
+#   // markIdempotencyIndeterminate, getIdempotency, deleteExpiredIdempotency,
+#   // claimWebhook, renewWebhook, completeWebhook, failWebhook, getWebhook,
+#   // listRetryableWebhooks, deleteExpiredWebhooks, scheduleReconciliation,
+#   // claimReconciliation, renewReconciliation, completeReconciliation,
+#   // failReconciliation, markReconciliationManualReview, getReconciliation,
+#   // listDueReconciliation, deleteExpiredReconciliation.
+#   async bindHashPartitionLayout(partitions: number) {
+#     await this.ready();
+#     return this.stores.bindHashPartitionLayout(partitions);
 #   }
-#   // … wire other methods similarly; alarm() optional for 17.4
+#   reserveIdempotency(input: unknown, tableNamespace?: unknown) {
+#     return this.stores.reserveIdempotency(input as never, tableNamespace as never);
+#   }
+#   // … wire other REQUIRED_DO_RPC_METHODS the same way; alarm() optional (17.4)
+#   // failWebhook is pull-only recovery (listRetryable) — do not auto-wire alarms
 # }

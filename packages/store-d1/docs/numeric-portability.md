@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-d1`  
 **Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md) § portable IDs/timestamps  
-**Foundation codecs:** [`internal/sql-store` codecs](../../../internal/sql-store/docs/relational-foundation.md)
+**Foundation codecs:** [`@paykernel/sql-foundation` codecs](../../sql-foundation/docs/relational-foundation.md)
 
 D1 is SQLite-backed. This adapter still stores **identity, lease, hash, and money-like** values as **TEXT** (and ISO-8601 strings for time) so JavaScript number precision and cross-runtime ports stay safe.
 
@@ -44,6 +44,6 @@ const stores = createD1PaymentStores({ db, clock });
 
 ## Why TEXT for “numbers”
 
-Workers and Node both use IEEE-754 doubles for JS numbers. Opaque tokens and financial exactness must not depend on that. sql-store codecs and this adapter keep the portable string surface aligned with Phase 9 contracts and Phase 11 foundation.
+Workers and Node both use IEEE-754 doubles for JS numbers. Opaque tokens and financial exactness must not depend on that. `@paykernel/sql-foundation` codecs and this adapter keep the portable string surface aligned with Phase 9 contracts and Phase 11 foundation.
 
 See also [claims.md](./claims.md) (lease tokens / generation) and [guarantees.md](./guarantees.md).

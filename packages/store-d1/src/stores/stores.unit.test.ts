@@ -7,6 +7,7 @@ import {
 } from "@paykernel/testkit";
 import {
   StoreLeaseLostError,
+  StoreUnavailableError,
   StoreUnsupportedFeatureError,
 } from "@paykernel/store-contracts";
 import {
@@ -15,6 +16,7 @@ import {
   createD1ReconciliationStore,
   createD1Stores,
   createD1PaymentStores,
+  createD1Executor,
 } from "../index";
 import type { D1Executor } from "../executor";
 
@@ -652,6 +654,50 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
   });
 });
 
+function createStructuralD1(handlers?: {
+  onAll?: (sql: string) => {
+    results: Row[];
+    success: boolean;
+    error?: string;
+  };
+  onRun?: (sql: string) => {
+    success: boolean;
+    error?: string;
+    meta?: { changes?: number };
+  };
+  onBatch?: () => Array<{ success?: boolean; error?: string; results?: unknown[] }>;
+}) {
+  const sqls: string[] = [];
+  const db = {
+    sqls,
+    prepare(sql: string) {
+      sqls.push(sql);
+      return {
+        bind() {
+          return this;
+        },
+        async first() {
+          return null;
+        },
+        async all() {
+          return (
+            handlers?.onAll?.(sql) ?? { results: [] as Row[], success: true }
+          );
+        },
+        async run() {
+          return (
+            handlers?.onRun?.(sql) ?? { success: true, meta: { changes: 0 } }
+          );
+        },
+      };
+    },
+    async batch() {
+      return handlers?.onBatch?.() ?? [];
+    },
+  };
+  return db;
+}
+
 describe("withTransaction honesty (SHARED-1)", () => {
   it("fails closed when executor lacks transaction (no silent no-op)", async () => {
     const executor = createScriptedExecutor({});
@@ -663,6 +709,30 @@ describe("withTransaction honesty (SHARED-1)", () => {
     await expect(
       store.withTransaction(async () => "should-not-run"),
     ).rejects.toThrow(/refusing silent no-op/i);
+  });
+
+  it("createD1Executor omits transaction; withTransaction fails closed (no live BEGIN IMMEDIATE)", async () => {
+    const db = createStructuralD1();
+    const executor = createD1Executor(db);
+    expect(executor.transaction).toBeUndefined();
+    const store = createD1IdempotencyStore({ executor });
+    await expect(
+      store.withTransaction(async () => "should-not-run"),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+    await expect(
+      store.withTransaction(async () => "should-not-run"),
+    ).rejects.toThrow(/refusing silent no-op/i);
+    expect(db.sqls.some((s) => /BEGIN/i.test(s))).toBe(false);
+  });
+
+  it("createD1PaymentStores withTransaction fails closed (not StoreUnavailableError after BEGIN)", async () => {
+    const db = createStructuralD1();
+    const bundle = createD1PaymentStores({ db });
+    expect(bundle.executor.transaction).toBeUndefined();
+    await expect(
+      bundle.idempotency.withTransaction(async () => "should-not-run"),
+    ).rejects.toBeInstanceOf(StoreUnsupportedFeatureError);
+    expect(db.sqls.some((s) => /BEGIN/i.test(s))).toBe(false);
   });
 
   it("uses executor.transaction when present", async () => {
@@ -746,6 +816,67 @@ describe("serializeResultJson honesty (STORES-3)", () => {
     expect(JSON.parse(serializeResultJson(ok))).toEqual(ok);
     const huge = { blob: "x".repeat(MAX_RESULT_JSON_BYTES) };
     expect(() => serializeResultJson(huge)).toThrow(StoreSerializationFailureError);
+  });
+});
+
+describe("D1 success:false honesty (P16-SUCCESS)", () => {
+  it("success:false all() does not become acquired/in_progress miss", async () => {
+    const now = new Date().toISOString();
+    const leaseExp = new Date(Date.now() + 60_000).toISOString();
+    const db = createStructuralD1({
+      onAll: (sql) => {
+        if (/insert|update|delete/i.test(sql)) {
+          return {
+            results: [],
+            success: false,
+            error: "D1_ERROR: storage backend internal error",
+          };
+        }
+        // SELECT would look like another worker holds the lease — must not
+        // classify as in_progress / acquired when the write reported failure.
+        return {
+          results: [
+            {
+              key: "job-1",
+              status: "claimed",
+              subject_id: "pay_1",
+              reason: "timeout",
+              due_at: now,
+              lease_owner: "other",
+              lease_token: "lt_other",
+              lease_expires_at: leaseExp,
+              attempts: 1,
+              generation: 1,
+              last_error_sanitized: null,
+              tenant_id: null,
+              created_at: now,
+              updated_at: now,
+              completed_at: null,
+            },
+          ],
+          success: true,
+        };
+      },
+    });
+    const executor = createD1Executor(db);
+    await expect(executor.query("UPDATE t SET x = 1 RETURNING x")).rejects.toBeInstanceOf(
+      StoreUnavailableError,
+    );
+
+    const recon = createD1ReconciliationStore({ executor });
+    await expect(
+      recon.claim({ key: "job-1", owner: "w", leaseMs: 1000 }),
+    ).rejects.toBeInstanceOf(StoreUnavailableError);
+
+    const idem = createD1IdempotencyStore({ executor });
+    await expect(
+      idem.reserve({
+        key: "k",
+        fingerprint: "fp",
+        owner: "w",
+        leaseMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(StoreUnavailableError);
   });
 });
 

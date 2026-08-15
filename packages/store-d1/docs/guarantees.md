@@ -27,8 +27,8 @@ https://developers.cloudflare.com/d1/worker-api/
 ## Manifest notes (summary)
 
 - Workers/Pages D1 binding; multi-instance Workers sharing one D1  
-- **Not** `adapter-sqlite` (single-host local)  
-- **Not** `adapter-turso` (Turso/libSQL clients)  
+- **Not** `@paykernel/store-sqlite` (single-host local)  
+- **Not** `@paykernel/store-turso` (Turso/libSQL clients)  
 - **Not** Durable Objects (Phase 17)  
 - Normal operation: binding only — **no** Cloudflare REST/account token required  
 - Claims: single-statement ON CONFLICT/RETURNING preferred; multi-statement only via `batch()`  

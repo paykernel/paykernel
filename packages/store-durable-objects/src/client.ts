@@ -51,6 +51,7 @@ import type {
 } from "@paykernel/store-contracts";
 import { StoreUnsupportedFeatureError } from "@paykernel/store-contracts";
 import { createSchemaNamespace } from "@paykernel/sql-foundation";
+import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
 import type {
   DoClientStoreOptions,
   DoFromStorageOptions,
@@ -136,7 +137,16 @@ type FanOutStoreContext = {
   objectNamePrefix: string | undefined;
   /** Shared once-promise for DO-1 hash layout pin (optional). */
   ensureHashLayout?: () => Promise<void>;
+  /** Forwarded on every RPC so the DO applies the Worker table prefix. */
+  tableNamespace?: SchemaNamespaceConfig;
+  /** Rotate bounded deleteExpired start so later partitions are not starved. */
+  cleanupCursor: { next: number };
 };
+
+/** Extra RPC args after the store input (tableNamespace when the Worker sent one). */
+function rpcTail(tableNamespace?: SchemaNamespaceConfig): unknown[] {
+  return tableNamespace !== undefined ? [tableNamespace] : [];
+}
 
 /**
  * Pin hash partitions on a stable layout meta DO (DO-1).
@@ -216,7 +226,12 @@ async function fanOutListByKey<T extends { key: string }>(
 
   const batches = await Promise.all(
     shardNames.map((name) =>
-      callStub<T[]>(stubForShardName(namespace, name), method, perPartitionInput),
+      callStub<T[]>(
+        stubForShardName(namespace, name),
+        method,
+        perPartitionInput,
+        ...rpcTail(options.tableNamespace),
+      ),
     ),
   );
 
@@ -250,7 +265,10 @@ type FanOutDeleteOptions = FanOutStoreContext & {
 
 /**
  * Fan-out deleteExpired across partitions; sum deleted counts.
- * With limit: walk partitions in stable order, applying remaining budget.
+ *
+ * Unbounded: parallel all partitions.
+ * Bounded: per-partition budget + rotating start so later hash partitions
+ * are not starved when index 0 has more than `limit` eligible rows (P17-CLEAN).
  */
 async function fanOutDeleteExpired(
   options: FanOutDeleteOptions,
@@ -258,12 +276,18 @@ async function fanOutDeleteExpired(
   if (options.ensureHashLayout) await options.ensureHashLayout();
   const { namespace, method, input } = options;
   const shardNames = requireDiscoveryShardNames(options);
+  const nsArgs = rpcTail(options.tableNamespace);
   const limit = input.limit;
 
   if (limit === undefined) {
     const results = await Promise.all(
       shardNames.map((name) =>
-        callStub<CleanupResult>(stubForShardName(namespace, name), method, input),
+        callStub<CleanupResult>(
+          stubForShardName(namespace, name),
+          method,
+          input,
+          ...nsArgs,
+        ),
       ),
     );
     let deleted = 0;
@@ -271,20 +295,30 @@ async function fanOutDeleteExpired(
     return { deleted };
   }
 
-  // Bounded cleanup: sequential stable partition order so limit is global.
-  let remaining = limit;
+  const n = shardNames.length;
+  if (n === 0) return { deleted: 0 };
+
+  const start = options.cleanupCursor.next % n;
+  options.cleanupCursor.next = (options.cleanupCursor.next + 1) % n;
+
+  const base = Math.floor(limit / n);
+  const extra = limit % n;
   let deleted = 0;
-  for (const name of shardNames) {
-    if (remaining <= 0) break;
-    const partInput: CleanupInput = { before: input.before, limit: remaining };
+
+  for (let i = 0; i < n; i++) {
+    const budget = base + (i < extra ? 1 : 0);
+    if (budget <= 0) continue;
+    const idx = (start + i) % n;
+    const partInput: CleanupInput = { before: input.before, limit: budget };
     const r = await callStub<CleanupResult>(
-      stubForShardName(namespace, name),
+      stubForShardName(namespace, shardNames[idx]!),
       method,
       partInput,
+      ...nsArgs,
     );
     deleted += r.deleted;
-    remaining -= r.deleted;
   }
+
   return { deleted };
 }
 
@@ -293,14 +327,13 @@ function createIdempotencyClient(
   sharding: DoShardingStrategy,
   objectNamePrefix: string | undefined,
   ensureHashLayout: () => Promise<void>,
+  tableNamespace: SchemaNamespaceConfig | undefined,
+  cleanupCursor: { next: number },
 ): IdempotencyStore {
-  const shard = (key: string, tenantId?: string) =>
-    resolveStub(
-      namespace,
-      sharding,
-      tenantId !== undefined ? { key, tenantId } : { key },
-      objectNamePrefix,
-    );
+  // Store contracts have no tenantId — tenant strategy is static or f(key).
+  const shard = (key: string) =>
+    resolveStub(namespace, sharding, { key }, objectNamePrefix);
+  const nsArgs = rpcTail(tableNamespace);
 
   const gated = async <T>(fn: () => Promise<T>): Promise<T> => {
     await ensureHashLayout();
@@ -310,31 +343,42 @@ function createIdempotencyClient(
   return {
     async reserve(input: ReserveIdempotencyInput): Promise<IdempotencyReservation> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "reserveIdempotency", input)),
+        gated(() =>
+          callStub(shard(input.key), "reserveIdempotency", input, ...nsArgs),
+        ),
       );
     },
     async renew(
       input: RenewIdempotencyReservationInput,
     ): Promise<RenewReservationResult> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "renewIdempotency", input)),
+        gated(() =>
+          callStub(shard(input.key), "renewIdempotency", input, ...nsArgs),
+        ),
       );
     },
     async complete(input: CompleteIdempotencyInput): Promise<void> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "completeIdempotency", input)),
+        gated(() =>
+          callStub(shard(input.key), "completeIdempotency", input, ...nsArgs),
+        ),
       );
     },
     async markIndeterminate(input: MarkIndeterminateInput): Promise<void> {
       return withMappedErrors(() =>
         gated(() =>
-          callStub(shard(input.key), "markIdempotencyIndeterminate", input),
+          callStub(
+            shard(input.key),
+            "markIdempotencyIndeterminate",
+            input,
+            ...nsArgs,
+          ),
         ),
       );
     },
     async get(key: IdempotencyKey): Promise<IdempotencyRecord | undefined> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(key), "getIdempotency", key)),
+        gated(() => callStub(shard(key), "getIdempotency", key, ...nsArgs)),
       );
     },
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
@@ -346,6 +390,8 @@ function createIdempotencyClient(
           ensureHashLayout,
           method: "deleteExpiredIdempotency",
           input,
+          cleanupCursor,
+          ...(tableNamespace !== undefined ? { tableNamespace } : {}),
         }),
       );
     },
@@ -360,53 +406,65 @@ function createWebhookClient(
   sharding: DoShardingStrategy,
   objectNamePrefix: string | undefined,
   ensureHashLayout: () => Promise<void>,
+  tableNamespace: SchemaNamespaceConfig | undefined,
+  cleanupCursor: { next: number },
 ): WebhookInboxStore {
-  const shard = (key: string, tenantId?: string) =>
-    resolveStub(
-      namespace,
-      sharding,
-      tenantId !== undefined ? { key, tenantId } : { key },
-      objectNamePrefix,
-    );
+  const shard = (key: string) =>
+    resolveStub(namespace, sharding, { key }, objectNamePrefix);
+  const nsArgs = rpcTail(tableNamespace);
 
   const gated = async <T>(fn: () => Promise<T>): Promise<T> => {
     await ensureHashLayout();
     return fn();
   };
 
+  const fanCtx = {
+    namespace,
+    sharding,
+    objectNamePrefix,
+    ensureHashLayout,
+    cleanupCursor,
+    ...(tableNamespace !== undefined ? { tableNamespace } : {}),
+  };
+
   return {
     async claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "claimWebhook", input)),
+        gated(() =>
+          callStub(shard(input.key), "claimWebhook", input, ...nsArgs),
+        ),
       );
     },
     async renew(input: RenewWebhookLeaseInput): Promise<RenewWebhookLeaseResult> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "renewWebhook", input)),
+        gated(() =>
+          callStub(shard(input.key), "renewWebhook", input, ...nsArgs),
+        ),
       );
     },
     async complete(input: CompleteWebhookInput): Promise<void> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "completeWebhook", input)),
+        gated(() =>
+          callStub(shard(input.key), "completeWebhook", input, ...nsArgs),
+        ),
       );
     },
     async fail(input: FailWebhookInput): Promise<void> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "failWebhook", input)),
+        gated(() =>
+          callStub(shard(input.key), "failWebhook", input, ...nsArgs),
+        ),
       );
     },
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(key), "getWebhook", key)),
+        gated(() => callStub(shard(key), "getWebhook", key, ...nsArgs)),
       );
     },
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(() =>
         fanOutListByKey<WebhookInboxRecord>({
-          namespace,
-          sharding,
-          objectNamePrefix,
-          ensureHashLayout,
+          ...fanCtx,
           method: "listRetryableWebhooks",
           input,
           sortKey: (row) => row.availableAt,
@@ -416,10 +474,7 @@ function createWebhookClient(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() =>
         fanOutDeleteExpired({
-          namespace,
-          sharding,
-          objectNamePrefix,
-          ensureHashLayout,
+          ...fanCtx,
           method: "deleteExpiredWebhooks",
           input,
         }),
@@ -436,71 +491,91 @@ function createReconciliationClient(
   sharding: DoShardingStrategy,
   objectNamePrefix: string | undefined,
   ensureHashLayout: () => Promise<void>,
+  tableNamespace: SchemaNamespaceConfig | undefined,
+  cleanupCursor: { next: number },
 ): ReconciliationStore {
-  const shard = (key: string, tenantId?: string) =>
-    resolveStub(
-      namespace,
-      sharding,
-      tenantId !== undefined ? { key, tenantId } : { key },
-      objectNamePrefix,
-    );
+  const shard = (key: string) =>
+    resolveStub(namespace, sharding, { key }, objectNamePrefix);
+  const nsArgs = rpcTail(tableNamespace);
 
   const gated = async <T>(fn: () => Promise<T>): Promise<T> => {
     await ensureHashLayout();
     return fn();
   };
 
+  const fanCtx = {
+    namespace,
+    sharding,
+    objectNamePrefix,
+    ensureHashLayout,
+    cleanupCursor,
+    ...(tableNamespace !== undefined ? { tableNamespace } : {}),
+  };
+
   return {
     async schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult> {
       return withMappedErrors(() =>
         gated(() =>
-          callStub(shard(input.key), "scheduleReconciliation", input),
+          callStub(shard(input.key), "scheduleReconciliation", input, ...nsArgs),
         ),
       );
     },
     async claim(input: ClaimReconciliationInput): Promise<ClaimResult> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "claimReconciliation", input)),
+        gated(() =>
+          callStub(shard(input.key), "claimReconciliation", input, ...nsArgs),
+        ),
       );
     },
     async renew(
       input: RenewReconciliationLeaseInput,
     ): Promise<RenewReconciliationLeaseResult> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "renewReconciliation", input)),
+        gated(() =>
+          callStub(shard(input.key), "renewReconciliation", input, ...nsArgs),
+        ),
       );
     },
     async complete(input: CompleteReconciliationInput): Promise<void> {
       return withMappedErrors(() =>
         gated(() =>
-          callStub(shard(input.key), "completeReconciliation", input),
+          callStub(
+            shard(input.key),
+            "completeReconciliation",
+            input,
+            ...nsArgs,
+          ),
         ),
       );
     },
     async fail(input: FailReconciliationInput): Promise<void> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(input.key), "failReconciliation", input)),
+        gated(() =>
+          callStub(shard(input.key), "failReconciliation", input, ...nsArgs),
+        ),
       );
     },
     async markManualReview(input: MarkManualReviewInput): Promise<void> {
       return withMappedErrors(() =>
         gated(() =>
-          callStub(shard(input.key), "markReconciliationManualReview", input),
+          callStub(
+            shard(input.key),
+            "markReconciliationManualReview",
+            input,
+            ...nsArgs,
+          ),
         ),
       );
     },
     async get(key: ReconciliationKey): Promise<ReconciliationRecord | undefined> {
       return withMappedErrors(() =>
-        gated(() => callStub(shard(key), "getReconciliation", key)),
+        gated(() => callStub(shard(key), "getReconciliation", key, ...nsArgs)),
       );
     },
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(() =>
         fanOutListByKey<ReconciliationRecord>({
-          namespace,
-          sharding,
-          objectNamePrefix,
-          ensureHashLayout,
+          ...fanCtx,
           method: "listDueReconciliation",
           input,
           sortKey: (row) => row.dueAt,
@@ -510,10 +585,7 @@ function createReconciliationClient(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() =>
         fanOutDeleteExpired({
-          namespace,
-          sharding,
-          objectNamePrefix,
-          ensureHashLayout,
+          ...fanCtx,
           method: "deleteExpiredReconciliation",
           input,
         }),
@@ -549,6 +621,8 @@ export function createDoPaymentStores(
   const ns = createSchemaNamespace(options.tableNamespace ?? {});
   const prefix = options.objectNamePrefix;
   const sharding = options.sharding;
+  const tableNamespace = options.tableNamespace;
+  const cleanupCursor = { next: 0 };
   const ensureHashLayout = createHashLayoutGate(
     options.namespace,
     sharding,
@@ -560,18 +634,24 @@ export function createDoPaymentStores(
     sharding,
     prefix,
     ensureHashLayout,
+    tableNamespace,
+    cleanupCursor,
   );
   const webhookInbox = createWebhookClient(
     options.namespace,
     sharding,
     prefix,
     ensureHashLayout,
+    tableNamespace,
+    cleanupCursor,
   );
   const reconciliation = createReconciliationClient(
     options.namespace,
     sharding,
     prefix,
     ensureHashLayout,
+    tableNamespace,
+    cleanupCursor,
   );
 
   return {

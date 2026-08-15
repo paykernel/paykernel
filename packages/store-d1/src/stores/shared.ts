@@ -2,6 +2,7 @@
  * Shared helpers for Cloudflare D1 store implementations.
  */
 
+// Workers require compatibility_flags = ["nodejs_compat"] (or nodejs_als).
 import { AsyncLocalStorage } from "node:async_hooks";
 import {
   createSchemaNamespace,
@@ -52,8 +53,9 @@ export type ResolvedStoreContext = {
    */
   getExecutor: () => D1Executor;
   /**
-   * When `executor.transaction` is available (mock D1 / same-connection BEGIN),
+   * When `executor.transaction` is available (tests that attach a TX helper),
    * runs `fn` inside that interactive write transaction.
+   * Production createD1Executor omits transaction(); withTransaction fails closed.
    * Claim correctness still prefers single-statement UPSERT/RETURNING or batch().
    */
   withStoreTransaction: <T>(fn: () => Promise<T> | T) => Promise<T>;

@@ -174,11 +174,56 @@ describe("d1 sessions (mock)", () => {
     }
   });
 
+  it("createD1Executor defaults to first-primary when withSession exists", () => {
+    const handle = createMockD1({ sessions: true });
+    try {
+      createD1Executor(handle.db);
+      expect(handle.lastSessionConstraint).toBe("first-primary");
+    } finally {
+      handle.close();
+    }
+  });
+
   it("createD1PaymentStores session:false opts out of default first-primary", () => {
     const handle = createMockD1({ sessions: true });
     try {
       createD1PaymentStores({ db: handle.db, session: false });
       expect(handle.lastSessionConstraint).toBeUndefined();
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("createD1Executor session:false stays unbound", () => {
+    const handle = createMockD1({ sessions: true });
+    try {
+      createD1Executor(handle.db, { session: false });
+      expect(handle.lastSessionConstraint).toBeUndefined();
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("createD1Executor stays unbound when withSession is missing", () => {
+    const db = {
+      prepare() {
+        throw new Error("unused");
+      },
+      async batch() {
+        return [];
+      },
+    };
+    const executor = createD1Executor(db);
+    expect(typeof executor.query).toBe("function");
+    expect(executor.withSession).toBeUndefined();
+  });
+
+  it("migrateD1Adapter wrapping a raw binding defaults to first-primary", async () => {
+    const handle = createMockD1({ sessions: true });
+    try {
+      const prefix = uniqueTablePrefix("ms");
+      await migrateD1Adapter(handle.db, { namespace: { tablePrefix: prefix } });
+      expect(handle.lastSessionConstraint).toBe("first-primary");
     } finally {
       handle.close();
     }
