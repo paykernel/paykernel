@@ -101,9 +101,18 @@ RETURNING ${WEBHOOK_SELECT_COLS}
 `.trim();
 }
 
+type DoWebhookInboxStore = WebhookInboxStore & {
+  /**
+   * PERF-5: cheap occupancy probe. True when this shard has pending-available
+   * work **or** expired claimed rows (listRetryable will soft-release those).
+   * Read-only — does not mutate leases.
+   */
+  peekRetryable(input: ListRetryableInput): Promise<boolean>;
+};
+
 export function createDoWebhookInboxStore(
   options: DoStoreOptions,
-): WebhookInboxStore {
+): DoWebhookInboxStore {
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.webhookInbox, ctx.namespace);
   const claimTpl = claimSql(table);
@@ -121,7 +130,7 @@ export function createDoWebhookInboxStore(
     return mapWebhookRow(row);
   }
 
-  const store: WebhookInboxStore = {
+  const store: DoWebhookInboxStore = {
     async claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult> {
       return withMappedErrors(() => {
         const leaseToken = newLeaseToken();
@@ -401,6 +410,28 @@ export function createDoWebhookInboxStore(
           [now, limit],
         );
         return rows.map(mapWebhookRow);
+      });
+    },
+
+    async peekRetryable(input: ListRetryableInput): Promise<boolean> {
+      return withMappedErrors(() => {
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
+        const rows = ctx.getExecutor().query<{ occupied: number }>(
+          `SELECT 1 AS occupied
+           FROM ${table}
+           WHERE (status = 'pending' AND available_at <= ?)
+              OR (
+                status = 'claimed'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at <= ?
+              )
+           LIMIT 1`,
+          [now, now],
+        );
+        return rows.length > 0;
       });
     },
 

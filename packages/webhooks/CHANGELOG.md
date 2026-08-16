@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **PERF-7:** `processRetryable` issues listed `store.claim` calls concurrently (list is discovery; claim is the fence). Handlers stay serial.
 - **Deep audit 2026-08-16:** Paymob inbox keys qualify redirect vs processed (`paymob:TRANSACTION_RESPONSE:{txnId}` vs `paymob:TRANSACTION:{txnId}`); `:redirect` suffix and class prefix collapse to one key. Missing durable snapshots and parse-stage `InvalidWebhookError` are retryable, not `invalid_webhook`. Inline claims persist `payloadRef` so `processRetryable` does not dead-letter paid rows.
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged; contract + memory + durable adapter (postgres/sqlite/d1/turso/redis/DO) parity + conformance so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **WEBHOOKS-2:** Canonical payload hash source — `resolveInboxPayloadHash` prefers gateway `event.payloadHash`; docs/README refuse treating `hashWebhookPayload(rawBodyString)` as interchangeable with object hashes. Core JSDoc aligned.

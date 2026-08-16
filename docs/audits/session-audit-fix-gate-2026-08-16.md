@@ -50,7 +50,7 @@ Lock: empty/whitespace key still generates and the header is sent.
 ### PAYPAL-DW-1 — closed on the product path
 
 `mapWebhookStatus` still fail-closes refund-shaped `PAYMENT.CAPTURE.REFUNDED` to `partially_refunded` (~2931–2947). After `attachPaymentEvent`, `demoteIncompleteRefundWebhookDualWrite` rematches **both** `status === "refund_completed"` **and** `type === PAYMENT.CAPTURE.REFUNDED && status === "partially_refunded"` off `refund.completed` → `refund.pending` (~3341–3369). Proven `refunded` stays `refund.completed`.  
-Residual (non-blocking): static `PAYPAL_EVENT_TYPE_MAP` still names `refund.completed` without status (`webhook-event-map.ts` ~305). Type-only handlers that only call the mapper with no status still see that name; `parseWebhookEvent` rematch is what dual-write consumers get.
+`mapPayPalEventType` status-gates `PAYMENT.CAPTURE.REFUNDED` (`refunded` → `refund.completed`; else `refund.pending`). Catalog map still names the proven-full-refund arm.
 
 ### WEBHOOKS-403 — closed
 
@@ -83,9 +83,9 @@ Lock: `engine.test.ts` WEBHOOKS-403.
 
 | ID | Status |
 | --- | --- |
-| **PERF-5** | remaining — DO hash `listDue` / `listRetryable` still fans out to every enumerable isolate at full `limit` (`store-durable-objects/src/client.ts`). No cheaper correct global earliest-N. |
-| **PERF-6** | remaining — webhook path still parse / redact / stringify / SHA-256 / deep-clone large Stripe bodies more than once. |
-| **PERF-7** | remaining — `processDue` / `processRetryable` stay list-then-serial-claim (list is not a fence). Oversample still capped at 200 when `maxInFlightByGateway` is set. |
+| **PERF-5** | closed — peek every enumerable isolate; full-list only occupied shards. |
+| **PERF-6** | closed (owned clone path) — no deep-clone of `rawPayload` on hook isolation. Stripe gateway parse/hash unchanged. |
+| **PERF-7** | closed — listed claims run concurrently; handlers stay serial. Oversample cap 200. |
 | **MOYASAR-3** | closed — `moyasarSource` / `CreditCardSource` JSDoc state backend `createPayment` **rejects** raw `creditcard`. |
 | **REDIS-CLEAN-1** | closed — `DEFAULT_DELETE_EXPIRED_LIMIT = 1000` (`store-redis/src/limits.ts`). |
 

@@ -1334,6 +1334,16 @@ export function createWebhookInboxEngine(
 
     const items: ProcessRetryableResult["items"] = [];
 
+    type PreparedRetryable = {
+      rec: (typeof pending)[number];
+      gateway: string;
+      providerEventId: string;
+      payloadHash: string;
+      event: unknown | undefined;
+      payloadRef: string | undefined;
+    };
+
+    const prepared: PreparedRetryable[] = [];
     for (const rec of pending) {
       let gateway: string;
       let providerEventId: string;
@@ -1372,14 +1382,34 @@ export function createWebhookInboxEngine(
         // WEBHOOKS-1: never stub `{ key, payloadHash }` — paid data would be lost.
       }
 
-      // Re-claim with same hash (pending after fail/ackAfterClaim).
-      const claim = await store.claim({
-        key: rec.key,
+      prepared.push({
+        rec,
+        gateway,
+        providerEventId,
         payloadHash,
-        owner,
-        leaseMs,
-        ...(payloadRef !== undefined ? { payloadRef } : {}),
+        event,
+        payloadRef,
       });
+    }
+
+    // PERF-7: list is discovery; claim is the fence. Issue claims in parallel,
+    // then run handlers serially so one paid handler cannot race another.
+    const claims = await Promise.all(
+      prepared.map((row) =>
+        store.claim({
+          key: row.rec.key,
+          payloadHash: row.payloadHash,
+          owner,
+          leaseMs,
+          ...(row.payloadRef !== undefined ? { payloadRef: row.payloadRef } : {}),
+        }),
+      ),
+    );
+
+    for (let i = 0; i < prepared.length; i++) {
+      const row = prepared[i]!;
+      const claim = claims[i]!;
+      const { rec, gateway, providerEventId, event } = row;
 
       if (claim.kind !== "acquired") {
         const outcome = mapClaimKindToOutcome(

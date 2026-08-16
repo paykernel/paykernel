@@ -7,7 +7,6 @@
 
 import type { ReconciliationTarget } from "./types";
 import type {
-  ClaimResult,
   IsoTimestamp,
   LeaseToken,
   ReconciliationKey,
@@ -175,6 +174,39 @@ export type ProcessDueResult = {
 const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
+ * PERF-7: list is discovery only; claim is the fence. Issue listed claims
+ * concurrently, then return acquired jobs in list order. Handlers stay serial
+ * so one job's disposition cannot race another on the same scheduler.
+ */
+async function claimListedDue(
+  store: ReconciliationStore,
+  records: ReconciliationRecord[],
+  owner: string,
+  leaseMs: number,
+): Promise<ClaimedJob[]> {
+  const results = await Promise.all(
+    records.map((rec) =>
+      store.claim({
+        key: rec.key,
+        owner,
+        leaseMs,
+      }),
+    ),
+  );
+  const claimed: ClaimedJob[] = [];
+  for (const result of results) {
+    if (result.kind === "acquired") {
+      claimed.push({
+        key: result.record.key,
+        leaseToken: result.leaseToken,
+        record: result.record,
+      });
+    }
+  }
+  return claimed;
+}
+
+/**
  * Derive a stable reconciliation job key from target identifiers.
  * Prefer gatewayPaymentId → idempotencyKey → localReference → providerRequestId.
  */
@@ -285,24 +317,7 @@ export function createReconciliationScheduler(
       const leaseMs = options.leaseMs ?? defaultLeaseMs;
       const now = new Date(clock.nowMs()).toISOString();
       const due = await store.listDue({ now, limit });
-      const claimed: ClaimedJob[] = [];
-
-      for (const rec of due) {
-        const result: ClaimResult = await store.claim({
-          key: rec.key,
-          owner,
-          leaseMs,
-        });
-        if (result.kind === "acquired") {
-          claimed.push({
-            key: result.record.key,
-            leaseToken: result.leaseToken,
-            record: result.record,
-          });
-        }
-        // not_due / in_progress / already_terminal / not_found → skip
-      }
-      return claimed;
+      return claimListedDue(store, due, owner, leaseMs);
     },
 
     async complete(input: CompleteJobInput): Promise<void> {
@@ -370,10 +385,10 @@ export function createReconciliationScheduler(
       const limit = options.limit ?? 10;
       const now = new Date(clock.nowMs()).toISOString();
 
-      // RECON-8 / PERF-7: keep list-then-serial-claim fencing (list is
-      // discovery only; claim is the fence). When per-gateway caps are set,
-      // oversample listDue so a cap-dominated prefix cannot starve other
-      // gateways — never above LIST_DUE_OVERSAMPLE_CAP (200).
+      // RECON-8 / PERF-7: list is discovery only; claim is the fence
+      // (parallel after the candidate set is chosen). When per-gateway caps
+      // are set, oversample listDue so a cap-dominated prefix cannot starve
+      // other gateways — never above LIST_DUE_OVERSAMPLE_CAP (200).
       const fetchLimit =
         options.maxInFlightByGateway !== undefined
           ? Math.min(
@@ -428,19 +443,9 @@ export function createReconciliationScheduler(
         return true;
       };
 
-      for (const rec of candidates) {
-        const claimResult: ClaimResult = await store.claim({
-          key: rec.key,
-          owner,
-          leaseMs,
-        });
-        if (claimResult.kind !== "acquired") continue;
+      const acquired = await claimListedDue(store, candidates, owner, leaseMs);
 
-        const job: ClaimedJob = {
-          key: claimResult.record.key,
-          leaseToken: claimResult.leaseToken,
-          record: claimResult.record,
-        };
+      for (const job of acquired) {
         const claimedGateway = gatewayFromKey(job.key);
         addLive(claimedGateway, 1);
         processed++;

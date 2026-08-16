@@ -83,9 +83,18 @@ RETURNING ${RECON_SELECT_COLS}
 `.trim();
 }
 
+type DoReconciliationStore = ReconciliationStore & {
+  /**
+   * PERF-5: cheap occupancy probe. True when this shard has scheduled-due
+   * work **or** expired claimed rows (listDue will soft-release those).
+   * Read-only — does not mutate leases.
+   */
+  peekDue(input: ListDueInput): Promise<boolean>;
+};
+
 export function createDoReconciliationStore(
   options: DoStoreOptions,
-): ReconciliationStore {
+): DoReconciliationStore {
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = claimSql(table);
@@ -105,7 +114,7 @@ export function createDoReconciliationStore(
     return mapReconciliationRow(row);
   }
 
-  const store: ReconciliationStore = {
+  const store: DoReconciliationStore = {
     async schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult> {
       return withMappedErrors(() => {
         const now = clockNowIso(ctx.clock);
@@ -380,6 +389,28 @@ RETURNING key, status, generation`,
           [now, limit],
         );
         return rows.map(mapReconciliationRow);
+      });
+    },
+
+    async peekDue(input: ListDueInput): Promise<boolean> {
+      return withMappedErrors(() => {
+        const now =
+          input.now !== undefined
+            ? canonicalizeIsoTimestamp(input.now, "now")
+            : clockNowIso(ctx.clock);
+        const rows = ctx.getExecutor().query<{ occupied: number }>(
+          `SELECT 1 AS occupied
+           FROM ${table}
+           WHERE (status = 'scheduled' AND due_at <= ?)
+              OR (
+                status = 'claimed'
+                AND lease_expires_at IS NOT NULL
+                AND lease_expires_at <= ?
+              )
+           LIMIT 1`,
+          [now, now],
+        );
+        return rows.length > 0;
       });
     },
 

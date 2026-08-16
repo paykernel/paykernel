@@ -80,7 +80,7 @@ describe("buildFoundationMigrationSql index uniqueness", () => {
   });
 
   it("PERF-3: buildListIndexMigrationSql emits IF NOT EXISTS composites only", () => {
-    const sql = buildListIndexMigrationSql("sqlite", (logical) => `"${logical}"`);
+    const sql = buildListIndexMigrationSql((logical) => `"${logical}"`);
     expect(sql).not.toMatch(/CREATE TABLE/i);
     expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail/i);
     expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due/i);

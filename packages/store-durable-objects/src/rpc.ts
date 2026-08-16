@@ -20,6 +20,7 @@ export const REQUIRED_DO_STORE_RPC_METHODS = [
   "completeWebhook",
   "failWebhook",
   "getWebhook",
+  "peekRetryableWebhooks",
   "listRetryableWebhooks",
   "deleteExpiredWebhooks",
   "scheduleReconciliation",
@@ -29,6 +30,7 @@ export const REQUIRED_DO_STORE_RPC_METHODS = [
   "failReconciliation",
   "markReconciliationManualReview",
   "getReconciliation",
+  "peekDueReconciliation",
   "listDueReconciliation",
   "deleteExpiredReconciliation",
 ] as const;

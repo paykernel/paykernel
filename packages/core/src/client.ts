@@ -68,8 +68,9 @@ function isThenable(value: unknown): value is Promise<unknown> {
  *
  * CORE-2: hooks must not rewrite money/status identity (status, amount, ids,
  * stableType, dual-write event) on the object returned to callers. `Date`
- * timestamps are re-instantiated; `rawPayload` is shallow-copied when it is a
- * plain object so hook annotation of raw is isolated from the returned event.
+ * timestamps are re-instantiated. `rawPayload` is a shallow root copy
+ * (PERF-6) so hook annotation of top-level raw keys is isolated without
+ * walking a large Stripe body.
  */
 function cloneWebhookEventForHooks(event: WebhookEvent): WebhookEvent {
   const clone: WebhookEvent = {
@@ -80,7 +81,7 @@ function cloneWebhookEventForHooks(event: WebhookEvent): WebhookEvent {
     gatewayPaymentId: event.gatewayPaymentId,
     status: event.status,
     timestamp: new Date(event.timestamp.getTime()),
-    rawPayload: clonePlainJson(event.rawPayload),
+    rawPayload: shallowCopyJsonRoot(event.rawPayload),
   };
   if (event.gatewayObjectId !== undefined) {
     clone.gatewayObjectId = event.gatewayObjectId;
@@ -119,6 +120,16 @@ function cloneWebhookEventForHooks(event: WebhookEvent): WebhookEvent {
     clone.payloadHash = event.payloadHash;
   }
   return clone;
+}
+
+function shallowCopyJsonRoot(value: unknown): unknown {
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.slice();
+  }
+  return { ...(value as Record<string, unknown>) };
 }
 
 function clonePlainJson(value: unknown): unknown {
@@ -844,8 +855,8 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       ),
     );
 
-    // CORE-2: hooks receive a deep clone. Mutations to status/amount/ids/stableType
-    // must not rewrite the verified event returned to callers (false fulfillment).
+    // CORE-2: hooks receive an isolated clone. Mutations to status/amount/ids/
+    // stableType must not rewrite the verified event returned to callers.
     const forHooks = cloneWebhookEventForHooks(event);
 
     // Verified path: onWebhookVerified failures are rethrown so the HTTP

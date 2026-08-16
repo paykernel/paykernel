@@ -207,31 +207,85 @@ function requireDiscoveryShardNames(ctx: FanOutStoreContext): readonly string[] 
 
 type FanOutListOptions<T extends { key: string }> = FanOutStoreContext & {
   method: string;
-  input: { limit?: number };
+  /** Cheap occupancy RPC; full `method` runs only on shards that return true. */
+  peekMethod: string;
+  input: { limit?: number; now?: string };
   sortKey: (row: T) => string;
 };
 
+type PeekShardOptions = {
+  namespace: DoNamespaceLike;
+  shardName: string;
+  peekMethod: string;
+  input: { now?: string };
+  tableNamespace?: SchemaNamespaceConfig;
+};
+
 /**
- * Fan-out listDue/listRetryable across all enumerable partitions; merge, dedupe by key,
- * stable sort, then truncate to limit.
+ * Occupancy probe for PERF-5. Missing peek RPCs (rolling old Workers) fail
+ * closed to "occupied" so discovery still runs the full list.
+ */
+async function peekShardOccupied(options: PeekShardOptions): Promise<boolean> {
+  try {
+    return await callStub<boolean>(
+      stubForShardName(options.namespace, options.shardName),
+      options.peekMethod,
+      options.input,
+      ...rpcTail(options.tableNamespace),
+    );
+  } catch (err) {
+    if (
+      err instanceof TypeError &&
+      String(err.message).includes("missing RPC method")
+    ) {
+      return true;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Fan-out listDue/listRetryable across enumerable partitions; merge, dedupe by
+ * key, stable sort, then truncate to limit.
  *
- * PERF-5: there is no cheaper correct fan-in. Hash partitions have no global
- * due/retry index, so the globally earliest `limit` rows require waking every
- * enumerable isolate. Per-partition listDue/listRetryable still bound their
- * expired-lease UPDATE to `limit` (PERF-2). Sequential early-exit would miss
- * earlier work on later shards.
+ * PERF-5: hash partitions have no global due/retry index, so a correct global
+ * earliest-N still peeks every enumerable isolate. Full list (bounded
+ * expired-lease UPDATE + SELECT) runs only on occupied shards. Peek treats
+ * expired claimed as occupied so crash recovery is not skipped. Sequential
+ * early-exit on the first non-empty list would miss earlier work on later
+ * shards.
  */
 async function fanOutListByKey<T extends { key: string }>(
   options: FanOutListOptions<T>,
 ): Promise<T[]> {
   if (options.ensureHashLayout) await options.ensureHashLayout();
-  const { namespace, method, input, sortKey } = options;
+  const { namespace, method, peekMethod, input, sortKey } = options;
   const shardNames = requireDiscoveryShardNames(options);
   const limit = input.limit ?? DEFAULT_LIST_LIMIT;
+  const peekInput = input.now !== undefined ? { now: input.now } : {};
   const perPartitionInput = { ...input, limit };
 
+  const occupancy = await Promise.all(
+    shardNames.map((name) => {
+      const peek: PeekShardOptions = {
+        namespace,
+        shardName: name,
+        peekMethod,
+        input: peekInput,
+      };
+      if (options.tableNamespace !== undefined) {
+        peek.tableNamespace = options.tableNamespace;
+      }
+      return peekShardOccupied(peek);
+    }),
+  );
+  // Fail-closed: only an explicit `false` skips the shard. A void / unexpected
+  // peek result must not hide due work.
+  const occupiedNames = shardNames.filter((_, i) => occupancy[i] !== false);
+  if (occupiedNames.length === 0) return [];
+
   const batches = await Promise.all(
-    shardNames.map((name) =>
+    occupiedNames.map((name) =>
       callStub<T[]>(
         stubForShardName(namespace, name),
         method,
@@ -472,6 +526,7 @@ function createWebhookClient(
         fanOutListByKey<WebhookInboxRecord>({
           ...fanCtx,
           method: "listRetryableWebhooks",
+          peekMethod: "peekRetryableWebhooks",
           input,
           sortKey: (row) => row.availableAt,
         }),
@@ -583,6 +638,7 @@ function createReconciliationClient(
         fanOutListByKey<ReconciliationRecord>({
           ...fanCtx,
           method: "listDueReconciliation",
+          peekMethod: "peekDueReconciliation",
           input,
           sortKey: (row) => row.dueAt,
         }),
@@ -615,10 +671,10 @@ function createReconciliationClient(
  *
  * Does **not** migrate schema. Does **not** default to one global DO.
  *
- * Under `kind: "hash"`, `listDue` / `listRetryable` / `deleteExpired` fan out
- * across all partitions (required for a correct global earliest-N; no cheaper
- * fan-in exists without a cross-isolate index). Under `kind: "key"`, those
- * methods throw {@link StoreUnsupportedFeatureError}.
+ * Under `kind: "hash"`, `listDue` / `listRetryable` peek every enumerable
+ * partition then full-list only occupied shards (PERF-5). `deleteExpired`
+ * still fans out. Under `kind: "key"`, those methods throw
+ * {@link StoreUnsupportedFeatureError}.
  */
 export function createDoPaymentStores(
   options: DoClientStoreOptions,

@@ -770,6 +770,36 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(seenLimit).toBe(80);
   });
 
+  it("PERF-7: claimDue issues listed claims concurrently", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    const now = new Date(clock.nowMs()).toISOString();
+    for (const id of ["a", "b", "c"]) {
+      await inner.schedule({
+        key: `recon:stripe:${id}`,
+        subjectId: id,
+        reason: "timeout",
+        dueAt: now,
+      });
+    }
+    let inflight = 0;
+    let maxInflight = 0;
+    const store: ReconciliationStore = {
+      ...inner,
+      async claim(input) {
+        inflight += 1;
+        maxInflight = Math.max(maxInflight, inflight);
+        await Promise.resolve();
+        inflight -= 1;
+        return inner.claim(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const claimed = await scheduler.claimDue({ limit: 3 });
+    expect(claimed).toHaveLength(3);
+    expect(maxInflight).toBeGreaterThan(1);
+  });
+
   it("RECON-7: schedule reopens terminal completed job under same key", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });

@@ -301,6 +301,52 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.status).toBe("completed");
   });
 
+  it("PERF-7: processRetryable issues listed claims concurrently", async () => {
+    const clock = createTestClock();
+    const inner = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store: inner,
+      mode: "durable_retry",
+      ackAfterClaim: true,
+      clock,
+    });
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_a",
+      payloadHash: "ha",
+      envelope: { id: "evt_a" },
+    });
+    await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_b",
+      payloadHash: "hb",
+      envelope: { id: "evt_b" },
+    });
+
+    let inflight = 0;
+    let maxInflight = 0;
+    const store = {
+      ...inner,
+      async claim(input: Parameters<typeof inner.claim>[0]) {
+        inflight += 1;
+        maxInflight = Math.max(maxInflight, inflight);
+        await Promise.resolve();
+        inflight -= 1;
+        return inner.claim(input);
+      },
+    };
+    const worker = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+    });
+    const result = await worker.processRetryable({
+      handler: async () => {},
+    });
+    expect(result.items).toHaveLength(2);
+    expect(maxInflight).toBeGreaterThan(1);
+  });
+
   it("processRetryable throws on inline engines (no mode mix)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });

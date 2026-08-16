@@ -302,6 +302,7 @@ export const PAYPAL_EVENT_TYPE_MAP: Readonly<
   "PAYMENT.CAPTURE.DENIED": "payment.failed",
   "PAYMENT.CAPTURE.DECLINED": "payment.failed",
   "PAYMENT.CAPTURE.PENDING": "payment.processing",
+  // Proven full-capture refund only. mapPayPalEventType status-gates this.
   "PAYMENT.CAPTURE.REFUNDED": "refund.completed",
   "PAYMENT.REFUND.PENDING": "refund.pending",
   "PAYMENT.REFUND.COMPLETED": "refund.completed",
@@ -329,6 +330,15 @@ function mapPayPalEventType(
     if (status === "paid") return "payment.succeeded";
     if (status === "approved") return "payment.processing";
     return "provider.unmapped";
+  }
+
+  // Catalog entry is proven full-capture refund. Type-only / incomplete
+  // (refund-shaped COMPLETED → partially_refunded) must not close as
+  // refund.completed (PAYPAL-DW-1).
+  if (providerEventType === "PAYMENT.CAPTURE.REFUNDED") {
+    const status = (context?.status ?? "").toLowerCase();
+    if (status === "refunded") return "refund.completed";
+    return "refund.pending";
   }
 
   // REVERSED has no stable payment.reversed arm — do not invent cancelled

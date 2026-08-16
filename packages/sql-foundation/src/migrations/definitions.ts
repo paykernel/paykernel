@@ -212,10 +212,8 @@ export const FOUNDATION_SQL_PORTABLE =
  * emitted these names (current foundation DDL includes them for new installs).
  */
 export function buildListIndexMigrationSql(
-  dialect: "postgres" | "sqlite",
   qualify: (logical: string) => string,
 ): string {
-  void dialect;
   const inbox = qualify("payment_webhook_inbox");
   const recon = qualify("payment_reconciliation_jobs");
   const statements: string[] = [];
@@ -229,9 +227,9 @@ export function buildListIndexMigrationSql(
   return statements.join(";\n") + ";";
 }
 
-export const LIST_INDEX_SQL_POSTGRES = buildListIndexMigrationSql("postgres", defaultQualify);
+export const LIST_INDEX_SQL_POSTGRES = buildListIndexMigrationSql(defaultQualify);
 
-export const LIST_INDEX_SQL_SQLITE = buildListIndexMigrationSql("sqlite", defaultQualify);
+export const LIST_INDEX_SQL_SQLITE = buildListIndexMigrationSql(defaultQualify);
 
 export const LIST_INDEX_SQL_PORTABLE =
   "CREATE INDEX IF NOT EXISTS composite (status, available_at) / (status, due_at) / (status, lease_expires_at) on webhook inbox and reconciliation jobs for listRetryable/listDue and bounded expired-lease cleanup.";

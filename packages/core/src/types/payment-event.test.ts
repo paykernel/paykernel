@@ -548,7 +548,6 @@ describe("mapProviderEventTypeToStable tables", () => {
       ["PAYMENT.CAPTURE.DENIED", "payment.failed"],
       ["PAYMENT.CAPTURE.DECLINED", "payment.failed"],
       ["PAYMENT.CAPTURE.PENDING", "payment.processing"],
-      ["PAYMENT.CAPTURE.REFUNDED", "refund.completed"],
       ["PAYMENT.REFUND.COMPLETED", "refund.completed"],
       ["PAYMENT.REFUND.PENDING", "refund.pending"],
       ["PAYMENT.REFUND.FAILED", "refund.failed"],
@@ -563,6 +562,23 @@ describe("mapProviderEventTypeToStable tables", () => {
         expect(mapProviderEventTypeToStable("paypal", native)).toBe(stable);
       });
     }
+
+    it.each([
+      [undefined, "refund.pending"],
+      ["refunded", "refund.completed"],
+      ["partially_refunded", "refund.pending"],
+    ] as const)(
+      "PAYPAL-DW-1: CAPTURE.REFUNDED status=%s → %s",
+      (status, stable) => {
+        expect(
+          mapProviderEventTypeToStable(
+            "paypal",
+            "PAYMENT.CAPTURE.REFUNDED",
+            status === undefined ? undefined : { status },
+          ),
+        ).toBe(stable);
+      },
+    );
 
     it("PAYMENT.CAPTURE.REVERSED stays unmapped (no stable reversed arm)", () => {
       expect(

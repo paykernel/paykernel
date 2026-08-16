@@ -176,8 +176,7 @@ function selectDialectSql(
   }
   // PERF-3: qualify physical names the same way as v1 (prefix/schema).
   if (migration.version === 2) {
-    const indexDialect = dialect === "postgres" ? "postgres" : "sqlite";
-    return buildListIndexMigrationSql(indexDialect, qualify);
+    return buildListIndexMigrationSql(qualify);
   }
   if (dialect === "postgres") {
     return migration.sql.postgres ?? migration.sql.portable ?? "";

@@ -185,7 +185,7 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Moyasar | `payment_authorized` | `payment.authorized` | |
 | PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded` |
 | PayPal | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | **`payment.processing`** | Status `partially_captured`; **not** `capture.completed` / `payment.succeeded` — open capture story |
-| PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` | |
+| PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` when status is `refunded`; otherwise `refund.pending` | Type-only / refund-shaped / `partially_refunded` must not close a capture as fully refunded |
 | PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource; capture id via `rel: up` / related_ids |
 | PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
 | Paymob | `TOKEN` | `payment_method.setup_completed` | |

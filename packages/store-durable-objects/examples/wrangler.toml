@@ -78,10 +78,11 @@ new_sqlite_classes = ["PaymentsStoreDurableObject"]
 #   // Store RPCs: reserveIdempotency, renewIdempotency, completeIdempotency,
 #   // markIdempotencyIndeterminate, getIdempotency, deleteExpiredIdempotency,
 #   // claimWebhook, renewWebhook, completeWebhook, failWebhook, getWebhook,
-#   // listRetryableWebhooks, deleteExpiredWebhooks, scheduleReconciliation,
-#   // claimReconciliation, renewReconciliation, completeReconciliation,
-#   // failReconciliation, markReconciliationManualReview, getReconciliation,
-#   // listDueReconciliation, deleteExpiredReconciliation.
+#   // peekRetryableWebhooks, listRetryableWebhooks, deleteExpiredWebhooks,
+#   // scheduleReconciliation, claimReconciliation, renewReconciliation,
+#   // completeReconciliation, failReconciliation, markReconciliationManualReview,
+#   // getReconciliation, peekDueReconciliation, listDueReconciliation,
+#   // deleteExpiredReconciliation.
 #   async bindHashPartitionLayout(partitions: number) {
 #     await this.ready();
 #     return this.stores.bindHashPartitionLayout(partitions);

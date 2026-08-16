@@ -142,6 +142,14 @@ export class PaymentsStoreDurableObject extends DurableObject<Env> {
     return this.inner.getWebhook(key as never, tableNamespace as never);
   }
 
+  async peekRetryableWebhooks(input: unknown, tableNamespace?: unknown) {
+    await this.ready();
+    return this.inner.peekRetryableWebhooks(
+      input as never,
+      tableNamespace as never,
+    );
+  }
+
   async listRetryableWebhooks(input: unknown, tableNamespace?: unknown) {
     await this.ready();
     return this.inner.listRetryableWebhooks(
@@ -202,6 +210,14 @@ export class PaymentsStoreDurableObject extends DurableObject<Env> {
   async getReconciliation(key: unknown, tableNamespace?: unknown) {
     await this.ready();
     return this.inner.getReconciliation(key as never, tableNamespace as never);
+  }
+
+  async peekDueReconciliation(input: unknown, tableNamespace?: unknown) {
+    await this.ready();
+    return this.inner.peekDueReconciliation(
+      input as never,
+      tableNamespace as never,
+    );
   }
 
   async listDueReconciliation(input: unknown, tableNamespace?: unknown) {

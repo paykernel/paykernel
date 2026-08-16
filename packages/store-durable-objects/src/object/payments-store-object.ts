@@ -346,6 +346,14 @@ export class PaymentsStoreObject {
     return s.webhookInbox.get(key);
   }
 
+  async peekRetryableWebhooks(
+    input: ListRetryableInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<boolean> {
+    const s = await this.readyStores(tableNamespace);
+    return s.webhookInbox.peekRetryable(input);
+  }
+
   async listRetryableWebhooks(
     input: ListRetryableInput,
     tableNamespace?: SchemaNamespaceConfig,
@@ -418,6 +426,14 @@ export class PaymentsStoreObject {
   ): Promise<ReconciliationRecord | undefined> {
     const s = await this.readyStores(tableNamespace);
     return s.reconciliation.get(key);
+  }
+
+  async peekDueReconciliation(
+    input: ListDueInput,
+    tableNamespace?: SchemaNamespaceConfig,
+  ): Promise<boolean> {
+    const s = await this.readyStores(tableNamespace);
+    return s.reconciliation.peekDue(input);
   }
 
   async listDueReconciliation(

@@ -435,10 +435,14 @@ describe("HooksManager webhook hook composition", () => {
     manager.register("onWebhookVerified", second);
 
     const event = {
+      id: "evt_fail_fast",
       gateway: "stripe",
       type: "payment.paid",
       paymentId: "pi_1",
+      gatewayPaymentId: "pi_1",
       status: "paid",
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      rawPayload: {},
     } as WebhookEvent;
 
     await expect(manager.runWebhookVerified(event)).rejects.toThrow(
@@ -459,10 +463,14 @@ describe("HooksManager webhook hook composition", () => {
     });
 
     await manager.runWebhookVerified({
+      id: "evt_order",
       gateway: "moyasar",
       type: "payment_paid",
       paymentId: "pay_x",
+      gatewayPaymentId: "pay_x",
       status: "paid",
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      rawPayload: {},
     } as WebhookEvent);
 
     expect(order).toEqual(["a:pay_x", "b:pay_x"]);
@@ -501,6 +509,35 @@ describe("HooksManager webhook hook composition", () => {
       { status: "paid", amount: 25 },
       { status: "paid", amount: 25 },
     ]);
+  });
+
+  it("PERF-6: onWebhookVerified clones isolate rawPayload root keys without deep-copy", async () => {
+    const raw = { id: "evt_raw", nested: { n: 1 } };
+    const seen: unknown[] = [];
+    const manager = new HooksManager({
+      onWebhookVerified: async (e) => {
+        (e.rawPayload as Record<string, unknown>).annotated = true;
+        seen.push((e.rawPayload as Record<string, unknown>).annotated);
+      },
+    });
+    manager.register("onWebhookVerified", async (e) => {
+      seen.push((e.rawPayload as Record<string, unknown>).annotated);
+    });
+
+    await manager.runWebhookVerified({
+      id: "evt_raw_clone",
+      gateway: "stripe",
+      type: "payment_intent.succeeded",
+      paymentId: "pi_1",
+      gatewayPaymentId: "pi_1",
+      status: "paid",
+      timestamp: new Date("2024-01-01T00:00:00.000Z"),
+      rawPayload: raw,
+    } as WebhookEvent);
+
+    expect(seen).toEqual([true, undefined]);
+    expect((raw as { annotated?: boolean }).annotated).toBeUndefined();
+    expect(raw.nested.n).toBe(1);
   });
 
   it("post-before guards see hook-injected amount (CORE-1 support)", async () => {

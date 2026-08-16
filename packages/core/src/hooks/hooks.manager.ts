@@ -21,35 +21,41 @@ import {
     shallowCloneResult,
 } from './money-identity';
 
+function shallowCopyJsonRoot(value: unknown): unknown {
+    if (value === null || typeof value !== "object") {
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.slice();
+    }
+    return { ...(value as Record<string, unknown>) };
+}
+
 /**
- * Deep-clone a verified webhook event for a single `onWebhookVerified` handler
- * (CORE-2). Prevents the first composed handler from mutating status/amount/
- * stableType/nested dual-write for subsequent handlers.
+ * Isolate a verified webhook event for one `onWebhookVerified` handler (CORE-2).
+ * Identity / dual-write (`event`, `provider`) are cloned so the first handler
+ * cannot poison status/amount/stableType for the next. `rawPayload` is a
+ * shallow root copy (PERF-6) — do not structuredClone the Stripe body.
  */
 function cloneWebhookEventForHandler(event: WebhookEvent): WebhookEvent {
-    try {
-        return structuredClone(event);
-    } catch {
-        // Fallback when rawPayload (or nested dual-write) is non-cloneable.
-        // Shallow-copy identity fields; share uncloneable nested refs only as last resort.
-        const cloneNested = <T>(value: T): T => {
-            try {
-                return structuredClone(value);
-            } catch {
-                return value;
-            }
-        };
-        return {
-            ...event,
-            timestamp: new Date(event.timestamp.getTime()),
-            ...(event.event !== undefined
-                ? { event: cloneNested(event.event) }
-                : {}),
-            ...(event.provider !== undefined
-                ? { provider: cloneNested(event.provider) }
-                : {}),
-        };
-    }
+    const cloneNested = <T>(value: T): T => {
+        try {
+            return structuredClone(value);
+        } catch {
+            return value;
+        }
+    };
+    return {
+        ...event,
+        timestamp: new Date(event.timestamp.getTime()),
+        rawPayload: shallowCopyJsonRoot(event.rawPayload),
+        ...(event.event !== undefined
+            ? { event: cloneNested(event.event) }
+            : {}),
+        ...(event.provider !== undefined
+            ? { provider: cloneNested(event.provider) }
+            : {}),
+    };
 }
 
 /**
@@ -303,7 +309,7 @@ export class HooksManager {
             // Fail-fast: if the first handler throws, do not run the next.
             // Avoids double fulfillment when a primary handler fails mid-way
             // (caller gets 5xx / provider retry; secondary must not also fulfill).
-            // CORE-2: each handler receives its own deep clone so the first cannot
+            // CORE-2: each handler receives an isolated clone so the first cannot
             // poison status/amount/stableType/nested event for the second.
             const composed: WebhookVerifiedHook = async (event) => {
                 await prev(cloneWebhookEventForHandler(event));

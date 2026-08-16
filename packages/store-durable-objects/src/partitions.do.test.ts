@@ -10,6 +10,7 @@ import {
   resolveDoHashLayoutMetaShardName,
   resolveDoShardName,
 } from "./index";
+import type { DoNamespaceLike, DoStubLike } from "./types";
 import { createMockDoNamespace } from "./test-utils/mock-namespace";
 import { uniqueTablePrefix } from "./test-utils/do-env";
 
@@ -442,6 +443,99 @@ describe("do multi-partition discovery fan-out", () => {
       const listed = await stores.reconciliation.listDue({ now, limit: 1 });
       expect(listed).toHaveLength(1);
       expect([keyA, keyB]).toContain(listed[0]!.key);
+    } finally {
+      ns.close();
+    }
+  });
+
+  it("PERF-5: peek every shard, full-list only occupied (expired claimed counts)", async () => {
+    const prefix = uniqueTablePrefix("pk5");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const partitions = 8;
+      const peekNames: string[] = [];
+      const listNames: string[] = [];
+      const inner = ns.namespace;
+      function wrapStub(stub: DoStubLike, name: string): DoStubLike {
+        return new Proxy(stub, {
+          get(target, prop, recv) {
+            const value = Reflect.get(target, prop, recv);
+            if (typeof value !== "function") return value;
+            if (prop === "peekDueReconciliation") {
+              return async (...args: unknown[]) => {
+                peekNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            if (prop === "listDueReconciliation") {
+              return async (...args: unknown[]) => {
+                listNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            return value;
+          },
+        });
+      }
+      const wrapped: DoNamespaceLike = {
+        idFromName: (n) => inner.idFromName(n),
+        get: (id) => wrapStub(inner.get(id), id.toString()),
+        getByName: (name) => wrapStub(inner.getByName!(name), name),
+      };
+
+      const stores = createDoPaymentStores({
+        namespace: wrapped,
+        sharding: { kind: "hash", partitions },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+
+      const { keyA, keyB } = findCrossPartitionKeys(partitions);
+      const shardA = resolveDoShardName(
+        { kind: "hash", partitions },
+        { key: keyA },
+      );
+      const shardB = resolveDoShardName(
+        { kind: "hash", partitions },
+        { key: keyB },
+      );
+      await stores.reconciliation.schedule({
+        key: keyA,
+        subjectId: "pay_a",
+        reason: "timeout",
+        dueAt: now,
+      });
+      await stores.reconciliation.schedule({
+        key: keyB,
+        subjectId: "pay_b",
+        reason: "timeout",
+        dueAt: now,
+      });
+      const claimed = await stores.reconciliation.claim({
+        key: keyB,
+        owner: "w1",
+        leaseMs: 1_000,
+      });
+      expect(claimed.kind).toBe("acquired");
+      clock.advance(2_000);
+      const later = new Date(clock.nowMs()).toISOString();
+
+      peekNames.length = 0;
+      listNames.length = 0;
+      const listed = await stores.reconciliation.listDue({
+        now: later,
+        limit: 50,
+      });
+      const keys = new Set(listed.map((r) => r.key));
+      expect(keys.has(keyA)).toBe(true);
+      expect(keys.has(keyB)).toBe(true);
+      expect(peekNames).toHaveLength(partitions);
+      expect(new Set(listNames)).toEqual(new Set([shardA, shardB]));
     } finally {
       ns.close();
     }

@@ -129,9 +129,9 @@ Not money-integrity ship blockers. Documented leftovers.
 
 | ID | Residual |
 | --- | --- |
-| **PERF-5** | DO hash `listDue` / `listRetryable` still fans out to every enumerable isolate at full `limit` (`store-durable-objects/src/client.ts` `fanOutListByKey`). Per-shard UPDATE is bounded (PERF-2). No cheaper correct global earliest-N without a cross-isolate index. |
-| **PERF-6** | Webhook path still parse / redact / stringify / SHA-256 / deep-clone large Stripe bodies more than once. Unowned for a code change this pass (`stripe.gateway.ts` is stream A; infer stream must not edit it). |
-| **PERF-7** | `processDue` / `processRetryable` stay list-then-serial-claim (list is discovery; claim is the fence). Oversample still capped at **200** when `maxInFlightByGateway` is set; default 10 stays 10. |
+| **PERF-5** | **closed** — peek every enumerable isolate; full list only on occupied shards. Expired claimed is occupied. Missing peek RPC fails closed to full list. |
+| **PERF-6** | **closed (owned clone path)** — `cloneWebhookEventForHooks` / composed `onWebhookVerified` shallow-copy `rawPayload` and do not `structuredClone` the Stripe body. Gateway parse/hash in `stripe.gateway.ts` is unchanged. |
+| **PERF-7** | **closed** — `claimDue` / `processDue` / `processRetryable` issue listed claims in parallel; handlers stay serial. Oversample cap remains 200. |
 
 ---
 
@@ -198,7 +198,7 @@ Not money-integrity ship blockers. Documented leftovers.
 
 **Tests:** refund-resource COMPLETED is not type-only `refund.completed`.
 
-**Residual (non-blocking):** static `PAYPAL_EVENT_TYPE_MAP` still names `refund.completed` without status (`webhook-event-map.ts` ~305). Type-only handlers that only call the mapper with no status still see that name; `parseWebhookEvent` rematch is what dual-write consumers get.
+**Mapper:** `mapPayPalEventType` status-gates `PAYMENT.CAPTURE.REFUNDED` — proven `refunded` → `refund.completed`; missing / `partially_refunded` → `refund.pending`. Catalog `PAYPAL_EVENT_TYPE_MAP` still names the proven-full-refund arm.
 
 ### WEBHOOKS-403 — CLOSED (parse-stage 403 is retryable)
 
@@ -247,7 +247,7 @@ Skipped tests are live postgres / redis / turso / better-sqlite3 integration onl
 
 ## Verdict
 
-**PASS.** Session-audit fence-release, empty PayPal-Request-Id, type-only incomplete `refund.completed`, parse-stage 403 drop, and the listed money-lie IDs are not still present in source. Residual PERF-5/6/7 are documented and non-blocking.
+**PASS.** Session-audit fence-release, empty PayPal-Request-Id, type-only incomplete `refund.completed`, parse-stage 403 drop, listed money-lie IDs, and leftover PERF-5/6/7 are closed in source. Stripe gateway parse/hash (unowned PERF-6 slice) is unchanged.
 
 ```json
 {
@@ -259,8 +259,8 @@ Skipped tests are live postgres / redis / turso / better-sqlite3 integration onl
   "implement_ok": 10,
   "implement_fail": 0,
   "blocking": [],
-  "non_blocking": ["PERF-5", "PERF-6", "PERF-7"],
+  "non_blocking": [],
   "audit": "docs/audits/session-audit-2026-08-16.md",
-  "summary": "PASS. Session-audit fence/idempotency/403/money-lie IDs are closed in source (PAYMOB-FENCE-1/2/3, PAYPAL-IDEM-1, PAYPAL-DW-1, WEBHOOKS-403, STRIPE-CKO/CHG, CORE-INF/HW/6-EXT, PAYPAL-ID-1, PAYMOB-TOCTOU, RECON-LEASE-1, MOYASAR-CAP-0, PAYMOB-AUTH-REDIR). Typecheck green; 2708 pass / 35 skip / 0 fail. Residual PERF-5/6/7 only."
+  "summary": "PASS. Session leftover IDs including PERF-5/6/7 and PAYPAL-DW-1 mapper status-gate are closed. Stripe gateway parse/hash is unchanged. Typecheck/tests must be re-run after this close-out."
 }
 ```

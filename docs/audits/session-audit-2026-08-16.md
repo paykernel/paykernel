@@ -48,9 +48,9 @@
 | **SQL-UPD-1** | Postgres expired-claim `UPDATE … WHERE key IN (SELECT claimed …)` does not re-check `status = 'claimed'`. Concurrent pollers can double-decrement `attempts`. |
 | **PERF-3** | Composite list indexes exist in sql-foundation v1 DDL only. `migrate()` skips applied v1. D1 Wrangler `0001_foundation.sql` is still single-column. |
 | **PERF-4** | Redis `listDue` / `listRetryable` is ZRANGE + N Lua GETs. |
-| **PERF-5** | DO `listDue` wakes every hash isolate at full `limit`. |
-| **PERF-6** | Webhook path still parse / redact / stringify / SHA-256 / deep-clone large Stripe bodies more than once. |
-| **PERF-7** | `processDue` / `processRetryable` still list-then-serial-claim. |
+| **PERF-5** | **closed** — DO list peeks every enumerable isolate, full-lists only occupied shards (expired claimed counts). |
+| **PERF-6** | **closed (owned clone path)** — client/hooks no longer deep-clone `rawPayload`. Stripe gateway parse/hash is unchanged. |
+| **PERF-7** | **closed** — listed claims run concurrently; handlers stay serial. Oversample cap remains 200. |
 | **REDIS-CLEAN-1** | `deleteExpired` default `limit` is `Infinity` (SCAN + per-key EVAL). |
 
 ---

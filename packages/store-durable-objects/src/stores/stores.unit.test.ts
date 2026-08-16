@@ -819,3 +819,25 @@ describe("withTransaction honesty (SHARED-1 / DO)", () => {
   });
 });
 
+describe("PERF-5 peek occupancy (fake executor)", () => {
+  it("peekDue is a read-only SELECT (no lease UPDATE)", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const executor = createScriptedExecutor({
+      onQuery: () => [{ occupied: 1 }],
+    });
+    const store = createDoReconciliationStore({ executor });
+    expect(await store.peekDue({ now })).toBe(true);
+    expect(executor.calls.every((c) => !/UPDATE/i.test(c.sql))).toBe(true);
+  });
+
+  it("peekRetryable is a read-only SELECT (no lease UPDATE)", async () => {
+    const now = "2026-01-01T00:00:00.000Z";
+    const executor = createScriptedExecutor({
+      onQuery: () => [],
+    });
+    const store = createDoWebhookInboxStore({ executor });
+    expect(await store.peekRetryable({ now })).toBe(false);
+    expect(executor.calls.every((c) => !/UPDATE/i.test(c.sql))).toBe(true);
+  });
+});
+
