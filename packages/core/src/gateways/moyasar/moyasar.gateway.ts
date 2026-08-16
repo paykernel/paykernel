@@ -1473,11 +1473,10 @@ export class MoyasarGateway extends BaseGateway {
       return "requires_action";
     }
     // Open money story — align with Paymob demotion (MOYASAR-5).
-    if (status === "partially_captured") {
+    if (status === "partially_captured" || status === "refund_completed") {
       return "requires_action";
     }
-    // paid | authorized | partially_refunded | refunded | refund_completed |
-    // setup_completed
+    // paid | authorized | partially_refunded | refunded | setup_completed
     return "succeeded";
   }
 

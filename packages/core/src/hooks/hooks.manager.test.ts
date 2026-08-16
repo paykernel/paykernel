@@ -257,98 +257,89 @@ describe("HooksManager after-hook isolation (unit)", () => {
     expect(warns.some((w) => w.msg.includes("proceed:false"))).toBe(true);
   });
 
-  it("later after-hook sees frozen money identity (CORE-2)", async () => {
+  it.each([
+    {
+      label: "afterCapture then onAfter",
+      operation: "capturePayment" as const,
+      compose: "onAfter" as const,
+    },
+    {
+      label: "two afterCreatePayment handlers",
+      operation: "createPayment" as const,
+      compose: "register" as const,
+    },
+  ])("later handler sees frozen money identity ($label) (CORE-2)", async ({
+    operation,
+    compose,
+  }) => {
     let laterSaw: unknown;
-    const manager = new HooksManager({
-      afterCapture: async (_ctx, result) => ({
-        proceed: true,
-        modifiedResult: {
-          ...result,
-          success: true,
-          status: "paid",
-          amount: 999,
-          gatewayId: "forged",
-          annotation: "from-first",
-        },
-      }),
-      onAfter: async (_ctx, result) => {
-        laterSaw = result;
-        return { proceed: true };
-      },
-    });
-
     const original = {
       success: false,
-      status: "pending",
-      amount: 10,
+      status: "processing",
+      amount: 50,
       currency: "USD",
       gatewayId: "pi_real",
+      outcome: "requires_action",
+      reconciliationRequired: true,
+      nextAction: { type: "redirect", url: "https://bank.test/3ds" },
+      references: { providerObjectId: "pi_real" },
     };
+    const forged = {
+      ...original,
+      success: true,
+      status: "paid",
+      amount: 999,
+      gatewayId: "forged",
+      outcome: "succeeded",
+      reconciliationRequired: false,
+      nextAction: { type: "redirect", url: "https://evil.test/phish" },
+      references: { providerObjectId: "forged" },
+      annotation: "from-first",
+    };
+
+    const first = async (_ctx: HookContext<unknown>, _result: unknown) => ({
+      proceed: true,
+      modifiedResult: forged,
+    });
+    const second = async (_ctx: HookContext<unknown>, result: unknown) => {
+      laterSaw = result;
+      return { proceed: true };
+    };
+
+    const hooks =
+      compose === "onAfter"
+        ? { afterCapture: first, onAfter: second }
+        : { afterCreatePayment: first };
+    const manager = new HooksManager(hooks);
+    if (compose === "register") {
+      manager.register("afterCreatePayment", second);
+    }
+
     const result = await manager.runAfter(
-      baseCtx({
-        params: { gatewayPaymentId: "pi_real" },
-        operation: "capturePayment",
-      }),
+      baseCtx({ params: { gatewayPaymentId: "pi_real" }, operation }),
       original,
     );
 
     expect(laterSaw).toEqual(
       expect.objectContaining({
         success: false,
-        status: "pending",
-        amount: 10,
-        currency: "USD",
+        status: "processing",
+        amount: 50,
         gatewayId: "pi_real",
+        outcome: "requires_action",
+        reconciliationRequired: true,
+        nextAction: { type: "redirect", url: "https://bank.test/3ds" },
+        references: { providerObjectId: "pi_real" },
         annotation: "from-first",
       }),
     );
     expect(result.modifiedResult).toEqual(
       expect.objectContaining({
         success: false,
-        status: "pending",
-        amount: 10,
+        status: "processing",
+        amount: 50,
         gatewayId: "pi_real",
         annotation: "from-first",
-      }),
-    );
-  });
-
-  it("composed after-hooks restore money before the next handler (CORE-2)", async () => {
-    let secondSaw: unknown;
-    const manager = new HooksManager({
-      afterCreatePayment: async (_ctx, result) => ({
-        proceed: true,
-        modifiedResult: {
-          ...result,
-          success: true,
-          status: "paid",
-          amount: 1,
-          note: "first",
-        },
-      }),
-    });
-    manager.register("afterCreatePayment", async (_ctx, result) => {
-      secondSaw = result;
-      return { proceed: true, modifiedResult: { ...result, note: "second" } };
-    });
-
-    await manager.runAfter(
-      baseCtx({ params: {}, operation: "createPayment" }),
-      {
-        success: false,
-        status: "processing",
-        amount: 50,
-        gatewayId: "pi_create",
-      },
-    );
-
-    expect(secondSaw).toEqual(
-      expect.objectContaining({
-        success: false,
-        status: "processing",
-        amount: 50,
-        gatewayId: "pi_create",
-        note: "first",
       }),
     );
   });

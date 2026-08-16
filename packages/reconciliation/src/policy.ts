@@ -310,16 +310,19 @@ function providerAuthOrPartialWithUnaccountedTotals(
   }
 
   if (local.status === "partially_captured") {
-    const unaccountedCapture =
-      local.capturedAmount === undefined &&
-      provider.capturedAmount !== undefined;
-    return unaccountedCapture || unaccountedRefund;
+    // Status-only local cannot verify a partial capture even when the provider
+    // omitted capturedAmount — fail closed (do not mark_consistent).
+    return local.capturedAmount === undefined || unaccountedRefund;
   }
 
-  // partially_refunded
+  // partially_refunded: omitted local refund total cannot verify the slice.
   const unaccountedCapture =
     local.capturedAmount === undefined && moneyIsNonZero(provider.capturedAmount);
-  return unaccountedCapture || unaccountedRefund;
+  return (
+    local.refundedAmount === undefined ||
+    unaccountedCapture ||
+    unaccountedRefund
+  );
 }
 
 function maySafeUpgradeToPaid(

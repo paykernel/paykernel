@@ -355,9 +355,11 @@ export function inferOperationOutcome(
         result.status === "pending" ||
         result.status === "processing" ||
         result.status === "approved" ||
-        result.status === "partially_captured"
+        result.status === "partially_captured" ||
+        result.status === "refund_completed"
     ) {
-        // Non-terminal / pre-capture / open partial capture: never succeeded.
+        // Non-terminal / pre-capture / open partial capture / incomplete refund
+        // snapshot: never succeeded.
         // Prefer requires_action so fulfillment gates stay closed (clientSecret,
         // bare pending intention, PayPal buyer APPROVED, leftover auth, etc.).
         return "requires_action";
@@ -414,7 +416,9 @@ function coercePaymentOutcomeToGatewayStatus(
         if (
             result.status === "pending" ||
             result.status === "processing" ||
-            result.status === "approved"
+            result.status === "approved" ||
+            result.status === "partially_captured" ||
+            result.status === "refund_completed"
         ) {
             return "requires_action";
         }
@@ -424,7 +428,10 @@ function coercePaymentOutcomeToGatewayStatus(
     if (outcome === "requires_action") {
         // CORE-1: partial capture is open money — Paymob/Stripe demote to
         // requires_action; do not upgrade via settled-status coerce.
-        if (result.status === "partially_captured") {
+        if (
+            result.status === "partially_captured" ||
+            result.status === "refund_completed"
+        ) {
             return "requires_action";
         }
         // Explicit requires_action must not under-fulfill fully settled money

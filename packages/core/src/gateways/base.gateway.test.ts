@@ -23,6 +23,7 @@ class TestGateway extends BaseGateway {
       payments: true,
       immediateCapture: true,
       refunds: true,
+      voids: true,
     });
   }
 
@@ -68,6 +69,19 @@ class TestGateway extends BaseGateway {
     });
   }
 
+  async voidPayment(params: { gatewayPaymentId: string }): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("voidPayment", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        success: true,
+        gatewayId: params.gatewayPaymentId,
+        status: "cancelled",
+        redirectUrl: undefined,
+        rawResponse: {},
+      };
+    });
+  }
+
   async confirmStcPayOtp(params: {
     transactionUrl: string;
     otpValue: string;
@@ -100,53 +114,89 @@ function postSubmitTimeout(): NetworkError {
 }
 
 describe("BaseGateway CORE-7 post-submit identity", () => {
-  it("create timeout uses orderId when present", async () => {
+  const createBase = {
+    amount: 10,
+    currency: "USD",
+    callbackUrl: "https://example.test/return",
+  };
+
+  it.each([
+    {
+      label: "create uses orderId when present",
+      run: (gw: TestGateway) =>
+        gw.createPayment({ ...createBase, orderId: "ord_123" }),
+      gatewayId: "ord_123",
+    },
+    {
+      label: "create prefers orderId over idempotencyKey",
+      run: (gw: TestGateway) =>
+        gw.createPayment({
+          ...createBase,
+          orderId: "ord_wins",
+          idempotencyKey: "idem_ignored",
+        }),
+      gatewayId: "ord_wins",
+    },
+    {
+      label: "create uses idempotencyKey when no order/payment id exists",
+      run: (gw: TestGateway) =>
+        gw.createPayment({
+          ...createBase,
+          idempotencyKey: "idem_moyasar_given_id",
+        }),
+      gatewayId: "idem_moyasar_given_id",
+    },
+    {
+      label: "OTP uses transactionUrl",
+      run: (gw: TestGateway) =>
+        gw.confirmStcPayOtp({
+          transactionUrl: "https://moyasar.test/otp/txn_99",
+          otpValue: "1234",
+        }),
+      gatewayId: "https://moyasar.test/otp/txn_99",
+    },
+    {
+      label: "create without identity stays unknown",
+      run: (gw: TestGateway) => gw.createPayment(createBase),
+      gatewayId: "unknown",
+    },
+    {
+      label: "capture uses gatewayPaymentId",
+      run: (gw: TestGateway) =>
+        gw.capturePayment({ gatewayPaymentId: "pi_cap_1" }),
+      gatewayId: "pi_cap_1",
+    },
+    {
+      label: "void uses gatewayPaymentId",
+      run: (gw: TestGateway) =>
+        gw.voidPayment({ gatewayPaymentId: "pi_void_1" }),
+      gatewayId: "pi_void_1",
+    },
+  ])("post-submit timeout $label", async ({ run, gatewayId }) => {
     const gw = new TestGateway();
     gw.failWith = postSubmitTimeout();
-    const result = await gw.createPayment({
-      amount: 10,
-      currency: "USD",
-      callbackUrl: "https://example.test/return",
-      orderId: "ord_123",
-    });
+    const result = await run(gw);
     expect(result.outcome).toBe("indeterminate");
-    expect(result.gatewayId).toBe("ord_123");
+    expect(result.gatewayId).toBe(gatewayId);
     expect(result.reconciliationRequired).toBe(true);
   });
 
-  it("create timeout uses idempotencyKey when no order/payment id exists", async () => {
+  it("refund post-submit timeout is indeterminate with gatewayRefundId", async () => {
     const gw = new TestGateway();
     gw.failWith = postSubmitTimeout();
-    const result = await gw.createPayment({
-      amount: 10,
-      currency: "USD",
-      callbackUrl: "https://example.test/return",
-      idempotencyKey: "idem_moyasar_given_id",
+    const result = await gw.refundPayment({
+      gatewayPaymentId: "pi_ref_1",
     });
     expect(result.outcome).toBe("indeterminate");
-    expect(result.gatewayId).toBe("idem_moyasar_given_id");
+    expect(result.gatewayRefundId).toBe("pi_ref_1");
+    expect(result.reconciliationRequired).toBe(true);
   });
 
-  it("OTP timeout uses transactionUrl", async () => {
+  it("pre-submit network error is not forged as indeterminate", async () => {
     const gw = new TestGateway();
-    gw.failWith = postSubmitTimeout();
-    const result = await gw.confirmStcPayOtp({
-      transactionUrl: "https://moyasar.test/otp/txn_99",
-      otpValue: "1234",
-    });
-    expect(result.outcome).toBe("indeterminate");
-    expect(result.gatewayId).toBe("https://moyasar.test/otp/txn_99");
-  });
-
-  it("create timeout without any identity stays gatewayId unknown", async () => {
-    const gw = new TestGateway();
-    gw.failWith = postSubmitTimeout();
-    const result = await gw.createPayment({
-      amount: 10,
-      currency: "USD",
-      callbackUrl: "https://example.test/return",
-    });
-    expect(result.outcome).toBe("indeterminate");
-    expect(result.gatewayId).toBe("unknown");
+    gw.failWith = new NetworkError("connect reset");
+    await expect(gw.createPayment(createBase)).rejects.toBeInstanceOf(
+      NetworkError,
+    );
   });
 });

@@ -1181,7 +1181,8 @@ describe("MoyasarGateway", () => {
       expect(result.status).not.toBe("refunded");
       expect(result.status).not.toBe("partially_refunded");
       expect(result.refundedAmount).toBe(0);
-      expect(result.outcome).toBe("succeeded");
+      expect(result.outcome).toBe("requires_action");
+      expect(result.outcome).not.toBe("succeeded");
     });
 
     it("maps provider refunded + missing refunded amount to refund_completed", async () => {
@@ -1201,6 +1202,7 @@ describe("MoyasarGateway", () => {
       expect(result.status).toBe("refund_completed");
       expect(result.status).not.toBe("refunded");
       expect(result.status).not.toBe("partially_refunded");
+      expect(result.outcome).toBe("requires_action");
     });
 
     it("maps provider refunded + non-finite refunded amount to refund_completed", async () => {
@@ -2185,84 +2187,69 @@ describe("MoyasarGateway", () => {
       expect(event.provider?.eventType).toBe("payment_paid");
     });
 
-    it("fail-closes payment_voided + residual paid snapshot (MOYASAR-1)", () => {
-      const event = createGateway().parseWebhookEvent({
+    it.each([
+      {
+        label: "paid residual",
         id: "wh_void_paid",
-        type: "payment_voided",
-        secret_token: "webhook_secret",
-        created_at: "2026-05-21T10:00:00Z",
         data: {
-          id: PAYMENT_ID,
           status: "paid",
           amount: 10000,
-          currency: "SAR",
           captured: 10000,
           refunded: 0,
         },
-      });
-
-      // Money-honest residual: funds still captured — do not rewrite to cancelled.
-      expect(event.status).toBe("paid");
-      expect(event.status).not.toBe("cancelled");
-      expect(event.amount).toBe(100);
-      expect(event.currency).toBe("SAR");
-      // Envelope type stays provider-native; dual-write must not restock.
-      expect(event.type).toBe("payment_voided");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
-      expect(event.stableType).not.toBe("payment.cancelled");
-      expect(event.provider?.eventType).toBe("payment_voided");
-    });
-
-    it("fail-closes payment_voided + residual authorized snapshot (MOYASAR-1)", () => {
-      const event = createGateway().parseWebhookEvent({
+        status: "paid",
+        amount: 100,
+      },
+      {
+        label: "authorized residual",
         id: "wh_void_auth",
-        type: "payment_voided",
-        secret_token: "webhook_secret",
-        created_at: "2026-05-21T10:00:00Z",
         data: {
-          id: PAYMENT_ID,
           status: "authorized",
           amount: 10000,
-          currency: "SAR",
           captured: 0,
           refunded: 0,
         },
-      });
-
-      expect(event.status).toBe("authorized");
-      expect(event.status).not.toBe("cancelled");
-      expect(event.amount).toBe(100);
-      expect(event.currency).toBe("SAR");
-      expect(event.type).toBe("payment_voided");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
-      expect(event.provider?.eventType).toBe("payment_voided");
-    });
-
-    it("fail-closes payment_voided + residual partially_captured snapshot (MOYASAR-1)", () => {
-      const event = createGateway().parseWebhookEvent({
+        status: "authorized",
+        amount: 100,
+      },
+      {
+        label: "partially_captured residual",
         id: "wh_void_partial",
-        type: "payment_voided",
-        secret_token: "webhook_secret",
-        created_at: "2026-05-21T10:00:00Z",
         data: {
-          id: PAYMENT_ID,
           status: "paid",
           amount: 10000,
-          currency: "SAR",
           captured: 4000,
           refunded: 0,
         },
-      });
+        status: "partially_captured",
+        amount: 40,
+      },
+    ] as const)(
+      "fail-closes payment_voided + $label (MOYASAR-1)",
+      ({ id, data, status, amount }) => {
+        const event = createGateway().parseWebhookEvent({
+          id,
+          type: "payment_voided",
+          secret_token: "webhook_secret",
+          created_at: "2026-05-21T10:00:00Z",
+          data: {
+            id: PAYMENT_ID,
+            currency: "SAR",
+            ...data,
+          },
+        });
 
-      expect(event.status).toBe("partially_captured");
-      expect(event.status).not.toBe("cancelled");
-      expect(event.amount).toBe(40);
-      expect(event.currency).toBe("SAR");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
-    });
+        expect(event.status).toBe(status);
+        expect(event.status).not.toBe("cancelled");
+        expect(event.amount).toBe(amount);
+        expect(event.currency).toBe("SAR");
+        expect(event.type).toBe("payment_voided");
+        expect(event.stableType).toBe("payment.processing");
+        expect(event.event?.type).toBe("payment.processing");
+        expect(event.stableType).not.toBe("payment.cancelled");
+        expect(event.provider?.eventType).toBe("payment_voided");
+      },
+    );
 
     it("maps consistent payment_voided + voided snapshot to cancelled (MOYASAR-1)", () => {
       const event = createGateway().parseWebhookEvent({

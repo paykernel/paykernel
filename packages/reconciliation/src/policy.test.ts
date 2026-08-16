@@ -661,6 +661,28 @@ describe("decideReconciliationPolicy", () => {
     expect(d.safe).toBe(false);
   });
 
+  it("RECON-2: status-only partials stay unsafe when provider omitted totals", () => {
+    for (const status of ["partially_captured", "partially_refunded"] as const) {
+      const provider = buildProviderPaymentSnapshot({
+        gatewayPaymentId: `pi_${status}_bare`,
+        status,
+        amount: money("10.00", "USD"),
+        providerStatus: status,
+      });
+      const d = decideReconciliationPolicy(
+        { outcome: "consistent", provider },
+        {
+          gateway: "stripe",
+          gatewayPaymentId: `pi_${status}_bare`,
+          expected: { status },
+        },
+      );
+      expect(d.action).not.toBe("mark_consistent");
+      expect(d.safe).toBe(false);
+      expect(d.action).toBe("manual_review");
+    }
+  });
+
   it("RECON-4: authorized/partially_captured → paid is not safe auto-upgrade", () => {
     for (const localStatus of ["authorized", "partially_captured"] as const) {
       const result: ReconciliationResult = {

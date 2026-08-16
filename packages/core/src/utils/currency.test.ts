@@ -48,6 +48,9 @@ describe("getCurrencyExponent", () => {
     ["JMD", 2],
     ["XCG", 2], // Caribbean guilder (replaced ANG)
     ["XAD", 2],
+    ["jmd", 2],
+    ["xcg", 2],
+    ["xad", 2],
     // Case-insensitive
     ["jpy", 0],
     ["isk", 0],
@@ -128,15 +131,6 @@ describe("isKnownCurrencyCode", () => {
     expect(isKnownCurrencyCode("JMD")).toBe(true);
     expect(isKnownCurrencyCode("XCG")).toBe(true);
     expect(isKnownCurrencyCode("XAD")).toBe(true);
-  });
-
-  it("JMD / XCG / XAD are ISO two-decimal (MONEY-1)", () => {
-    expect(getCurrencyExponent("JMD")).toBe(2);
-    expect(getCurrencyExponent("XCG")).toBe(2);
-    expect(getCurrencyExponent("XAD")).toBe(2);
-    expect(getCurrencyExponent("jmd")).toBe(2);
-    expect(getCurrencyExponent("xcg")).toBe(2);
-    expect(getCurrencyExponent("xad")).toBe(2);
   });
 
   it("is case-insensitive and trims whitespace", () => {

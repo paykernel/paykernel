@@ -833,6 +833,19 @@ describe("operation-result helpers", () => {
     expect(pending.status).toBe("pending");
     expect(pending.outcome).not.toBe("succeeded");
     expect(inferOperationOutcome(pending)).toBe(pending.outcome);
+
+    const incompleteRefund = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pay_refund_incomplete",
+        status: "refund_completed",
+        rawResponse: {},
+        gateway: "moyasar",
+      },
+      "succeeded",
+    );
+    expect(incompleteRefund.outcome).toBe("requires_action");
+    expect(incompleteRefund.outcome).not.toBe("succeeded");
+    expect(incompleteRefund.status).toBe("refund_completed");
   });
 
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {

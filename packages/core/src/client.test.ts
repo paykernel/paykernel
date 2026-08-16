@@ -2762,7 +2762,7 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
         expect(event.id).toBe('evt_async_verify');
     });
 
-    it('CORE-3: a rejected / false Promise from verifyWebhook is not treated as verified', async () => {
+    it('CORE-3: a false Promise from verifyWebhook is not treated as verified', async () => {
         const client = createWebhookOnlyClient(
             'custom',
             () => {
@@ -2775,6 +2775,22 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
 
         await expect(client.handleWebhook('custom', { hello: true })).rejects.toBeInstanceOf(
             InvalidWebhookError,
+        );
+    });
+
+    it('CORE-3: a rejected Promise from verifyWebhook is not treated as verified', async () => {
+        const client = createWebhookOnlyClient(
+            'custom',
+            () => {
+                throw new Error('parse must not run');
+            },
+            {
+                verifyWebhook: () => Promise.reject(new Error('verify transport failed')),
+            },
+        );
+
+        await expect(client.handleWebhook('custom', { hello: true })).rejects.toThrow(
+            'verify transport failed',
         );
     });
 

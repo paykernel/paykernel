@@ -975,45 +975,47 @@ describe("mockGateway", () => {
     expect(await g.getPaymentStatus!(pay.gatewayId)).toBe("cancelled");
   });
 
-  it("does not capture after void / failed / pending (TESTKIT-1)", async () => {
-    const g = mockGateway();
-    const auth = await g.createPayment({
-      ...baseCreate,
-      amount: 30,
-      capture: false,
-    });
-    await g.voidPayment!({ gatewayPaymentId: auth.gatewayId });
+  it.each([
+    {
+      label: "voided auth",
+      setup: async () => {
+        const g = mockGateway();
+        const auth = await g.createPayment({
+          ...baseCreate,
+          amount: 30,
+          capture: false,
+        });
+        await g.voidPayment!({ gatewayPaymentId: auth.gatewayId });
+        return { g, id: auth.gatewayId, status: "cancelled" as const };
+      },
+    },
+    {
+      label: "failed create",
+      setup: async () => {
+        const g = mockGateway({
+          createPayment: [{ outcome: "failed" }],
+        });
+        const failed = await g.createPayment(baseCreate);
+        return { g, id: failed.gatewayId, status: "failed" as const };
+      },
+    },
+    {
+      label: "pending requires_action",
+      setup: async () => {
+        const g = mockGateway({
+          createPayment: [{ outcome: "requires_action" }],
+        });
+        const pending = await g.createPayment(baseCreate);
+        return { g, id: pending.gatewayId, status: "pending" as const };
+      },
+    },
+  ])("does not capture after $label (TESTKIT-1)", async ({ setup }) => {
+    const { g, id, status } = await setup();
     await expect(
-      g.capturePayment({ gatewayPaymentId: auth.gatewayId }),
+      g.capturePayment({ gatewayPaymentId: id }),
     ).rejects.toBeInstanceOf(InvalidRequestError);
-    expect(g.getPaymentState(auth.gatewayId)?.status).toBe("cancelled");
-    expect(g.getPaymentState(auth.gatewayId)?.capturedAmount).toBe(0);
-
-    const failedGw = mockGateway({
-      createPayment: [{ outcome: "failed" }],
-    });
-    const failed = await failedGw.createPayment(baseCreate);
-    expect(failed.status).toBe("failed");
-    await expect(
-      failedGw.capturePayment({ gatewayPaymentId: failed.gatewayId }),
-    ).rejects.toBeInstanceOf(InvalidRequestError);
-    expect(failedGw.getPaymentState(failed.gatewayId)?.capturedAmount).toBe(0);
-    expect(failedGw.getPaymentState(failed.gatewayId)?.status).toBe("failed");
-
-    const pendingGw = mockGateway({
-      createPayment: [{ outcome: "requires_action" }],
-    });
-    const pending = await pendingGw.createPayment(baseCreate);
-    expect(pending.status).toBe("pending");
-    await expect(
-      pendingGw.capturePayment({ gatewayPaymentId: pending.gatewayId }),
-    ).rejects.toBeInstanceOf(InvalidRequestError);
-    expect(pendingGw.getPaymentState(pending.gatewayId)?.capturedAmount).toBe(
-      0,
-    );
-    expect(pendingGw.getPaymentState(pending.gatewayId)?.status).toBe(
-      "pending",
-    );
+    expect(g.getPaymentState(id)?.status).toBe(status);
+    expect(g.getPaymentState(id)?.capturedAmount).toBe(0);
   });
 
   it("converts capture/refund majors with payment currency (TESTKIT-2)", async () => {

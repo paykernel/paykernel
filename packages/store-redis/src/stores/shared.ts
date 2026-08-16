@@ -128,46 +128,6 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
 }
 
 /**
- * Rare repair: SCAN store record keys and run GET_LUA so expired `claimed`
- * rows soft-release + re-index into the due/retry ZSET.
- *
- * Not the poll path. Claim / renew ZADD the due/retry index at
- * `lease_expires_ms` (REDIS-1 / P1315-REDIS-2) so ZRANGEBYSCORE(-inf, now)
- * rediscovers abandoned work with keyed ZSET ops only. Call this only for
- * operator repair of a drifted index — never from every listDue/listRetryable.
- */
-export async function softReleaseExpiredClaimedViaScan(options: {
-  port: RedisCommandPort;
-  eval: EvalHelper;
-  match: string;
-  indexKey: string;
-  getLua: string;
-  nowMs: string;
-  nowIso: string;
-  /** Skip keys ending with this segment (e.g. "due", "retry"). */
-  indexName: string;
-}): Promise<void> {
-  const { port, eval: evalHelper, match, indexKey, getLua, nowMs, nowIso, indexName } =
-    options;
-  let cursor = "0";
-  do {
-    const scanRaw = await port.send("SCAN", [
-      cursor,
-      "MATCH",
-      match,
-      "COUNT",
-      "50",
-    ]);
-    const scan = normalizeScan(scanRaw);
-    cursor = scan.cursor;
-    for (const redisKey of scan.keys) {
-      if (redisKey === indexKey || redisKey.endsWith(`:${indexName}`)) continue;
-      await evalHelper.eval(getLua, [redisKey, indexKey], [nowMs, nowIso]);
-    }
-  } while (cursor !== "0");
-}
-
-/**
  * PERF-4: load ZRANGE members in one wave (not serial N+1 GET) and keep
  * list-eligible rows up to `limit`.
  */
