@@ -7,7 +7,11 @@
  * @packageDocumentation
  */
 
-import { redactAttributeBag, sanitizeExceptionIdentity } from "./redaction";
+import {
+  redactAttributeBag,
+  sanitizeExceptionIdentity,
+  sanitizeSpanStatusMessage,
+} from "./redaction";
 import type { PaymentSpan, PaymentSpanStatus, PaymentTracer } from "./spans";
 
 /**
@@ -82,8 +86,9 @@ function applyOtelSpanStatus(
       : status.code === "error"
         ? OTEL_STATUS_ERROR
         : OTEL_STATUS_OK;
-  if (status.message !== undefined) {
-    otelSpan.setStatus({ code, message: status.message });
+  const safeMessage = sanitizeSpanStatusMessage(status.message);
+  if (safeMessage !== undefined) {
+    otelSpan.setStatus({ code, message: safeMessage });
   } else {
     otelSpan.setStatus({ code });
   }

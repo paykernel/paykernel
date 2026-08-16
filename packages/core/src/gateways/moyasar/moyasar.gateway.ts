@@ -290,19 +290,19 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Construction-time heads-up: capture/refund/void refuse to run without a
-   * store that implements atomic `reserve()` and an `idempotencyKey` (see
-   * {@link runIdempotentMutation}). Warn so misconfiguration is visible before
-   * the first mutation throws.
+   * Construction-time heads-up: capture/refund/void **require** a store that
+   * implements atomic `reserve()` and an `idempotencyKey` (see
+   * {@link runIdempotentMutation}). Warn so a missing store is visible before
+   * the first mutation throws `InvalidRequestError`.
    */
   private warnIfIdempotencyStoreUnsafe(): void {
     const store = this.moyasarConfig.idempotencyStore;
     if (!store) {
       this.logger.warn(
-        "[Moyasar] No idempotencyStore configured. Capture, refund, and void " +
-          "will throw until moyasar.idempotencyStore (with atomic reserve()) " +
-          "and idempotencyKey are provided — Moyasar has no native mutation " +
-          "idempotency (double-refund class).",
+        "[Moyasar] idempotencyStore is required for capture, refund, and void. " +
+          "Those mutations throw InvalidRequestError until moyasar.idempotencyStore " +
+          "(with atomic reserve()) and idempotencyKey are provided — Moyasar has " +
+          "no native mutation idempotency (double-refund class).",
       );
       return;
     }
@@ -460,7 +460,9 @@ export class MoyasarGateway extends BaseGateway {
 
   /**
    * Create a payment using Moyasar's Payment API.
-   * Supports: creditcard, token, applepay, samsungpay, stcpay.
+   * Backend-safe sources: token (Moyasar.js), applepay, samsungpay, stcpay.
+   * Raw `creditcard` (PAN/CVC) sources are rejected before any HTTP request —
+   * send cardholder data only via Moyasar.js tokenization.
    * @see https://docs.moyasar.com/api/payments/01-create-payment
    * @note `success: true` only means the payment is not mapped to `failed`
    *   (provider `failed`/`abandoned`, or an unmapped status). An `initiated`
@@ -476,12 +478,11 @@ export class MoyasarGateway extends BaseGateway {
     return this.executeWithHooks("createPayment", params, async (p) => {
       // Build source payload from moyasarSource or legacy tokenId
       const sourcePayload = this.buildSourcePayload(p);
-      const requiresCallback =
-        sourcePayload.type === "creditcard" || sourcePayload.type === "token";
+      const requiresCallback = sourcePayload.type === "token";
 
       if (requiresCallback && !p.callbackUrl) {
         throw new InvalidRequestError(
-          "callbackUrl is required for Moyasar creditcard and token payments",
+          "callbackUrl is required for Moyasar token payments",
         );
       }
 
@@ -654,7 +655,8 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Map our typed MoyasarPaymentSource to Moyasar API payload
+   * Map our typed MoyasarPaymentSource to Moyasar API payload.
+   * Raw `creditcard` is rejected — this backend never forwards PAN/CVC.
    */
   private mapMoyasarSource(
     source: MoyasarPaymentSource,
@@ -1192,9 +1194,13 @@ export class MoyasarGateway extends BaseGateway {
     // Covers amount-derived partially_captured and any other non-paid domain.
     // Incomplete refund_completed must not dual-write refund.completed —
     // type-only handlers would over-settle without proven refunded amount.
+    // payment_voided + residual paid/authorized must not dual-write
+    // payment.cancelled (type-only restock while funds remain).
     return {
-      ...this.demoteIncompleteRefundWebhookDualWrite(
-        this.demoteNonPaidSettledWebhookDualWrite(attached),
+      ...this.demoteResidualVoidWebhookDualWrite(
+        this.demoteIncompleteRefundWebhookDualWrite(
+          this.demoteNonPaidSettledWebhookDualWrite(attached),
+        ),
       ),
       payloadHash,
     };
@@ -1824,6 +1830,61 @@ export class MoyasarGateway extends BaseGateway {
       return status;
     }
     return "refund_completed";
+  }
+
+  /**
+   * Residual held-money domain statuses on an inconsistent `payment_voided`
+   * snapshot. Void is unproven: do not rewrite these to `cancelled` and do not
+   * dual-write `payment.cancelled` (type-only restock while funds remain).
+   */
+  private isResidualHeldWebhookStatus(status: PaymentStatus): boolean {
+    return (
+      status === "paid" ||
+      status === "authorized" ||
+      status === "partially_captured"
+    );
+  }
+
+  /**
+   * Envelope `payment_voided` maps to `payment.cancelled` from the type alone.
+   * When the payment snapshot is still paid / authorized / partially captured,
+   * demote dual-write to `payment.processing` so type-only handlers cannot
+   * restock while funds remain captured or held (MOYASAR-1). Domain status
+   * stays residual (money-honest, same as `voidPayment` residual 2xx).
+   * Provider-native `event.type` is unchanged.
+   */
+  private demoteResidualVoidWebhookDualWrite(
+    event: WebhookEvent,
+  ): WebhookEvent {
+    if (!event.event || !event.provider) {
+      return event;
+    }
+    if (!this.isResidualHeldWebhookStatus(event.status)) {
+      return event;
+    }
+
+    const cancelledArm =
+      event.stableType === "payment.cancelled" ||
+      event.event.type === "payment.cancelled";
+    if (!cancelledArm) {
+      return event;
+    }
+
+    const payment =
+      ("payment" in event.event && event.event.payment
+        ? event.event.payment
+        : undefined) ?? paymentFromWebhookEvent(event);
+
+    return {
+      ...event,
+      stableType: "payment.processing",
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "payment.processing",
+        payment,
+        provider: event.provider,
+      },
+    };
   }
 
   /**

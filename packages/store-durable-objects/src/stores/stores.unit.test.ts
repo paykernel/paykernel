@@ -452,6 +452,8 @@ describe("webhook store unit (B5/B4)", () => {
       (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
     );
     expect(soft).toBeDefined();
+    expect(soft?.sql).toMatch(/LIMIT\s+\?/i);
+    expect(soft?.params.at(-1)).toBe(100);
   });
 
   it("claim SQL gates pending on available_at", async () => {
@@ -553,6 +555,8 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
         c.sql.toLowerCase().includes("status = 'scheduled'"),
     );
     expect(soft).toBeDefined();
+    expect(soft?.sql).toMatch(/LIMIT\s+\?/i);
+    expect(soft?.params.at(-1)).toBe(100);
   });
 
   it("markManualReview requires active lease (expired → lease_lost)", async () => {

@@ -135,6 +135,39 @@ function resolveChargeAmount(
   };
 }
 
+/** Capture is only valid on an open auth hold or incremental capture. */
+function isCapturableMockStatus(status: PaymentStatus): boolean {
+  return status === "authorized" || status === "partially_captured";
+}
+
+/**
+ * Convert a capture/refund major using the **payment** currency (TESTKIT-2).
+ * Caller currency (or a Money leaf) that disagrees is rejected — same posture
+ * as Stripe / Paymob / Moyasar. Never scale with the caller's exponent.
+ */
+function resolveMutationMinor(
+  operation: "capturePayment" | "refundPayment",
+  amount: AmountInput,
+  callerCurrency: string | undefined,
+  paymentCurrency: string,
+): number {
+  const expected = paymentCurrency.toUpperCase();
+  if (
+    callerCurrency !== undefined &&
+    callerCurrency.toUpperCase() !== expected
+  ) {
+    throw new InvalidRequestError(
+      `Mock ${operation} currency ${callerCurrency.toUpperCase()} does not match payment currency ${expected}`,
+    );
+  }
+  if (isMoney(amount) && amount.currency.toUpperCase() !== expected) {
+    throw new InvalidRequestError(
+      `Mock ${operation} currency ${amount.currency.toUpperCase()} does not match payment currency ${expected}`,
+    );
+  }
+  return resolveChargeAmount(amount, expected).minor;
+}
+
 export type MockGatewayOptions = {
   name?: string;
   capabilities?: GatewayCapabilities | Partial<Record<GatewayCapabilityKey, boolean>>;
@@ -1359,6 +1392,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   name,
                 );
               }
+              // TESTKIT-1: do not resurrect voided / failed / pending ledgers.
+              if (!isCapturableMockStatus(state.status)) {
+                throw new InvalidRequestError(
+                  `Cannot capture payment ${params.gatewayPaymentId} in status ${state.status} (mock)`,
+                );
+              }
               const remainingMinor =
                 state.amountMinor - state.capturedAmountMinor;
               if (remainingMinor <= 0) {
@@ -1366,19 +1405,23 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   `Payment ${params.gatewayPaymentId} has no capturable amount remaining (mock)`,
                 );
               }
-              const currency = params.currency ?? state.currency;
               const captureMinor =
                 params.amount !== undefined
-                  ? resolveChargeAmount(params.amount, currency).minor
+                  ? resolveMutationMinor(
+                      "capturePayment",
+                      params.amount,
+                      params.currency,
+                      state.currency,
+                    )
                   : remainingMinor;
               if (captureMinor <= 0) {
                 throw new InvalidRequestError(
-                  `Capture amount must be positive (got ${minorToMajor(captureMinor, currency)}) (mock)`,
+                  `Capture amount must be positive (got ${minorToMajor(captureMinor, state.currency)}) (mock)`,
                 );
               }
               if (captureMinor > remainingMinor) {
                 throw new InvalidRequestError(
-                  `Over-capture: requested ${minorToMajor(captureMinor, currency)}, remaining capturable ${minorToMajor(remainingMinor, currency)} (mock)`,
+                  `Over-capture: requested ${minorToMajor(captureMinor, state.currency)}, remaining capturable ${minorToMajor(remainingMinor, state.currency)} (mock)`,
                 );
               }
               if (
@@ -1532,19 +1575,23 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               `Payment ${params.gatewayPaymentId} has no refundable amount remaining (mock)`,
             );
           }
-          const currency = params.currency ?? state.currency;
           const refundMinor =
             params.amount !== undefined
-              ? resolveChargeAmount(params.amount, currency).minor
+              ? resolveMutationMinor(
+                  "refundPayment",
+                  params.amount,
+                  params.currency,
+                  state.currency,
+                )
               : remainingMinor;
           if (refundMinor <= 0) {
             throw new InvalidRequestError(
-              `Refund amount must be positive (got ${minorToMajor(refundMinor, currency)}) (mock)`,
+              `Refund amount must be positive (got ${minorToMajor(refundMinor, state.currency)}) (mock)`,
             );
           }
           if (refundMinor > remainingMinor) {
             throw new InvalidRequestError(
-              `Over-refund: requested ${minorToMajor(refundMinor, currency)}, remaining refundable ${minorToMajor(remainingMinor, currency)} (mock)`,
+              `Over-refund: requested ${minorToMajor(refundMinor, state.currency)}, remaining refundable ${minorToMajor(remainingMinor, state.currency)} (mock)`,
             );
           }
           if (
@@ -1793,9 +1840,16 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         if (!body.id || !body.gatewayPaymentId || !body.status) {
           throw new GatewayApiError("Malformed webhook payload (mock)", name);
         }
+        // TESTKIT-3: never invent payment_paid / payment.succeeded for a
+        // typeless payload. Missing type is malformed, not a paid event.
+        const type =
+          typeof body.type === "string" ? body.type.trim() : "";
+        if (!type) {
+          throw new GatewayApiError("Malformed webhook payload (mock)", name);
+        }
         const normalized: MockWebhookPayload = {
           id: body.id,
-          type: body.type ?? "payment_paid",
+          type,
           gatewayPaymentId: body.gatewayPaymentId,
           status: body.status,
         };

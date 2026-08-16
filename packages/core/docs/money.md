@@ -85,7 +85,7 @@ ISO-default money omits the field (`exponent` is undefined) so JSON stays
    - explicit `options.exponent`, else
    - stored `Money.exponent` when present (re-pin path), else
    - `options.exponentOverrides` via `getCurrencyExponent`, else
-   - ISO 4217 tables in `getCurrencyExponent` (0 / 2 / 3 / **4** for CLF/UYW funds codes).
+   - ISO 4217 tables in `getCurrencyExponent` (0 / 2 / 3 / **4** for CLF/UYW funds codes). Two-decimal tables include active **JMD**, **XCG** (replaces ANG), and **XAD**.
 3. Scale with **bigint** only — never `amount * 10 ** n` as a float result path.
 4. Default **rounding is `reject`**: excess fractional digits throw
    `InvalidRequestError`.

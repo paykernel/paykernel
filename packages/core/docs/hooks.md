@@ -94,9 +94,12 @@ After hooks run **after** the gateway operation has already succeeded. They
 After-hooks may return `modifiedResult` to attach additive fields (e.g.
 metadata bags, `rawResponse` annotations). The SDK **restores critical money /
 identity fields** from the original gateway result whenever they were present
-on that original object — including when the hook mutates the result argument
-**in-place** (hooks receive a shallow clone with nested identity objects
-detached; the freeze snapshot stays clean):
+on that original object — **between composed after-hooks** (constructor hook +
+`addHook`, or operation-specific + `onAfter`) and again on the value returned
+to the caller. A later after-handler never sees a previous hook's forged
+`success` / `status` / `amount`. In-place mutation of the result argument is
+also undone before the next handler (hooks receive a shallow clone with nested
+identity objects detached; the freeze snapshot stays clean):
 
 `success`, `outcome`, `status`, `amount`, `gatewayId`, `captureId`,
 `authorizationId`, `orderId`, `totalRefunded`, `refundId`, `gatewayRefundId`,

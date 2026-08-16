@@ -1078,6 +1078,86 @@ describe("StripeGateway", () => {
       expect(event.amount).toBe(25);
     });
 
+    it("STRIPE-1: refund.failed maps to refund_failed not payment failed", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_refund_failed",
+        type: "refund.failed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "re_failed",
+            object: "refund",
+            status: "failed",
+            amount: 2500,
+            currency: "usd",
+            payment_intent: "pi_refund_failed",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refund_failed");
+      expect(event.status).not.toBe("failed");
+      expect(event.status).not.toBe("pending");
+      expect(event.gatewayPaymentId).toBe("pi_refund_failed");
+      expect(event.stableType).toBe("refund.failed");
+      expect(event.event?.type).toBe("refund.failed");
+      expect(event.stableType).not.toBe("payment.failed");
+    });
+
+    it("STRIPE-1: refund.updated canceled maps to refund_failed not payment failed", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_refund_canceled",
+        type: "refund.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "re_canceled",
+            object: "refund",
+            status: "canceled",
+            amount: 1200,
+            currency: "usd",
+            payment_intent: "pi_refund_canceled",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refund_failed");
+      expect(event.status).not.toBe("failed");
+      expect(event.status).not.toBe("cancelled");
+      expect(event.stableType).toBe("refund.failed");
+      expect(event.event?.type).toBe("refund.failed");
+    });
+
+    it("STRIPE-1: in-flight refund.updated maps to refund_pending not payment pending", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_refund_pending",
+        type: "refund.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "re_pending_wh",
+            object: "refund",
+            status: "pending",
+            amount: 800,
+            currency: "usd",
+            payment_intent: "pi_refund_pending",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refund_pending");
+      expect(event.status).not.toBe("pending");
+      expect(event.status).not.toBe("failed");
+      expect(event.stableType).toBe("refund.pending");
+      expect(event.event?.type).toBe("refund.pending");
+    });
+
     it("STRIPE-3: refund.* proven aggregate status publishes amount_refunded not per-refund face", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_refund_agg_amount",
@@ -1373,6 +1453,101 @@ describe("StripeGateway", () => {
       expect(event.status).toBe("paid");
       expect(event.amount).toBe(100);
       expect(event.stableType).toBe("payment.succeeded");
+    });
+
+    it("STRIPE-2: payment_intent.succeeded with amount_refunded is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_succeeded_refunded",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_succeeded_refunded",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_succeeded_refunded",
+              amount_captured: 10000,
+              amount_refunded: 10000,
+              refunded: true,
+              currency: "usd",
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(100);
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-2: payment_intent.succeeded with partial amount_refunded is partially_refunded", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_succeeded_partial_refund",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_succeeded_partial_refund",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_succeeded_partial_refund",
+              amount_captured: 10000,
+              amount_refunded: 2500,
+              refunded: false,
+              currency: "usd",
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(25);
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-2: payment_intent.succeeded with unexpanded latest_charge is processing not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_unexpanded_charge",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_unexpanded_charge",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: "ch_unexpanded_id",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
     });
 
     it("should omit currency when Stripe omits it on the webhook object", () => {

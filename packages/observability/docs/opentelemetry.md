@@ -133,7 +133,7 @@ Only set non-sensitive primitives. Instrumentation (`withPaymentOperation`) sets
 - optional: `tenant`, `namespace`, `internalReference`, `providerObjectId`, `providerRequestId`, `attemptNumber`, `inboxEventKey`
 - on end: `normalizedOutcome`, `durationMs`, and updated provider ids
 
-**Never** set card data, tokens, raw payloads, full error messages with secrets, or auth headers as attributes. Structured bags still go through [redaction](./redaction.md). The OTEL bridge **and** `withPaymentOperation` auto-redact attributes via `redactAttributeBag` (defense-in-depth, including secret-shaped `internalReference`). A custom `PaymentTracer` started *outside* `withPaymentOperation` may not scrub — still treat those attributes as caller-owned discipline.
+**Never** set card data, tokens, raw payloads, full error messages with secrets, or auth headers as attributes. Structured bags still go through [redaction](./redaction.md). The OTEL bridge **and** `withPaymentOperation` auto-redact attributes via `redactAttributeBag` (defense-in-depth, including secret-shaped `internalReference` and `cs_live_` / client-secret values on allow-listed keys). `span.end({ message })` is sanitized before `setStatus` (OBS-1) so tokens / PANs / `sk_live` / `cs_live` never reach exporters. A custom `PaymentTracer` started *outside* `withPaymentOperation` may not scrub — still treat those attributes as caller-owned discipline.
 
 ## With instrumentation
 

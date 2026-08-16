@@ -573,6 +573,11 @@ export type ApplyOutcomeGatewayBase = {
  *
  * **Do not fulfill on `success` alone.** Use {@link isPaidOutcome} or
  * `outcome === 'succeeded'` with a paid-like {@link PaymentStatus}.
+ *
+ * **CORE-5:** stored `outcome` / `success` are coerced against `base.status`
+ * (same family as {@link inferOperationOutcome}). `outcome: 'succeeded'` with
+ * `status: 'failed'` / `'pending'` is never persisted as `success: true` +
+ * `outcome: 'succeeded'`.
  */
 export function applyOutcomeToGatewayResult(
     base: ApplyOutcomeGatewayBase,
@@ -589,7 +594,16 @@ export function applyOutcomeToGatewayResult(
         reconciliationRequired?: boolean;
     },
 ): GatewayPaymentResult {
-    const success = successFromOutcome(outcome);
+    const decline = extras?.decline ?? base.decline;
+    const storedOutcome = coercePaymentOutcomeToGatewayStatus(outcome, {
+        success: successFromOutcome(outcome),
+        gatewayId: base.gatewayId,
+        status: base.status,
+        redirectUrl: base.redirectUrl,
+        rawResponse: base.rawResponse,
+        ...(decline !== undefined ? { decline } : {}),
+    });
+    const success = successFromOutcome(storedOutcome);
 
     const references =
         base.references ??
@@ -624,7 +638,7 @@ export function applyOutcomeToGatewayResult(
 
     const result: GatewayPaymentResult = {
         success,
-        outcome,
+        outcome: storedOutcome,
         gatewayId: base.gatewayId,
         status: base.status,
         redirectUrl: base.redirectUrl,
@@ -661,7 +675,6 @@ export function applyOutcomeToGatewayResult(
         result.providerRequestId = base.providerRequestId;
     }
 
-    const decline = extras?.decline ?? base.decline;
     if (decline !== undefined) {
         result.decline = decline;
     }
@@ -669,7 +682,7 @@ export function applyOutcomeToGatewayResult(
     // Only the indeterminate arm is a reconciliation signal. Attaching the
     // flag on any other outcome makes infer() return indeterminate while
     // stored `outcome` stays something else (dual-write lie).
-    if (outcome === "indeterminate") {
+    if (storedOutcome === "indeterminate") {
         result.reconciliationRequired = true;
     }
 
@@ -943,6 +956,9 @@ export function applyIndeterminateRefundOutcome(input: {
  * family as {@link inferOperationOutcome} / `mapGatewayRefundToOperationResult`).
  * Bare callers must not treat `outcome: 'succeeded'` as settled while status is
  * still `pending` (or reverse under-report pending when status is completed).
+ *
+ * **P610-INF-2:** `success: false` (or omitted `success`) + `pending` /
+ * `processing` / `approved` is **indeterminate**, not `failed`.
  */
 export function inferRefundOperationOutcome(
     result: GatewayRefundResult,
@@ -966,7 +982,19 @@ export function inferRefundOperationOutcome(
     if (result.status === "pending" && result.success) {
         return "pending";
     }
-    if (result.status === "failed" || !result.success) {
+    // P610-INF-2: success:false (or omitted success) + pending/processing/approved
+    // is uncertain — the refund request may have been accepted. Do not forge
+    // a definitive `failed` (retry can double-refund).
+    const status = result.status as string;
+    if (
+        !result.success &&
+        (status === "pending" ||
+            status === "processing" ||
+            status === "approved")
+    ) {
+        return "indeterminate";
+    }
+    if (result.status === "failed" || result.success === false) {
         return "failed";
     }
     return "pending";

@@ -1199,7 +1199,8 @@ export class PayPalGateway extends BaseGateway {
         : nestedFinalCapture;
 
     let status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
-      hasCapture: Boolean(captureId),
+      // Nested captures only — a related_ids.capture_id string is not settlement.
+      hasCapture: Boolean(lastOrderCapture),
       hasAuthorization: Boolean(orderAuthorization),
       ...(effectiveFinalCapture !== undefined
         ? { finalCapture: effectiveFinalCapture }
@@ -1212,9 +1213,10 @@ export class PayPalGateway extends BaseGateway {
     }
 
     // Align ORDER.COMPLETED with getPayment for every branch:
-    // - capture(s) present → paid / partially_captured / refund aggregates
+    // - nested capture(s) present → paid / partially_captured / refund aggregates
     // - auth-only → authorized (PAYPAL-2; not approved)
     // - bare COMPLETED without payments → processing (PAYPAL-1; not paid)
+    // - capture_id string only (no purchase_units[].payments.captures) → processing
     if (raw.event_type === "CHECKOUT.ORDER.COMPLETED") {
       // Build a minimal order snapshot for status mapping (cast avoids EOPT noise
       // on optional amount/purchase_units from the webhook resource shape).
@@ -1228,22 +1230,11 @@ export class PayPalGateway extends BaseGateway {
           ? { purchase_units: raw.resource.purchase_units }
           : {}),
       } as PayPalOrderResponse;
-      // Synthetic capture only when we have a capture id but nested list is absent
-      // (e.g. supplementary_data.related_ids.capture_id). Do not invent paid from
-      // bare COMPLETED without capture evidence.
-      const captureForMap =
-        lastOrderCapture ??
-        (captureId
-          ? resourceFinalCapture !== undefined
-            ? {
-                status: raw.resource.status ?? "COMPLETED",
-                final_capture: resourceFinalCapture,
-              }
-            : { status: raw.resource.status ?? "COMPLETED" }
-          : undefined);
+      // Do not invent a COMPLETED capture from related_ids.capture_id.
+      // Absent nested purchase_units[].payments.captures → same as bare COMPLETED.
       status = this.mapPaymentResultStatus(
         orderLike,
-        captureForMap,
+        lastOrderCapture,
         orderAuthorization,
         orderCaptures,
       );
@@ -2646,11 +2637,19 @@ export class PayPalGateway extends BaseGateway {
     | { currency_code: string; value: string }
     | null
     | undefined {
-    // Refund resources publish this-op refund amount — not capture face rewriting.
+    // PAYMENT.REFUND.* resources publish this-op refund amount (not remaining held).
+    if (raw.event_type.startsWith("PAYMENT.REFUND.")) {
+      return undefined;
+    }
+    // CAPTURE.REFUNDED + refund resource: this-op amount is not capture settlement.
+    // Remaining-held rewrite needs a capture face; omit rather than publish refund face.
     if (
-      raw.resource_type === "refund" ||
-      raw.event_type.startsWith("PAYMENT.REFUND.")
+      raw.event_type === "PAYMENT.CAPTURE.REFUNDED" &&
+      raw.resource_type === "refund"
     ) {
+      return null;
+    }
+    if (raw.resource_type === "refund") {
       return undefined;
     }
 
@@ -2671,12 +2670,13 @@ export class PayPalGateway extends BaseGateway {
     const resourceMapped = raw.resource.status
       ? this.mapResourceStatus(raw.resource.status)
       : undefined;
-    // CAPTURE.REFUNDED without resource status defaults to full refunded
-    // (see mapWebhookStatus). CAPTURE.REVERSED → reversed.
+    // CAPTURE.REFUNDED without capture REFUNDED/PARTIALLY_REFUNDED is unproven
+    // completeness — fail-closed to partially_refunded (omit remaining).
+    // CAPTURE.REVERSED → reversed.
     const effectiveStatus: PaymentStatus | undefined =
       resourceMapped ??
       (raw.event_type === "PAYMENT.CAPTURE.REFUNDED"
-        ? "refunded"
+        ? "partially_refunded"
         : raw.event_type === "PAYMENT.CAPTURE.REVERSED"
           ? "reversed"
           : undefined);
@@ -2923,10 +2923,18 @@ export class PayPalGateway extends BaseGateway {
         ? this.mapResourceStatus(resourceStatus)
         : undefined;
 
-      return resourceMappedStatus === "partially_refunded" ||
+      // Capture-resource completeness only when PayPal says REFUNDED / PARTIALLY_REFUNDED.
+      if (
+        resourceMappedStatus === "partially_refunded" ||
         resourceMappedStatus === "refunded"
-        ? resourceMappedStatus
-        : "refunded";
+      ) {
+        return resourceMappedStatus;
+      }
+
+      // resource_type=refund + COMPLETED maps to paid via mapResourceStatus —
+      // that is this-op refund, not capture settlement. Missing/unknown status
+      // is equally unproven. Fail-closed: never default to full refunded.
+      return "partially_refunded";
     }
 
     // Order completed without a capture (e.g. AUTHORIZE-intent) must not look paid.
@@ -2965,8 +2973,8 @@ export class PayPalGateway extends BaseGateway {
       "PAYMENT.REFUND.PENDING": "refund_pending",
       // PAYPAL-2: refund resource COMPLETED proves this refund op finished, not
       // that the capture is fully refunded. Prefer incomplete `refund_completed`
-      // (and dual-write refund.completed) over full `refunded` overstatement.
-      // Aggregate completeness comes from CAPTURE.REFUNDED resource status or getPayment.
+      // (dual-write demoted to refund.pending) over full `refunded` overstatement.
+      // Aggregate completeness comes from CAPTURE.REFUNDED capture status or getPayment.
       "PAYMENT.REFUND.COMPLETED": "refund_completed",
       "PAYMENT.REFUND.FAILED": "refund_failed",
     };

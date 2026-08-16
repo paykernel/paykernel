@@ -4,10 +4,10 @@
  */
 import { describe, expect, it } from "bun:test";
 import {
-  createFakeExecutor,
   createFakeDbState,
   expectedTablesForNamespace,
 } from "@paykernel/internal-sql-store";
+import { createFakeExecutor } from "../../sql-foundation/src/testing";
 import type { PostgresExecutor } from "./executor";
 import { migratePostgresAdapter, verifyPostgresAdapterSchema } from "./migrate";
 import { toSqlStoreExecutor } from "./executor";

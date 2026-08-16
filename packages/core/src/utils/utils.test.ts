@@ -565,6 +565,20 @@ describe("redact", () => {
     expect(out.amount).toBe(10);
   });
 
+  it("redacts embedded sk_live_ / PAN inside hookError strings (MONEY-3)", () => {
+    const out = redact({
+      hookError: "after hook threw: sk_live_51HxExampleSecretKeyValue",
+      detail: "card 4242424242424242 declined",
+      safe: "after hook threw: timeout",
+    }) as Record<string, unknown>;
+
+    expect(out.hookError).toBe("[REDACTED]");
+    expect(out.detail).toBe("[REDACTED]");
+    expect(String(out.hookError)).not.toContain("sk_live_");
+    expect(String(out.detail)).not.toContain("4242424242424242");
+    expect(out.safe).toBe("after hook threw: timeout");
+  });
+
   it("redacts bare month/year card expiry and CVC aliases (MONEY-4)", () => {
     const out = redact({
       // Moyasar source card fields
@@ -1043,11 +1057,18 @@ describe("fingerprintParams", () => {
 
   it("fingerprints Date as ISO-8601, not empty object", () => {
     const d = new Date("2026-01-15T12:00:00.000Z");
-    expect(fingerprintParams(d)).toBe(JSON.stringify(d.toISOString()));
+    expect(fingerprintParams(d)).toBe(`__date__:${d.toISOString()}`);
     expect(fingerprintParams(d)).not.toBe(fingerprintParams({}));
     expect(fingerprintParams({ at: d })).toBe(
       fingerprintParams({ at: new Date("2026-01-15T12:00:00.000Z") }),
     );
+  });
+
+  it("MONEY-2: Date fingerprint does not collide with the same ISO string", () => {
+    const iso = "2026-01-15T12:00:00.000Z";
+    const d = new Date(iso);
+    expect(fingerprintParams(d)).not.toBe(fingerprintParams(iso));
+    expect(fingerprintParams({ at: d })).not.toBe(fingerprintParams({ at: iso }));
   });
 
   it("includes Money.exponent so scale overrides do not false-match (MONEY-1)", () => {

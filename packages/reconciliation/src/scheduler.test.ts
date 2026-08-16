@@ -147,6 +147,55 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(Date.parse(rec!.dueAt)).toBe(clock.nowMs() + 2000);
   });
 
+  it("RECON-3: retry_later past 10 claims is not markManualReview solely due to attempts", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      // default maxAttempts = 10
+      backoff: createExponentialBackoff({
+        baseMs: 1000,
+        maxMs: 60_000,
+        multiplier: 2,
+        jitterRatio: 0,
+      }),
+    });
+    expect(scheduler.maxAttempts).toBe(10);
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_inflight" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "in_flight_settlement",
+    });
+
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_inflight",
+    });
+
+    // 11 claims (> default 10) — still settling, not a handler failure.
+    for (let i = 0; i < 11; i++) {
+      const result = await scheduler.processDue({
+        handler: async () => ({
+          disposition: "retry_later" as const,
+          error: "policy:retry_later",
+        }),
+      });
+      expect(result.processed).toBe(1);
+      expect(result.manualReview).toBe(0);
+      expect(result.completed).toBe(0);
+      expect(result.rescheduled).toBe(1);
+      expect((await store.get(key))?.status).toBe("scheduled");
+      clock.advance(60_000);
+    }
+
+    const rec = await store.get(key);
+    expect(rec?.status).not.toBe("manual_review");
+    expect(rec?.status).toBe("scheduled");
+    expect(rec!.attempts).toBeGreaterThan(10);
+  });
+
   it("max attempts → markManualReview dead letter path", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });

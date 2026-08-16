@@ -194,7 +194,8 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  * Non-JSON primitives use unquoted type tags so they never equal the JSON
  * encoding of ordinary strings: `NaN`/`Infinity`/`undefined`/`bigint` do not
  * collide with `"NaN"` / `"Infinity"` / `"undefined"` / `"10n"`. `Date` uses
- * ISO-8601 rather than `{}`.
+ * an unquoted `__date__:` tag so it never collides with the same ISO-8601
+ * string (MONEY-2).
  */
 export function fingerprintParams(value: unknown): string {
   return stableStringify(value);
@@ -209,6 +210,7 @@ const UNDEFINED_TAG = "undefined";
 const NAN_TAG = "NaN";
 const POS_INFINITY_TAG = "Infinity";
 const NEG_INFINITY_TAG = "-Infinity";
+const DATE_TAG = "__date__:";
 
 /** Parse options that never reject zero/negative amounts during fingerprinting. */
 const FINGERPRINT_MONEY_OPTS = {
@@ -370,9 +372,14 @@ function stableStringify(value: unknown): string {
     return JSON.stringify(value) ?? "null";
   }
 
-  // Date → ISO string (default object walk yields "{}").
+  // Date → tagged ISO (default object walk yields "{}"). Unquoted tag so
+  // `{ at: Date }` never collides with `{ at: isoString }` (MONEY-2).
   if (value instanceof Date) {
-    return JSON.stringify(value.toISOString());
+    const time = value.getTime();
+    if (Number.isNaN(time)) {
+      return `${DATE_TAG}Invalid`;
+    }
+    return `${DATE_TAG}${value.toISOString()}`;
   }
 
   // Pure Money only (no extra siblings) — canonicalize amount+currency,

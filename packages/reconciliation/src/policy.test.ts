@@ -555,6 +555,112 @@ describe("decideReconciliationPolicy", () => {
     expect(d.safe).toBe(false);
   });
 
+  it("RECON-1: authorized + capturedAmount 0 is mark_consistent", () => {
+    const authHold = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_auth",
+      status: "authorized",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("0", "USD"),
+      providerStatus: "requires_capture",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: authHold,
+    };
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_auth",
+      expected: { status: "authorized", amount: money("10.00", "USD") },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).toBe("mark_consistent");
+    expect(d.safe).toBe(true);
+  });
+
+  it("RECON-2: incremental capture while authorized is not mark_consistent", () => {
+    const incremental = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_inc",
+      status: "authorized",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("4.00", "USD"),
+      providerStatus: "requires_capture",
+    });
+    const result: ReconciliationResult = {
+      outcome: "consistent",
+      provider: incremental,
+    };
+    // Status-only local authorized — compare may report consistent, policy must not.
+    const target: ReconciliationTarget = {
+      gateway: "stripe",
+      gatewayPaymentId: "pi_inc",
+      expected: { status: "authorized" },
+    };
+    const d = decideReconciliationPolicy(result, target);
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+    expect(d.action).toBe("manual_review");
+  });
+
+  it("RECON-2: approved + growing capturedAmount is not mark_consistent", () => {
+    const incremental = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "ORDER-INC",
+      status: "approved",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("4.00", "USD"),
+      providerStatus: "APPROVED",
+    });
+    const d = decideReconciliationPolicy(
+      { outcome: "consistent", provider: incremental },
+      {
+        gateway: "paypal",
+        gatewayPaymentId: "ORDER-INC",
+        expected: { status: "approved" },
+      },
+    );
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+  });
+
+  it("RECON-2: partially_captured status-only + provider capturedAmount is not mark_consistent", () => {
+    const partial = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_partial",
+      status: "partially_captured",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("4.00", "USD"),
+      providerStatus: "requires_capture",
+    });
+    const d = decideReconciliationPolicy(
+      { outcome: "consistent", provider: partial },
+      {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_partial",
+        expected: { status: "partially_captured" },
+      },
+    );
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+  });
+
+  it("RECON-2: partially_refunded status-only + provider refundedAmount is not mark_consistent", () => {
+    const partialRefund = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_prf",
+      status: "partially_refunded",
+      amount: money("10.00", "USD"),
+      refundedAmount: money("3.00", "USD"),
+      providerStatus: "partially_refunded",
+    });
+    const d = decideReconciliationPolicy(
+      { outcome: "consistent", provider: partialRefund },
+      {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_prf",
+        expected: { status: "partially_refunded" },
+      },
+    );
+    expect(d.action).not.toBe("mark_consistent");
+    expect(d.safe).toBe(false);
+  });
+
   it("RECON-4: authorized/partially_captured → paid is not safe auto-upgrade", () => {
     for (const localStatus of ["authorized", "partially_captured"] as const) {
       const result: ReconciliationResult = {

@@ -74,12 +74,65 @@ export function moneyEquals(a: Money, b: Money): boolean {
 }
 
 /**
+ * Auth-hold / pre-capture statuses (domain + Stripe `requires_capture`).
+ * A present `capturedAmount=0` against `local.amount` is the hold, not drift.
+ */
+const AUTH_HOLD_STATUSES = new Set<string>([
+  "authorized",
+  "approved",
+  "requires_capture",
+]);
+
+function isAuthHoldStatus(status: string | undefined): boolean {
+  if (status === undefined) return false;
+  return AUTH_HOLD_STATUSES.has(status) || AUTH_HOLD_STATUSES.has(status.trim().toLowerCase());
+}
+
+/**
+ * True when the snapshot pair is an auth-hold (not paid / partial capture).
+ * Local status omitted still counts when the provider side is the hold.
+ */
+function isAuthHoldPair(
+  local: LocalPaymentSnapshot,
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (local.status !== undefined && !isAuthHoldStatus(local.status)) {
+    return false;
+  }
+  return (
+    isAuthHoldStatus(provider.status) ||
+    isAuthHoldStatus(provider.providerStatus)
+  );
+}
+
+/**
+ * Proven-zero money. Unparseable / incomplete snapshots are not zero
+ * (fail-closed — caller must treat them as drift, not a hold).
+ */
+function moneyIsZero(m: Money): boolean {
+  try {
+    const currency = normalizeCurrencyCode(m.currency);
+    return toMinorUnits(m.amount, currency, MONEY_EQ_PARSE) === 0n;
+  } catch (err) {
+    if (err instanceof MoneyAmountError) {
+      return false;
+    }
+    throw err;
+  }
+}
+
+/**
  * Compare local expected snapshot fields present on local against provider.
  * Empty differences → consistent path.
  *
  * Only fields present on `local` are compared (partial local knowledge).
  * Amount fields use {@link moneyEquals} (minor-unit numeric equality +
  * case-insensitive currency codes).
+ *
+ * RECON-1: auth-hold (`authorized` / `approved` / `requires_capture`) with
+ * `capturedAmount=0` vs `local.amount` is consistent, not money drift.
+ * RECON-2: non-zero provider capture while local omitted `capturedAmount` on
+ * an auth-hold is incremental capture drift (even if capture equals amount).
  */
 export function compareSnapshots(
   local: LocalPaymentSnapshot | undefined,
@@ -124,17 +177,33 @@ export function compareSnapshots(
     }
   } else if (
     local.amount !== undefined &&
-    provider.capturedAmount !== undefined &&
-    !moneyEquals(local.amount, provider.capturedAmount)
+    provider.capturedAmount !== undefined
   ) {
-    // Local omitted capturedAmount but quoted a charge amount; a present
-    // provider capture that does not match is still money drift.
-    diffs.push({
-      field: "capturedAmount",
-      local: local.amount,
-      provider: provider.capturedAmount,
-      message: "capturedAmount mismatch",
-    });
+    const authHold = isAuthHoldPair(local, provider);
+    const capturedZero = moneyIsZero(provider.capturedAmount);
+    // RECON-1: authorized / approved / requires_capture + captured 0 is a
+    // hold against local.amount — not apply_drift_review money drift.
+    if (!(authHold && capturedZero)) {
+      if (authHold) {
+        // RECON-2: incremental capture while still on an auth-hold. Local
+        // omitted capturedAmount (implied 0); do not compare to charge amount.
+        diffs.push({
+          field: "capturedAmount",
+          local: { amount: "0", currency: provider.capturedAmount.currency },
+          provider: provider.capturedAmount,
+          message: "capturedAmount mismatch",
+        });
+      } else if (!moneyEquals(local.amount, provider.capturedAmount)) {
+        // Paid-like / other: local omitted capturedAmount but quoted a charge
+        // amount; a present provider capture that does not match is drift.
+        diffs.push({
+          field: "capturedAmount",
+          local: local.amount,
+          provider: provider.capturedAmount,
+          message: "capturedAmount mismatch",
+        });
+      }
+    }
   }
 
   if (local.refundedAmount !== undefined) {

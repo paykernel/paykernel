@@ -198,12 +198,16 @@ export function paymentStatusToOperationOutcome(
     case "reversed":
     case "refund_completed":
     case "refund_pending":
-    case "refund_failed":
     case "setup_completed":
-    default:
-      // Void/cancel/refund terminal ops are still "operation succeeded" at API level;
-      // isPaidOutcome stays false unless status is paid (not approved/authorized).
+      // Void/cancel/refund-completed ops are still "operation succeeded" at API
+      // level; isPaidOutcome stays false unless status is paid.
       return "succeeded";
+    case "refund_failed":
+      // TESTKIT-4: a failed refund is not a successful payment op. Mapping this
+      // (or unknown) to succeeded dual-writes success:true on a still-captured charge.
+      return "failed";
+    default:
+      return "failed";
   }
 }
 

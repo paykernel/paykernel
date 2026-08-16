@@ -16,7 +16,11 @@ export {
 export type { ResolveInboxPayloadHashInput } from "./engine";
 
 // Event key
-export { deriveWebhookEventKey, parseWebhookEventKey } from "./event-key";
+export {
+  deriveWebhookEventKey,
+  parseWebhookEventKey,
+  qualifyPaymobProviderEventId,
+} from "./event-key";
 
 // Sanitize
 export {

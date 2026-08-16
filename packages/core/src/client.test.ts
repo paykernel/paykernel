@@ -2531,6 +2531,7 @@ describe('PaymentClient PayPal webhooks', () => {
 function createWebhookOnlyClient(
     name: 'custom' | 'stripe',
     parseWebhookEvent: (payload: unknown) => WebhookEvent,
+    opts?: { verifyWebhook?: () => boolean | Promise<boolean> },
 ) {
     return createPaymentClient({
         gateways: {
@@ -2567,7 +2568,9 @@ function createWebhookOnlyClient(
                             throw new Error('unused');
                         },
                         verifyWebhook() {
-                            return true;
+                            return opts?.verifyWebhook
+                                ? opts.verifyWebhook()
+                                : true;
                         },
                         parseWebhookEvent,
                     };
@@ -2729,5 +2732,76 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
         expect(event.event?.type).toBe('refund.pending');
         expect(event.stableType).not.toBe('refund.completed');
         expect(event.event?.type).not.toBe('refund.completed');
+    });
+
+    it('CORE-3: awaits a Promise returned from sync verifyWebhook', async () => {
+        let resolved = false;
+        const client = createWebhookOnlyClient(
+            'custom',
+            (payload) => ({
+                id: 'evt_async_verify',
+                type: 'payment_paid',
+                gateway: 'custom',
+                paymentId: 'pay_internal',
+                gatewayPaymentId: 'gw_1',
+                status: 'paid',
+                timestamp: new Date('2024-01-01T00:00:00.000Z'),
+                rawPayload: payload,
+            }),
+            {
+                verifyWebhook: () =>
+                    Promise.resolve().then(() => {
+                        resolved = true;
+                        return true;
+                    }),
+            },
+        );
+
+        const event = await client.handleWebhook('custom', { hello: true });
+        expect(resolved).toBe(true);
+        expect(event.id).toBe('evt_async_verify');
+    });
+
+    it('CORE-3: a rejected / false Promise from verifyWebhook is not treated as verified', async () => {
+        const client = createWebhookOnlyClient(
+            'custom',
+            () => {
+                throw new Error('parse must not run');
+            },
+            {
+                verifyWebhook: () => Promise.resolve(false),
+            },
+        );
+
+        await expect(client.handleWebhook('custom', { hello: true })).rejects.toBeInstanceOf(
+            InvalidWebhookError,
+        );
+    });
+
+    it('CORE-4: thin 3-field PaymentEvent is rebuilt and demoted', async () => {
+        const client = createWebhookOnlyClient('stripe', (payload) => ({
+            id: 'evt_thin_dual',
+            type: 'payment_intent.succeeded',
+            gateway: 'stripe',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'pi_thin',
+            status: 'processing',
+            amount: 100,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            event: {
+                schemaVersion: '1',
+                type: 'payment.succeeded',
+                provider: {},
+            } as WebhookEvent['event'],
+        }));
+
+        const event = await client.handleWebhook('stripe', { hello: true });
+
+        expect(event.event?.schemaVersion).toBe('1');
+        expect(event.event?.type).not.toBe('payment.succeeded');
+        expect(event.event?.type).toBe('payment.processing');
+        expect(event.stableType).toBe('payment.processing');
     });
 });

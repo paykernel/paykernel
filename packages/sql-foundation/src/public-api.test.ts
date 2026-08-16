@@ -119,9 +119,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "MEMORY_RELATIONAL_NON_DISTRIBUTED",
   "ReferenceLeaseLostError",
   "isReferenceLeaseLostError",
-  // fixtures
+  // fixtures (createFakeExecutor is test-only — PKG-1)
   "createFakeDbState",
-  "createFakeExecutor",
   "expectedTablesForNamespace",
   "sampleIdempotencyRecord",
   "sampleWebhookRecord",
@@ -186,6 +185,11 @@ describe("public API surface", () => {
     const state = api.createFakeDbState();
     expect(state.statements).toEqual([]);
     expect(state.tables.size).toBe(0);
+  });
+
+  it("PKG-1: createFakeExecutor is not a root export next to migrate()", () => {
+    expect("createFakeExecutor" in api).toBe(false);
+    expect((api as Record<string, unknown>).createFakeExecutor).toBeUndefined();
   });
 
   it("export freeze list has no duplicate names", () => {

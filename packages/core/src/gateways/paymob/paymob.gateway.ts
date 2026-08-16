@@ -119,7 +119,9 @@ const PAYMOB_DEFAULT_CURRENCY_BY_REGION: Record<PaymobRegion, string> = {
 
 /**
  * HMAC fields order per Paymob transaction callback docs.
- * Note: Paymob uses is_refunded/is_voided in callbacks (not is_refund/is_void).
+ * Note: Paymob uses is_refunded/is_voided in callbacks. is_refund/is_void are
+ * HMAC aliases when those current-state flags are absent (`readHmacField`).
+ * HMAC also covers error_occured and has_parent_transaction (used in status).
  * @see https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac
  */
 const HMAC_FIELDS = [
@@ -250,6 +252,8 @@ interface PaymobTransactionResponse {
   is_refund?: boolean;
   is_voided?: boolean;
   is_refunded?: boolean;
+  has_parent_transaction?: boolean;
+  error_occured?: boolean;
   refunded_amount_cents?: number;
   captured_amount?: number;
   is_auth?: boolean;
@@ -311,9 +315,9 @@ class PaymobIndeterminateGatewayError extends NetworkError {
 }
 
 /**
- * HTTP 200 after a money mutation with an empty/malformed/unreadable body.
- * Paymob may have accepted the capture/refund/void; do not release the
- * idempotency fence (same as network/5xx indeterminate paths).
+ * HTTP 200 after a mutating POST with an empty/malformed/unreadable body.
+ * Paymob may have accepted the Intention / capture / refund / void; do not
+ * release the idempotency fence (same as network/5xx indeterminate paths).
  */
 class PaymobIndeterminateResponseError extends NetworkError {
   constructor(operation: string, detail: string, rawResponse: unknown) {
@@ -542,10 +546,13 @@ export class PaymobGateway extends BaseGateway {
       );
     }
 
-    const gatewayId = this.requireString(
+    // PAYMOB-2: HTTP 200 means Paymob may have created a payable intention.
+    // Missing id / checkout URL is indeterminate — keep the create fence.
+    const gatewayId = this.requireMutationString(
       data.id,
       "Paymob Intention API response is missing id",
       data,
+      "Intention",
     );
 
     // Build redirect URL from response
@@ -556,15 +563,16 @@ export class PaymobGateway extends BaseGateway {
         ? this.buildUnifiedCheckoutUrl(data.client_secret)
         : undefined);
 
-    this.requireString(
+    const checkoutUrl = this.requireMutationString(
       redirectUrl,
       "Paymob Intention API response is missing checkout URL/client_secret",
       data,
+      "Intention",
     );
 
     const nextAction = {
       type: "redirect" as const,
-      checkoutUrl: redirectUrl,
+      checkoutUrl,
       intentionId: gatewayId,
       clientSecret: data.client_secret,
       paymentKeys: data.payment_keys,
@@ -575,7 +583,7 @@ export class PaymobGateway extends BaseGateway {
         gatewayId,
         gatewayObjectId: gatewayId,
         status: "pending",
-        ...(redirectUrl !== undefined ? { redirectUrl } : {}),
+        redirectUrl: checkoutUrl,
         nextAction,
         rawResponse: data,
         providerNativeStatus: "intention_pending",
@@ -1217,8 +1225,10 @@ export class PaymobGateway extends BaseGateway {
     }
     const raw = payload as PaymobWebhookPayload;
     const obj = normalized.obj;
-    // HMAC does not cover is_captured / captured_amount / refunded_amount_cents /
-    // is_refund / is_void — never drive paid/refund/void from unsigned slots.
+    // HMAC does not cover is_captured / captured_amount / refunded_amount_cents.
+    // is_refund / is_void are HMAC aliases when current-state is absent; when
+    // current-state is present-and-false they are kept so child refund/void
+    // cannot fall through to paid (PAYMOB-1).
     const statusSource = this.sanitizeWebhookTransactionForStatus(obj);
 
     const status = this.mapTransactionStatus(statusSource);
@@ -1242,7 +1252,7 @@ export class PaymobGateway extends BaseGateway {
     const txnId = String(obj.id);
     const signedOrderId = this.readSignedPaymobOrderId(normalized.rawObj);
     const legacy: WebhookEvent = {
-      id: txnId,
+      id: this.paymobWebhookEventId(txnId, "TRANSACTION"),
       type: normalized.type,
       gateway: "paymob",
       paymentId: undefined,
@@ -1328,6 +1338,8 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(statusData, "is_refunded", payload.is_refunded);
     this.assignOptionalBoolean(statusData, "is_auth", payload.is_auth);
     this.assignOptionalBoolean(statusData, "is_capture", payload.is_capture);
+    this.assignOptionalBoolean(statusData, "has_parent_transaction", payload.has_parent_transaction);
+    this.assignOptionalBoolean(statusData, "error_occured", payload.error_occured);
     const statusSource = this.sanitizeWebhookTransactionForStatus(statusData);
     const status = this.mapTransactionStatus(statusSource);
     const amount = this.resolveWebhookEventAmount(
@@ -1342,12 +1354,15 @@ export class PaymobGateway extends BaseGateway {
     // on redirect-only events. Trusting payload.type would let type=TRANSACTION
     // skip demotion and look fulfillment-ready.
     // PAYMOB-1: merchant_order_id is not HMAC-bound — omit paymentId on redirect too.
+    // WEBHOOKS-1: redirect and processed TRANSACTION share Paymob's txn id.
+    // Qualify redirect event.id so inbox keys cannot ACK-suppress later paid.
+    const txnId = String(payload.id);
     const legacy: WebhookEvent = {
-      id: String(payload.id),
+      id: this.paymobWebhookEventId(txnId, "TRANSACTION_RESPONSE"),
       type: "TRANSACTION_RESPONSE",
       gateway: "paymob",
       paymentId: undefined,
-      gatewayPaymentId: String(payload.id),
+      gatewayPaymentId: txnId,
       status,
       ...(amount !== undefined ? { amount } : {}),
       // Normalize to uppercase ISO 4217 for cross-gateway consistency.
@@ -1368,9 +1383,12 @@ export class PaymobGateway extends BaseGateway {
    * is_voided, success, pending, amount_cents — not is_captured, captured_amount,
    * refunded_amount_cents, is_refund, or is_void.
    *
-   * is_refund / is_void are only HMAC-covered as aliases when is_refunded /
-   * is_voided are absent (`readHmacField`). When both are present, only the
-   * signed current-state flag is trusted.
+   * is_refund / is_void are HMAC-covered as aliases when is_refunded /
+   * is_voided are absent (`readHmacField`). When the signed current-state flag
+   * is true, drop the action alias (current-state already classifies). When
+   * current-state is present-and-false, **keep** the action flag so a child
+   * refund/void (`is_refund` / `is_void` + success, often with HMAC
+   * `has_parent_transaction`) cannot fall through to paid (PAYMOB-1).
    *
    * refunded_amount_cents is never HMAC-covered — always strip it on the webhook
    * path. Signed `is_refunded` / HMAC-aliased `is_refund` without a trusted
@@ -1390,11 +1408,12 @@ export class PaymobGateway extends BaseGateway {
     delete out.captured_amount;
     delete out.refunded_amount_cents;
 
-    // Drop action aliases when current-state flags are present (HMAC used the latter).
-    if (out.is_refunded !== undefined) {
+    // Drop action aliases only when signed current-state is true.
+    // Present-and-false current-state must not discard child refund/void flags.
+    if (out.is_refunded === true) {
       delete out.is_refund;
     }
-    if (out.is_voided !== undefined) {
+    if (out.is_voided === true) {
       delete out.is_void;
     }
 
@@ -1981,6 +2000,8 @@ export class PaymobGateway extends BaseGateway {
     is_refund?: boolean;
     is_voided?: boolean;
     is_refunded?: boolean;
+    has_parent_transaction?: boolean;
+    error_occured?: boolean;
     amount_cents?: number;
     refunded_amount_cents?: number;
     captured_amount?: number;
@@ -1989,7 +2010,17 @@ export class PaymobGateway extends BaseGateway {
     is_captured?: boolean;
   }): PaymentStatus {
     if (data.pending) return "pending";
-    if (data.is_voided === true || (data.success === true && data.is_void === true)) return "cancelled";
+    // HMAC has_parent_transaction marks child refund/void/capture txns.
+    // Combined with action flags so is_refund/is_void + success cannot look paid
+    // when is_refunded/is_voided are present-and-false (PAYMOB-1).
+    const childAction = data.has_parent_transaction === true && data.success === true;
+    if (
+      data.is_voided === true ||
+      (data.success === true && data.is_void === true) ||
+      (childAction && data.is_void === true)
+    ) {
+      return "cancelled";
+    }
 
     // Explicit refund flags, or refunded_amount_cents alone (API/inquiry path only —
     // webhooks always strip unsigned refunded_amount_cents / captured_amount).
@@ -1998,6 +2029,7 @@ export class PaymobGateway extends BaseGateway {
     if (
       data.is_refunded === true ||
       (data.success === true && data.is_refund === true) ||
+      (childAction && data.is_refund === true) ||
       (data.refunded_amount_cents !== undefined && data.refunded_amount_cents > 0)
     ) {
       const refundedAmountCents = data.refunded_amount_cents;
@@ -2021,6 +2053,12 @@ export class PaymobGateway extends BaseGateway {
         return "refund_completed";
       }
       return "refunded";
+    }
+
+    // PAYMOB-3: HMAC-covered error_occured. Signed error + success must not
+    // look paid / payment.succeeded. Refund/void current-state already returned.
+    if (data.error_occured === true) {
+      return "failed";
     }
 
     // Capture amounts before auth-only: success + captured_amount > 0 is paid or partially_captured.
@@ -3217,6 +3255,39 @@ export class PaymobGateway extends BaseGateway {
     throw new PaymobIndeterminateResponseError(operation, message, raw);
   }
 
+  /**
+   * Require a non-empty string from a mutating HTTP 200 body (Intention id /
+   * checkout URL). Missing values are indeterminate — Paymob may have created
+   * a payable session; callers must retain the idempotency fence (PAYMOB-2).
+   */
+  private requireMutationString(
+    value: unknown,
+    message: string,
+    raw: unknown,
+    operation: string,
+  ): string {
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+    throw new PaymobIndeterminateResponseError(operation, message, raw);
+  }
+
+  /**
+   * Inbox / dedupe identity for Paymob notifications.
+   * Redirect `TRANSACTION_RESPONSE` and processed `TRANSACTION` share Paymob's
+   * txn id. Qualify redirect `event.id` so the documented inbox key cannot
+   * ACK-suppress the later paid processed callback (WEBHOOKS-1).
+   * `gatewayPaymentId` stays the raw signed txn id.
+   */
+  private paymobWebhookEventId(
+    providerTxnId: string,
+    notification: "TRANSACTION" | "TRANSACTION_RESPONSE",
+  ): string {
+    return notification === "TRANSACTION_RESPONSE"
+      ? `${providerTxnId}:redirect`
+      : providerTxnId;
+  }
+
   private recordOrUndefined(value: unknown): Record<string, unknown> | undefined {
     return value && typeof value === "object" && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -3318,6 +3389,8 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(transaction, "is_auth", source.is_auth);
     this.assignOptionalBoolean(transaction, "is_capture", source.is_capture);
     this.assignOptionalBoolean(transaction, "is_captured", source.is_captured);
+    this.assignOptionalBoolean(transaction, "has_parent_transaction", source.has_parent_transaction);
+    this.assignOptionalBoolean(transaction, "error_occured", source.error_occured);
 
     const currency = this.stringOrUndefined(source.currency);
     if (currency) {
@@ -3373,6 +3446,8 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(obj, "is_auth", rawObj.is_auth);
     this.assignOptionalBoolean(obj, "is_capture", rawObj.is_capture);
     this.assignOptionalBoolean(obj, "is_captured", rawObj.is_captured);
+    this.assignOptionalBoolean(obj, "has_parent_transaction", rawObj.has_parent_transaction);
+    this.assignOptionalBoolean(obj, "error_occured", rawObj.error_occured);
 
     return {
       // Missing type must not default to TRANSACTION — that invents fulfillment

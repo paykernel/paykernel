@@ -31,11 +31,12 @@ export interface MoyasarConfig {
     /** Request timeout in milliseconds. Default: 30000 */
     timeoutMs?: number;
     /**
-     * Optional injectable idempotency store for refund/capture/void. Moyasar's
-     * API has no native idempotency for these endpoints, so without a store a
-     * retried refund can refund the customer twice. Provide a process-wide
-     * store (Redis/SQL, ideally with an atomic `reserve`) for full protection;
-     * an in-memory store only dedupes within a single process.
+     * Idempotency store for capture/refund/void. **Required at runtime for those
+     * mutations** — Moyasar has no native idempotency, and the adapter throws
+     * `InvalidRequestError` if this is omitted or lacks atomic `reserve()`.
+     * Prefer a process-wide store (Redis/SQL) with atomic `reserve`;
+     * `InMemoryIdempotencyStore` only dedupes within a single process.
+     * Create / get / webhook parse do not require a store.
      */
     idempotencyStore?: IdempotencyStore;
 }

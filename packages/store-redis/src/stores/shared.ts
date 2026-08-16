@@ -128,13 +128,13 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
 }
 
 /**
- * SCAN store record keys and run GET_LUA on each so expired `claimed` rows
- * soft-release + re-index into the due/retry ZSET.
+ * Rare repair: SCAN store record keys and run GET_LUA so expired `claimed`
+ * rows soft-release + re-index into the due/retry ZSET.
  *
- * Extra / standalone-only: claim already ZADDs the due/retry index at
- * `lease_expires_ms` so ZRANGEBYSCORE(-inf, now) rediscovers abandoned
- * claimed keys with keyed ZSET ops (P1315-REDIS-2, Cluster-safe). SCAN must
- * not be the only recovery path.
+ * Not the poll path. Claim / renew ZADD the due/retry index at
+ * `lease_expires_ms` (REDIS-1 / P1315-REDIS-2) so ZRANGEBYSCORE(-inf, now)
+ * rediscovers abandoned work with keyed ZSET ops only. Call this only for
+ * operator repair of a drifted index — never from every listDue/listRetryable.
  */
 export async function softReleaseExpiredClaimedViaScan(options: {
   port: RedisCommandPort;
@@ -165,5 +165,25 @@ export async function softReleaseExpiredClaimedViaScan(options: {
       await evalHelper.eval(getLua, [redisKey, indexKey], [nowMs, nowIso]);
     }
   } while (cursor !== "0");
+}
+
+/**
+ * PERF-4: load ZRANGE members in one wave (not serial N+1 GET) and keep
+ * list-eligible rows up to `limit`.
+ */
+export async function loadListedRecords<T>(
+  keys: readonly string[],
+  load: (key: string) => Promise<T | undefined>,
+  keep: (rec: T) => boolean,
+  limit: number,
+): Promise<T[]> {
+  if (keys.length === 0 || limit <= 0) return [];
+  const records = await Promise.all(keys.map((key) => load(key)));
+  const out: T[] = [];
+  for (const rec of records) {
+    if (rec !== undefined && keep(rec)) out.push(rec);
+    if (out.length >= limit) break;
+  }
+  return out;
 }
 

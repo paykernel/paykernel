@@ -381,10 +381,17 @@ export function createD1WebhookInboxStore(
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = ?,
              updated_at = ?
-           WHERE status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= ?`,
-          [now, now, now],
+           WHERE key IN (
+             SELECT key FROM (
+               SELECT key FROM ${table}
+               WHERE status = 'claimed'
+                 AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at <= ?
+               ORDER BY lease_expires_at ASC
+               LIMIT ?
+             )
+           )`,
+          [now, now, now, limit],
         );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${WEBHOOK_SELECT_COLS}

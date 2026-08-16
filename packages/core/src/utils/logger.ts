@@ -107,16 +107,38 @@ const SENSITIVE_EXACT_KEYS = new Set(["month", "year"]);
 const PAN_LIKE_STRING = /^[\d\s-]{13,23}$/;
 
 /**
- * Secret-shaped leaves under non-sensitive keys (MONEY-3): API keys, webhook
- * secrets, bearer tokens. Matched on string leaves only so free-form notes
- * cannot leak live credentials when logged under keys like `note` / `detail`.
+ * Secret-shaped tokens (MONEY-3): API keys, webhook secrets, bearer tokens.
+ * Matched as a substring so `hookError` strings like
+ * `"after hook threw: sk_live_…"` cannot leak live credentials.
  */
 const SECRET_SHAPED_STRING =
-  /^(?:sk_(?:live|test)_|rk_(?:live|test)_|pk_(?:live|test)_|whsec_|Bearer\s+\S)/i;
+  /(?:sk_(?:live|test)_|rk_(?:live|test)_|pk_(?:live|test)_|cs_(?:live|test)_|whsec_|Bearer\s+\S)/i;
+
+/**
+ * Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes).
+ */
+const EMBEDDED_PAN_RUN = /\d[\d\s-]{11,21}\d/g;
+
+function isPanDigitRun(value: string): boolean {
+  const digits = value.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
+
+function containsEmbeddedPan(value: string): boolean {
+  EMBEDDED_PAN_RUN.lastIndex = 0;
+  const runs = value.match(EMBEDDED_PAN_RUN);
+  if (!runs) {
+    return false;
+  }
+  return runs.some(isPanDigitRun);
+}
 
 function isOpaqueSensitiveString(value: string): boolean {
   const trimmed = value.trim();
   if (SECRET_SHAPED_STRING.test(trimmed)) {
+    return true;
+  }
+  if (containsEmbeddedPan(trimmed)) {
     return true;
   }
   if (trimmed.length < 13 || trimmed.length > 23) {
@@ -125,8 +147,7 @@ function isOpaqueSensitiveString(value: string): boolean {
   if (!PAN_LIKE_STRING.test(trimmed)) {
     return false;
   }
-  const digits = trimmed.replace(/[\s-]/g, "");
-  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+  return isPanDigitRun(trimmed);
 }
 
 /**
@@ -213,6 +234,8 @@ function isSensitiveKey(key: string): boolean {
  * Redacts:
  * - Keys matching {@link SENSITIVE_KEY_PATTERNS} (case-insensitive substring)
  * - Opaque string leaves that look like PANs (13–19 digits)
+ * - Embedded `sk_live_` / `whsec_` / `Bearer` / PAN tokens inside otherwise
+ *   non-sensitive strings (e.g. `hookError` messages)
  */
 export function redact(value: unknown, depth = 0): unknown {
   if (depth > MAX_DEPTH) {

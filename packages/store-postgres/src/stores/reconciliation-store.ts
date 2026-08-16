@@ -360,10 +360,15 @@ export function createPostgresReconciliationStore(
              lease_expires_at = NULL,
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = $1
-           WHERE status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= $1`,
-          [now],
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status = 'claimed'
+               AND lease_expires_at IS NOT NULL
+               AND lease_expires_at <= $1
+             ORDER BY lease_expires_at ASC
+             LIMIT $2
+           )`,
+          [now, limit],
         );
         // Soft-release above UPDATEs expired claimed rows first. SKIP LOCKED is
         // for multi-worker fairness on durable rows only; default path is a

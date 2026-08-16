@@ -61,7 +61,7 @@ describe("buildFoundationMigrationSql index uniqueness", () => {
     const prefix = "p".repeat(MAX_SAFE_TABLE_PREFIX_LENGTH);
     const sql = buildFoundationMigrationSql("postgres", (logical) => `"${prefix}${logical}"`);
     const names = extractIndexNames(sql);
-    expect(names.length).toBeGreaterThanOrEqual(12); // 3 + 5 + 4 domain indexes
+    expect(names.length).toBeGreaterThanOrEqual(16); // 3 + 7 + 6 domain indexes
     expect(new Set(names).size).toBe(names.length);
 
     // Shared-suffix indexes must not collapse across tables.
@@ -72,6 +72,10 @@ describe("buildFoundationMigrationSql index uniqueness", () => {
     const statusIndexes = names.filter((n) => n.endsWith("_status"));
     expect(statusIndexes.length).toBe(3);
     expect(new Set(statusIndexes).size).toBe(3);
+
+    expect(names.some((n) => n.endsWith("_st_avail"))).toBe(true);
+    expect(names.some((n) => n.endsWith("_st_due"))).toBe(true);
+    expect(names.filter((n) => n.endsWith("_st_lexp")).length).toBe(2);
   });
 
   it("schema-qualified long names remain unique", () => {

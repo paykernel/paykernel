@@ -565,6 +565,27 @@ function mapPaymobEventType(
   return "provider.unmapped";
 }
 
+/**
+ * CORE-6: an already-stable `payment.succeeded` must not survive a failed /
+ * pending / processing domain status. Other stable names stay idempotent.
+ */
+function coerceStableSucceededToDomainStatus(
+  type: StablePaymentEventType,
+  context?: ProviderEventMapContext,
+): MappedStableEventType {
+  if (type !== "payment.succeeded") {
+    return type;
+  }
+  const status = (context?.status ?? "").toLowerCase();
+  if (status === "failed") {
+    return "payment.failed";
+  }
+  if (status === "pending" || status === "processing") {
+    return "payment.processing";
+  }
+  return type;
+}
+
 // ─── Public mapper ───────────────────────────────────────────────────────────
 
 /**
@@ -588,9 +609,10 @@ export function mapProviderEventTypeToStable(
   }
 
   // Already a stable name (e.g. dual-write consumers re-mapping) — accept as-is
-  // so mapping is idempotent. Uses shared catalog (no duplicated name list).
+  // so mapping is idempotent, except `payment.succeeded` cannot survive a
+  // failed / pending / processing domain status (CORE-6).
   if (isStablePaymentEventType(providerEventType)) {
-    return providerEventType;
+    return coerceStableSucceededToDomainStatus(providerEventType, context);
   }
 
   const g = gateway.toLowerCase();

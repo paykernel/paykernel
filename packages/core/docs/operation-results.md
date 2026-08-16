@@ -258,12 +258,31 @@ gateway `status` (same family as payment `inferOperationOutcome`). Bare
 `mapGatewayRefundToOperationResult` for Phase-6 union shapes; bare infer is safe
 for status-consistent branching only after this coerce.
 
+**P610-INF-2 (refunds):** `{ success: false, status: 'pending' }` (or omitted
+`success` with `pending` / `processing` / `approved`) infers **`indeterminate`**,
+not `failed`. A forged decline would invite a retry and can **double-refund**.
+Reconcile; do not retry the mutation as a fresh failure.
+
 Do not treat a pending refund as settled. Same Engineering Rule 3 applies after
 submit when the refund request may have been accepted.
 
+**CORE-5:** `applyOutcomeToGatewayResult` coerces stored `outcome` / `success`
+against `status`. `outcome: 'succeeded'` with `status: 'failed'` becomes
+`declined` + `success: false`; with `status: 'pending'` / `'processing'` /
+`'approved'` it becomes `requires_action`. Callers branching on
+`result.outcome === 'succeeded'` must not see a failed or still-pending payment
+as a successful operation.
+
+**CORE-7:** Post-submit create / OTP / capture / refund / void timeouts return
+`outcome: 'indeterminate'` with `gatewayId` taken from params when present
+(`gatewayPaymentId`, `orderId`, `transactionUrl`, `idempotencyKey`, …). Create
+without any of those ids still uses `gatewayId: 'unknown'` because the provider
+has not assigned an object id — reconcile via the idempotency store / inquiry,
+not `getPayment('unknown')`.
+
 ## After-hook freeze
 
-Money/identity fields restored after after-hooks include (when present): `success`, `outcome`, `status`, `amount`, `gatewayId`, capture/order/authorization/refund IDs, fees, `capturedAmount`, `refundedAmount`, `clientSecret`, `references`, `decline`, `reconciliationRequired`, `providerRequestId`. After-hooks cannot flip a paid result into declined or invent a paid status.
+Money/identity fields restored after after-hooks include (when present): `success`, `outcome`, `status`, `amount`, `gatewayId`, capture/order/authorization/refund IDs, fees, `capturedAmount`, `refundedAmount`, `clientSecret`, `references`, `decline`, `reconciliationRequired`, `providerRequestId`. Restore runs **between** composed after-hooks as well as on the client return path, so a later handler cannot see a previous hook's forged paid/status/amount. After-hooks cannot flip a paid result into declined or invent a paid status.
 
 ## Migration checklist (0.x apps)
 

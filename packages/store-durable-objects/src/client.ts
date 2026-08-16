@@ -214,6 +214,12 @@ type FanOutListOptions<T extends { key: string }> = FanOutStoreContext & {
 /**
  * Fan-out listDue/listRetryable across all enumerable partitions; merge, dedupe by key,
  * stable sort, then truncate to limit.
+ *
+ * PERF-5: there is no cheaper correct fan-in. Hash partitions have no global
+ * due/retry index, so the globally earliest `limit` rows require waking every
+ * enumerable isolate. Per-partition listDue/listRetryable still bound their
+ * expired-lease UPDATE to `limit` (PERF-2). Sequential early-exit would miss
+ * earlier work on later shards.
  */
 async function fanOutListByKey<T extends { key: string }>(
   options: FanOutListOptions<T>,
@@ -610,8 +616,9 @@ function createReconciliationClient(
  * Does **not** migrate schema. Does **not** default to one global DO.
  *
  * Under `kind: "hash"`, `listDue` / `listRetryable` / `deleteExpired` fan out
- * across all partitions. Under `kind: "key"`, those methods throw
- * {@link StoreUnsupportedFeatureError}.
+ * across all partitions (required for a correct global earliest-N; no cheaper
+ * fan-in exists without a cross-isolate index). Under `kind: "key"`, those
+ * methods throw {@link StoreUnsupportedFeatureError}.
  */
 export function createDoPaymentStores(
   options: DoClientStoreOptions,

@@ -122,7 +122,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.attempts).toBe(0);
   });
 
-  it("ackAfterClaim without envelope refuses before claim (invalid_webhook)", async () => {
+  it("ackAfterClaim without envelope refuses before claim (retryable, not invalid_webhook)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -136,14 +136,8 @@ describe("modes: inline vs durable_retry (A6)", () => {
       payloadHash: "h",
     });
 
-    expect(outcome.outcome).toBe("invalid_webhook");
-    if (outcome.outcome === "invalid_webhook") {
-      // WEBHOOKS-1: durable_retry refuses claim without materializable payload
-      // (covers ackAfterClaim park and inline durable handler paths).
-      expect(outcome.reason).toMatch(
-        /envelope or event is required for durable_retry|envelope is required for ackAfterClaim/i,
-      );
-    }
+    // WEBHOOKS-2: missing durable snapshot is not forgery / 400.
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
     expect(store.size).toBe(0);
   });
 
@@ -191,7 +185,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       envelope: "",
     });
 
-    expect(outcome.outcome).toBe("invalid_webhook");
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
     expect(store.size).toBe(0);
   });
 
@@ -357,7 +351,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.payloadRef).toContain("payment.succeeded");
   });
 
-  it("durable_retry without envelope/event refuses claim (WEBHOOKS-1 no permanent block)", async () => {
+  it("durable_retry without envelope/event refuses claim as retryable (WEBHOOKS-2)", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({
       store,
@@ -376,15 +370,13 @@ describe("modes: inline vs durable_retry (A6)", () => {
       },
     });
 
-    expect(outcome.outcome).toBe("invalid_webhook");
-    if (outcome.outcome === "invalid_webhook") {
-      expect(outcome.reason).toMatch(/payloadRef|envelope or event/i);
-    }
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(outcome.outcome).not.toBe("invalid_webhook");
     // No claim row — redelivery can retry with a materializable payload.
     expect(await store.get("stripe:evt_no_payload")).toBeUndefined();
   });
 
-  it("processRetryable dead-letters rows with missing payloadRef (never stubs event)", async () => {
+  it("processRetryable does not dead-letter rows with missing payloadRef (WEBHOOKS-4)", async () => {
     const clock = createTestClock();
     const store = createMemoryWebhookInboxStore({ clock });
     // Seed a legacy pending row without payloadRef (simulates pre-fix durable fail).
@@ -422,10 +414,11 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(result.items).toHaveLength(1);
     expect(result.items[0]?.outcome).toEqual({
       outcome: "handler_failed",
-      retryable: false,
+      retryable: true,
     });
     const rec = await store.get("stripe:evt_legacy_stub");
-    expect(rec?.status).toBe("dead_letter");
+    expect(rec?.status).not.toBe("dead_letter");
+    expect(rec?.status).toBe("pending");
     expect(rec?.lastError).toMatch(/missing payloadRef/i);
   });
 });

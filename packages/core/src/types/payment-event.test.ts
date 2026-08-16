@@ -156,11 +156,32 @@ describe("PaymentEvent discrimination", () => {
     expect(label(unmapped)).toBe("unmapped:invoice.paid");
   });
 
-  it("isPaymentEvent requires schemaVersion 1 + type + provider", () => {
+  it("isPaymentEvent requires schemaVersion 1 + type + complete provider + entity arm", () => {
     const e = webhookEventToPaymentEvent(baseWebhook());
     expect(isPaymentEvent(e)).toBe(true);
     expect(isPaymentEvent({ type: "payment.succeeded" })).toBe(false);
     expect(isPaymentEvent(null)).toBe(false);
+    // CORE-4: thin 3-field shape is not a trusted PaymentEvent.
+    expect(
+      isPaymentEvent({
+        schemaVersion: "1",
+        type: "payment.succeeded",
+        provider: {},
+      }),
+    ).toBe(false);
+    expect(
+      isPaymentEvent({
+        schemaVersion: "1",
+        type: "payment.succeeded",
+        provider: {
+          gateway: "custom",
+          eventId: "evt_1",
+          eventType: "payment_paid",
+          occurredAt: "2024-01-01T00:00:00.000Z",
+          receivedAt: "2024-01-01T00:00:00.000Z",
+        },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -787,6 +808,34 @@ describe("mapProviderEventTypeToStable tables", () => {
     expect(
       mapProviderEventTypeToStable("stripe", "payment.succeeded"),
     ).toBe("payment.succeeded");
+  });
+
+  it("CORE-6: stable payment.succeeded does not survive failed/pending status", () => {
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment.succeeded", {
+        status: "pending",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "payment.succeeded", {
+        status: "processing",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "paid",
+      }),
+    ).toBe("payment.succeeded");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.failed", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
   });
 });
 

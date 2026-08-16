@@ -12,6 +12,7 @@ describe("public API runtime surface", () => {
       ["resolveInboxPayloadHash", webhooks.resolveInboxPayloadHash],
       ["deriveWebhookEventKey", webhooks.deriveWebhookEventKey],
       ["parseWebhookEventKey", webhooks.parseWebhookEventKey],
+      ["qualifyPaymobProviderEventId", webhooks.qualifyPaymobProviderEventId],
       ["sanitizeWebhookError", webhooks.sanitizeWebhookError],
       ["redactOpaquePayloadRefString", webhooks.redactOpaquePayloadRefString],
       ["DEFAULT_SANITIZE_MAX_LENGTH", webhooks.DEFAULT_SANITIZE_MAX_LENGTH],

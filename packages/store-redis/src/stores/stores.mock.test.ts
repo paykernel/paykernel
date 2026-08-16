@@ -388,6 +388,43 @@ describe("webhook store mock port", () => {
     expect(failArgv!.some((a) => a === "604800")).toBe(true);
   });
 
+  it("REDIS-1: webhook renew EVAL includes retry index key for ZSET rescore", async () => {
+    const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
+    const { port, calls } = createMockPort(() => [
+      "ok",
+      ...webhookPack({ status: "claimed", attempts: "1", lease_token: "lt_2" }),
+      "lt_2",
+    ]);
+    const store = createRedisWebhookInboxStore({ port, clock });
+    const r = await store.renew({ key: "e1", leaseToken: "lt_1", leaseMs: 15_000 });
+    expect(r.ok).toBe(true);
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    expect(evalCall!.args.some((a) => String(a).endsWith(":whinbox:retry"))).toBe(
+      true,
+    );
+    expect(evalCall!.args.some((a) => a === String(clock.nowMs() + 15_000))).toBe(
+      true,
+    );
+  });
+
+  it("PERF-1: listRetryable uses ZRANGEBYSCORE and does not SCAN", async () => {
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "ZRANGEBYSCORE") return ["e1"];
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        return ["ok", ...webhookPack({ status: "pending", attempts: "0" })];
+      }
+      return null;
+    });
+    const store = createRedisWebhookInboxStore({ port });
+    const listed = await store.listRetryable({ limit: 10 });
+    expect(listed.map((r) => r.key)).toContain("e1");
+    expect(calls.some((c) => c.command === "ZRANGEBYSCORE")).toBe(true);
+    expect(calls.some((c) => c.command === "SCAN")).toBe(false);
+  });
+
   it("P1315-REDIS-2: webhook claim EVAL ARGV includes leaseExpiresMs", async () => {
     const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
     const leaseMs = 15_000;
@@ -512,7 +549,6 @@ describe("reconciliation store mock port", () => {
     const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
     let phase: "claim1" | "list" | "claim2" | "reclaim" = "claim1";
     const { port } = createMockPort((call) => {
-      if (call.command === "SCAN") return ["0", ["psdk:v1:recon:j1"]];
       if (call.command === "ZRANGEBYSCORE") return ["j1"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
         if (phase === "claim1") {
@@ -574,9 +610,8 @@ describe("reconciliation store mock port", () => {
     );
   });
 
-  it("P1315-REDIS-2: listDue rediscovers via ZRANGEBYSCORE when SCAN is empty", async () => {
+  it("PERF-1: listDue rediscovers via ZRANGEBYSCORE without SCAN", async () => {
     const { port, calls } = createMockPort((call) => {
-      if (call.command === "SCAN") return ["0", []];
       if (call.command === "ZRANGEBYSCORE") return ["j1"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
         return ["ok", ...reconPack({ status: "scheduled", attempts: "0" })];
@@ -587,7 +622,29 @@ describe("reconciliation store mock port", () => {
     const due = await store.listDue({ limit: 10 });
     expect(due.map((r) => r.key)).toContain("j1");
     expect(calls.some((c) => c.command === "ZRANGEBYSCORE")).toBe(true);
-    expect(calls.some((c) => c.command === "SCAN")).toBe(true);
+    expect(calls.some((c) => c.command === "SCAN")).toBe(false);
+  });
+
+  it("REDIS-1: renew EVAL includes due index key for ZSET rescore", async () => {
+    const clock = createFakeClock(new Date("2026-01-01T00:00:00.000Z"));
+    const { port, calls } = createMockPort(() => [
+      "ok",
+      ...reconPack({ status: "claimed", attempts: "1", lease_token: "lt_2" }),
+      "lt_2",
+    ]);
+    const store = createRedisReconciliationStore({ port, clock });
+    const r = await store.renew({ key: "j1", leaseToken: "lt_1", leaseMs: 30_000 });
+    expect(r.ok).toBe(true);
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    expect(evalCall!.args.some((a) => String(a).endsWith(":recon:due"))).toBe(
+      true,
+    );
+    expect(evalCall!.args.some((a) => a === String(clock.nowMs() + 30_000))).toBe(
+      true,
+    );
   });
 
   it("P1315-REDIS-3: recon terminal fail / markManualReview with retention still invoke scripts", async () => {
@@ -818,15 +875,17 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
 
   it("P1315-REDIS-5: listDue / listRetryable write canonical Z nowIso", async () => {
     const { port, calls } = createMockPort((call) => {
-      if (call.command === "SCAN") {
-        const match = String(call.args[2] ?? "");
-        const key = match.includes("whinbox")
-          ? "psdk:v1:whinbox:e1"
-          : "psdk:v1:recon:j1";
-        return ["0", [key]];
+      if (call.command === "ZRANGEBYSCORE") {
+        return String(call.args[0] ?? "").includes("whinbox") ? ["e1"] : ["j1"];
       }
-      if (call.command === "ZRANGEBYSCORE") return [];
-      return ["ok"];
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        const joined = call.args.map(String).join(" ");
+        if (joined.includes("whinbox")) {
+          return ["ok", ...webhookPack({ status: "pending" })];
+        }
+        return ["ok", ...reconPack({ status: "scheduled" })];
+      }
+      return null;
     });
     const recon = createRedisReconciliationStore({ port });
     const webhook = createRedisWebhookInboxStore({ port });

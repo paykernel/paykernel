@@ -2185,6 +2185,109 @@ describe("MoyasarGateway", () => {
       expect(event.provider?.eventType).toBe("payment_paid");
     });
 
+    it("fail-closes payment_voided + residual paid snapshot (MOYASAR-1)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_void_paid",
+        type: "payment_voided",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 10000,
+          refunded: 0,
+        },
+      });
+
+      // Money-honest residual: funds still captured — do not rewrite to cancelled.
+      expect(event.status).toBe("paid");
+      expect(event.status).not.toBe("cancelled");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("SAR");
+      // Envelope type stays provider-native; dual-write must not restock.
+      expect(event.type).toBe("payment_voided");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.cancelled");
+      expect(event.provider?.eventType).toBe("payment_voided");
+    });
+
+    it("fail-closes payment_voided + residual authorized snapshot (MOYASAR-1)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_void_auth",
+        type: "payment_voided",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "authorized",
+          amount: 10000,
+          currency: "SAR",
+          captured: 0,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("authorized");
+      expect(event.status).not.toBe("cancelled");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("SAR");
+      expect(event.type).toBe("payment_voided");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.provider?.eventType).toBe("payment_voided");
+    });
+
+    it("fail-closes payment_voided + residual partially_captured snapshot (MOYASAR-1)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_void_partial",
+        type: "payment_voided",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 4000,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.status).not.toBe("cancelled");
+      expect(event.amount).toBe(40);
+      expect(event.currency).toBe("SAR");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+    });
+
+    it("maps consistent payment_voided + voided snapshot to cancelled (MOYASAR-1)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_void_ok",
+        type: "payment_voided",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "voided",
+          amount: 10000,
+          currency: "SAR",
+          captured: 0,
+          refunded: 0,
+        },
+      });
+
+      expect(event.status).toBe("cancelled");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("SAR");
+      expect(event.type).toBe("payment_voided");
+      expect(event.stableType).toBe("payment.cancelled");
+      expect(event.event?.type).toBe("payment.cancelled");
+    });
+
     it("demotes payment_paid dual-write when domain status is not paid-like (MOYASAR-3)", () => {
       // Envelope payment_paid maps to payment.succeeded, but provider status
       // authorized is not paid-like — dual-write must not settle from type alone.
@@ -2824,7 +2927,7 @@ describe("MoyasarGateway", () => {
       return { warnings, logger };
     };
 
-    it("warns when no idempotencyStore is configured", () => {
+    it("warns that idempotencyStore is required when none is configured", () => {
       const { warnings, logger } = captureWarnings();
 
       new MoyasarGateway(CONFIG, new HooksManager(), logger);
@@ -2832,8 +2935,8 @@ describe("MoyasarGateway", () => {
       expect(
         warnings.some(
           (w) =>
-            w.includes("No idempotencyStore configured") &&
-            (w.includes("will throw") || w.includes("double-refund")),
+            w.includes("idempotencyStore is required") &&
+            (w.includes("InvalidRequestError") || w.includes("double-refund")),
         ),
       ).toBe(true);
     });
@@ -2865,6 +2968,9 @@ describe("MoyasarGateway", () => {
       );
 
       expect(warnings.some((w) => w.includes("atomic reserve"))).toBe(false);
+      expect(warnings.some((w) => w.includes("idempotencyStore is required"))).toBe(
+        false,
+      );
       expect(warnings.some((w) => w.includes("No idempotencyStore"))).toBe(
         false,
       );
@@ -2879,6 +2985,20 @@ describe("MoyasarGateway", () => {
         gateway.refundPayment({
           gatewayPaymentId: PAYMENT_ID,
           idempotencyKey: "unguarded-key",
+        }),
+      ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
+
+      await expect(
+        gateway.capturePayment({
+          gatewayPaymentId: PAYMENT_ID,
+          idempotencyKey: "unguarded-capture",
+        }),
+      ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
+
+      await expect(
+        gateway.voidPayment({
+          gatewayPaymentId: PAYMENT_ID,
+          idempotencyKey: "unguarded-void",
         }),
       ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
 

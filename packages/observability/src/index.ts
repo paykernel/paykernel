@@ -66,6 +66,7 @@ export {
   redactTelemetryData,
   sanitizeExceptionCode,
   sanitizeExceptionIdentity,
+  sanitizeSpanStatusMessage,
 } from "./redaction";
 export type { TelemetrySink } from "./redaction";
 

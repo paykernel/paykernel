@@ -53,12 +53,12 @@ import {
 import type { RedisStoreOptions } from "../types";
 import {
   canonicalizeIsoZ,
+  loadListedRecords,
   msFromIso,
   newLeaseToken,
   normalizeScan,
   resolveRedisStoreContext,
   scanMatchForStore,
-  softReleaseExpiredClaimedViaScan,
 } from "./shared";
 
 export function createRedisReconciliationStore(
@@ -73,11 +73,13 @@ export function createRedisReconciliationStore(
 
   async function runGet(
     key: string,
+    nowMs = clockNowMsString(ctx.clock),
+    nowIso = clockNowIso(ctx.clock),
   ): Promise<ReconciliationRecord | undefined> {
     const raw = await ctx.eval.eval(
       RECON_GET_LUA,
       [rk(key), dueIndex],
-      [clockNowMsString(ctx.clock), clockNowIso(ctx.clock)],
+      [nowMs, nowIso],
     );
     const tagged = parseTaggedResult(raw);
     if (tagged.tag === "missing") return undefined;
@@ -169,7 +171,7 @@ export function createRedisReconciliationStore(
         const newToken = newLeaseToken();
         const raw = await ctx.eval.eval(
           RECON_RENEW_LUA,
-          [rk(input.key)],
+          [rk(input.key), dueIndex],
           [
             clockNowMsString(ctx.clock),
             clockNowIso(ctx.clock),
@@ -296,19 +298,8 @@ export function createRedisReconciliationStore(
             ? canonicalizeIsoZ(input.now)
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // P1315-REDIS-2: claim ZADDs due index at lease_expires_ms so
-        // ZRANGEBYSCORE(-inf, now) rediscovers abandoned claimed keys.
-        // SCAN bulk soft-release is extra; not the only recovery path.
-        await softReleaseExpiredClaimedViaScan({
-          port: ctx.port,
-          eval: ctx.eval,
-          match: scanMatchForStore(ctx.keys, "recon"),
-          indexKey: dueIndex,
-          getLua: RECON_GET_LUA,
-          nowMs,
-          nowIso,
-          indexName: "due",
-        });
+        // PERF-1: ZSET is scored at due_ms / lease_expires_ms (claim + REDIS-1
+        // renew). Do not SCAN every record on the poll path.
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",
@@ -320,15 +311,12 @@ export function createRedisReconciliationStore(
         const keys = Array.isArray(members)
           ? members.map((m) => String(m))
           : [];
-        const out: ReconciliationRecord[] = [];
-        for (const k of keys) {
-          const rec = await runGet(k);
-          if (rec && rec.status === "scheduled") {
-            out.push(rec);
-          }
-          if (out.length >= limit) break;
-        }
-        return out;
+        return loadListedRecords(
+          keys,
+          (k) => runGet(k, nowMs, nowIso),
+          (rec) => rec.status === "scheduled",
+          limit,
+        );
       });
     },
 

@@ -148,6 +148,8 @@ export const MIGRATIONS_COLUMNS = {
  *
  * - lease_expires_at: reclaim expired leases / cleanup
  * - available_at / due_at: due retries
+ * - (status, available_at) / (status, due_at): listRetryable / listDue
+ * - (status, lease_expires_at): bounded expired-lease soft-release
  * - (tenant_id, key) when tenant column enabled (tenant_id alone for scans)
  * - status partial indexes where dialect supports them (adapter-level optional)
  */
@@ -159,12 +161,16 @@ export const TABLE_INDEX_INTENTS = {
     "status",
     "tenant_id",
     "payload_hash",
+    "status, available_at",
+    "status, lease_expires_at",
   ] as const,
   [LOGICAL_TABLES.reconciliationJobs]: [
     "lease_expires_at",
     "due_at",
     "status",
     "tenant_id",
+    "status, due_at",
+    "status, lease_expires_at",
   ] as const,
 } as const;
 

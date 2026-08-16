@@ -313,10 +313,15 @@ export function createPostgresWebhookInboxStore(
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = $1,
              updated_at = $1
-           WHERE status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= $1`,
-          [now],
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status = 'claimed'
+               AND lease_expires_at IS NOT NULL
+               AND lease_expires_at <= $1
+             ORDER BY lease_expires_at ASC
+             LIMIT $2
+           )`,
+          [now, limit],
         );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT key, status, payload_hash, payload_ref, gateway, provider_event_id,

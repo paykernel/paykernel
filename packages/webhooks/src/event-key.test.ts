@@ -33,6 +33,43 @@ describe("deriveWebhookEventKey", () => {
   it("allows colon in providerEventId only", () => {
     expect(deriveWebhookEventKey("gw", "a:b:c")).toBe("gw:a:b:c");
   });
+
+  it("WEBHOOKS-1: Paymob keys include notification class when provided", () => {
+    expect(deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE")).toBe(
+      "paymob:TRANSACTION_RESPONSE:123456789",
+    );
+    expect(deriveWebhookEventKey("paymob", "123456789", "TRANSACTION")).toBe(
+      "paymob:TRANSACTION:123456789",
+    );
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE"),
+    ).not.toBe(deriveWebhookEventKey("paymob", "123456789", "TRANSACTION"));
+  });
+
+  it("WEBHOOKS-1: does not double-qualify an already class-prefixed Paymob id", () => {
+    expect(
+      deriveWebhookEventKey("paymob", "TRANSACTION:123456789", "TRANSACTION"),
+    ).toBe("paymob:TRANSACTION:123456789");
+  });
+
+  it("WEBHOOKS-1: :redirect suffix and TRANSACTION_RESPONSE class share one key", () => {
+    expect(
+      deriveWebhookEventKey("paymob", "123456789:redirect", "TRANSACTION_RESPONSE"),
+    ).toBe("paymob:TRANSACTION_RESPONSE:123456789");
+    expect(deriveWebhookEventKey("paymob", "123456789:redirect")).toBe(
+      "paymob:TRANSACTION_RESPONSE:123456789",
+    );
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE"),
+    ).toBe("paymob:TRANSACTION_RESPONSE:123456789");
+  });
+
+  it("WEBHOOKS-1: non-Paymob gateways ignore notification class", () => {
+    expect(
+      deriveWebhookEventKey("stripe", "evt_1", "payment_intent.succeeded"),
+    ).toBe("stripe:evt_1");
+    expect(deriveWebhookEventKey("paymob", "123456789")).toBe("paymob:123456789");
+  });
 });
 
 describe("parseWebhookEventKey", () => {

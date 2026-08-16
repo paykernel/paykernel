@@ -1,7 +1,6 @@
 /**
  * Unit tests for HooksManager composition and isolation paths.
  * Complements client/gateway integration tests that exercise executeWithHooks.
- * Does not change production hook behavior.
  */
 import { describe, it, expect, mock } from "bun:test";
 import { HooksManager } from "./hooks.manager";
@@ -256,6 +255,102 @@ describe("HooksManager after-hook isolation (unit)", () => {
       expect.objectContaining({ step: 2, refundId: "re_1" }),
     );
     expect(warns.some((w) => w.msg.includes("proceed:false"))).toBe(true);
+  });
+
+  it("later after-hook sees frozen money identity (CORE-2)", async () => {
+    let laterSaw: unknown;
+    const manager = new HooksManager({
+      afterCapture: async (_ctx, result) => ({
+        proceed: true,
+        modifiedResult: {
+          ...result,
+          success: true,
+          status: "paid",
+          amount: 999,
+          gatewayId: "forged",
+          annotation: "from-first",
+        },
+      }),
+      onAfter: async (_ctx, result) => {
+        laterSaw = result;
+        return { proceed: true };
+      },
+    });
+
+    const original = {
+      success: false,
+      status: "pending",
+      amount: 10,
+      currency: "USD",
+      gatewayId: "pi_real",
+    };
+    const result = await manager.runAfter(
+      baseCtx({
+        params: { gatewayPaymentId: "pi_real" },
+        operation: "capturePayment",
+      }),
+      original,
+    );
+
+    expect(laterSaw).toEqual(
+      expect.objectContaining({
+        success: false,
+        status: "pending",
+        amount: 10,
+        currency: "USD",
+        gatewayId: "pi_real",
+        annotation: "from-first",
+      }),
+    );
+    expect(result.modifiedResult).toEqual(
+      expect.objectContaining({
+        success: false,
+        status: "pending",
+        amount: 10,
+        gatewayId: "pi_real",
+        annotation: "from-first",
+      }),
+    );
+  });
+
+  it("composed after-hooks restore money before the next handler (CORE-2)", async () => {
+    let secondSaw: unknown;
+    const manager = new HooksManager({
+      afterCreatePayment: async (_ctx, result) => ({
+        proceed: true,
+        modifiedResult: {
+          ...result,
+          success: true,
+          status: "paid",
+          amount: 1,
+          note: "first",
+        },
+      }),
+    });
+    manager.register("afterCreatePayment", async (_ctx, result) => {
+      secondSaw = result;
+      return { proceed: true, modifiedResult: { ...result, note: "second" } };
+    });
+
+    await manager.runAfter(
+      baseCtx({ params: {}, operation: "createPayment" }),
+      {
+        success: false,
+        status: "processing",
+        amount: 50,
+        gatewayId: "pi_create",
+      },
+    );
+
+    expect(secondSaw).toEqual(
+      expect.objectContaining({
+        success: false,
+        status: "processing",
+        amount: 50,
+        gatewayId: "pi_create",
+        note: "first",
+      }),
+    );
   });
 });
 

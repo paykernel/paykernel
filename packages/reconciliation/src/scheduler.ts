@@ -93,16 +93,27 @@ export type ListDeadLetterOptions = {
 };
 
 /**
- * Explicit disposition from a processDue handler (RECON-2).
+ * Explicit disposition from a processDue handler (RECON-2 / RECON-3).
  *
  * Completing a job requires `{ disposition: "complete" }`. Returning void is
  * treated as retry (fail-closed) so policy outcomes like `retry_later` cannot
  * silently terminate recovery when the handler forgets to throw.
+ *
+ * `{ disposition: "retry_later" }` is in-flight settlement (policy
+ * `retry_later`) — it reschedules and does **not** consume the maxAttempts
+ * manual-review / dead-letter budget. Use `{ disposition: "retry" }` for
+ * handler/transient failures that should dead-letter at maxAttempts.
  */
 export type ProcessDueDisposition =
   | { disposition: "complete" }
   | {
       disposition: "retry";
+      error?: unknown;
+      /** Optional override delay; when omitted, exponential backoff is used. */
+      retryAfterMs?: number;
+    }
+  | {
+      disposition: "retry_later";
       error?: unknown;
       /** Optional override delay; when omitted, exponential backoff is used. */
       retryAfterMs?: number;
@@ -125,6 +136,9 @@ export type ProcessDueOptions = {
    * - Return `{ disposition: "complete" }` to mark the job completed.
    * - Return `{ disposition: "retry" }` or throw → failAndReschedule (or
    *   markManualReview when attempts ≥ maxAttempts).
+   * - Return `{ disposition: "retry_later" }` → failAndReschedule **without**
+   *   consuming the maxAttempts dead-letter budget (RECON-3 — in-flight
+   *   settlement must not park after ~10 claims).
    * - Return `{ disposition: "manual_review" }` to dead-letter without counting
    *   as a transient failure path.
    * - Return `void` / `undefined` → treated as retry (fail-closed; RECON-2).
@@ -332,11 +346,13 @@ export function createReconciliationScheduler(
       const limit = options.limit ?? 10;
       const now = new Date(clock.nowMs()).toISOString();
 
-      // RECON-8: when per-gateway caps are set, oversample listDue so a
-      // cap-dominated prefix cannot starve other gateways within this call.
+      // RECON-8 / PERF-7: when per-gateway caps are set, oversample listDue
+      // so a cap-dominated prefix cannot starve other gateways — but do not
+      // pull up to 1000 rows for a default-10 batch. Claim fencing is still
+      // per-key store.claim (list is discovery only).
       const fetchLimit =
         options.maxInFlightByGateway !== undefined
-          ? Math.min(1_000, Math.max(limit * 10, limit + 50))
+          ? Math.min(200, Math.max(limit * 3, limit + 16))
           : limit;
       const due = await store.listDue({ now, limit: fetchLimit });
 
@@ -416,8 +432,13 @@ export function createReconciliationScheduler(
             continue;
           }
 
-          // retry (explicit or fail-closed void / throw)
-          if (job.record.attempts >= maxAttempts) {
+          // RECON-3: in-flight retry_later must not dead-letter at maxAttempts.
+          // Settlement (bank transfer / 3DS / async) can outlive the default
+          // 10-claim budget; parking would leave local pending after provider paid.
+          const skipAttemptBudget = disposition.disposition === "retry_later";
+
+          // retry (explicit, retry_later, or fail-closed void / throw)
+          if (!skipAttemptBudget && job.record.attempts >= maxAttempts) {
             const reviewPayload: MarkManualReviewJobInput = {
               key: job.key,
               leaseToken: job.leaseToken,
@@ -490,6 +511,7 @@ function normalizeHandlerDisposition(
   if (
     raw.disposition === "complete" ||
     raw.disposition === "retry" ||
+    raw.disposition === "retry_later" ||
     raw.disposition === "manual_review"
   ) {
     return raw;

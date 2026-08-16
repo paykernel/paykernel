@@ -31,8 +31,9 @@ import {
 | --- | --- |
 | `TelemetrySink` | `{ emit?(event, data?) }` — optional structured sink |
 | `createRedactingTelemetrySink(sink)` | **Package-owned** wrap (OBS-1: not a pure core re-export). Uses core `redact()` + defense-in-depth operational restore. Prefer this for observability paths. |
-| `redactTelemetryData(data)` | One-shot scrub via core `redact()` + optional operational restore |
+| `redactTelemetryData(data)` | One-shot scrub via core `redact()` + optional operational restore + `cs_live_` / client-secret value scrub (OBS-2) |
 | `redactAttributeBag(attrs)` | Span/metric attribute scrubber (package-owned; same model) |
+| `sanitizeSpanStatusMessage(message)` | OTEL `end()` status message sanitizer (OBS-1) |
 
 > **OBS-1:** Core also exports a `createRedactingTelemetrySink`. This package’s
 > version is **not** a pure re-export — it is implemented here so metrics/spans
@@ -109,8 +110,8 @@ Still redacted by substring patterns (unless exact allow-list hit): `secret`, `t
 
 - Free-form **event name** strings on `emit` (same residual as log **messages** — do not put secrets in the event string).
 - **Structured telemetry bags** go through `createRedactingTelemetrySink` / `redactTelemetryData` (core `redact()` + operational-key restore).
-- **Metric labels and span attributes (OBS-1 honesty):** the in-package metric registry (`createInMemoryPaymentMetrics`), the OTEL bridge (`createOpenTelemetryBridge`), and `withPaymentOperation` **do** auto-redact via `redactAttributeBag` as defense-in-depth (custom tracers used *through* `withPaymentOperation` do not see raw secret-shaped `internalReference`). Still set only non-sensitive primitives — a custom `PaymentMetrics` / a `PaymentTracer` started outside instrumentation may not scrub, and redaction is key/pattern based (not a full DLP guarantee for free-form values).
-- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set). Span `recordException` is sanitized to name + non-secret `code` only (secret-shaped codes such as `sk_live_x` are dropped) so raw exception text never reaches OTEL exporters.
+- **Metric labels and span attributes (OBS-1 honesty):** the in-package metric registry (`createInMemoryPaymentMetrics`), the OTEL bridge (`createOpenTelemetryBridge`), and `withPaymentOperation` **do** auto-redact via `redactAttributeBag` as defense-in-depth (custom tracers used *through* `withPaymentOperation` do not see raw secret-shaped `internalReference`). Residual `cs_live_` / `cs_test_` / PaymentIntent client-secret **values** on allow-listed keys (`internalReference`, `providerObjectId`) are replaced with `[REDACTED]` (OBS-2). Still set only non-sensitive primitives — a custom `PaymentMetrics` / a `PaymentTracer` started outside instrumentation may not scrub, and redaction is key/pattern based (not a full DLP guarantee for free-form values).
+- Error **messages** are intentionally not attached by default in instrumentation (only `errorName` may be set). Span `recordException` is sanitized to name + non-secret `code` only (secret-shaped codes such as `sk_live_x` are dropped) so raw exception text never reaches OTEL exporters. OTEL `span.end()` `status.message` is sanitized the same way (OBS-1).
 
 ## Double-wrapping
 

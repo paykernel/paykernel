@@ -103,6 +103,10 @@ declare const reconciler: PaymentReconciler;
 declare function loadTarget(job: {
   record: { subjectId: string };
 }): Promise<ReconciliationTarget>;
+declare function applyLocalUpdate(decision: {
+  action: "update_local_to_paid" | "update_local_to_failed";
+  provider: unknown;
+}): Promise<void>;
 
 const claimed = await scheduler.claimDue({ limit: 10 });
 // listDue → atomic store.claim each; skips not_due / in_progress / terminal
@@ -116,18 +120,25 @@ for (const job of claimed) {
     // sparse/pending local + provider pending/processing is still settling
     // (retry_later), not recovery-complete.
 
-    if (
-      decision.action === "mark_consistent" ||
-      ((decision.action === "update_local_to_paid" ||
+    if (decision.action === "mark_consistent" && decision.safe) {
+      await scheduler.complete({
+        key: job.key,
+        leaseToken: job.leaseToken,
+      });
+    } else if (
+      (decision.action === "update_local_to_paid" ||
         decision.action === "update_local_to_failed") &&
-        decision.safe)
+      decision.safe
     ) {
-      // apply the safe local paid/failed update in YOUR app first, then:
+      // RECON-4: apply the local paid/failed update in YOUR app *before*
+      // complete — do not finish the job while local remains pending.
+      await applyLocalUpdate(decision);
       await scheduler.complete({
         key: job.key,
         leaseToken: job.leaseToken,
       });
     } else if (decision.action === "retry_later") {
+      // RECON-3: in-flight settlement — reschedule; do not park at maxAttempts.
       await scheduler.failAndReschedule({
         key: job.key,
         leaseToken: job.leaseToken,
@@ -153,6 +164,7 @@ for (const job of claimed) {
       });
     }
   } catch (err) {
+    // Handler/transient failure budget only — not policy retry_later.
     if (job.record.attempts >= scheduler.maxAttempts) {
       await scheduler.markManualReview({
         key: job.key,
@@ -193,20 +205,25 @@ await scheduler.processDue({
     const target = await loadTarget(job);
     const result = await reconciler.reconcile(target);
     const decision = decideReconciliationPolicy(result, target);
-    // complete ONLY for mark_consistent / applied safe paid/failed updates.
-    // retry_later → retry (never complete on raw outcome === "consistent").
-    if (
-      decision.action === "mark_consistent" ||
-      ((decision.action === "update_local_to_paid" ||
-        decision.action === "update_local_to_failed") &&
-        decision.safe)
-    ) {
+    // complete ONLY after mark_consistent, or after *applying* a safe
+    // paid/failed local update (RECON-4). Never complete while local is
+    // still pending. Never complete on raw outcome === "consistent".
+    if (decision.action === "mark_consistent" && decision.safe) {
       return { disposition: "complete" };
     }
     if (
-      decision.action === "retry_later" ||
-      decision.action === "do_not_create_replacement"
+      (decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+      decision.safe
     ) {
+      await applyLocalUpdate(decision); // YOUR app — persist paid/failed first
+      return { disposition: "complete" };
+    }
+    if (decision.action === "retry_later") {
+      // RECON-3: does not consume the maxAttempts dead-letter budget.
+      return { disposition: "retry_later", error: new Error("retry_later") };
+    }
+    if (decision.action === "do_not_create_replacement") {
       return { disposition: "retry", error: new Error(decision.action) };
     }
     if (
@@ -225,7 +242,9 @@ await scheduler.processDue({
 
 `leaseLost` counts fencing rejections on complete/fail/markManualReview (another worker owns the lease) — these are **not** counted as business reschedules or dead-letters.
 
-`maxInFlightByGateway` uses the gateway segment of keys shaped `recon:{gateway}:{id}` (canonical) or app-supplied `{gateway}:{id}` (RECON-4). Counts are shared across overlapping `processDue` calls on the **same scheduler instance**. Keys without a parseable gateway segment map to `"unknown"`. When caps are set, `listDue` is oversampled so a single gateway’s due prefix cannot starve others. This is not a multi-worker store lock — bound workers at the app layer for that. See [batch.md](./batch.md).
+`maxInFlightByGateway` uses the gateway segment of keys shaped `recon:{gateway}:{id}` (canonical) or app-supplied `{gateway}:{id}` (RECON-4). Counts are shared across overlapping `processDue` calls on the **same scheduler instance**. Keys without a parseable gateway segment map to `"unknown"`. When caps are set, `listDue` is oversampled (3× / +16, capped at 200 — PERF-7) so a single gateway’s due prefix cannot starve others. Claim fencing stays per-key `store.claim`. This is not a multi-worker store lock — bound workers at the app layer for that. See [batch.md](./batch.md).
+
+`{ disposition: "retry_later" }` reschedules in-flight settlement and **does not** `markManualReview` when `attempts >= maxAttempts`. `{ disposition: "retry" }` / throw still dead-letters at the attempt budget.
 
 ### Re-scheduling terminal jobs
 

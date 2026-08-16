@@ -18,7 +18,8 @@ const client = new PaymentClient({
     // Optional: API timeout in milliseconds (default: 30000)
     timeoutMs: 30000,
 
-    // Required for multi-worker capture/refund/void safety (see Idempotency section)
+    // Required at runtime for capture/refund/void (throws InvalidRequestError if omitted)
+    // Prefer a shared store with atomic reserve() in production.
     // idempotencyStore: sharedStoreWithAtomicReserve,
 
     // sandbox is ignored — Moyasar test/live is determined by the key prefix only
@@ -30,15 +31,16 @@ const client = new PaymentClient({
 > **Sandbox flag**: `MoyasarConfig.sandbox` is deprecated and ignored. Use a
 > `sk_test_…` key for test mode or a `sk_live_…` key for production.
 >
-> **Multi-worker mutations**: Capture, refund, and void have **no** native Moyasar
-> idempotency. In multi-worker production, configure a shared `idempotencyStore`
-> (with atomic `reserve()` when possible) and pass `idempotencyKey` on each
-> mutation — otherwise retries can double-apply (e.g. double refund). See
+> **Mutations require a store**: Capture, refund, and void have **no** native
+> Moyasar idempotency. `idempotencyStore` (with atomic `reserve()`) is **required
+> at runtime** for those methods — omitting it throws `InvalidRequestError`.
+> Pass `idempotencyKey` on each mutation. Prefer a shared store in multi-worker
+> production. See
 > [Idempotency for refunds, captures, and voids](#idempotency-for-refunds-captures-and-voids).
 
 ## Payment Sources
 
-Moyasar supports multiple payment source types via the `moyasarSource` field:
+Backend-safe `moyasarSource` types (raw `creditcard` PAN/CVC is **not** accepted):
 
 | Source Type | Use Case | Key Fields |
 |-------------|----------|------------|
@@ -46,9 +48,8 @@ Moyasar supports multiple payment source types via the `moyasarSource` field:
 | `stcpay` | STC Pay mobile wallet | `mobile`, `cashier?`, `branch?` |
 | `applepay` | Apple Pay | `token`, `saveCard?`, `manualCapture?` |
 | `samsungpay` | Samsung Pay | `token`, `saveCard?`, `manualCapture?` |
-| `creditcard` | Not supported by this backend SDK | Use Moyasar.js tokenization instead |
 
-> **Card data safety**: Moyasar prohibits sending cardholder data to the merchant backend. This SDK rejects raw `creditcard` sources before making an API request. Use Moyasar.js tokenization, Apple Pay, Samsung Pay, or STC Pay.
+> **Card data safety**: This backend SDK never accepts raw `creditcard` sources (PAN, expiry, CVC). Moyasar requires cardholder data to go directly to Moyasar via Moyasar.js tokenization, Apple Pay, Samsung Pay, or STC Pay. A `type: 'creditcard'` source is rejected with `InvalidRequestError` before any HTTP request.
 
 ### Token Payment (Moyasar.js)
 
@@ -59,7 +60,7 @@ const result = await client.createPayment({
   amount: 100,
   currency: 'SAR',
   orderId: 'order_123',
-  callbackUrl: 'https://example.com/callback', // Required for token/card sources
+  callbackUrl: 'https://example.com/callback', // Required for token sources
   moyasarSource: {
     type: 'token',
     token: 'token_abc123xyz', // From Moyasar.js
@@ -529,6 +530,14 @@ snapshots (`status === refund_completed`, missing/zero/non-finite `refunded`) de
 dual-write from `refund.completed` → `refund.pending`; proven full/partial refunds keep
 `refund.completed`.
 
+`payment_voided` maps to `payment.cancelled` only when the snapshot is actually
+voided (`status === cancelled`). A `payment_voided` envelope whose payment object is
+still `paid`, `authorized`, or `partially_captured` is fail-closed: domain status stays
+residual (money-honest — funds remain captured or held) and dual-write is demoted to
+`payment.processing` so type-only handlers cannot restock. Key void-complete restock on
+`status === 'cancelled'` and `stableType === 'payment.cancelled'`, not envelope type
+alone. Re-fetch with `getPayment` when the snapshot is inconsistent.
+
 ### Unsupported: card authentication webhooks
 
 Standalone 3DS (`card_auth_*`) webhooks — e.g. `card_auth_authenticated`,
@@ -561,7 +570,8 @@ indeterminate failures **keep** the fence as `unknown` — the mutation may
 already have applied server-side; resolve via `getPayment` before reusing the
 key. Stores without atomic `reserve()` are refused at mutation time (non-atomic
 get-then-set races under concurrency). The SDK also logs a construction-time
-warning when no store is configured or when `reserve()` is missing.
+warning that the store is **required** for mutations when none is configured
+or when `reserve()` is missing.
 
 ```typescript
 import { PaymentClient, InMemoryIdempotencyStore } from '@paykernel/core';

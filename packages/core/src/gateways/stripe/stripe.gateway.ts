@@ -848,10 +848,65 @@ function mapStripeRefundWebhookStatus(
     // Dual-write demoted to refund.pending via demoteIncompleteRefundWebhookDualWrite.
     return "refund_completed";
   }
+  // Failed / canceled refunds do not un-capture the charge. Persist refund
+  // entity status — never payment `failed` / `pending` (STRIPE-1).
   if (status === "failed" || status === "canceled") {
-    return "failed";
+    return "refund_failed";
   }
-  return "pending";
+  return "refund_pending";
+}
+
+function isUnexpandedStripeChargeId(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0;
+}
+
+/**
+ * Charge-level refund domain status on a succeeded PaymentIntent.
+ * Aligns with getPayment (~1591-1607): amount_refunded > 0 vs captured base
+ * (amount_received → amount_captured). `refunded: true` is a full refund.
+ * Returns undefined when refunds are unproven (caller continues settled math).
+ */
+function stripeSucceededIntentRefundStatus(pi: {
+  amount_received?: unknown;
+  latest_charge?: unknown;
+}): PaymentStatus | undefined {
+  const latest = pi.latest_charge;
+  if (typeof latest !== "object" || latest === null) {
+    return undefined;
+  }
+  const charge = latest as StripeChargeSnapshot;
+  if (charge.refunded === true) {
+    return "refunded";
+  }
+  const amountRefunded = finiteStripeMinor(charge.amount_refunded);
+  if (amountRefunded === undefined || amountRefunded <= 0) {
+    return undefined;
+  }
+  const capturedBase =
+    finiteStripeMinor(pi.amount_received) ??
+    finiteStripeMinor(charge.amount_captured);
+  if (
+    capturedBase !== undefined &&
+    capturedBase > 0 &&
+    amountRefunded >= capturedBase
+  ) {
+    return "refunded";
+  }
+  return "partially_refunded";
+}
+
+function stripeExpandedChargeRefundedMinor(
+  latestCharge: unknown,
+): number | undefined {
+  if (typeof latestCharge !== "object" || latestCharge === null) {
+    return undefined;
+  }
+  const amountRefunded = finiteStripeMinor(
+    (latestCharge as StripeChargeSnapshot).amount_refunded,
+  );
+  return amountRefunded !== undefined && amountRefunded > 0
+    ? amountRefunded
+    : undefined;
 }
 
 function stripeHeader(
@@ -1091,9 +1146,46 @@ function toUrlEncoded(
  *
  * Used by Stripe `parseWebhookEvent` and the client handleWebhook safety-net.
  */
+function rematchSucceededIntentRefundWebhookDualWrite(
+  event: WebhookEvent,
+): WebhookEvent {
+  if (
+    event.type !== "payment_intent.succeeded" ||
+    (event.status !== "refunded" && event.status !== "partially_refunded") ||
+    event.stableType !== "payment.succeeded" ||
+    !event.event ||
+    event.event.type !== "payment.succeeded" ||
+    !event.provider
+  ) {
+    return event;
+  }
+
+  const payment = event.event.payment ?? paymentFromWebhookEvent(event);
+  return {
+    ...event,
+    stableType: "refund.completed",
+    event: {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: "refund.completed",
+      refund: {
+        status: "completed",
+        references: payment.references,
+        ...(event.amount !== undefined ? { amount: event.amount } : {}),
+        ...(event.currency !== undefined ? { currency: event.currency } : {}),
+      },
+      provider: event.provider,
+    },
+  };
+}
+
 export function demoteIncompleteSettledWebhookDualWrite(
   event: WebhookEvent,
 ): WebhookEvent {
+  const rematched = rematchSucceededIntentRefundWebhookDualWrite(event);
+  if (rematched !== event) {
+    return rematched;
+  }
+
   const openMoney =
     event.status === "processing" || event.status === "partially_captured";
   if (
@@ -1131,9 +1223,56 @@ export function demoteIncompleteSettledWebhookDualWrite(
  *
  * Used by Stripe `parseWebhookEvent` and the client handleWebhook safety-net.
  */
+function rematchRefundFailureWebhookDualWrite(
+  event: WebhookEvent,
+): WebhookEvent {
+  // refund.created / refund.updated with domain refund_failed fall through
+  // webhook-event-map as refund.pending (it keys on payment `failed`).
+  // Promote so type-only handlers see refund.failed, not an in-flight refund.
+  if (
+    event.status !== "refund_failed" ||
+    event.stableType !== "refund.pending" ||
+    !event.event ||
+    event.event.type !== "refund.pending" ||
+    !event.provider
+  ) {
+    return event;
+  }
+
+  const existingRefund = event.event.refund;
+  const payment = paymentFromWebhookEvent(event);
+  return {
+    ...event,
+    stableType: "refund.failed",
+    event: {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: "refund.failed",
+      refund: existingRefund
+        ? { ...existingRefund, status: "failed" }
+        : {
+            status: "failed",
+            references: payment.references,
+            ...(event.amount !== undefined ? { amount: event.amount } : {}),
+            ...(event.currency !== undefined ? { currency: event.currency } : {}),
+          },
+      failure: {
+        code: "refund_failed",
+        message: `Refund failed (${event.status})`,
+        providerCode: event.status,
+      },
+      provider: event.provider,
+    },
+  };
+}
+
 export function demoteIncompleteRefundWebhookDualWrite(
   event: WebhookEvent,
 ): WebhookEvent {
+  const rematched = rematchRefundFailureWebhookDualWrite(event);
+  if (rematched !== event) {
+    return rematched;
+  }
+
   if (
     event.status !== "refund_completed" ||
     event.stableType !== "refund.completed" ||
@@ -1256,6 +1395,7 @@ export class StripeGateway extends BaseGateway {
           response.status === "succeeded"
             ? this.succeededPaymentIntentWebhookStatus(
                 response as unknown as StripeWebhookPayload["data"]["object"],
+                { unexpandedCharge: "ignore" },
               )
             : undefined;
 
@@ -1320,6 +1460,7 @@ export class StripeGateway extends BaseGateway {
           response.status === "succeeded"
             ? this.succeededPaymentIntentWebhookStatus(
                 response as unknown as StripeWebhookPayload["data"]["object"],
+                { unexpandedCharge: "ignore" },
               )
             : this.mapStatus(response.status);
 
@@ -2229,7 +2370,8 @@ export class StripeGateway extends BaseGateway {
         break;
       }
       case "refund.failed":
-        status = "failed";
+        // STRIPE-1: refund failure does not un-capture the charge.
+        status = "refund_failed";
         break;
       case "invoice.paid":
       case "invoice.payment_succeeded":
@@ -2277,6 +2419,20 @@ export class StripeGateway extends BaseGateway {
         } else {
           status = "pending";
         }
+    }
+
+    // STRIPE-2: refunded PI snapshots publish cumulative amount_refunded
+    // (same as charge.refunded) so rematched refund.completed dual-write
+    // cannot over-credit wallets with the captured total.
+    if (
+      object.object === "payment_intent" &&
+      (status === "refunded" || status === "partially_refunded")
+    ) {
+      const refundedMinor = stripeExpandedChargeRefundedMinor(
+        (object as { latest_charge?: unknown }).latest_charge,
+      );
+      amount =
+        refundedMinor !== undefined ? convertMinor(refundedMinor) : undefined;
     }
 
     const legacy: WebhookEvent = {
@@ -2668,14 +2824,34 @@ export class StripeGateway extends BaseGateway {
 
   /**
    * Succeeded PaymentIntent status from money fields.
+   * - unexpanded `latest_charge` id → processing (refunds unobservable)
+   * - charge amount_refunded > 0 / refunded → refunded / partially_refunded
    * - settled (amount_received → amount_captured) < amount → partially_captured
    * - settled known and not partial → paid
    * - settled missing → processing (fail closed; never claim full paid)
+   *
+   * Mutation responses (create/capture) pass `unexpandedCharge: "ignore"`:
+   * at submit time refunds have not happened and Stripe often returns the
+   * charge as an unexpanded id.
    */
   private succeededPaymentIntentWebhookStatus(
     object: StripeWebhookPayload["data"]["object"],
+    options?: { unexpandedCharge?: "processing" | "ignore" },
   ): PaymentStatus {
     const pi = object as any;
+    const unexpandedMode = options?.unexpandedCharge ?? "processing";
+    if (
+      unexpandedMode === "processing" &&
+      isUnexpandedStripeChargeId(pi.latest_charge)
+    ) {
+      // Thin-event hydration typically leaves latest_charge as a string id.
+      // Stripe keeps PI status succeeded after refunds — do not invent paid.
+      return "processing";
+    }
+    const refundStatus = stripeSucceededIntentRefundStatus(pi);
+    if (refundStatus !== undefined) {
+      return refundStatus;
+    }
     const settled = resolveStripeCapturedMinor(pi);
     if (settled === undefined) {
       // Incomplete money snapshot — do not map missing settled amount to paid.

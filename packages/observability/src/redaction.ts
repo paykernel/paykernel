@@ -29,6 +29,20 @@ const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 6;
 
 /**
+ * Residual secret-shaped leaves that core `redact()` does not match
+ * (OBS-2): Stripe Checkout `cs_live_` / `cs_test_`, Paymob-style `csk_`,
+ * and PaymentIntent `pi_…_secret_…` client secrets. Applied even on
+ * allow-listed span keys (`internalReference`, `providerObjectId`).
+ */
+const CLIENT_SECRET_VALUE =
+  /^(?:cs_(?:live|test)_|csk_(?:live|test)_)/i;
+const PI_CLIENT_SECRET_VALUE = /^pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+$/i;
+
+/** Embedded credentials in free-form span status messages (OBS-1). */
+const EMBEDDED_SECRET_IN_MESSAGE =
+  /(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/gi;
+
+/**
  * Operational `authorized` restore is only for booleans (`true`/`false`).
  * Never unmask a leaf core already replaced because the *value* was
  * secret-shaped (sk_live / PAN / Bearer).
@@ -89,19 +103,64 @@ function restoreOperationalKeysIfRedacted(
   return out;
 }
 
+function isClientSecretShapedValue(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  return (
+    CLIENT_SECRET_VALUE.test(trimmed) || PI_CLIENT_SECRET_VALUE.test(trimmed)
+  );
+}
+
+function redactResidualSecretLeaves(value: unknown, depth = 0): unknown {
+  if (depth > MAX_DEPTH) return value;
+  if (typeof value === "string") {
+    return isClientSecretShapedValue(value) ? REDACTED : value;
+  }
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => redactResidualSecretLeaves(item, depth + 1));
+  }
+  const out: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  for (const [key, leaf] of Object.entries(out)) {
+    out[key] = redactResidualSecretLeaves(leaf, depth + 1);
+  }
+  return out;
+}
+
 /**
  * Scrub a structured telemetry bag with core `redact()`, then defense-in-depth
  * restore for operational boolean keys (e.g. `authorized: false`) if ever
  * over-redacted. Secret-shaped `authorized` leaves stay `[REDACTED]`.
- * Prefer {@link createRedactingTelemetrySink} when wrapping a sink end-to-end.
+ * Residual `cs_live_` / client-secret values are scrubbed even on allow-listed
+ * keys (OBS-2). Prefer {@link createRedactingTelemetrySink} for end-to-end wrap.
  */
 export function redactTelemetryData(
   data: Record<string, unknown>,
 ): Record<string, unknown> {
-  return restoreOperationalKeysIfRedacted(
+  const restored = restoreOperationalKeysIfRedacted(
     data,
     redact(data),
-  ) as Record<string, unknown>;
+  );
+  return redactResidualSecretLeaves(restored) as Record<string, unknown>;
+}
+
+/**
+ * Sanitize a span `end()` status message before it reaches OTEL `setStatus`
+ * (OBS-1). Whole-string secrets are dropped; embedded `sk_live_` / `cs_live_`
+ * / Bearer / PI client-secret fragments are replaced with `[REDACTED]`.
+ */
+export function sanitizeSpanStatusMessage(
+  message: string | undefined,
+): string | undefined {
+  if (message === undefined) return undefined;
+  const trimmed = message.trim();
+  if (trimmed.length === 0) return undefined;
+  if (redact(trimmed) === REDACTED || isClientSecretShapedValue(trimmed)) {
+    return undefined;
+  }
+  const scrubbed = trimmed.replace(EMBEDDED_SECRET_IN_MESSAGE, REDACTED);
+  if (scrubbed === REDACTED) return undefined;
+  return scrubbed;
 }
 
 /**

@@ -168,7 +168,8 @@ export type ProcessVerifiedInput = {
    * requires a non-empty envelope (or event-derived payloadRef).
    * Events/envelopes that still carry `rawPayload` or `headers` are converted
    * via core `toPersistedPaymentEventEnvelope` when a PaymentEvent is present,
-   * otherwise refused (`invalid_webhook`) — never persisted (P610-SNAP-1).
+   * otherwise refused as retryable `handler_failed` (WEBHOOKS-2 — not
+   * `invalid_webhook` / 400 forgery) — never persisted (P610-SNAP-1).
    *
    * **Handler event (WEBHOOKS-2):** when `event` is omitted but `envelope` is
    * present, `processVerified` materializes `ctx.event` from the envelope /
@@ -194,7 +195,8 @@ export type ProcessVerifiedInput = {
    *
    * **Requires `envelope`** (non-empty serializable payload for `payloadRef`).
    * Without a stored payload, workers cannot materialize the event — the engine
-   * refuses with `invalid_webhook` rather than parking unfulfillable work.
+   * refuses with retryable `handler_failed` (WEBHOOKS-2) rather than parking
+   * unfulfillable work or labeling it `invalid_webhook` (forgery / 400).
    */
   ackAfterClaim?: boolean;
 };
@@ -243,9 +245,10 @@ export type ProcessRetryableInput = {
    * PaymentEvent / custom shapes are used as-is.
    *
    * **No stub events:** if `payloadRef` is missing and this resolver is omitted
-   * (or returns no `event` / envelope), the row is dead-lettered with
-   * `handler_failed { retryable: false }` — never materializes `{ key, payloadHash }`
-   * stubs that can ACK then drop paid fulfillment.
+   * (or returns no `event` / envelope), the row is **not** dead-lettered
+   * (WEBHOOKS-4). The poll returns `handler_failed { retryable: true }` and
+   * leaves the row pending so provider redelivery or a later `resolveEvent`
+   * can recover paid work. Never materializes `{ key, payloadHash }` stubs.
    *
    * Override for custom stores or non-envelope `payloadRef` layouts.
    */
@@ -333,9 +336,12 @@ export type WebhookInboxEngine = {
   /**
    * Optional wrapper: run injected verifyAndNormalize, then processVerified.
    *
-   * **Verify classification (WEBHOOKS-1 / WEBHOOKS-4):**
-   * - `{ ok: false }` or forgery throw (`InvalidWebhookError`) → `invalid_webhook`
-   *   (never claims). `{ ok: false }.reason` is sanitized before return.
+   * **Verify classification (WEBHOOKS-1 / WEBHOOKS-3 / WEBHOOKS-4):**
+   * - `{ ok: false }` or verify-false `InvalidWebhookError` (signature /
+   *   authenticity) → `invalid_webhook` (never claims). `{ ok: false }.reason`
+   *   is sanitized before return.
+   * - Parse-stage `InvalidWebhookError` (Paymob/Moyasar payload shape,
+   *   "parse failed") → `handler_failed { retryable: true }` (not forgery)
    * - Permanent structure/config throws → `handler_failed { retryable: false }`
    *   (408 / 409 / 425 / 429 stay retryable)
    * - Infrastructure / unknown throws (NetworkError, RateLimitError, TypeError,

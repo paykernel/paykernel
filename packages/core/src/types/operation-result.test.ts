@@ -804,6 +804,37 @@ describe("operation-result helpers", () => {
     expect(inferOperationOutcome(ind)).toBe(ind.outcome);
   });
 
+  it("CORE-5: applyOutcome does not persist succeeded+success with failed/pending status", () => {
+    const failed = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_fail_lie",
+        status: "failed",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "succeeded",
+    );
+    expect(failed.outcome).toBe("declined");
+    expect(failed.success).toBe(false);
+    expect(failed.status).toBe("failed");
+    expect(inferOperationOutcome(failed)).toBe(failed.outcome);
+
+    const pending = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_pend_lie",
+        status: "pending",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "succeeded",
+    );
+    expect(pending.outcome).toBe("requires_action");
+    expect(pending.success).toBe(true);
+    expect(pending.status).toBe("pending");
+    expect(pending.outcome).not.toBe("succeeded");
+    expect(inferOperationOutcome(pending)).toBe(pending.outcome);
+  });
+
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {
     const completed = applyOutcomeToGatewayRefundResult(
       {
@@ -959,6 +990,35 @@ describe("operation-result helpers", () => {
         outcome: "succeeded",
       }),
     ).toBe("failed");
+
+    // P610-INF-2 / CORE-1: success:false + pending is indeterminate, not failed
+    expect(
+      inferRefundOperationOutcome({
+        success: false,
+        status: "pending",
+        gatewayRefundId: "re_pending_false",
+        rawResponse: {},
+      }),
+    ).toBe("indeterminate");
+    const mappedPendingFalse = mapGatewayRefundToOperationResult({
+      success: false,
+      status: "pending",
+      gatewayRefundId: "re_pending_false_map",
+      rawResponse: {},
+    });
+    expect(mappedPendingFalse.outcome).toBe("indeterminate");
+    if (mappedPendingFalse.outcome === "indeterminate") {
+      expect(mappedPendingFalse.reconciliationRequired).toBe(true);
+    }
+
+    // P610-INF-2: omitted success + pending is also indeterminate
+    expect(
+      inferRefundOperationOutcome({
+        status: "pending",
+        gatewayRefundId: "re_omit_success",
+        rawResponse: {},
+      } as Parameters<typeof inferRefundOperationOutcome>[0]),
+    ).toBe("indeterminate");
 
     const mapped = mapGatewayRefundToOperationResult({
       success: false,

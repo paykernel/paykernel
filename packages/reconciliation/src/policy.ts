@@ -64,7 +64,20 @@ const INDETERMINATE_LOCAL_STATUSES = new Set<string>([
  */
 const AUTH_HOLD_LOCAL_STATUSES = new Set<string>([
   "authorized",
+  "approved",
   "partially_captured",
+]);
+
+/**
+ * Determinate auth / partial statuses where `mark_consistent` must inspect
+ * capture / refund totals (RECON-2). Incremental capture while still
+ * `authorized` / `approved` is not a safe consistent completion.
+ */
+const DETERMINATE_AUTH_OR_PARTIAL_LOCAL_STATUSES = new Set<string>([
+  "authorized",
+  "approved",
+  "partially_captured",
+  "partially_refunded",
 ]);
 
 /**
@@ -265,6 +278,50 @@ function providerPaidWithCaptureMismatch(
   return !moneyEquals(provider.capturedAmount, provider.amount);
 }
 
+/**
+ * RECON-2: determinate auth / partial local must not `mark_consistent` while
+ * ignoring provider capture / refund totals.
+ *
+ * - `authorized` / `approved` + growing `capturedAmount` (incremental capture
+ *   while Stripe still `requires_capture`) is unsafe — app may full-capture /
+ *   void already-moved funds.
+ * - `partially_captured` / `partially_refunded` with omitted local totals
+ *   cannot verify provider totals (fail-closed).
+ * - Auth-hold + present `capturedAmount=0` (or omitted) is *not* this class
+ *   (RECON-1 — that is a consistent hold).
+ */
+function providerAuthOrPartialWithUnaccountedTotals(
+  local: LocalPaymentSnapshot | undefined,
+  provider: ProviderPaymentSnapshot,
+): boolean {
+  if (!local || local.status === undefined) return false;
+  if (!DETERMINATE_AUTH_OR_PARTIAL_LOCAL_STATUSES.has(local.status)) {
+    return false;
+  }
+
+  const unaccountedRefund =
+    local.refundedAmount === undefined && moneyIsNonZero(provider.refundedAmount);
+
+  if (local.status === "authorized" || local.status === "approved") {
+    const unaccountedCapture =
+      local.capturedAmount === undefined &&
+      moneyIsNonZero(provider.capturedAmount);
+    return unaccountedCapture || unaccountedRefund;
+  }
+
+  if (local.status === "partially_captured") {
+    const unaccountedCapture =
+      local.capturedAmount === undefined &&
+      provider.capturedAmount !== undefined;
+    return unaccountedCapture || unaccountedRefund;
+  }
+
+  // partially_refunded
+  const unaccountedCapture =
+    local.capturedAmount === undefined && moneyIsNonZero(provider.capturedAmount);
+  return unaccountedCapture || unaccountedRefund;
+}
+
 function maySafeUpgradeToPaid(
   target: ReconciliationTarget,
   provider: ProviderPaymentSnapshot,
@@ -296,7 +353,8 @@ function maySafeUpdateToFailed(
  * Rules:
  * - consistent → mark_consistent (only when not sparse+open-provider incomplete,
  *   and not paid-like provider with non-zero refundedAmount — RECON-2,
- *   and not paid-like with present capturedAmount zero/≠ amount — P19-CAPTURE)
+ *   and not paid-like with present capturedAmount zero/≠ amount — P19-CAPTURE,
+ *   and not determinate auth/partial local ignoring capture/refund totals — RECON-2)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
  *   (RECON-2: not when provider.refundedAmount is non-zero;
@@ -432,6 +490,17 @@ export function decideReconciliationPolicy(
           safe: false,
           reason:
             "Provider is paid-like but capturedAmount is zero or not money-equal to amount — refuse safe mark_consistent; surface capture mismatch for review",
+        };
+      }
+      // RECON-2: authorized / approved / partially_captured / partially_refunded
+      // must not ignore growing capture / refund totals (incremental capture
+      // while still authorized is not mark_consistent safe:true).
+      if (providerAuthOrPartialWithUnaccountedTotals(local, result.provider)) {
+        return {
+          action: "manual_review",
+          safe: false,
+          reason:
+            "Local is authorized/partial but provider capturedAmount or refundedAmount shows unaccounted money movement — refuse safe mark_consistent; surface incremental capture/refund for review",
         };
       }
       return {

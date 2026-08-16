@@ -103,7 +103,7 @@ Webhook `gateway`, `provider_event_id`, `first_received_at`, and `last_received_
 
 **Write-path honesty:** official adapters do not write every CHECK-legal status. Postgres never writes idempotency `expired` (reclaim uses `lease_expires_at`). Webhook `fail` writes `pending` / `dead_letter`, not `failed`. `expired` and `failed` remain CHECK-legal for operator SQL and for memory expire-on-read.
 
-**Index intent** (`TABLE_INDEX_INTENTS`): lease expiry, due/available times, status, `tenant_id`, payload_hash — created in migrations; adapters may add dialect-specific partial indexes. The `tenant_id` index is **not** tenant isolation.
+**Index intent** (`TABLE_INDEX_INTENTS`): lease expiry, due/available times, status, `tenant_id`, payload_hash, plus composite `(status, available_at)` / `(status, due_at)` / `(status, lease_expires_at)` for listDue/listRetryable — created in migrations; adapters may add dialect-specific partial indexes. The `tenant_id` index is **not** tenant isolation.
 
 Primary keys: business `key` for the three domain tables; `version` for migrations. `tenant_id` is never part of the primary key.
 

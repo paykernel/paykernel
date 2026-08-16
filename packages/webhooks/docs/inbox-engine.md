@@ -7,7 +7,7 @@ Full guide: **[webhook-inbox.md](./webhook-inbox.md)** · Crash matrix: **[crash
 ## Pipeline (10.1)
 
 1. Validate inputs (`gateway`, `providerEventId`, `payloadHash`).
-2. Derive key: `deriveWebhookEventKey(gateway, providerEventId)` → `gateway:providerEventId`.
+2. Derive key: `deriveWebhookEventKey(gateway, providerEventId, notificationClass?)` → `gateway:providerEventId` (Paymob: `paymob:{TRANSACTION|TRANSACTION_RESPONSE}:{txnId}` when class is present — WEBHOOKS-1).
 3. Atomic `store.claim` (never get-then-set in the engine).
 4. Map claim kinds to outcomes (no handler on non-`acquired`).
 5. Mode branch (`inline` / `durable_retry` / `ackAfterClaim`).
@@ -49,11 +49,11 @@ Outcomes are framework-agnostic. **Silent ACK of failed work is forbidden.** Map
 | `not_available` | Claim backoff; no handler ran | Prefer **5xx** (provider redelivery) |
 
 Store claim `duplicate_failed` → `handler_failed { retryable: false }`.
-Store claim `not_available` (pending, `availableAt` in future) → `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` (no attempt burn; WEBHOOKS-5 timing).
+Store claim `not_available` (pending, `availableAt` in future) → durable `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` (no attempt burn; WEBHOOKS-5 timing). **Inline maps `not_available` to `handler_failed { retryable: true }`** (never `scheduled_for_retry`).
 
 ## Lean record vs 10.2 fields
 
-See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. Object/JSON-string envelopes are force-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`; opaque non-JSON strings redact known secret patterns (`redactOpaquePayloadRefString`); `durable_retry` also snapshots redacted `event` when envelope is omitted. Missing `payloadRef` on redrive dead-letters (no stub events). Still prefer `toPersistedPaymentEventEnvelope` so raw never enters.
+See [webhook-inbox.md §5](./webhook-inbox.md#5-inbox-record-fields-and-what-must-not-be-stored). Phase 9 lean row stores gateway/event-id in `key`, envelope snapshot in optional `payloadRef`, timestamps via `createdAt` / `updatedAt` / `availableAt`. Do not store raw signatures, auth headers, secrets, or unredacted payloads. Object/JSON-string envelopes are force-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`; opaque non-JSON strings redact known secret patterns (`redactOpaquePayloadRefString`); `durable_retry` also snapshots redacted `event` when envelope is omitted. Missing `payloadRef` on redrive is retryable `handler_failed` (no stub events, no dead-letter of paid rows — WEBHOOKS-4). Inline also snapshots `event` into `payloadRef` when materializable. Missing / unrefusable durable snapshots are `handler_failed { retryable: true }`, not `invalid_webhook` (WEBHOOKS-2). Still prefer `toPersistedPaymentEventEnvelope` so raw never enters.
 
 ## Crash boundaries (10.6)
 

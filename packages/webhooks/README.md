@@ -55,6 +55,8 @@ const payloadHash = resolveInboxPayloadHash({
 const outcome = await engine.processVerified({
   gateway: "stripe",
   providerEventId: webhookEvent.id,
+  // Paymob: pass event so the inbox key includes TRANSACTION vs
+  // TRANSACTION_RESPONSE (same txn id on redirect + processed — WEBHOOKS-1).
   payloadHash,
   event: webhookEvent.event ?? webhookEvent,
   // Optional sanitized dual-write envelope (never raw signatures / secrets):
@@ -93,7 +95,9 @@ switch (outcome.outcome) {
     // without recovery (WEBHOOKS-3). Idle pending supersedes automatically.
     break;
   case "invalid_webhook":
-    // typically 400 — forgery / bad input only (not verify transport throws)
+    // typically 400 — forgery / empty key / empty hash only.
+    // Missing durable payload / unrefusable snapshot is handler_failed
+    // retryable (WEBHOOKS-2), not invalid_webhook.
     break;
 }
 ```
@@ -125,8 +129,10 @@ import { resolveInboxPayloadHash } from "@paykernel/webhooks";
 const outcome = await engine.processWithVerifier({
   raw: { body, headers },
   verifyAndNormalize: async (raw) => {
-    // Let throws propagate. Classification (WEBHOOKS-1 / WEBHOOKS-4):
-    // - InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
+    // Let throws propagate. Classification (WEBHOOKS-1 / WEBHOOKS-3 / WEBHOOKS-4):
+    // - verify-false InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
+    // - parse-stage InvalidWebhookError (Paymob/Moyasar payload shape) →
+    //   handler_failed { retryable: true } (~5xx; not forgery)
     // - RateLimitError / TypeError / NetworkError / unknown Error →
     //   handler_failed { retryable: true } (~5xx; providers redeliver)
     // - Permanent structure GatewayApiError → handler_failed { retryable: false }
@@ -190,8 +196,10 @@ Mode is fixed at `createWebhookInboxEngine` construction. Process methods never 
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
 the engine unwraps `.event` so handlers receive the PaymentEvent. Plain events
 and custom shapes pass through; override `resolveEvent` when needed.
-**Missing `payloadRef` never stubs** `{ key, payloadHash }` — the row is
-dead-lettered (`handler_failed { retryable: false }`).
+**Missing `payloadRef` never stubs** `{ key, payloadHash }` — the poll
+returns `handler_failed { retryable: true }` and leaves the row pending
+(WEBHOOKS-4; does **not** dead-letter paid work). Provide `resolveEvent` or
+let provider redelivery supply a snapshot.
 
 **Silent acknowledgment of failed work is forbidden.** Always inspect `WebhookProcessingOutcome`.
 
@@ -221,10 +229,10 @@ Policy notes:
 
 - Store claim `duplicate_failed` → `handler_failed { retryable: false }` (terminal `dead_letter`; custom stores may still use status `failed`).
 - Store claim `not_available` (backoff before `availableAt`) → durable `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` without burning attempts. **Inline maps `not_available` to `handler_failed { retryable: true }`** (never `scheduled_for_retry`). Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
-- `scheduled_for_retry { reason: "parked" }` is emitted **only** after `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` → `already_processing` or `handler_failed { retryable: true }`. Safe to 200 **only** when a `processRetryable` worker is guaranteed.
+- `scheduled_for_retry { reason: "parked" }` is emitted **only** after `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` → `already_processing` or `handler_failed { retryable: true }` (the row stays claimed — do **not** HTTP 200 that park). Safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts`.
-- Durable redrive never materializes stub events: missing `payloadRef` → dead-letter / `handler_failed { retryable: false }`.
+- Durable redrive never materializes stub events: missing `payloadRef` → retryable `handler_failed` (row stays pending; WEBHOOKS-4).
 - Terminal claim outcomes (`already_completed` / `duplicate_failed`) take precedence over `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done (WEBHOOKS-1).
 
 ## Event key
@@ -233,9 +241,20 @@ Policy notes:
 import { deriveWebhookEventKey } from "@paykernel/webhooks";
 
 deriveWebhookEventKey("stripe", "evt_123"); // "stripe:evt_123"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
+// "paymob:TRANSACTION_RESPONSE:123456789"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION");
+// "paymob:TRANSACTION:123456789"
 ```
 
 Empty gateway or providerEventId throws / yields `invalid_webhook`.
+
+**Paymob (WEBHOOKS-1):** `WebhookEvent.id` is the transaction id on both
+redirect `TRANSACTION_RESPONSE` (`payment.processing`) and processed
+`TRANSACTION` (`payment.succeeded`). `processVerified` includes the
+notification class in the key when `event` / `envelope` carries
+`type` or `provider.eventType`. Do **not** inbox-dedupe Paymob on raw
+`event.id` and no-op the redirect — that combo ACK-suppresses later paid.
 
 ## Store contract
 
@@ -262,7 +281,7 @@ Atomic claim only — never get-then-set in the engine. Lease tokens fence compl
 
 **Do not** persist raw signatures, authorization headers, secret tokens, or unredacted provider payloads.
 
-**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store; plain opaque refs without secret shapes pass through. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive. Values that still carry `rawPayload` or `headers` are converted via `toPersistedPaymentEventEnvelope` when a PaymentEvent is present; otherwise the claim is refused (`invalid_webhook`) — raw request-local payloads are never persisted (P610-SNAP-1).
+**Envelope honesty:** object/array envelopes (and JSON-string envelopes that parse as object/array) are deep-redacted via core `redactWebhookPayloadSecrets` before `JSON.stringify` into `payloadRef`. Opaque non-JSON string envelopes have known secret/signature patterns redacted (`redactOpaquePayloadRefString`, WEBHOOKS-6) before store; plain opaque refs without secret shapes pass through. Redaction is defense-in-depth — still prefer core `toPersistedPaymentEventEnvelope` (or strip secrets yourself) so raw signatures never enter. On `durable_retry`, if `envelope` is omitted the engine snapshots a redacted `event` into `payloadRef` for redrive. **Inline** also snapshots `event` / `envelope` when materializable (WEBHOOKS-4) so a later durable worker can redrive. Values that still carry `rawPayload` or `headers` are converted via `toPersistedPaymentEventEnvelope` when a PaymentEvent is present; otherwise durable_retry refuses the claim as retryable `handler_failed` (WEBHOOKS-2 — **not** `invalid_webhook` / 400) — raw request-local payloads are never persisted (P610-SNAP-1).
 
 Durable adapters must pass testkit `runWebhookInboxStoreConformanceSuite`.
 

@@ -194,7 +194,7 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without signed refund flags) | **ignored for refund** | Status stays non-refund; **not** `payment.succeeded` and **not** forged `refunded` |
 | Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled; capture totals on webhooks still require inquiry for multi-partial (unsigned `captured_amount` stripped) |
 | Paymob | `TRANSACTION` `partially_captured` (status or partial `captured_amount` on **API** path) | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like); amount-aware capture logic required |
-| Paymob | `TRANSACTION` `is_capture` + success | `capture.completed` | Capture domain; still amount-aware for partials |
+| Paymob | `TRANSACTION` `is_capture` + success (no trusted `captured_amount`) | **`payment.processing`** | Gateway fail-closes to `processing` — **not** `capture.completed` / `paid`. Use transaction inquiry for capture fulfillment (PAYMOB-4) |
 | Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
 | Paymob | `TRANSACTION_RESPONSE` + success / paid / capture signals | **`payment.processing`** | **Never** `payment.succeeded` / `capture.completed` on redirect; wait for processed `TRANSACTION` |
 
@@ -215,6 +215,14 @@ redirect callbacks parse as `TRANSACTION_RESPONSE` and dual-write
 fulfill-on-`payment.succeeded` handlers never ship from redirect alone. Use the
 processed backend notification (`type: 'TRANSACTION'`) or transaction inquiry
 as the sole fulfillment source of truth.
+
+**Paymob inbox key (WEBHOOKS-1):** `WebhookEvent.id` is the **transaction id**
+on both redirect and processed notifications. `@paykernel/webhooks`
+`deriveWebhookEventKey('paymob', id, type)` yields
+`paymob:TRANSACTION_RESPONSE:{txn}` vs `paymob:TRANSACTION:{txn}`. Passing
+`event` (or `event.event` with `provider.eventType`) into `processVerified`
+qualifies the key automatically. Inbox-deduping on raw `event.id` plus a
+normal return on documented redirect is the P0 that swallows later paid.
 
 **Stripe / Paymob partial capture:** Domain status `partially_captured` dual-writes
 `payment.processing`, not `payment.succeeded`. Stripe still emits native
@@ -274,7 +282,10 @@ explicit migration. Dual-write is additive (`event` / `stableType` / `provider`)
 
 1. Prefer `event.event` or `webhookEventToPaymentEvent(event)`.
 2. Switch on `schemaVersion` + `PaymentEvent.type`.
-3. Keep using `event.id` for inbox dedupe.
+3. Inbox-dedupe with `deriveWebhookEventKey(gateway, event.id, event.type)`
+   (Paymob **must** include notification class — redirect
+   `TRANSACTION_RESPONSE` and processed `TRANSACTION` share the same txn id).
+   Do not inbox-dedupe Paymob on raw `event.id` alone (WEBHOOKS-1).
 4. For persistence, call `toPersistedPaymentEventEnvelope` (never store
    `rawPayload` by default); prefer `event.payloadHash` when present.
 5. When ready for 1.0, `type` may become stable-only; until then dual-write.
@@ -350,8 +361,10 @@ types (structurally compatible with testkit) and `createWebhookInboxEngine`.
 
 When integrating the engine + store:
 
-1. Dedupe on `event.provider.eventId` via `deriveWebhookEventKey` (and/or
-   `payloadHash` conflict policy).
+1. Dedupe via `deriveWebhookEventKey(gateway, event.provider.eventId,
+   event.provider.eventType)` (and/or `payloadHash` conflict policy). Paymob
+   keys include the native type (`TRANSACTION` vs `TRANSACTION_RESPONSE`) so
+   redirect and processed snapshots are distinct (WEBHOOKS-1).
 2. Persist **only** the envelope (or equivalent sanitized fields) as optional
    `payloadRef` / claim `envelope` — never raw signatures or secrets.
 3. Treat hash conflicts on the same id as integrity failures (`payload_conflict`

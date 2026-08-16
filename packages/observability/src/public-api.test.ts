@@ -28,6 +28,7 @@ describe("public API runtime surface", () => {
       ["redactAttributeBag", observability.redactAttributeBag],
       ["sanitizeExceptionCode", observability.sanitizeExceptionCode],
       ["sanitizeExceptionIdentity", observability.sanitizeExceptionIdentity],
+      ["sanitizeSpanStatusMessage", observability.sanitizeSpanStatusMessage],
       // OperationContext (core)
       ["createOperationContext", observability.createOperationContext],
       ["finalizeOperationContext", observability.finalizeOperationContext],

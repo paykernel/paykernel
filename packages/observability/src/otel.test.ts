@@ -84,6 +84,29 @@ describe("createOpenTelemetryBridge", () => {
     expect(s.status?.code).toBe(1);
   });
 
+  it("sanitizes span.end() status.message (OBS-1)", () => {
+    const mock = createMockOtelApi();
+    const tracer = createOpenTelemetryBridge(mock.api);
+    const span = tracer.startSpan(PAYMENT_SPAN_NAMES.refund);
+    span.end({
+      code: "error",
+      message: "capture failed sk_live_SUPERSECRET_TOKEN_99",
+    });
+
+    const s = mock.spans[0]!;
+    expect(s.status?.code).toBe(2);
+    expect(s.status?.message).toBe("capture failed [REDACTED]");
+    expect(JSON.stringify(s.status)).not.toContain("sk_live");
+    expect(JSON.stringify(s.status)).not.toContain("SUPERSECRET");
+
+    const span2 = tracer.startSpan(PAYMENT_SPAN_NAMES.capture);
+    span2.end({ code: "error", message: "cs_live_checkout_secret_value" });
+    const s2 = mock.spans[1]!;
+    expect(s2.status?.code).toBe(2);
+    expect(s2.status?.message).toBeUndefined();
+    expect(JSON.stringify(s2.status)).not.toContain("cs_live");
+  });
+
   it("maps error status and sanitizes recordException", () => {
     const mock = createMockOtelApi();
     const tracer = createOpenTelemetryBridge(mock.api);

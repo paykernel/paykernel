@@ -389,10 +389,17 @@ export function createSqliteReconciliationStore(
              lease_expires_at = NULL,
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = ?
-           WHERE status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= ?`,
-          [now, now],
+           WHERE key IN (
+             SELECT key FROM (
+               SELECT key FROM ${table}
+               WHERE status = 'claimed'
+                 AND lease_expires_at IS NOT NULL
+                 AND lease_expires_at <= ?
+               ORDER BY lease_expires_at ASC
+               LIMIT ?
+             )
+           )`,
+          [now, now, limit],
         );
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${SELECT_COLS}

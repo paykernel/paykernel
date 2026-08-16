@@ -350,6 +350,32 @@ describe("withPaymentOperation", () => {
     expect(seen[0]?.normalizedOutcome).toBe("indeterminate");
   });
 
+  it("redacts cs_live_ on allow-listed span keys (OBS-2)", async () => {
+    const { tracer, spans } = recordingTracer();
+    const ctx = createOperationContext({
+      operationId: "op_checkout_secret",
+      gateway: "stripe",
+      operationType: "payment.create",
+      internalReference: "cs_live_checkout_secret_abc",
+    });
+
+    await withPaymentOperation(
+      { context: ctx, tracer, clock: fakeClock([0, 1]) },
+      async () => ({
+        result: true,
+        contextPatch: {
+          normalizedOutcome: "succeeded",
+          providerObjectId: "cs_test_session_secret_xyz",
+        },
+      }),
+    );
+
+    expect(spans[0]!.attributes.internalReference).toBe("[REDACTED]");
+    expect(spans[0]!.attributes.providerObjectId).toBe("[REDACTED]");
+    expect(JSON.stringify(spans[0]!.attributes)).not.toContain("cs_live");
+    expect(JSON.stringify(spans[0]!.attributes)).not.toContain("cs_test");
+  });
+
   it("redacts secret-shaped internalReference before custom tracers see span attrs (P20-TRACER)", async () => {
     const { tracer, spans } = recordingTracer();
     const ctx = createOperationContext({

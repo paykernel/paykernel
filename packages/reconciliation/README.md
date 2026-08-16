@@ -83,13 +83,14 @@ for (const job of claimed) {
   // Never complete on raw result.outcome === "consistent" — pending/processing
   // still settling maps to retry_later, not recovery-complete.
 
-  if (
-    decision.action === "mark_consistent" ||
-    ((decision.action === "update_local_to_paid" ||
+  if (decision.action === "mark_consistent" && decision.safe) {
+    await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
+  } else if (
+    (decision.action === "update_local_to_paid" ||
       decision.action === "update_local_to_failed") &&
-      decision.safe)
+    decision.safe
   ) {
-    // apply the safe local paid/failed update in YOUR app first, then:
+    // apply the safe local paid/failed update in YOUR app first, then complete:
     await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
   } else if (decision.action === "retry_later") {
     await scheduler.failAndReschedule({

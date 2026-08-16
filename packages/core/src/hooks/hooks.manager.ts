@@ -16,6 +16,10 @@ import type {
 import type { WebhookEvent } from '../types/webhook.types';
 import type { GatewayId } from '../types/payment.types';
 import { noopLogger, type Logger } from '../utils/logger';
+import {
+    restoreMoneyIdentityFields,
+    shallowCloneResult,
+} from './money-identity';
 
 /**
  * Deep-clone a verified webhook event for a single `onWebhookVerified` handler
@@ -152,6 +156,10 @@ export class HooksManager {
             const nxt = next as AfterHook;
             const logger = this.logger;
             const composed: AfterHook = async (ctx, result) => {
+                // CORE-2: later handlers must see frozen money/identity, not a
+                // previous hook's forged paid/status/amount. Additive fields
+                // on modifiedResult are kept.
+                const freezeOriginal = shallowCloneResult(result);
                 let carried = result;
                 // Only surface modifiedResult when a handler actually set one so
                 // executeWithHooks can preserve original result identity (e.g.
@@ -171,8 +179,16 @@ export class HooksManager {
                         );
                     }
                     if (first.modifiedResult !== undefined) {
-                        carried = first.modifiedResult;
+                        carried = restoreMoneyIdentityFields(
+                            freezeOriginal,
+                            first.modifiedResult,
+                        );
                         didModify = true;
+                    } else {
+                        carried = restoreMoneyIdentityFields(
+                            freezeOriginal,
+                            carried,
+                        );
                     }
                 } catch (e) {
                     logger.error(
@@ -185,6 +201,10 @@ export class HooksManager {
                             hookError:
                                 e instanceof Error ? e.message : String(e),
                         },
+                    );
+                    carried = restoreMoneyIdentityFields(
+                        freezeOriginal,
+                        carried,
                     );
                 }
                 try {
@@ -201,7 +221,10 @@ export class HooksManager {
                         );
                     }
                     if (second.modifiedResult !== undefined) {
-                        carried = second.modifiedResult;
+                        carried = restoreMoneyIdentityFields(
+                            freezeOriginal,
+                            second.modifiedResult,
+                        );
                         didModify = true;
                     }
                 } catch (e) {
@@ -373,6 +396,10 @@ export class HooksManager {
         ctx: HookContext<T>,
         result: R
     ): Promise<AfterHookResult<R>> {
+        // CORE-2: freeze money/identity for later handlers, not only on the
+        // client return path. Specific after-hooks must not show onAfter (or
+        // composed peers) a forged paid/status/amount.
+        const freezeOriginal = shallowCloneResult(result);
         let finalResult = result;
         let didModify = false;
 
@@ -392,8 +419,16 @@ export class HooksManager {
                     );
                 }
                 if (hookResult.modifiedResult !== undefined) {
-                    finalResult = hookResult.modifiedResult as R;
+                    finalResult = restoreMoneyIdentityFields(
+                        freezeOriginal,
+                        hookResult.modifiedResult as R,
+                    );
                     didModify = true;
+                } else {
+                    finalResult = restoreMoneyIdentityFields(
+                        freezeOriginal,
+                        finalResult,
+                    );
                 }
             } catch (e) {
                 this.logger.error(
@@ -404,6 +439,10 @@ export class HooksManager {
                         hook: 'specific',
                         hookError: e instanceof Error ? e.message : String(e),
                     },
+                );
+                finalResult = restoreMoneyIdentityFields(
+                    freezeOriginal,
+                    finalResult,
                 );
             }
         }
@@ -426,7 +465,10 @@ export class HooksManager {
                     );
                 }
                 if (globalResult.modifiedResult !== undefined) {
-                    finalResult = globalResult.modifiedResult as R;
+                    finalResult = restoreMoneyIdentityFields(
+                        freezeOriginal,
+                        globalResult.modifiedResult as R,
+                    );
                     didModify = true;
                 }
             } catch (e) {

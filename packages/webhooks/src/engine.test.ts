@@ -978,6 +978,18 @@ describe("processWithVerifier", () => {
       code: "INVALID_WEBHOOK",
       message: "Webhook parse failed: thin event shape",
     },
+    {
+      label: "Paymob parse-stage InvalidWebhookError",
+      name: "InvalidWebhookError",
+      code: "INVALID_WEBHOOK",
+      message: "Invalid Paymob transaction webhook payload",
+    },
+    {
+      label: "Moyasar parse-stage InvalidWebhookError",
+      name: "InvalidWebhookError",
+      code: "INVALID_WEBHOOK",
+      message: "Invalid Moyasar webhook payload",
+    },
   ] as const)(
     "$label → retryable not invalid_webhook (WEBHOOKS-1/5)",
     async ({ name, code, message, ...rest }) => {
@@ -1247,7 +1259,7 @@ describe("P610-SNAP-1: durable_retry must not persist rawPayload", () => {
       receivedAt: "2026-01-01T00:00:00.000Z",
     },
     payment: {
-      status: "succeeded" as const,
+      status: "paid" as const,
       references: { providerPaymentId: "pi_snap" },
     },
   };
@@ -1270,10 +1282,9 @@ describe("P610-SNAP-1: durable_retry must not persist rawPayload", () => {
       },
       handler: async () => {},
     });
-    expect(o.outcome).toBe("invalid_webhook");
-    if (o.outcome === "invalid_webhook") {
-      expect(o.reason).toMatch(/rawPayload|headers|toPersistedPaymentEventEnvelope/i);
-    }
+    // WEBHOOKS-2: unrefusable snapshot is retryable, not invalid_webhook/400.
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(o.outcome).not.toBe("invalid_webhook");
     expect(store.size).toBe(0);
   });
 
@@ -1322,7 +1333,7 @@ describe("P610-SNAP-1: durable_retry must not persist rawPayload", () => {
         rawPayload: { leak: "envelope-raw" },
       },
     });
-    expect(o.outcome).toBe("invalid_webhook");
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
     expect(store.size).toBe(0);
   });
 });
@@ -1352,5 +1363,139 @@ describe("WEBHOOKS-5 first-delivery redaction parity", () => {
       client_secret: "[REDACTED]",
       secret_token: "[REDACTED]",
     });
+  });
+});
+
+describe("WEBHOOKS-1 Paymob redirect then processed is not duplicate_completed", () => {
+  it("same txn id + TRANSACTION_RESPONSE then TRANSACTION both run", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const redirect = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_redirect",
+      event: {
+        id: txnId,
+        type: "TRANSACTION_RESPONSE",
+        gateway: "paymob",
+        status: "paid",
+      },
+      handler: async () => {},
+    });
+    expect(redirect).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION_RESPONSE:123456789")).toMatchObject({
+      status: "completed",
+    });
+
+    let processedRan = false;
+    const processed = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_processed",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "paid",
+      },
+      handler: async () => {
+        processedRan = true;
+      },
+    });
+
+    expect(processed).toEqual({ outcome: "processed" });
+    expect(processed.outcome).not.toBe("duplicate_completed");
+    expect(processedRan).toBe(true);
+    expect(await store.get("paymob:TRANSACTION:123456789")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("same txn id + PaymentEvent provider.eventType TRANSACTION_RESPONSE then TRANSACTION", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const first = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "h_pe_redirect",
+      event: {
+        schemaVersion: "1",
+        type: "payment.processing",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION_RESPONSE",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      handler: async () => {},
+    });
+    expect(first).toEqual({ outcome: "processed" });
+
+    let paidRan = false;
+    const second = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "h_pe_processed",
+      event: {
+        schemaVersion: "1",
+        type: "payment.succeeded",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+      },
+      handler: async () => {
+        paidRan = true;
+      },
+    });
+    expect(second).toEqual({ outcome: "processed" });
+    expect(second.outcome).not.toBe("duplicate_completed");
+    expect(paidRan).toBe(true);
+  });
+});
+
+describe("WEBHOOKS-4 inline claims persist payloadRef", () => {
+  it("inline processVerified stores payloadRef so durable processRetryable can redrive", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const inline = createWebhookInboxEngine({ store, mode: "inline", clock });
+
+    const fail = await inline.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_inline_ref",
+      payloadHash: "h",
+      event: { id: "evt_inline_ref", type: "payment.succeeded" },
+      handler: async () => {
+        throw new Error("transient");
+      },
+    });
+    expect(fail).toEqual({ outcome: "handler_failed", retryable: true });
+    const rec = await store.get("stripe:evt_inline_ref");
+    expect(rec?.payloadRef).toContain("payment.succeeded");
+    expect(rec?.status).toBe("pending");
+
+    const durable = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+      defaultRetryAfterMs: 0,
+    });
+    let runs = 0;
+    const result = await durable.processRetryable({
+      handler: async () => {
+        runs++;
+      },
+    });
+    expect(runs).toBe(1);
+    expect(result.items[0]?.outcome).toEqual({ outcome: "processed" });
   });
 });

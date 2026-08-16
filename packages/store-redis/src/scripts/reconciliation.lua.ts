@@ -189,9 +189,10 @@ local p = pack(m)
 return {'acquired', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], leaseToken}
 `.trim();
 
-/** KEYS[1]=record ARGV: nowMs, nowIso, leaseToken, newToken, leaseExpiresAt, leaseExpiresMs */
+/** KEYS[1]=record KEYS[2]=dueIndex ARGV: nowMs, nowIso, leaseToken, newToken, leaseExpiresAt, leaseExpiresMs */
 export const RECON_RENEW_LUA = `
 local rec = KEYS[1]
+local idx = KEYS[2]
 local nowMs = tonumber(ARGV[1])
 local nowIso = ARGV[2]
 local leaseToken = ARGV[3]
@@ -250,6 +251,12 @@ redis.call('HSET', rec,
   'generation', tostring(gen),
   'updated_at', nowIso
 )
+-- REDIS-1: rescore due ZSET to the new lease expiry so listDue
+-- ZRANGEBYSCORE(-inf, now) does not keep the original claim score.
+local logicalKey = m['key'] or ''
+if idx ~= nil and idx ~= '' and logicalKey ~= '' then
+  redis.call('ZADD', idx, tonumber(leaseExpiresMs), logicalKey)
+end
 m = hgetall_map(rec)
 local p = pack(m)
 return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13], newToken}
@@ -476,8 +483,8 @@ end
 local m = hgetall_map(rec)
 if (m['status'] or '') == 'claimed' then
   local exp = tonumber(m['lease_expires_ms'] or '0') or 0
+  local logicalKey = m['key'] or ''
   if exp <= nowMs then
-    local logicalKey = m['key'] or ''
     local dueMs = tonumber(m['due_ms'] or tostring(nowMs)) or nowMs
     -- P1315-REDIS-1: restore unfinished claim attempt so crash reclaim does not
     -- burn maxAttempts (parity with WEBHOOK_GET_LUA / memory soft-release).
@@ -498,6 +505,9 @@ if (m['status'] or '') == 'claimed' then
       redis.call('ZADD', idx, dueMs, logicalKey)
     end
     m = hgetall_map(rec)
+  elseif logicalKey ~= '' then
+    -- Heal a stale due score (pre-REDIS-1 renew left the original expiry).
+    redis.call('ZADD', idx, exp, logicalKey)
   end
 end
 

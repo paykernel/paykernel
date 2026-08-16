@@ -92,9 +92,12 @@ export type BeforeHook<T = unknown> = (
  * committed operation or to change money identity fields (`success`, `status`,
  * `amount`, `gatewayId`, capture/order/authorization IDs, refund totals, `fee`,
  * `capturedAmount`, `refundedAmount`, `clientSecret`, etc.) — including via
- * in-place mutation of the result argument. The gateway freezes those from the
- * original result (shallow-cloned into hooks so mutation cannot poison the
- * snapshot). Throws and `proceed: false` are logged and ignored.
+ * in-place mutation of the result argument. Money identity is restored
+ * **between** composed after-hooks (and specific → `onAfter`), not only on the
+ * client return path, so later handlers never see a forged paid/status/amount.
+ * The gateway also freezes those fields from the original result (shallow-cloned
+ * into hooks so mutation cannot poison the snapshot). Throws and
+ * `proceed: false` are logged and ignored.
  */
 export type AfterHook<T = unknown, R = unknown> = (
     ctx: HookContext<T>,

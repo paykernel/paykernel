@@ -165,7 +165,8 @@ Does **not** apply migrations.
 
 | Asset                                      | Role                               |
 | ------------------------------------------ | ---------------------------------- |
-| `createFakeExecutor` / `createFakeDbState` | Unit tests without a real DB       |
+| `createFakeDbState` / sample records       | Unit-test row helpers (root export) |
+| `createFakeExecutor`                       | **Test-only** (`src/testing.ts`); always-succeed fake — do not import next to `migrate()` |
 | `expectedTablesForNamespace`               | Physical names for a namespace     |
 | `DIALECT_SAMPLES`                          | Dialect sample payloads            |
 | `import-no-migrate.test.ts`                | Import does not migrate            |

@@ -201,10 +201,11 @@ export type {
   MemoryRelationalOptions,
 } from "./reference/memory-relational-store";
 
-// ─── Fixtures ────────────────────────────────────────────────────────────────
+// ─── Fixtures (sample rows / namespace helpers only) ─────────────────────────
+// PKG-1: createFakeExecutor is test-only (`./testing.ts`) — it always
+// succeeds and must not sit next to migrate() on the root export.
 export {
   createFakeDbState,
-  createFakeExecutor,
   expectedTablesForNamespace,
   sampleIdempotencyRecord,
   sampleWebhookRecord,

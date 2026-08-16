@@ -178,6 +178,40 @@ describe("21.1 inputs affect matching", () => {
     ).toBe("stripe");
   });
 
+  it("ROUTE-1: complementary amount-split + fallback is honesty-blocked after exclude", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({
+          currency: "USD",
+          amountMax: "99.99",
+          amountCurrency: "USD",
+        }).to("stripe"),
+        route({
+          currency: "USD",
+          amountMin: "100.00",
+          amountCurrency: "USD",
+        }).to("paypal"),
+      ],
+      fallback: "stripe",
+    });
+    expect(
+      router.select({
+        currency: "USD",
+        amount: { amount: "150.00", currency: "USD" },
+      }).gateway,
+    ).toBe("paypal");
+    // After excluding the matching bucket, complementary stripe max still
+    // matches non-amount criteria — fallback must not send $150 to a
+    // $99.99-bounded gateway (fail-closed NoRouteMatchError).
+    expect(() =>
+      router.select({
+        currency: "USD",
+        amount: { amount: "150.00", currency: "USD" },
+        excludeGateways: ["paypal"],
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
   it("ROUTE-1: select-time fallback does not bypass amount-range bounds", () => {
     const router = createPaymentRouter({
       rules: [

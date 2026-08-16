@@ -68,7 +68,7 @@ Token-gated methods (complete / fail / renew / markIndeterminate / markManualRev
 | --------------------------- | -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `evaluateClaim`             | All            | Unified dispatcher over the three `decide*` functions (unit tests / harness)                                                                                      |
 | `decideIdempotencyReserve`  | Idempotency    | No row → insert; matching fingerprint + reclaimable (expired / not active reserved) → update; else completed / indeterminate / in_progress / fingerprint_conflict |
-| `decideWebhookClaim`        | Webhook inbox  | No row → insert claimed; matching payload_hash + pending-when-due (`availableAt <= now`) or expired lease → update; pending + future `availableAt` → `not_available`; expired lease reclaim allowed even if `availableAt` future; else completed / in_progress / payload_hash_conflict / duplicate_failed |
+| `decideWebhookClaim`        | Webhook inbox  | No row → insert claimed; pending-when-due (`availableAt <= now`) or expired/idle lease → update (idle hash mismatch **supersedes**); pending + same hash + future `availableAt` → `not_available`; expired lease reclaim allowed even if `availableAt` future; active lease + hash mismatch → `payload_hash_conflict`; else completed / in_progress / duplicate_failed |
 | `decideReconciliationClaim` | Reconciliation | Row must exist (schedule first); due + scheduled/expired lease → update; else not_found / not_due / in_progress / already_terminal                                |
 | `decideLeaseMutation`       | Mutators       | Pure fencing for complete/fail/renew: not_found / wrong_status / lease_lost / ok                                                                                  |
 
@@ -118,8 +118,8 @@ Each `ClaimTemplateSet` has:
 ### Webhook claim intent
 
 1. Insert if absent as `claimed`, or reclaim `pending` when `available_at <= now`, or reclaim expired `claimed` lease.
-2. `status=pending` with future `available_at` is **not** reclaimable (backoff / `retryAfterMs` gate). Expired lease reclaim for crash recovery is still allowed even when `available_at` is in the future.
-3. `payload_hash` must match on conflict; mismatch is conflict (not silent overwrite).
+2. `status=pending` with future `available_at` is **not** reclaimable **when the hash matches** (backoff / `retryAfterMs` gate). Expired lease reclaim for crash recovery is still allowed even when `available_at` is in the future.
+3. `payload_hash` mismatch is `payload_hash_conflict` only under an **active** lease. Idle pending / expired claimed rows **supersede** the stored hash (`decideWebhookClaim`) so a hash-source mistake (raw string vs object) does not permanently stick a paid redrive.
 4. Do not reclaim terminal `completed` / `failed` / `dead_letter` via this template path.
 5. Increment fencing fields; bind all user values.
 6. Lease expiry comparisons use a bound injectable `now` (ISO TEXT) so FakeClock tests work; production multi-host deployments must keep host clocks NTP-synced (timestamps are ISO TEXT, not dialect `NOW()`), see adapter crash-boundaries docs.

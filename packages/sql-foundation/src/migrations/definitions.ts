@@ -11,6 +11,7 @@ import { MAX_IDENTIFIER_LENGTH } from "../schema/namespace";
  * Max chars from a qualified table name embedded in index identifiers.
  * Full index name is `idx_{label}_{suffix}`; longest suffix today is
  * `lease_expires` (14) → `idx_` + 40 + `_` + 14 = 59 ≤ 63.
+ * Composite poll suffixes stay short (`st_avail`, `st_due`, `st_lexp`).
  */
 export const INDEX_LABEL_MAX = 40;
 
@@ -136,6 +137,9 @@ CREATE TABLE IF NOT EXISTS ${inbox} (
   pushCreateIndex(statements, usedIndexNames, inbox, "status", "status");
   pushCreateIndex(statements, usedIndexNames, inbox, "tenant", "tenant_id");
   pushCreateIndex(statements, usedIndexNames, inbox, "payload_hash", "payload_hash");
+  // PERF-3: listRetryable (status, available_at) and bounded expired-lease UPDATE
+  pushCreateIndex(statements, usedIndexNames, inbox, "st_avail", "status, available_at");
+  pushCreateIndex(statements, usedIndexNames, inbox, "st_lexp", "status, lease_expires_at");
 
   statements.push(
     `
@@ -165,6 +169,9 @@ CREATE TABLE IF NOT EXISTS ${recon} (
   pushCreateIndex(statements, usedIndexNames, recon, "due", "due_at");
   pushCreateIndex(statements, usedIndexNames, recon, "status", "status");
   pushCreateIndex(statements, usedIndexNames, recon, "tenant", "tenant_id");
+  // PERF-3: listDue (status, due_at) and bounded expired-lease UPDATE
+  pushCreateIndex(statements, usedIndexNames, recon, "st_due", "status, due_at");
+  pushCreateIndex(statements, usedIndexNames, recon, "st_lexp", "status, lease_expires_at");
 
   statements.push(
     `

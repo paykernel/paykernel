@@ -131,6 +131,65 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
     expect(diffs.some((d) => d.field === "capturedAmount")).toBe(true);
   });
 
+  it("RECON-1: auth-hold authorized + amount vs capturedAmount 0 is not drift", () => {
+    const diffs = compareSnapshots(
+      { status: "authorized", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_auth",
+        status: "authorized",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("0", "USD"),
+        providerStatus: "requires_capture",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(false);
+    expect(diffs).toEqual([]);
+  });
+
+  it("RECON-1: approved + amount vs capturedAmount 0 is not drift", () => {
+    const diffs = compareSnapshots(
+      { status: "approved", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "ORDER-1",
+        status: "approved",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("0.00", "USD"),
+        providerStatus: "APPROVED",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(false);
+    expect(diffs).toEqual([]);
+  });
+
+  it("RECON-2: incremental capture while authorized is capturedAmount drift", () => {
+    const diffs = compareSnapshots(
+      { status: "authorized", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_inc",
+        status: "authorized",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("4.00", "USD"),
+        providerStatus: "requires_capture",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(true);
+  });
+
+  it("RECON-2: full incremental capture while authorized is still drift", () => {
+    // captured === amount but status remains authorized — not a paid settle.
+    const diffs = compareSnapshots(
+      { status: "authorized", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_full_inc",
+        status: "authorized",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("10.00", "USD"),
+        providerStatus: "requires_capture",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(true);
+  });
+
   it("matches captured/refunded when zero spelling differs", () => {
     const diffs = compareSnapshots(
       {

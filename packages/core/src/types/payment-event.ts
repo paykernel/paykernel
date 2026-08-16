@@ -207,18 +207,74 @@ export type PaymentEvent =
 
 // ─── Type guards ─────────────────────────────────────────────────────────────
 
+function isProviderEventMetadata(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const p = value as Record<string, unknown>;
+  return (
+    typeof p.gateway === "string" &&
+    p.gateway.length > 0 &&
+    typeof p.eventId === "string" &&
+    p.eventId.length > 0 &&
+    typeof p.eventType === "string" &&
+    p.eventType.length > 0 &&
+    typeof p.occurredAt === "string" &&
+    p.occurredAt.length > 0 &&
+    typeof p.receivedAt === "string" &&
+    p.receivedAt.length > 0
+  );
+}
+
+function hasRequiredPaymentEventArm(
+  type: string,
+  value: Record<string, unknown>,
+): boolean {
+  if (
+    type === "payment.created" ||
+    type === "payment.processing" ||
+    type === "payment.authorized" ||
+    type === "payment.succeeded" ||
+    type === "payment.failed" ||
+    type === "payment.cancelled"
+  ) {
+    return value.payment !== null && typeof value.payment === "object";
+  }
+  if (type === "capture.completed") {
+    return value.capture !== null && typeof value.capture === "object";
+  }
+  if (
+    type === "refund.pending" ||
+    type === "refund.completed" ||
+    type === "refund.failed"
+  ) {
+    return value.refund !== null && typeof value.refund === "object";
+  }
+  if (type === "payment_method.setup_completed") {
+    return value.setup !== null && typeof value.setup === "object";
+  }
+  if (
+    type === "dispute.opened" ||
+    type === "dispute.updated" ||
+    type === "dispute.closed"
+  ) {
+    return value.dispute !== null && typeof value.dispute === "object";
+  }
+  return true;
+}
+
 /**
  * Runtime check: value looks like a v1 {@link PaymentEvent}.
+ *
+ * Requires complete {@link ProviderEventMetadata} and the type's entity arm.
+ * A thin 3-field `{schemaVersion, type, provider:{}}` is **not** trusted
+ * (CORE-4 — handleWebhook must still attach + demote incomplete money).
  */
 export function isPaymentEvent(value: unknown): value is PaymentEvent {
   if (value === null || typeof value !== "object") return false;
   const v = value as Record<string, unknown>;
-  return (
-    v.schemaVersion === PAYMENT_EVENT_SCHEMA_VERSION &&
-    typeof v.type === "string" &&
-    v.provider !== null &&
-    typeof v.provider === "object"
-  );
+  if (v.schemaVersion !== PAYMENT_EVENT_SCHEMA_VERSION) return false;
+  if (typeof v.type !== "string" || v.type.length === 0) return false;
+  if (!isProviderEventMetadata(v.provider)) return false;
+  return hasRequiredPaymentEventArm(v.type, v);
 }
 
 export function isPaymentSucceededEvent(

@@ -364,6 +364,9 @@ describe("webhook store unit", () => {
     expect(soft?.sql.toLowerCase()).toContain("status = 'pending'");
     // WEBHOOKS-1: soft-release restores unfinished attempt
     expect(soft?.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
+    // PERF-2: expired-lease UPDATE is bounded to the list limit
+    expect(soft?.sql).toMatch(/LIMIT\s+\$2/i);
+    expect(soft?.params[1]).toBe(100);
   });
 
   it("STORES-4: claim miss for free due pending repairs available_at and acquires", async () => {
@@ -839,6 +842,9 @@ describe("reconciliation store unit", () => {
     expect(soft).toBeDefined();
     // STORES-1: soft-release restores unfinished attempt
     expect(soft?.sql).toMatch(/attempts\s*=\s*CASE WHEN attempts > 0 THEN attempts - 1/i);
+    // PERF-2: expired-lease UPDATE is bounded to the list limit
+    expect(soft?.sql).toMatch(/LIMIT\s+\$2/i);
+    expect(soft?.params[1]).toBe(100);
   });
 
   it("SQL-2: listDue canonicalizes offset input.now for TEXT lexical compares", async () => {

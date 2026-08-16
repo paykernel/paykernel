@@ -104,8 +104,8 @@ Lease expiry / process death while claimed is treated like abandon: another work
 
 ### Engine notes
 
-- `durable_retry` + `ackAfterClaim`: claim then intentional release to pending returns `scheduled_for_retry` without handler — that is **not** a crash; workers must run `processRetryable`. A crash after claim but before that release leaves the row claimed until expiry/reclaim.
-- Residual: if park `fail({ restoreAttempt: true })` hits `StoreLeaseLostError` (lease/clock skew), engine returns `scheduled_for_retry` without restoring the attempt budget — parking claim may remain burned. See [webhook-inbox.md §6](./webhook-inbox.md#6-modes-inline-vs-durable_retry).
+- `durable_retry` + `ackAfterClaim`: claim then intentional release to pending returns `scheduled_for_retry` **only if** `store.fail({ restoreAttempt: true })` succeeds — that is **not** a crash; workers must run `processRetryable`. A crash after claim but before that release leaves the row claimed until expiry/reclaim.
+- Park `lease_lost` (WEBHOOKS-5): if park `fail({ restoreAttempt: true })` hits `StoreLeaseLostError`, the engine does **not** emit `scheduled_for_retry` / `parked`. It returns `already_processing` (when a retry-after is known) or `handler_failed { retryable: true }`. The row stays claimed — **do not HTTP 200** that park. See [webhook-inbox.md §6](./webhook-inbox.md#6-modes-inline-vs-durable_retry).
 
 ---
 
@@ -236,8 +236,9 @@ After reclaim, the **old** worker’s `complete`/`fail`/`renew` with the pre-rec
 ### `durable_retry`
 
 - Retryable handler failure → `store.fail` + `scheduled_for_retry { reason: "handler_retry" }` (row becomes pending after delay).
-- `ackAfterClaim: true`: returns `scheduled_for_retry { reason: "parked" }` after durable claim/release **without** running the handler. Requires non-empty `envelope` (else `invalid_webhook` before claim). Parking claim does not consume `maxAttempts` (`restoreAttempt`). Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work.
-- Claim backoff (`not_available`) → `scheduled_for_retry { reason: "not_available" }`. Adapters should prefer **5xx** so the provider redelivers when no durable scheduler owns the row (do not blind-ACK 200).
+- `ackAfterClaim: true`: returns `scheduled_for_retry { reason: "parked" }` after durable claim/release **without** running the handler **only if** `store.fail({ restoreAttempt: true })` succeeds. Requires a materializable `envelope` / `event` (else retryable `handler_failed` before claim — WEBHOOKS-2, not `invalid_webhook`). Parking claim does not consume `maxAttempts` (`restoreAttempt`). Crash after that ACK is OK only if a **worker** runs `processRetryable`. ACK without a worker = lost work. Park `lease_lost` → `already_processing` / retryable `handler_failed` (never `parked`).
+- Claim backoff (`not_available`) → durable `scheduled_for_retry { reason: "not_available" }`. **Inline maps `not_available` to `handler_failed { retryable: true }`** (WEBHOOKS-5). Adapters should prefer **5xx** so the provider redelivers when no durable scheduler owns the row (do not blind-ACK 200).
+- **Hash source (WEBHOOKS-5):** `hashWebhookPayload` does **not** JSON-parse non-object strings. `hashWebhookPayload(rawBodyString)` and `hashWebhookPayload(parsedObject)` are different digests. Prefer `resolveInboxPayloadHash({ eventPayloadHash, payloadForHash })` with the same object shape the gateway hashed. Mixing sources on an **idle** row supersedes; an **active lease** returns `payload_conflict`. Do not treat those hashes as interchangeable under a live lease.
 - Max **handler** attempts / default `NonRetryableHandlerError` → dead letter → `handler_failed { retryable: false }`. `{ deadLetter: false }` leaves pending until `maxAttempts` (prefer default).
 - `processRetryable` is **only** valid on `durable_retry` engines (throws if the engine was built with `inline`).
 

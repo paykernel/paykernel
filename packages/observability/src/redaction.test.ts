@@ -4,6 +4,7 @@ import {
   createRedactingTelemetrySink,
   redactAttributeBag,
   redactTelemetryData,
+  sanitizeSpanStatusMessage,
 } from "./redaction";
 
 describe("createRedactingTelemetrySink (A3)", () => {
@@ -124,6 +125,30 @@ describe("redactTelemetryData", () => {
 });
 
 describe("redactAttributeBag", () => {
+  it("redacts cs_live_ / client-secret values on allow-listed keys (OBS-2)", () => {
+    const out = redactAttributeBag({
+      internalReference: "cs_live_checkout_secret_abc",
+      providerObjectId: "cs_test_session_secret_xyz",
+      providerRequestId: "req_ok",
+      gateway: "stripe",
+    });
+    expect(out?.internalReference).toBe("[REDACTED]");
+    expect(out?.providerObjectId).toBe("[REDACTED]");
+    expect(out?.providerRequestId).toBe("req_ok");
+    expect(out?.gateway).toBe("stripe");
+    expect(JSON.stringify(out)).not.toContain("cs_live_");
+    expect(JSON.stringify(out)).not.toContain("cs_test_");
+    expect(JSON.stringify(out)).not.toContain("checkout_secret");
+
+    const piSecret = redactAttributeBag({
+      providerObjectId: "pi_3N3xYZ_secret_abc123def",
+      operationId: "op_1",
+    });
+    expect(piSecret?.providerObjectId).toBe("[REDACTED]");
+    expect(piSecret?.operationId).toBe("op_1");
+    expect(JSON.stringify(piSecret)).not.toContain("_secret_");
+  });
+
   it("redacts sensitive labels and keeps authorized/gateway", () => {
     const out = redactAttributeBag({
       gateway: "stripe",
@@ -143,5 +168,19 @@ describe("redactAttributeBag", () => {
 
   it("returns undefined for undefined input", () => {
     expect(redactAttributeBag(undefined)).toBeUndefined();
+  });
+});
+
+describe("sanitizeSpanStatusMessage (OBS-1)", () => {
+  it("drops whole-string secrets and redacts embedded credentials", () => {
+    expect(sanitizeSpanStatusMessage("sk_live_abc123secret")).toBeUndefined();
+    expect(sanitizeSpanStatusMessage("cs_live_checkout_secret")).toBeUndefined();
+    expect(sanitizeSpanStatusMessage("capture failed sk_live_abc123secret")).toBe(
+      "capture failed [REDACTED]",
+    );
+    expect(sanitizeSpanStatusMessage("failed")).toBe("failed");
+    expect(sanitizeSpanStatusMessage("Error")).toBe("Error");
+    expect(sanitizeSpanStatusMessage(undefined)).toBeUndefined();
+    expect(sanitizeSpanStatusMessage("   ")).toBeUndefined();
   });
 });

@@ -111,7 +111,7 @@ for (const [gateway, group] of byGateway) {
 | `scheduler.claimDue` / `processDue` | Durable multi-host workers; crash-safe leases |
 | Both | Online check + schedule stragglers that need retry |
 
-`processDue({ maxInFlightByGateway })` bounds claims within one processDue invocation for keys `recon:{gateway}:{id}`. Handler must return an explicit `{ disposition: "complete" | "retry" | "manual_review" }` — void is fail-closed to retry so policy `retry_later` cannot silently complete. Still set **global** worker parallelism and **per-provider** HTTP limits outside this package.
+`processDue({ maxInFlightByGateway })` bounds claims within one processDue invocation for keys `recon:{gateway}:{id}`. Handler must return an explicit `{ disposition: "complete" | "retry" | "retry_later" | "manual_review" }` — void is fail-closed to retry so policy `retry_later` cannot silently complete. `{ disposition: "retry_later" }` does not dead-letter at `maxAttempts` (in-flight settlement). Still set **global** worker parallelism and **per-provider** HTTP limits outside this package.
 
 ---
 

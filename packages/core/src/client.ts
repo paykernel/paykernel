@@ -54,6 +54,15 @@ import {
 } from "./errors";
 import { createRedactingLogger, noopLogger, type Logger } from "./utils/logger";
 
+/** True when `value` looks like a thenable (Promise). A Promise is truthy — never treat it as verified. */
+function isThenable(value: unknown): value is Promise<unknown> {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
 /**
  * Deep-clone a verified {@link WebhookEvent} for `onWebhookVerified` hooks.
  *
@@ -717,11 +726,15 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
         typeof signatureOrHeaders === "string" ? signatureOrHeaders : undefined;
       const verificationHeaders =
         typeof signatureOrHeaders === "string" ? headers : signatureOrHeaders;
-      const isVerified = gw.verifyWebhookAsync
+      // CORE-3: if verifyWebhookAsync is absent, still boolean-check
+      // verifyWebhook. A Promise must not count as verified — await it.
+      let isVerified: unknown = gw.verifyWebhookAsync
         ? await gw.verifyWebhookAsync(payload, signatureOrHeaders, headers)
         : gw.verifyWebhook(payload, signature, verificationHeaders);
-
-      if (!isVerified) {
+      if (isThenable(isVerified)) {
+        isVerified = await isVerified;
+      }
+      if (isVerified !== true) {
         throw new InvalidWebhookError("Webhook verification failed");
       }
     } catch (error) {

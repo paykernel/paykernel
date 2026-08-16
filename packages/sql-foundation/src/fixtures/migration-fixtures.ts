@@ -32,7 +32,8 @@ export function createFakeDbState(): FakeDbState {
 
 /**
  * Fake executor that records SQL and simulates CREATE TABLE + migration inserts.
- * Does not auto-migrate on construction.
+ * Always returns success — test-only (import from `src/testing.ts`, not the
+ * package root next to migrate()).
  */
 export function createFakeExecutor(
   state: FakeDbState,

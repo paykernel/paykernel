@@ -153,6 +153,17 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
   });
 
+  it("REDIS-1: renew ZADDs due/retry index at the new lease expiry", () => {
+    const recon = REDIS_SCRIPT_REGISTRY.reconciliation.renew;
+    const webhook = REDIS_SCRIPT_REGISTRY.webhookInbox.renew;
+    for (const renew of [recon, webhook]) {
+      expect(renew).toMatch(/local idx = KEYS\[2\]/);
+      expect(renew).toMatch(
+        /redis\.call\(\s*['"]ZADD['"]\s*,\s*idx\s*,\s*tonumber\(leaseExpiresMs\)/,
+      );
+    }
+  });
+
   it("P1315-REDIS-2: claim ZADDs due/retry index at lease expiry (not ZREM)", () => {
     const recon = REDIS_SCRIPT_REGISTRY.reconciliation.claim;
     const webhook = REDIS_SCRIPT_REGISTRY.webhookInbox.claim;

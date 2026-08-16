@@ -201,7 +201,34 @@ function outcomeInvalidWebhook(reason?: string): WebhookProcessingOutcome {
 }
 
 /**
- * WEBHOOKS-1: forgery-class verify failures only.
+ * WEBHOOKS-3: parse-stage InvalidWebhookError (Paymob / Moyasar / handleWebhook
+ * reclass leftovers). These are authentic-payload shape failures, not forgery.
+ */
+function isParseStageInvalidWebhookMessage(message: string): boolean {
+  return (
+    message.includes("webhook parse failed") ||
+    message.includes("parse failed") ||
+    message.startsWith("webhook parse") ||
+    message.includes("invalid paymob") ||
+    message.includes("invalid moyasar webhook payload") ||
+    message.includes("invalid moyasar")
+  );
+}
+
+/** Signature / authenticity failures only — typically handleWebhook verify-false. */
+function isVerifyFailureMessage(message: string): boolean {
+  return (
+    message.includes("webhook verification failed") ||
+    message.includes("verification failed") ||
+    message.includes("invalid signature") ||
+    message.includes("signature verification") ||
+    message.includes("hmac mismatch") ||
+    message.includes("hmac verification")
+  );
+}
+
+/**
+ * WEBHOOKS-1 / WEBHOOKS-3: forgery-class verify failures only.
  *
  * Reserved for explicit signature / authenticity failures — typically
  * `InvalidWebhookError` from `PaymentClient.handleWebhook` when verify returns
@@ -211,8 +238,9 @@ function outcomeInvalidWebhook(reason?: string): WebhookProcessingOutcome {
  *
  * Core `handleWebhook` throws `InvalidRequestError` for parse-after-verify
  * (never `InvalidWebhookError`). If a custom verifier still wraps parse as
- * `InvalidWebhookError`, message heuristics below refuse forgery classification
- * for parse-shaped messages.
+ * `InvalidWebhookError` (Paymob/Moyasar parse messages), that is **retryable**,
+ * not forgery. Unknown InvalidWebhookError is fail-open retryable so new parse
+ * shapes redeliver rather than 400-ACK.
  *
  * Explicit `{ ok: false }` from `verifyAndNormalize` is handled separately
  * (never throws).
@@ -228,15 +256,8 @@ function isForgeryClassVerifyError(err: unknown): boolean {
     name === "invalidwebhookerror" || code === "invalid_webhook";
   if (!looksLikeWebhookInvalid) return false;
 
-  // Defense-in-depth: parse-stage misclassification must not stop redelivery.
-  if (
-    message.includes("webhook parse failed") ||
-    message.includes("parse failed") ||
-    message.startsWith("webhook parse")
-  ) {
-    return false;
-  }
-  return true;
+  if (isParseStageInvalidWebhookMessage(message)) return false;
+  return isVerifyFailureMessage(message);
 }
 
 /**
@@ -628,6 +649,39 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
  * - When `event` is omitted, materialize from redacted `payloadRef` (envelope
  *   or durable snapshot) — same path as redrive.
  */
+/**
+ * WEBHOOKS-1: notification class for Paymob inbox qualification.
+ *
+ * Prefer `provider.eventType` (PaymentEvent native type: TRANSACTION vs
+ * TRANSACTION_RESPONSE). Fall back to WebhookEvent.type / nested event.type.
+ */
+function readProviderNativeEventType(provider: unknown): string | undefined {
+  if (provider === null || typeof provider !== "object") return undefined;
+  const eventType = (provider as { eventType?: unknown }).eventType;
+  if (typeof eventType === "string" && eventType.trim()) return eventType.trim();
+  return undefined;
+}
+
+function extractInboxNotificationClass(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  const fromProvider = readProviderNativeEventType(rec.provider);
+  if (fromProvider !== undefined) return fromProvider;
+
+  const nested = rec.event;
+  if (nested !== null && typeof nested === "object") {
+    const nestedRec = nested as Record<string, unknown>;
+    const fromNestedProvider = readProviderNativeEventType(nestedRec.provider);
+    if (fromNestedProvider !== undefined) return fromNestedProvider;
+    if (typeof nestedRec.type === "string" && nestedRec.type.trim()) {
+      return nestedRec.type.trim();
+    }
+  }
+
+  if (typeof rec.type === "string" && rec.type.trim()) return rec.type.trim();
+  return undefined;
+}
+
 function resolveHandlerEvent(
   inputEvent: unknown | undefined,
   payloadRef: string | undefined,
@@ -1026,9 +1080,13 @@ export function createWebhookInboxEngine(
       return outcomeInvalidWebhook("payloadHash is required");
     }
 
+    const notificationClass =
+      extractInboxNotificationClass(input.event) ??
+      extractInboxNotificationClass(input.envelope);
+
     let key: string;
     try {
-      key = deriveWebhookEventKey(gateway, providerEventId);
+      key = deriveWebhookEventKey(gateway, providerEventId, notificationClass);
     } catch (e) {
       return outcomeInvalidWebhook(
         e instanceof Error ? e.message : "invalid event key",
@@ -1065,28 +1123,31 @@ export function createWebhookInboxEngine(
         payloadHash,
       });
       if (!snap.ok) {
-        return outcomeInvalidWebhook(snap.reason);
+        // WEBHOOKS-2: missing / unrefusable snapshot is not forgery (not 400).
+        // Authentic paid deliveries must stay retryable so the provider redelivers.
+        return outcomeHandlerFailed(true);
       }
       payloadRef = snap.payloadRef;
-    } else if (input.envelope !== undefined) {
+    } else {
+      // WEBHOOKS-4: persist payloadRef on inline when event/envelope is
+      // materializable so a later durable_retry worker can redrive without
+      // dead-lettering paid rows. Raw/unrefusable snapshots are skipped
+      // (handler still has the in-memory event).
       const snap = resolveDurablePayloadRef({
         envelope: input.envelope,
+        event: input.event,
         payloadHash,
       });
       if (snap.ok) {
         payloadRef = snap.payloadRef;
-      } else if (snap.reason === DURABLE_RAW_REFUSED) {
-        return outcomeInvalidWebhook(snap.reason);
       }
-      // empty / unserializable envelope: inline does not require payloadRef
     }
 
     // Refuse durable park without a materializable payload — otherwise workers
     // cannot redrive and paid fulfillment is lost after ACK.
+    // WEBHOOKS-2: this is a server/retryable outcome, not invalid_webhook/400.
     if (ackAfterClaim && payloadRef === undefined) {
-      return outcomeInvalidWebhook(
-        "envelope is required for ackAfterClaim (durable workers need a payloadRef; provide envelope or event)",
-      );
+      return outcomeHandlerFailed(true);
     }
 
     const claimInput: {
@@ -1317,7 +1378,9 @@ export function createWebhookInboxEngine(
         continue;
       }
 
-      // Fail closed when no materializable handler event (legacy rows / missing ref).
+      // WEBHOOKS-4: missing payloadRef (inline-era rows / refused snapshot)
+      // must not dead-letter paid work. Refuse this poll as retryable so
+      // provider redelivery or a custom resolveEvent can recover.
       if (event === undefined) {
         try {
           await store.fail({
@@ -1325,26 +1388,14 @@ export function createWebhookInboxEngine(
             leaseToken: claim.leaseToken,
             error:
               "missing payloadRef: cannot redrive durable webhook without stored envelope/event",
-            deadLetter: true,
+            retryAfterMs: defaultRetryAfterMs,
+            restoreAttempt: true,
           });
         } catch (failErr) {
           if (isStoreLeaseLostError(failErr)) {
-            // WEBHOOKS-3: dead-letter intent must not become forever-retryable
-            // unless fail/dead_letter actually applied (P610-ACK-3).
-            const recovered = await bestEffortRecordFailAfterLeaseLost({
-              key: rec.key,
-              payloadHash,
-              payloadRef: rec.payloadRef,
-              owner,
-              leaseMs,
-              error:
-                "missing payloadRef: cannot redrive durable webhook without stored envelope/event",
-              forceDeadLetter: true,
-              priorAttempts: claim.record.attempts,
-            });
             items.push({
               key: rec.key,
-              outcome: outcomeHandlerFailed(!recovered.terminal),
+              outcome: outcomeHandlerFailed(true),
             });
             continue;
           }
@@ -1352,7 +1403,7 @@ export function createWebhookInboxEngine(
         }
         items.push({
           key: rec.key,
-          outcome: outcomeHandlerFailed(false),
+          outcome: outcomeHandlerFailed(true),
         });
         continue;
       }

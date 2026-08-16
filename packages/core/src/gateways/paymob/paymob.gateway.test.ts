@@ -703,10 +703,48 @@ describe("PaymobGateway", () => {
       expect(requestBody.notification_url).toBeUndefined();
     });
 
-    it("rejects malformed successful Intention responses", async () => {
+    it("treats malformed successful Intention responses as indeterminate (PAYMOB-2)", async () => {
       mockFetchSequence(jsonResponse({ status: "intended" }));
 
-      await expect(gateway.createPayment(VALID_CREATE_PARAMS)).rejects.toThrow(GatewayApiError);
+      const result = await gateway.createPayment(VALID_CREATE_PARAMS);
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+    });
+
+    it("keeps the idempotency fence after Intention HTTP 200 with empty id (PAYMOB-2)", async () => {
+      mockFetchSequence(
+        jsonResponse({}),
+        jsonResponse({ id: "pi_second", client_secret: "csk_second" }),
+      );
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "intention_200_empty_id",
+      };
+
+      const first = await gateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(gateway.createPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("keeps the idempotency fence after Intention HTTP 200 with missing checkout URL (PAYMOB-2)", async () => {
+      mockFetchSequence(
+        jsonResponse({ id: "pi_no_url" }),
+        jsonResponse({ id: "pi_second", client_secret: "csk_second" }),
+      );
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "intention_200_missing_url",
+      };
+
+      const first = await gateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(gateway.createPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls).toHaveLength(1);
     });
 
     it("rejects invalid billing metadata before sending Paymob requests", async () => {
@@ -2724,9 +2762,17 @@ describe("PaymobGateway", () => {
       expect(voidEvent.status).toBe("cancelled");
     });
 
-    it("ignores unsigned is_refund/is_void when signed is_refunded/is_voided are present (PAYMOB-1)", () => {
-      // HMAC uses is_refunded/is_voided when present; forged action aliases must not flip status.
+    it("does not map is_refund true + is_refunded false + success to paid (PAYMOB-1)", () => {
+      // Child refund: action flag + success must not fall through to paid when
+      // current-state is present-and-false. HMAC has_parent_transaction is the
+      // signed child-txn signal; action flags are kept in that case.
       const refundEvent = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        is_refund: true,
+        is_refunded: false,
+        has_parent_transaction: true,
+      } as Partial<PaymobWebhookPayload["obj"]>));
+      const refundWithoutParent = gateway.parseWebhookEvent(createMockWebhookPayload({
         success: true,
         is_refund: true,
         is_refunded: false,
@@ -2735,10 +2781,31 @@ describe("PaymobGateway", () => {
         success: true,
         is_void: true,
         is_voided: false,
+        has_parent_transaction: true,
       } as Partial<PaymobWebhookPayload["obj"]>));
 
-      expect(refundEvent.status).toBe("paid");
-      expect(voidEvent.status).toBe("paid");
+      expect(refundEvent.status).not.toBe("paid");
+      expect(refundEvent.status).toBe("refund_completed");
+      expect(refundEvent.stableType).not.toBe("payment.succeeded");
+      expect(refundWithoutParent.status).not.toBe("paid");
+      expect(refundWithoutParent.stableType).not.toBe("payment.succeeded");
+      expect(voidEvent.status).not.toBe("paid");
+      expect(voidEvent.status).toBe("cancelled");
+      expect(voidEvent.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("does not map HMAC-covered error_occured + success to payment.succeeded (PAYMOB-3)", () => {
+      const event = gateway.parseWebhookEvent(createMockWebhookPayload({
+        success: true,
+        error_occured: true,
+      }));
+
+      expect(event.status).not.toBe("paid");
+      expect(event.status).toBe("failed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.stableType).toBe("payment.failed");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.event?.type).toBe("payment.failed");
     });
 
     it("does not treat failed refund or void action callbacks as completed states", () => {
@@ -2945,9 +3012,12 @@ describe("PaymobGateway", () => {
       expect(gateway.verifyWebhook(forged, signature)).toBe(true);
 
       const event = gateway.parseWebhookEvent(forged);
-      expect(event.status).toBe("paid");
+      // is_refund + success is a child-refund action — not paid, and unsigned
+      // refunded_amount_cents still cannot upgrade to full refunded (PAYMOB-1/2).
+      expect(event.status).not.toBe("paid");
+      expect(event.status).toBe("refund_completed");
       expect(event.status).not.toBe("refunded");
-      expect(event.stableType).toBe("payment.succeeded");
+      expect(event.stableType).not.toBe("payment.succeeded");
     });
 
     it("rejects forged unsigned refunded_amount_cents completeness after valid is_refunded HMAC (PAYMOB-2)", () => {
@@ -3284,6 +3354,9 @@ describe("PaymobGateway", () => {
       // TRANSACTION_RESPONSE distinguishes redirect callbacks from processed TRANSACTION webhooks.
       // Callers must not fulfill orders on redirect-only events.
       expect(event.type).toBe("TRANSACTION_RESPONSE");
+      // WEBHOOKS-1: redirect event.id is type-qualified so inbox keys do not
+      // collide with the later processed TRANSACTION on the same txn id.
+      expect(event.id).toBe("123456789:redirect");
       // merchant_order_id is unsigned — correlate via signed gatewayPaymentId only.
       expect(event.paymentId).toBeUndefined();
       expect(event.gatewayPaymentId).toBe("123456789");
@@ -3311,10 +3384,31 @@ describe("PaymobGateway", () => {
 
       expect(event.type).toBe("TRANSACTION_RESPONSE");
       expect(event.type).not.toBe("TRANSACTION");
+      expect(event.id).toBe("123456789:redirect");
       // Settlement arms must stay demoted — never look fulfillment-ready on redirect.
       expect(event.stableType).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
       expect(event.event?.type).toBe("payment.processing");
+    });
+
+    it("qualifies redirect event.id so it does not collide with processed TRANSACTION (WEBHOOKS-1)", () => {
+      const redirect = gateway.parseWebhookEvent({
+        id: "123456789",
+        pending: "false",
+        success: "true",
+        amount_cents: "10000",
+        currency: "SAR",
+        created_at: "2024-12-31T12:00:00Z",
+      });
+      const processed = gateway.parseWebhookEvent(createMockWebhookPayload({ id: 123456789 }));
+
+      expect(processed.id).toBe("123456789");
+      expect(redirect.id).toBe("123456789:redirect");
+      expect(redirect.id).not.toBe(processed.id);
+      expect(redirect.gatewayPaymentId).toBe("123456789");
+      expect(processed.gatewayPaymentId).toBe("123456789");
+      expect(redirect.type).toBe("TRANSACTION_RESPONSE");
+      expect(processed.type).toBe("TRANSACTION");
     });
 
     it("rejects Paymob callbacks with invalid timestamps instead of using the current time", () => {

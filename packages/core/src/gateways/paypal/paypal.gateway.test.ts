@@ -661,6 +661,49 @@ describe('PayPalGateway', () => {
             const event = gateway.parseWebhookEvent(payload);
 
             expect(event.gatewayPaymentId).toBe('capture-from-supplementary');
+            // PAYPAL-3: a capture_id string is not settlement evidence.
+            expect(event.status).toBe('processing');
+            expect(event.status).not.toBe('paid');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-123',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('ORDER.COMPLETED + capture_id only (no nested captures) is not paid (PAYPAL-3)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-order-capture-id-only',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-capture-id-only',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '25.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-ID-ONLY',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('processing');
+            expect(event.status).not.toBe('paid');
+            expect(event.gatewayPaymentId).toBe('CAPTURE-ID-ONLY');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-capture-id-only',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
         });
 
         it('should aggregate multi-capture amounts on ORDER.COMPLETED webhooks (PAYPAL-5)', () => {
@@ -1327,6 +1370,37 @@ describe('PayPalGateway', () => {
             // Audit PAYPAL-1: never publish original capture face as still-held after reverse.
             expect(event.amount).toBe(0);
             expect(event.currency).toBe('USD');
+        });
+
+        it('CAPTURE.REFUNDED refund-resource COMPLETED partial amount is not full refunded (PAYPAL-1)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-refund-resource',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'refund',
+                resource: {
+                    id: 'REFUND-SLICE',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '5.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-FOR-SLICE-REFUND',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.status).not.toBe('refunded');
+            expect(event.status).not.toBe('paid');
+            expect(event.gatewayPaymentId).toBe('CAPTURE-FOR-SLICE-REFUND');
+            expect(event.gatewayObjectId).toBe('REFUND-SLICE');
+            // This-op refund face is not remaining held — omit when capture totals unknown.
+            expect(event.amount).toBeUndefined();
+            expect(event.currency).toBeUndefined();
         });
 
         it('should preserve partially refunded capture webhook status', () => {
