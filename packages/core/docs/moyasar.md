@@ -49,7 +49,7 @@ Backend-safe `moyasarSource` types (raw `creditcard` PAN/CVC is **not** accepted
 | `applepay` | Apple Pay | `token`, `saveCard?`, `manualCapture?` |
 | `samsungpay` | Samsung Pay | `token`, `saveCard?`, `manualCapture?` |
 
-> **Card data safety**: This backend SDK never accepts raw `creditcard` sources (PAN, expiry, CVC). Moyasar requires cardholder data to go directly to Moyasar via Moyasar.js tokenization, Apple Pay, Samsung Pay, or STC Pay. A `type: 'creditcard'` source is rejected with `InvalidRequestError` before any HTTP request.
+> **Card data safety**: This backend SDK never accepts raw `creditcard` sources (PAN, expiry, CVC). Moyasar requires cardholder data to go directly to Moyasar via Moyasar.js tokenization, Apple Pay, Samsung Pay, or STC Pay. A `type: 'creditcard'` source is rejected with `InvalidRequestError` before any HTTP request. The TypeScript `MoyasarPaymentSource` union still includes `CreditCardSource` for Moyasar.js / PCI-compliant client collection; generic `CreatePaymentParams.moyasarSource` must not be treated as accepting raw cards at runtime. Prefer `MoyasarCreatePaymentParams` / `MoyasarBackendPaymentSource` for backend create.
 
 ### Token Payment (Moyasar.js)
 
@@ -351,9 +351,14 @@ amount-derived `partially_captured` — so type-only handlers cannot over-fulfil
 the envelope alone.
 
 **Incomplete paid snapshots:** When a 2xx body maps to `paid` but the money snapshot is
-incomplete (missing/non-finite `amount`, or missing/blank `currency`), the SDK demotes
-status to `processing` so `isPaidOutcome` stays false. Major-unit money fields are only
-published together with a non-empty currency.
+incomplete (missing/non-finite `amount`, missing/blank `currency`, or missing/non-finite/
+**finite 0** `captured`), the SDK demotes status to `processing` so `isPaidOutcome`
+stays false and dual-write is not `payment.succeeded`. Finite `captured: 0` is
+legitimate only for non-paid paths (e.g. `verified` → `setup_completed`). Do not
+treat the authorization total as settled captured. Major-unit money fields are only
+published together with a non-empty currency; a known `captured: 0` is published as
+`capturedAmount: 0` (and webhook `event.amount` 0 for paid/captured envelopes)
+rather than inventing the full total.
 
 ## Capture Payment
 

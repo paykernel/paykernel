@@ -19,6 +19,7 @@ import {
   MAX_SANITIZED_ERROR_LENGTH,
 } from "../limits";
 import { canonicalizeIsoZ, msFromIso, serializeResultJson } from "./shared";
+import { DEFAULT_DELETE_EXPIRED_LIMIT } from "../limits";
 
 type SendCall = { command: string; args: readonly string[] };
 
@@ -610,19 +611,23 @@ describe("reconciliation store mock port", () => {
     );
   });
 
-  it("PERF-1: listDue rediscovers via ZRANGEBYSCORE without SCAN", async () => {
+  it("PERF-1 / PERF-4: listDue rediscovers via ZRANGEBYSCORE without SCAN", async () => {
     const { port, calls } = createMockPort((call) => {
-      if (call.command === "ZRANGEBYSCORE") return ["j1"];
+      if (call.command === "ZRANGEBYSCORE") return ["j1", "j2"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
-        return ["ok", ...reconPack({ status: "scheduled", attempts: "0" })];
+        const key = String(call.args.find((a) => String(a).includes("j2")) ?? "j1");
+        const logical = key.endsWith("j2") ? "j2" : "j1";
+        return ["ok", ...reconPack({ key: logical, status: "scheduled", attempts: "0" })];
       }
       return null;
     });
     const store = createRedisReconciliationStore({ port });
     const due = await store.listDue({ limit: 10 });
-    expect(due.map((r) => r.key)).toContain("j1");
+    expect(due.map((r) => r.key)).toEqual(expect.arrayContaining(["j1", "j2"]));
     expect(calls.some((c) => c.command === "ZRANGEBYSCORE")).toBe(true);
     expect(calls.some((c) => c.command === "SCAN")).toBe(false);
+    const evals = calls.filter((c) => c.command === "EVAL" || c.command === "EVALSHA");
+    expect(evals.length).toBe(2);
   });
 
   it("REDIS-1: renew EVAL includes due index key for ZSET rescore", async () => {
@@ -850,6 +855,32 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
     const result = await store.deleteExpired({ before: beforeOffset });
     expect(luaBefore).toBe("2026-06-15T08:00:00.000Z");
     expect(result.deleted).toBe(0);
+  });
+
+  it("REDIS-CLEAN-1: deleteExpired default limit is bounded (not Infinity)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    expect(Number.isFinite(DEFAULT_DELETE_EXPIRED_LIMIT)).toBe(true);
+    let evals = 0;
+    const { port } = createMockPort((call) => {
+      if (call.command === "SCAN") {
+        const keys = Array.from({ length: 50 }, (_, i) => `psdk:v1:recon:job:${evals + i}`);
+        return ["1", keys];
+      }
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        evals++;
+        return ["deleted"];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({ port });
+    const result = await store.deleteExpired({ before: "2099-01-01T00:00:00.000Z" });
+    expect(result.deleted).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+    expect(evals).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+    const higher = await store.deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+      limit: 5,
+    });
+    expect(higher.deleted).toBe(5);
   });
 
   it("P1315-REDIS-5: invalid before fails closed before SCAN", async () => {

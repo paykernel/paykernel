@@ -8,6 +8,8 @@ import {
   canonicalizeIsoTimestamp,
   canonicalizeOptionalIsoTimestamp,
   classifyReconciliationClaimMiss,
+  reconciliationFailTemplates,
+  reconciliationMarkManualReviewTemplates,
   reconciliationTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
@@ -87,6 +89,8 @@ export function createDoReconciliationStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = claimSql(table);
+  const failTpl = reconciliationFailTemplates(ctx.namespace).sqlite;
+  const reviewTpl = reconciliationMarkManualReviewTemplates(ctx.namespace).sqlite;
   const repairTpl = reconciliationTimestampRepairTemplates(ctx.namespace).sqlite;
 
   function selectByKey(key: string): ReconciliationRecord | undefined {
@@ -279,49 +283,24 @@ export function createDoReconciliationStore(
       return withMappedErrors(() => {
         const now = clockNowIso(ctx.clock);
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
-
-        if (input.retryAt !== undefined) {
-          const retryAt = canonicalizeIsoTimestamp(input.retryAt, "retryAt");
-          const rows = ctx.getExecutor().query<Record<string, unknown>>(
-            `UPDATE ${table} SET
-               status = 'scheduled',
-               due_at = ?,
-               last_error_sanitized = ?,
-               lease_owner = NULL,
-               lease_token = NULL,
-               lease_expires_at = NULL,
-               updated_at = ?
-             WHERE key = ?
-               AND lease_token = ?
-               AND status = 'claimed'
-               AND lease_expires_at IS NOT NULL
-               AND lease_expires_at > ?
-             RETURNING key, status, generation`,
-            [retryAt, lastError, now, input.key, input.leaseToken, now],
-          );
-          if (rows.length === 0) {
-            throw new StoreLeaseLostError(
-              "fail: lease token rejected or key not found",
-            );
-          }
-          return;
-        }
-
+        // RECON-LEASE-1: matching token on claimed is enough (accept after lease expiry).
+        const statusTarget = input.retryAt !== undefined ? "scheduled" : "failed";
+        const dueAt =
+          input.retryAt !== undefined
+            ? canonicalizeIsoTimestamp(input.retryAt, "retryAt")
+            : now;
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
-          `UPDATE ${table} SET
-             status = 'failed',
-             last_error_sanitized = ?,
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             updated_at = ?
-           WHERE key = ?
-             AND lease_token = ?
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > ?
-           RETURNING key, status, generation`,
-          [lastError, now, input.key, input.leaseToken, now],
+          `${failTpl.sql}
+RETURNING key, status, generation`,
+          [
+            statusTarget,
+            statusTarget,
+            dueAt,
+            lastError,
+            now,
+            input.key,
+            input.leaseToken,
+          ],
         );
         if (rows.length === 0) {
           throw new StoreLeaseLostError(
@@ -339,22 +318,11 @@ export function createDoReconciliationStore(
             ? enforceMaxSanitizedError(input.note) ?? null
             : null;
 
-        // Active-lease fence (parity with complete/fail).
+        // RECON-LEASE-1: matching token on claimed (allowed after expiry).
         const rows = ctx.getExecutor().query<Record<string, unknown>>(
-          `UPDATE ${table} SET
-             status = 'manual_review',
-             last_error_sanitized = ?,
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             updated_at = ?
-           WHERE key = ?
-             AND lease_token = ?
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > ?
-           RETURNING key, status, generation`,
-          [note, now, input.key, input.leaseToken, now],
+          `${reviewTpl.sql}
+RETURNING key, status, generation`,
+          [note, now, input.key, input.leaseToken],
         );
         if (rows.length === 0) {
           throw new StoreLeaseLostError(
@@ -379,6 +347,8 @@ export function createDoReconciliationStore(
         // Soft-release abandoned expired claims so processDue/claimDue can
         // rediscover them after worker crash. STORES-1: restore unfinished claim
         // attempt (floor 0) so crash/deploy thrash does not burn maxAttempts.
+        // SQL-UPD-1 / WH-LIST-FAIL: re-check status='claimed' in the outer WHERE
+        // so concurrent pollers cannot double-decrement attempts.
         ctx.getExecutor().run(
           `UPDATE ${table} SET
              status = 'scheduled',
@@ -387,7 +357,8 @@ export function createDoReconciliationStore(
              lease_expires_at = NULL,
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = ?
-           WHERE key IN (
+           WHERE status = 'claimed'
+             AND key IN (
              SELECT key FROM (
                SELECT key FROM ${table}
                WHERE status = 'claimed'

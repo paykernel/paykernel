@@ -16,6 +16,8 @@ import {
   idempotencyTimestampRepairTemplates,
   pickClaimTemplate,
   reconciliationClaimTemplates,
+  reconciliationFailTemplates,
+  reconciliationMarkManualReviewTemplates,
   reconciliationTimestampRepairTemplates,
   webhookClaimTemplates,
   webhookCompleteTemplates,
@@ -965,6 +967,33 @@ describe("memory-relational failWebhook (WEBHOOKS-2 / P11-REF-1)", () => {
     });
     expect(store.getWebhook("wh-expire-fail")?.status).toBe("pending");
   });
+
+  it("RECON-LEASE-1: claim, advance clock past lease, failReconciliation with same token succeeds", async () => {
+    const start = Date.parse("2026-01-15T12:00:00.000Z");
+    const store = createMemoryRelationalStore({ nowMs: start });
+    await store.scheduleReconciliation({
+      key: "recon-expire-fail",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt: new Date(start).toISOString(),
+    });
+    const claimed = await store.claimReconciliation({
+      key: "recon-expire-fail",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") throw new Error("expected acquired");
+
+    store.setNowMs(start + 5_000);
+
+    await store.failReconciliation({
+      key: "recon-expire-fail",
+      leaseToken: claimed.leaseToken,
+      error: "handler timeout after lease expiry",
+    });
+    expect(store.getReconciliation("recon-expire-fail")?.status).toBe("failed");
+  });
 });
 
 describe("dialect claim templates", () => {
@@ -1083,6 +1112,19 @@ describe("dialect claim templates", () => {
     expect(whf.postgres.sql).toContain("lease_token = $2");
     expect(whf.postgres.sql).not.toMatch(/lease_expires_at\s*>/i);
     expect(whf.sqlite.sql).not.toMatch(/lease_expires_at\s*>/i);
+    const rcf = reconciliationFailTemplates();
+    expect(rcf.postgres.sql).toContain("lease_token = $2");
+    expect(rcf.postgres.sql).toContain("status = 'claimed'");
+    expect(rcf.postgres.sql).toContain("last_error_sanitized");
+    // RECON-LEASE-1: fail matches token on claimed only — not lease_expires_at > now.
+    expect(rcf.postgres.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(rcf.sqlite.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(rcf.postgres.sql).not.toMatch(/\blast_error\s*=/);
+    const rcm = reconciliationMarkManualReviewTemplates();
+    expect(rcm.postgres.sql).toContain("manual_review");
+    expect(rcm.postgres.sql).toContain("status = 'claimed'");
+    expect(rcm.postgres.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(rcm.sqlite.sql).not.toMatch(/lease_expires_at\s*>/i);
     // Must never write the non-existent bare column name.
     expect(whf.postgres.sql).not.toMatch(/\blast_error\s*=/);
     expect(whf.sqlite.sql).not.toMatch(/\blast_error\s*=/);
@@ -1187,5 +1229,12 @@ describe("dialect claim templates", () => {
     assertSetColsSubset("webhookComplete", webhookCompleteTemplates(), webhookMap, webhookDdl);
     assertSetColsSubset("webhookFail", webhookFailTemplates(), webhookMap, webhookDdl);
     assertSetColsSubset("reconciliationClaim", reconciliationClaimTemplates(), reconMap, reconDdl);
+    assertSetColsSubset("reconciliationFail", reconciliationFailTemplates(), reconMap, reconDdl);
+    assertSetColsSubset(
+      "reconciliationMarkManualReview",
+      reconciliationMarkManualReviewTemplates(),
+      reconMap,
+      reconDdl,
+    );
   });
 });

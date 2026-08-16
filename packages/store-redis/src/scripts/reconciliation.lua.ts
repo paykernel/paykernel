@@ -349,11 +349,8 @@ local m = hgetall_map(rec)
 if (m['status'] or '') ~= 'claimed' or (m['lease_token'] or '') ~= leaseToken then
   return {'lease_lost'}
 end
--- Parity with RECON_COMPLETE_LUA / WEBHOOK_FAIL_LUA / SQL fail: require unexpired lease
-local exp = tonumber(m['lease_expires_ms'] or '0') or 0
-if exp <= nowMs then
-  return {'lease_lost'}
-end
+-- RECON-LEASE-1 / WEBHOOKS-2: matching token on claimed is enough (accept after expiry).
+-- Complete stays unexpired-only. Soft-release via GET/listDue clears token first.
 
 if mode == 'retry' then
   redis.call('HSET', rec,
@@ -416,11 +413,7 @@ local m = hgetall_map(rec)
 if (m['status'] or '') ~= 'claimed' or (m['lease_token'] or '') ~= leaseToken then
   return {'lease_lost'}
 end
--- Parity with RECON_COMPLETE_LUA / RECON_FAIL_LUA / SQL markManualReview: require unexpired lease
-local exp = tonumber(m['lease_expires_ms'] or '0') or 0
-if exp <= nowMs then
-  return {'lease_lost'}
-end
+-- RECON-LEASE-1: matching token on claimed is enough (accept after expiry).
 
 redis.call('HSET', rec,
   'status', 'manual_review',

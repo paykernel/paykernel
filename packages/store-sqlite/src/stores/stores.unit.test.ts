@@ -454,7 +454,7 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(listed.find((r) => r.key === "job-due-z")).toBeDefined();
   });
 
-  it("markManualReview rejects expired lease with lease_lost", async () => {
+  it("RECON-LEASE-1: markManualReview after lease expiry with matching token records review", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteReconciliationStore({ executor, clock });
     const dueAt = new Date(clock.nowMs()).toISOString();
@@ -472,20 +472,20 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(claimed.kind).toBe("acquired");
     if (claimed.kind !== "acquired") return;
     clock.advance(2_000);
-    await expect(
-      store.markManualReview({
-        key: "manual-exp",
-        leaseToken: claimed.leaseToken,
-        note: "late",
-      }),
-    ).rejects.toBeInstanceOf(StoreLeaseLostError);
-    // Still reclaimable after expiry (not terminal).
+    await store.markManualReview({
+      key: "manual-exp",
+      leaseToken: claimed.leaseToken,
+      note: "late",
+    });
+    const after = await store.get("manual-exp");
+    expect(after?.status).toBe("manual_review");
+    expect(after?.lastError).toBe("late");
     const again = await store.claim({
       key: "manual-exp",
       owner: "w2",
       leaseMs: 5_000,
     });
-    expect(again.kind).toBe("acquired");
+    expect(again.kind).toBe("already_terminal");
   });
 
   it("createSqliteStores shares namespace and does not migrate", async () => {
@@ -837,6 +837,38 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     if (c3.kind === "acquired") {
       expect(c3.record.attempts).toBe(1);
     }
+  });
+
+  it("RECON-LEASE-1: fail after lease expiry with matching token records scheduled", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    await store.schedule({
+      key: "recon-hang",
+      subjectId: "pay_1",
+      reason: "timeout",
+      dueAt,
+    });
+    const claimed = await store.claim({
+      key: "recon-hang",
+      owner: "w_hang",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    clock.advance(2_000);
+    const retryAt = new Date(clock.nowMs() + 30_000).toISOString();
+    await store.fail({
+      key: "recon-hang",
+      leaseToken: claimed.leaseToken,
+      error: "handler_timeout",
+      retryAt,
+    });
+    const after = await store.get("recon-hang");
+    expect(after?.status).toBe("scheduled");
+    expect(after?.dueAt).toBe(retryAt);
+    expect(after?.leaseToken).toBeUndefined();
+    expect(after?.lastError).toBe("handler_timeout");
   });
 
 });

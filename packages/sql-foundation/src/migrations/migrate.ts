@@ -15,7 +15,7 @@ import {
 } from "../schema/namespace";
 import { LOGICAL_TABLES } from "../schema/tables";
 import { CURRENT_SCHEMA_VERSION } from "../schema/versions";
-import { buildFoundationMigrationSql } from "./definitions";
+import { buildFoundationMigrationSql, buildListIndexMigrationSql } from "./definitions";
 import { MIGRATIONS, checksumMigrationSql, type MigrationDefinition } from "./metadata";
 
 /**
@@ -173,6 +173,11 @@ function selectDialectSql(
   const qualify = (logical: string) => qualifyTable(logical, ns);
   if (migration.version === 1 && (dialect === "postgres" || dialect === "sqlite")) {
     return buildFoundationMigrationSql(dialect, qualify);
+  }
+  // PERF-3: qualify physical names the same way as v1 (prefix/schema).
+  if (migration.version === 2) {
+    const indexDialect = dialect === "postgres" ? "postgres" : "sqlite";
+    return buildListIndexMigrationSql(indexDialect, qualify);
   }
   if (dialect === "postgres") {
     return migration.sql.postgres ?? migration.sql.portable ?? "";

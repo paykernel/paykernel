@@ -391,6 +391,212 @@ describe("StripeGateway", () => {
       expect(event.paymentId).toBe("internal_checkout_123");
     });
 
+    it("STRIPE-CKO-1: hydrated checkout.session.completed after refund is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_hydrated_refunded",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_hydrated_refunded",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_hydrated_refunded",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              latest_charge: {
+                id: "ch_cs_hydrated_refunded",
+                amount_captured: 10000,
+                amount_refunded: 10000,
+                refunded: true,
+                currency: "usd",
+              },
+            },
+            metadata: { paymentId: "order_cs_refunded" },
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("USD");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CKO-1: hydrated checkout.session.completed partial refund is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_hydrated_partial_refund",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_hydrated_partial_refund",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_hydrated_partial_refund",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              latest_charge: {
+                id: "ch_cs_hydrated_partial_refund",
+                amount_captured: 10000,
+                amount_refunded: 2500,
+                refunded: false,
+                currency: "usd",
+              },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(25);
+      expect(event.currency).toBe("USD");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CKO-1: hydrated checkout.session.completed with charges.data refund is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_hydrated_charges_data",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_hydrated_charges_data",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_hydrated_charges_data",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              charges: {
+                data: [
+                  {
+                    id: "ch_cs_hydrated_charges_data",
+                    amount_captured: 10000,
+                    amount_refunded: 10000,
+                    refunded: true,
+                    currency: "usd",
+                  },
+                ],
+              },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("USD");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CKO-1: hydrated checkout.session.completed without charge snapshot is processing", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_thin_hydrate",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_thin_hydrate",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_thin_hydrate",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CKO-1: async_payment_succeeded after refund is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_async_refunded",
+        type: "checkout.session.async_payment_succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_async_refunded",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 8000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_async_refunded",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 8000,
+              amount_received: 8000,
+              latest_charge: {
+                id: "ch_cs_async_refunded",
+                amount_captured: 8000,
+                amount_refunded: 8000,
+                refunded: true,
+                currency: "usd",
+              },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(80);
+      expect(event.currency).toBe("USD");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
     it("should parse setup checkout completion as setup_completed", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_checkout_setup",
@@ -1537,6 +1743,83 @@ describe("StripeGateway", () => {
       expect(event.status).not.toBe("paid");
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CHG-1: payment_intent.succeeded omitted latest_charge + charges.data amount_refunded is not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_charges_data_refunded",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_charges_data_refunded",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            charges: {
+              data: [
+                {
+                  id: "ch_charges_data_refunded",
+                  amount_captured: 10000,
+                  amount_refunded: 10000,
+                  refunded: true,
+                  currency: "usd",
+                },
+              ],
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(100);
+      expect(event.currency).toBe("USD");
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("STRIPE-CHG-1: unexpanded latest_charge stays processing even when charges.data shows refunds", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_unexpanded_ignores_charges_data",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_unexpanded_ignores_charges_data",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: "ch_unexpanded_id",
+            charges: {
+              data: [
+                {
+                  id: "ch_unexpanded_id",
+                  amount_captured: 10000,
+                  amount_refunded: 10000,
+                  refunded: true,
+                  currency: "usd",
+                },
+              ],
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("refunded");
+      expect(event.stableType).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 

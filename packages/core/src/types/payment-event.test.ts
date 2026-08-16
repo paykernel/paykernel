@@ -686,6 +686,30 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.processing");
     });
 
+    it("PAYMOB-AUTH-REDIR: TRANSACTION_RESPONSE + authorized/is_auth → payment.processing", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", {
+          status: "authorized",
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", {
+          flags: { isAuth: true, success: true },
+        }),
+      ).toBe("payment.processing");
+      // Processed server TRANSACTION still publishes confirmed auth.
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          flags: { isAuth: true, success: true },
+        }),
+      ).toBe("payment.authorized");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "authorized",
+        }),
+      ).toBe("payment.authorized");
+    });
+
     it("TRANSACTION with paid status still → payment.succeeded", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
@@ -836,6 +860,40 @@ describe("mapProviderEventTypeToStable tables", () => {
         status: "failed",
       }),
     ).toBe("payment.failed");
+  });
+
+  it("CORE-6-EXT: stable payment.succeeded rematches auth/approved/partial/refunded", () => {
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "authorized",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "payment.succeeded", {
+        status: "approved",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paymob", "payment.succeeded", {
+        status: "partially_captured",
+      }),
+    ).toBe("payment.processing");
+    // No refund entity on this mapper — do not invent refund.completed.
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment.succeeded", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "partially_refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.authorized", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
   });
 });
 

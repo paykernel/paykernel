@@ -745,6 +745,8 @@ export function createMemoryRelationalStore(
           providedToken: input.leaseToken,
           leaseExpiresAt: existing?.leaseExpiresAt,
           nowMs: clockMs,
+          // RECON-LEASE-1: hang/timeout must record fail after expiry (WEBHOOKS-2 parity).
+          requireActiveLease: false,
         });
         if (!decision.ok) {
           throw new ReferenceLeaseLostError(`failReconciliation: ${decision.reason}`);

@@ -54,6 +54,7 @@ import {
   InsufficientFundsError,
   AuthenticationError,
   NetworkError,
+  PaymentAbortedError,
   InvalidRequestError,
   InvalidWebhookError,
   RateLimitError,
@@ -297,8 +298,10 @@ interface PaymobNormalizedTransactionWebhook {
 }
 
 class PaymobIndeterminateNetworkError extends NetworkError {
-  constructor(error: NetworkError) {
-    super(error.message, error.originalError, { afterProviderSubmit: true });
+  constructor(error: NetworkError | Error) {
+    const original =
+      error instanceof NetworkError ? (error.originalError ?? error) : error;
+    super(error.message, original, { afterProviderSubmit: true });
     this.name = "PaymobIndeterminateNetworkError";
   }
 }
@@ -390,6 +393,8 @@ export class PaymobGateway extends BaseGateway {
    * Capture/refund/void dedupe depends on a shared store. Warn when:
    * - No store in serverless/edge (in-memory cache is per-isolate), or
    * - Store is present but lacks atomic `reserve()` (TOCTOU get-then-set race).
+   * Mutations that receive an idempotencyKey still throw InvalidRequestError
+   * when reserve() is missing — the warn is an extra construction-time signal.
    */
   private warnIfIdempotencyStoreUnsafe(): void {
     const store = this.paymobConfig.idempotencyStore;
@@ -675,10 +680,13 @@ export class PaymobGateway extends BaseGateway {
         { unknownOnServerError: true },
       );
     }
-    const orderId = this.requireNumber(
+    // PAYMOB-FENCE-3: HTTP 200 after the mutating Orders POST may have created
+    // the order. Missing id is indeterminate — keep the create fence.
+    const orderId = this.requireMutationNumber(
       orderData.id,
       "Paymob Orders API response is missing id",
       orderData,
+      "Orders",
     );
 
     // Step 3: Generate payment key
@@ -715,10 +723,13 @@ export class PaymobGateway extends BaseGateway {
         { unknownOnServerError: true },
       );
     }
-    const paymentToken = this.requireString(
+    // PAYMOB-FENCE-3: HTTP 200 after the mutating Payment Keys POST may have
+    // issued a payable token. Missing token is indeterminate — keep the fence.
+    const paymentToken = this.requireMutationString(
       paymentKeyData.token,
       "Paymob Payment Keys API response is missing token",
       paymentKeyData,
+      "Payment Keys",
     );
 
     // Generate iframe URL
@@ -2877,9 +2888,11 @@ export class PaymobGateway extends BaseGateway {
     try {
       return await this.fetchPaymob(url, init, operation);
     } catch (error) {
-      // Caller abort is definitive cancellation before/without treating the
-      // money outcome as indeterminate transport failure.
-      if (error instanceof NetworkError) {
+      // PAYMOB-FENCE-2: once the mutating POST is on the wire (including
+      // body-read), timeout, drop, and caller abort are all indeterminate.
+      // PaymentAbortedError must not reach executeIdempotent as a retryable
+      // failure that deletes the fence.
+      if (error instanceof NetworkError || error instanceof PaymentAbortedError) {
         throw new PaymobIndeterminateNetworkError(error);
       }
 
@@ -2952,7 +2965,11 @@ export class PaymobGateway extends BaseGateway {
       status: "in_progress",
     };
     const promise = (async () => {
-      const storedRecord = await this.reserveStoredIdempotencyRecord(cacheKey, inProgressRecord);
+      const storedRecord = await this.reserveStoredIdempotencyRecord(
+        cacheKey,
+        inProgressRecord,
+        operation,
+      );
       if (storedRecord) {
         if (storedRecord.fingerprint !== fingerprint) {
           throw new InvalidRequestError(
@@ -2995,8 +3012,8 @@ export class PaymobGateway extends BaseGateway {
       }, operation);
       return result;
     }).catch(async (error) => {
-      // Network/5xx after POST and HTTP-200 body validation failures all fence:
-      // Paymob may have applied the money op (PAYMOB-1).
+      // Network/5xx/caller-abort after POST and HTTP-200 body validation
+      // failures all fence: Paymob may have applied the money op (PAYMOB-1).
       if (isPaymobIndeterminateError(error)) {
         const unknownAt = this.clock.nowMs();
         this.idempotencyCache.set(cacheKey, {
@@ -3059,46 +3076,67 @@ export class PaymobGateway extends BaseGateway {
       createdAt: number;
       expiresAt: number;
     },
+    operation: string,
   ) {
     const store = this.paymobConfig.idempotencyStore;
     if (!store) {
       return undefined;
     }
 
-    if (store.reserve) {
-      const existing = await store.reserve(key, record);
-      if (existing?.expiresAt && existing.expiresAt <= this.clock.nowMs()) {
-        await store.delete(key);
-        return await store.reserve(key, record);
-      }
-      return existing;
+    // PAYMOB-TOCTOU: never fall through to get-then-set. Concurrent workers
+    // can both observe a free key and double-apply (Moyasar parity).
+    if (!store.reserve) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires idempotencyStore.reserve() for atomic ` +
+          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
+          "get-then-set stores can double-apply refund/capture/void under concurrency.",
+        [{ path: ["idempotencyStore"] }],
+      );
     }
 
-    const existing = await this.getStoredIdempotencyRecord(key);
-    if (existing) {
-      return existing;
+    const existing = await store.reserve(key, record);
+    if (!existing) {
+      return undefined;
     }
 
-    await store.set(key, record);
-    return undefined;
+    if (!this.isStoredIdempotencyReplayExpired(existing)) {
+      return this.retainStoredIdempotencyFence(existing);
+    }
+
+    // isStoredIdempotencyReplayExpired is only true for completed + expiresAt.
+    await store.delete(key);
+    return await store.reserve(key, record);
   }
 
-  private async getStoredIdempotencyRecord(key: string) {
-    const store = this.paymobConfig.idempotencyStore;
-    if (!store) {
-      return undefined;
-    }
+  /** Completed replay cache may expire. unknown / in_progress never do. */
+  private isStoredIdempotencyReplayExpired(record: {
+    status?: "in_progress" | "completed" | "unknown";
+    expiresAt?: number;
+  }): boolean {
+    return (
+      record.status === "completed" &&
+      typeof record.expiresAt === "number" &&
+      record.expiresAt <= this.clock.nowMs()
+    );
+  }
 
-    const record = await store.get(key);
-    if (!record) {
-      return undefined;
+  /**
+   * Expired in_progress is an unknown mutation outcome (worker may have died
+   * after POST). Refuse retry; do not treat the key as free.
+   */
+  private retainStoredIdempotencyFence<
+    T extends {
+      status?: "in_progress" | "completed" | "unknown";
+      expiresAt?: number;
+    },
+  >(record: T): T {
+    if (
+      record.status === "in_progress" &&
+      typeof record.expiresAt === "number" &&
+      record.expiresAt <= this.clock.nowMs()
+    ) {
+      return { ...record, status: "unknown" };
     }
-
-    if (record.expiresAt <= this.clock.nowMs()) {
-      await store.delete(key);
-      return undefined;
-    }
-
     return record;
   }
 
@@ -3257,8 +3295,9 @@ export class PaymobGateway extends BaseGateway {
 
   /**
    * Require a non-empty string from a mutating HTTP 200 body (Intention id /
-   * checkout URL). Missing values are indeterminate — Paymob may have created
-   * a payable session; callers must retain the idempotency fence (PAYMOB-2).
+   * checkout URL / legacy payment token). Missing values are indeterminate —
+   * Paymob may have created a payable session; callers must retain the
+   * idempotency fence (PAYMOB-2 / PAYMOB-FENCE-3).
    */
   private requireMutationString(
     value: unknown,
@@ -3268,6 +3307,24 @@ export class PaymobGateway extends BaseGateway {
   ): string {
     if (typeof value === "string" && value.length > 0) {
       return value;
+    }
+    throw new PaymobIndeterminateResponseError(operation, message, raw);
+  }
+
+  /**
+   * Require a finite number from a mutating HTTP 200 body (legacy order id).
+   * Missing/invalid values are indeterminate — the order POST may already
+   * have applied; callers must retain the idempotency fence (PAYMOB-FENCE-3).
+   */
+  private requireMutationNumber(
+    value: unknown,
+    message: string,
+    raw: unknown,
+    operation: string,
+  ): number {
+    const parsed = this.parseNumber(value);
+    if (parsed !== undefined) {
+      return parsed;
     }
     throw new PaymobIndeterminateResponseError(operation, message, raw);
   }

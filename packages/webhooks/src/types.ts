@@ -299,6 +299,8 @@ export type CreateWebhookInboxEngineOptions = {
    * - soft-release via get/listRetryable restores unfinished crash reclaim
    * - **WEBHOOKS-2:** `fail` after lease expiry with matching token still
    *   records the attempt so hang/timeout paths hit this budget
+   * - **WH-LIST-FAIL:** if `listRetryable` already wiped the token, late
+   *   `fail()` is `lease_lost` → retryable `handler_failed` (never complete)
    * - provider redelivery while `availableAt` is in the future returns
    *   `not_available` / `scheduled_for_retry` (`reason: "not_available"`) and
    *   does not increment attempts
@@ -341,7 +343,8 @@ export type WebhookInboxEngine = {
    *   authenticity) → `invalid_webhook` (never claims). `{ ok: false }.reason`
    *   is sanitized before return.
    * - Parse-stage `InvalidWebhookError` (Paymob/Moyasar payload shape,
-   *   "parse failed") → `handler_failed { retryable: true }` (not forgery)
+   *   "parse failed"; always HTTP 403) → `handler_failed { retryable: true }`
+   *   (not forgery, not permanent 4xx — WEBHOOKS-403)
    * - Permanent structure/config throws → `handler_failed { retryable: false }`
    *   (408 / 409 / 425 / 429 stay retryable)
    * - Infrastructure / unknown throws (NetworkError, RateLimitError, TypeError,

@@ -285,8 +285,9 @@ export function paymentFromGatewayResult(
  *   infers `requires_action` — open money is not a settled operation.
  * - Bare pending/processing without action still → `requires_action` so callers
  *   never fulfill on non-terminal state.
- * - `success: false` + pending/processing/approved → `indeterminate` (not
- *   `failed`): the mutation may have been accepted; do not forge a decline.
+ * - `success: false` (or omitted) + pending/processing/approved **or** a
+ *   paid/authorized/partial/refunded snapshot → `indeterminate` (not `failed`):
+ *   the mutation may have been accepted; do not forge a decline (CORE-INF-1).
  */
 export function inferOperationOutcome(
     result: GatewayPaymentResult,
@@ -334,12 +335,19 @@ export function inferOperationOutcome(
         if (result.status === "failed") {
             return "declined";
         }
-        // P610-INF-2: non-terminal / pre-capture with API-not-ok is uncertain
-        // (request may have been accepted). Do not forge a definitive failure.
+        // P610-INF-2 / CORE-INF-1: API-not-ok (or omitted success) with a
+        // non-terminal, pre-capture, settled, or refunded snapshot is uncertain
+        // (request may have been accepted). Do not forge a definitive failure
+        // — retry-as-failed can double-charge or double-refund.
         if (
             result.status === "pending" ||
             result.status === "processing" ||
-            result.status === "approved"
+            result.status === "approved" ||
+            result.status === "paid" ||
+            result.status === "authorized" ||
+            result.status === "partially_captured" ||
+            result.status === "refunded" ||
+            result.status === "partially_refunded"
         ) {
             return "indeterminate";
         }
@@ -966,6 +974,8 @@ export function applyIndeterminateRefundOutcome(input: {
  *
  * **P610-INF-2:** `success: false` (or omitted `success`) + `pending` /
  * `processing` / `approved` is **indeterminate**, not `failed`.
+ * **CORE-INF-2:** the same rule applies to `status: "completed"` — `success`
+ * is not a decline; retry-as-failed can double-refund.
  */
 export function inferRefundOperationOutcome(
     result: GatewayRefundResult,
@@ -989,15 +999,17 @@ export function inferRefundOperationOutcome(
     if (result.status === "pending" && result.success) {
         return "pending";
     }
-    // P610-INF-2: success:false (or omitted success) + pending/processing/approved
-    // is uncertain — the refund request may have been accepted. Do not forge
-    // a definitive `failed` (retry can double-refund).
+    // P610-INF-2 / CORE-INF-2: success:false (or omitted success) +
+    // pending/processing/approved/completed is uncertain — the refund request
+    // may have been accepted (`completed` + success already returned succeeded
+    // above). Do not forge a definitive `failed` (retry can double-refund).
     const status = result.status as string;
     if (
         !result.success &&
         (status === "pending" ||
             status === "processing" ||
-            status === "approved")
+            status === "approved" ||
+            status === "completed")
     ) {
         return "indeterminate";
     }

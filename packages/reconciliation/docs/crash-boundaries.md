@@ -27,7 +27,7 @@ This document describes process crashes relative to reconciliation schedule, cla
 | After lookup, before complete | Result known in memory; store not yet terminal |
 | After complete / manual_review / failed | Terminal store status |
 
-Lease expiry while claimed: another worker may **reclaim** after `leaseExpiresAt` via atomic `store.claim`. Stale or expired `leaseToken` on complete / fail / `markManualReview` → `StoreLeaseLostError`.
+Lease expiry while claimed: another worker may **reclaim** after `leaseExpiresAt` via atomic `store.claim`. Stale or expired `leaseToken` on complete / `markManualReview` → `StoreLeaseLostError`. **`fail` with a matching `claimed` token succeeds after expiry** (RECON-LEASE-1) so a handler that overran the lease can still record the attempt. After reclaim, the prior token is fenced.
 
 For poll-based workers (`claimDue` / `processDue`), reclaim requires the job to reappear in `listDue` after the lease expires — adapters must soft-release / re-index expired claims (memory and SQL adapters soft-release inside `listDue`; Redis must re-index abandoned claimed keys off the due ZSET).
 
@@ -126,7 +126,9 @@ Worker A complete(T1) → StoreLeaseLostError
 Worker B owns the work
 ```
 
-Treat `StoreLeaseLostError` (or `isStoreLeaseLostError`) as **another worker owns the work**, not as payment failure.
+Treat `StoreLeaseLostError` (or `isStoreLeaseLostError`) as **another worker owns the work** when the row is claimed under a different token or already terminal — not as payment failure.
+
+**Handler hang / lease overrun (RECON-LEASE-1):** a worker that still holds the original token (or whose token was only wiped by `listDue` soft-release) must not livelock. `processDue` calls `fail` / `failAndReschedule` after hang/throw so attempts can reach `maxAttempts` when the adapter implements fail-after-expiry. If `fail` is still `lease_lost` (token already cleared), `processDue` increments `hangOverrun` and an instance hang counter; at `maxAttempts` it reclaims on a fresh lease and `markManualReview`. Crash-without-fail still soft-releases via `listDue` and does **not** burn attempts (that path is abandoned work, not a recorded hang).
 
 Renew also rotates the token: complete with the pre-renew token fails the same way.
 

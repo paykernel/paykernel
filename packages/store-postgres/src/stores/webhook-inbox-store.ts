@@ -304,6 +304,8 @@ export function createPostgresWebhookInboxStore(
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0); next claim of pending
         // re-increments so crash reclaim is net-zero vs maxAttempts handler budget.
+        // SQL-UPD-1 / WH-LIST-FAIL: re-check status='claimed' in the outer WHERE
+        // so concurrent pollers cannot double-decrement attempts.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'pending',
@@ -313,7 +315,8 @@ export function createPostgresWebhookInboxStore(
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = $1,
              updated_at = $1
-           WHERE key IN (
+           WHERE status = 'claimed'
+             AND key IN (
              SELECT key FROM ${table}
              WHERE status = 'claimed'
                AND lease_expires_at IS NOT NULL

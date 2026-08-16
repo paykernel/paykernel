@@ -58,7 +58,7 @@ On every successful acquire / reclaim / renew that issues a new lease:
 
 Token-gated methods (complete / fail / renew / markIndeterminate / markManualReview) must check the **current** token (and typically expected status). Stale/wrong token → lease lost — **not** a definitive business failure of the payment.
 
-**Lease clock nuance:** `complete` / `renew` still require an **active** (unexpired) lease. Webhook `fail` succeeds after lease expiry when the token still matches (WEBHOOKS-2: hang/timeout handlers must record the attempt). Reconciliation `fail` still requires an active lease per contract. `markIndeterminate` (idempotency A4) parks on `status = reserved` + matching `lease_token` **without** requiring `lease_expires_at > now`, so a worker can still preserve an uncertain outcome near/at expiry before reclaim. After another worker reclaims, the prior token fails. This is intentional near-expiry parking — not a post-reclaim fence hole.
+**Lease clock nuance:** `complete` / `renew` still require an **active** (unexpired) lease. Webhook `fail` succeeds after lease expiry when the token still matches (WEBHOOKS-2: hang/timeout handlers must record the attempt). Reconciliation `fail` / `markManualReview` likewise succeed after expiry with a matching token on `status = claimed` (RECON-LEASE-1: hang must still record retry / dead-letter / review so `maxAttempts` is effective). `complete` stays unexpired-only (crash boundary: a late complete after reclaim must not overwrite). `markIndeterminate` (idempotency A4) parks on `status = reserved` + matching `lease_token` **without** requiring `lease_expires_at > now`, so a worker can still preserve an uncertain outcome near/at expiry before reclaim. After another worker reclaims, the prior token fails. This is intentional near-expiry parking — not a post-reclaim fence hole.
 
 ---
 
@@ -141,7 +141,7 @@ Templates implement the **same logical transitions** as `evaluateClaim` / `decid
 
 Phase 12 adapters must execute templates as **prepared statements** and pass testkit conformance. Do not hide dialect differences in a leaky abstraction that loses atomicity.
 
-Complete / renew templates (`idempotencyCompleteTemplates`, `webhookCompleteTemplates`) fence with `WHERE lease_token = … AND status = … AND lease_expires_at > now` so stale tokens update **zero** rows. `webhookFailTemplates` match `lease_token` + `status = claimed` only — webhook fail succeeds after expiry with a matching token. Reconciliation fail still requires an active lease per contract.
+Complete / renew templates (`idempotencyCompleteTemplates`, `webhookCompleteTemplates`) fence with `WHERE lease_token = … AND status = … AND lease_expires_at > now` so stale tokens update **zero** rows. `webhookFailTemplates`, `reconciliationFailTemplates`, and `reconciliationMarkManualReviewTemplates` match `lease_token` + `status = claimed` only — fail / review succeed after expiry with a matching token (WEBHOOKS-2 / RECON-LEASE-1).
 
 ---
 

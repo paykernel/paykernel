@@ -12,8 +12,9 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * Raw credit card payment source.
- * Use this when collecting card details directly (requires PCI-DSS compliance).
+ * Raw credit card payment source for Moyasar.js / PCI-compliant collection only.
+ * Backend `createPayment` rejects `type: "creditcard"` (PAN/CVC) with
+ * InvalidRequestError — tokenize via Moyasar.js and send {@link CardTokenSource}.
  */
 export interface CreditCardSource {
     type: "creditcard";
@@ -153,8 +154,9 @@ export interface StcPaySource {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * All supported Moyasar payment source types.
- * This is a discriminated union - use the `type` field to narrow.
+ * All Moyasar payment source types (discriminated on `type`).
+ * {@link CreditCardSource} is Moyasar.js / PCI-only; backend create accepts
+ * token, applepay, samsungpay, and stcpay.
  */
 export type MoyasarPaymentSource =
     | CreditCardSource

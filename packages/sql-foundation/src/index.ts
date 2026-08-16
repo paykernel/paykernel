@@ -9,7 +9,12 @@
  */
 
 // ─── Schema versions ─────────────────────────────────────────────────────────
-export { CURRENT_SCHEMA_VERSION, SCHEMA_VERSION_V1, SCHEMA_FAMILY } from "./schema/versions";
+export {
+  CURRENT_SCHEMA_VERSION,
+  SCHEMA_VERSION_V1,
+  SCHEMA_VERSION_V2,
+  SCHEMA_FAMILY,
+} from "./schema/versions";
 
 // ─── Tables ──────────────────────────────────────────────────────────────────
 export {
@@ -100,6 +105,7 @@ export type {
 export {
   MIGRATIONS,
   MIGRATION_001,
+  MIGRATION_002,
   getMigration,
   listMigrationVersions,
   checksumMigrationSql,
@@ -107,11 +113,15 @@ export {
 export type { MigrationDefinition, MigrationSqlBody } from "./migrations/metadata";
 export {
   buildFoundationMigrationSql,
+  buildListIndexMigrationSql,
   indexLabel,
   INDEX_LABEL_MAX,
   FOUNDATION_SQL_POSTGRES,
   FOUNDATION_SQL_SQLITE,
   FOUNDATION_SQL_PORTABLE,
+  LIST_INDEX_SQL_POSTGRES,
+  LIST_INDEX_SQL_SQLITE,
+  LIST_INDEX_SQL_PORTABLE,
 } from "./migrations/definitions";
 export {
   migrate,
@@ -173,6 +183,8 @@ export {
   idempotencyCompleteTemplates,
   webhookCompleteTemplates,
   webhookFailTemplates,
+  reconciliationFailTemplates,
+  reconciliationMarkManualReviewTemplates,
   pickClaimTemplate,
 } from "./claims/templates";
 export type { SqlFragment, ClaimTemplateSet } from "./claims/templates";

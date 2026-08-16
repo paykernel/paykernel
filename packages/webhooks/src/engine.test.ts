@@ -3,7 +3,7 @@
  * Crash boundaries (10.6) live in engine.crash.test.ts.
  */
 import { describe, it, expect } from "bun:test";
-import { hashWebhookPayload } from "@paykernel/core";
+import { hashWebhookPayload, InvalidWebhookError } from "@paykernel/core";
 import {
   computePayloadHash,
   createWebhookInboxEngine,
@@ -277,6 +277,40 @@ describe("WEBHOOKS-3 fail lease_lost preserves non-retryable intent", () => {
     const rec = await store.get("stripe:evt_lease_lost_dl");
     // fail with expired matching token → dead_letter (or best-effort reclaim).
     expect(rec?.status).toBe("dead_letter");
+  });
+});
+
+describe("WH-LIST-FAIL fail after listRetryable soft-release", () => {
+  it("handler throw after listRetryable wiped token → handler_failed retryable (not complete)", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      clock,
+      defaultLeaseMs: 1_000,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_list_fail",
+      payloadHash: "h",
+      event: { id: "evt_list_fail" },
+      handler: async () => {
+        clock.advance(2_000);
+        // Concurrent poller soft-releases the expired claim (token gone).
+        const listed = await store.listRetryable({ limit: 10 });
+        expect(listed).toHaveLength(1);
+        expect(listed[0]?.status).toBe("pending");
+        expect(listed[0]?.leaseToken).toBeUndefined();
+        throw new Error("handler failed after expiry");
+      },
+    });
+
+    // At-least-once: handler already ran; fail lease_lost must not complete.
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    const rec = await store.get("stripe:evt_list_fail");
+    expect(rec?.status).not.toBe("completed");
   });
 });
 
@@ -950,7 +984,9 @@ describe("processWithVerifier", () => {
     const engine = createWebhookInboxEngine({ store, mode: "inline" });
     const err = new Error("Webhook verification failed");
     err.name = "InvalidWebhookError";
-    (err as Error & { code?: string }).code = "INVALID_WEBHOOK";
+    (err as Error & { code?: string; statusCode?: number }).code =
+      "INVALID_WEBHOOK";
+    (err as Error & { statusCode?: number }).statusCode = 403;
     const o = await engine.processWithVerifier({
       raw: {},
       verifyAndNormalize: async () => {
@@ -977,18 +1013,28 @@ describe("processWithVerifier", () => {
       name: "InvalidWebhookError",
       code: "INVALID_WEBHOOK",
       message: "Webhook parse failed: thin event shape",
+      statusCode: 403,
     },
     {
       label: "Paymob parse-stage InvalidWebhookError",
       name: "InvalidWebhookError",
       code: "INVALID_WEBHOOK",
       message: "Invalid Paymob transaction webhook payload",
+      statusCode: 403,
     },
     {
       label: "Moyasar parse-stage InvalidWebhookError",
       name: "InvalidWebhookError",
       code: "INVALID_WEBHOOK",
       message: "Invalid Moyasar webhook payload",
+      statusCode: 403,
+    },
+    {
+      label: "non-verify InvalidWebhookError 403 (fail-open, not forgery)",
+      name: "InvalidWebhookError",
+      code: "INVALID_WEBHOOK",
+      message: "Unexpected webhook envelope after verify",
+      statusCode: 403,
     },
   ] as const)(
     "$label → retryable not invalid_webhook (WEBHOOKS-1/5)",
@@ -1012,6 +1058,27 @@ describe("processWithVerifier", () => {
       expect(store.size).toBe(0);
     },
   );
+
+  it("WEBHOOKS-403: core InvalidWebhookError parse messages stay retryable (HTTP 403)", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    for (const message of [
+      "Invalid Paymob transaction webhook payload",
+      "Invalid Moyasar webhook payload",
+    ]) {
+      const err = new InvalidWebhookError(message);
+      expect(err.statusCode).toBe(403);
+      const o = await engine.processWithVerifier({
+        raw: {},
+        verifyAndNormalize: async () => {
+          throw err;
+        },
+        handler: async () => {},
+      });
+      expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    }
+    expect(store.size).toBe(0);
+  });
 
   it("permanent GatewayApiError structure → non-retryable handler_failed (WEBHOOKS-6)", async () => {
     const store = createMemoryWebhookInboxStore();

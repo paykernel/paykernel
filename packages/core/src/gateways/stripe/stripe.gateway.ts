@@ -860,21 +860,50 @@ function isUnexpandedStripeChargeId(value: unknown): boolean {
   return typeof value === "string" && value.length > 0;
 }
 
+type StripeIntentRefundSource = {
+  amount?: unknown;
+  amount_received?: unknown;
+  latest_charge?: unknown;
+  charges?: { data?: Array<StripeChargeSnapshot> };
+  payment_intent?: unknown;
+};
+
+/**
+ * Charge snapshot used for succeeded-intent refund math.
+ * Prefer expanded `latest_charge`. When that field is omitted (not an
+ * unexpanded id), fall through to `charges.data[0]` (legacy list shape).
+ * Unexpanded `latest_charge` ids stay unobservable here.
+ */
+function stripeChargeSnapshotForRefundStatus(
+  pi: StripeIntentRefundSource,
+): StripeChargeSnapshot | undefined {
+  const latest = pi.latest_charge;
+  if (typeof latest === "object" && latest !== null) {
+    return latest as StripeChargeSnapshot;
+  }
+  if (isUnexpandedStripeChargeId(latest)) {
+    return undefined;
+  }
+  const firstCharge = pi.charges?.data?.[0];
+  if (firstCharge && typeof firstCharge === "object") {
+    return firstCharge;
+  }
+  return undefined;
+}
+
 /**
  * Charge-level refund domain status on a succeeded PaymentIntent.
  * Aligns with getPayment (~1591-1607): amount_refunded > 0 vs captured base
  * (amount_received → amount_captured). `refunded: true` is a full refund.
  * Returns undefined when refunds are unproven (caller continues settled math).
  */
-function stripeSucceededIntentRefundStatus(pi: {
-  amount_received?: unknown;
-  latest_charge?: unknown;
-}): PaymentStatus | undefined {
-  const latest = pi.latest_charge;
-  if (typeof latest !== "object" || latest === null) {
+function stripeSucceededIntentRefundStatus(
+  pi: StripeIntentRefundSource,
+): PaymentStatus | undefined {
+  const charge = stripeChargeSnapshotForRefundStatus(pi);
+  if (charge === undefined) {
     return undefined;
   }
-  const charge = latest as StripeChargeSnapshot;
   if (charge.refunded === true) {
     return "refunded";
   }
@@ -895,18 +924,124 @@ function stripeSucceededIntentRefundStatus(pi: {
   return "partially_refunded";
 }
 
-function stripeExpandedChargeRefundedMinor(
-  latestCharge: unknown,
+function resolveStripeRefundedMinor(
+  source: StripeIntentRefundSource,
 ): number | undefined {
-  if (typeof latestCharge !== "object" || latestCharge === null) {
+  const fromIntent = (
+    intent: StripeIntentRefundSource,
+  ): number | undefined => {
+    const charge = stripeChargeSnapshotForRefundStatus(intent);
+    if (charge === undefined) {
+      return undefined;
+    }
+    const amountRefunded = finiteStripeMinor(charge.amount_refunded);
+    return amountRefunded !== undefined && amountRefunded > 0
+      ? amountRefunded
+      : undefined;
+  };
+
+  const top = fromIntent(source);
+  if (top !== undefined) {
+    return top;
+  }
+  const pi = source.payment_intent;
+  if (typeof pi === "object" && pi !== null) {
+    return fromIntent(pi as StripeIntentRefundSource);
+  }
+  return undefined;
+}
+
+/**
+ * Expanded PI / charge fields on a Checkout Session (thin-event hydration).
+ * Classic snapshot webhooks keep `payment_intent` as a string id and return
+ * undefined so `payment_status: paid` can stay `paid`.
+ */
+function stripeCheckoutHydratedRefundSource(session: {
+  payment_intent?: unknown;
+  latest_charge?: unknown;
+  charges?: { data?: Array<StripeChargeSnapshot> };
+  amount?: unknown;
+  amount_total?: unknown;
+  amount_received?: unknown;
+}): StripeIntentRefundSource | undefined {
+  const pi = session.payment_intent;
+  if (typeof pi === "object" && pi !== null) {
+    const intent = pi as StripeIntentRefundSource;
+    return {
+      amount: intent.amount ?? session.amount_total ?? session.amount,
+      amount_received: intent.amount_received ?? session.amount_received,
+      latest_charge: intent.latest_charge ?? session.latest_charge,
+      ...(intent.charges !== undefined
+        ? { charges: intent.charges }
+        : session.charges !== undefined
+          ? { charges: session.charges }
+          : {}),
+    };
+  }
+
+  const sessionCharge =
+    (typeof session.latest_charge === "object" &&
+      session.latest_charge !== null) ||
+    (session.charges?.data?.[0] !== undefined &&
+      typeof session.charges.data[0] === "object");
+  if (!sessionCharge) {
     return undefined;
   }
-  const amountRefunded = finiteStripeMinor(
-    (latestCharge as StripeChargeSnapshot).amount_refunded,
+  return {
+    amount: session.amount ?? session.amount_total,
+    amount_received: session.amount_received,
+    latest_charge: session.latest_charge,
+    ...(session.charges !== undefined ? { charges: session.charges } : {}),
+  };
+}
+
+/**
+ * `payment_status: paid` / async_payment_succeeded after possible hydration.
+ * Visible refunds use the PI.succeeded captured-base rule. Hydrated session
+ * or expanded PI with no charge snapshot fail-closes to processing.
+ */
+function stripeCheckoutPaidSessionStatus(session: {
+  payment_intent?: unknown;
+  latest_charge?: unknown;
+  charges?: { data?: Array<StripeChargeSnapshot> };
+  amount?: unknown;
+  amount_total?: unknown;
+  amount_received?: unknown;
+}): PaymentStatus {
+  const hydrated = stripeCheckoutHydratedRefundSource(session);
+  if (hydrated === undefined) {
+    return "paid";
+  }
+  if (isUnexpandedStripeChargeId(hydrated.latest_charge)) {
+    return "processing";
+  }
+  const refundStatus = stripeSucceededIntentRefundStatus(hydrated);
+  if (refundStatus !== undefined) {
+    return refundStatus;
+  }
+  if (stripeChargeSnapshotForRefundStatus(hydrated) === undefined) {
+    return "processing";
+  }
+  const settled = resolveStripeCapturedMinor(hydrated);
+  if (settled === undefined) {
+    return "processing";
+  }
+  if (
+    typeof hydrated.amount === "number" &&
+    Number.isFinite(hydrated.amount) &&
+    settled < hydrated.amount
+  ) {
+    return "partially_captured";
+  }
+  return "paid";
+}
+
+function isStripePaidLikeWebhookType(type: string): boolean {
+  return (
+    type === "payment_intent.succeeded" ||
+    type === "checkout.session.completed" ||
+    type === "checkout.session.async_payment_succeeded"
   );
-  return amountRefunded !== undefined && amountRefunded > 0
-    ? amountRefunded
-    : undefined;
 }
 
 function stripeHeader(
@@ -1134,10 +1269,11 @@ function toUrlEncoded(
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * When domain status is `processing` on `payment_intent.succeeded` (incomplete
- * settled snapshot — missing amount_received / amount_captured), demote
- * Phase-7 dual-write from `payment.succeeded` → `payment.processing` so
- * type-only fulfillment matches isPaidOutcome (STRIPE-3).
+ * When domain status is `processing` on a paid-like Stripe type (incomplete
+ * settled snapshot — missing amount_received / amount_captured, or Checkout
+ * hydration with unobservable refunds), demote Phase-7 dual-write from
+ * `payment.succeeded` → `payment.processing` so type-only fulfillment matches
+ * isPaidOutcome (STRIPE-3 / STRIPE-CKO-1).
  *
  * Partial capture (`partially_captured`) is demoted in webhook-event-map;
  * incomplete-settled `processing` is not always mapped there, so the gateway
@@ -1150,7 +1286,7 @@ function rematchSucceededIntentRefundWebhookDualWrite(
   event: WebhookEvent,
 ): WebhookEvent {
   if (
-    event.type !== "payment_intent.succeeded" ||
+    !isStripePaidLikeWebhookType(event.type) ||
     (event.status !== "refunded" && event.status !== "partially_refunded") ||
     event.stableType !== "payment.succeeded" ||
     !event.event ||
@@ -1190,7 +1326,7 @@ export function demoteIncompleteSettledWebhookDualWrite(
     event.status === "processing" || event.status === "partially_captured";
   if (
     !openMoney ||
-    event.type !== "payment_intent.succeeded" ||
+    !isStripePaidLikeWebhookType(event.type) ||
     event.stableType !== "payment.succeeded" ||
     !event.event ||
     event.event.type !== "payment.succeeded" ||
@@ -2246,7 +2382,10 @@ export class StripeGateway extends BaseGateway {
           mode?: string;
         };
         if (session.payment_status === "paid") {
-          status = "paid";
+          // STRIPE-CKO-1: payment_status stays paid after refunds. Hydrated
+          // PI/charge snapshots rematch refunds; missing charge snapshot
+          // fail-closes to processing. Classic string payment_intent stays paid.
+          status = stripeCheckoutPaidSessionStatus(session);
         } else if (
           session.payment_status === "no_payment_required" &&
           session.status === "complete"
@@ -2284,7 +2423,9 @@ export class StripeGateway extends BaseGateway {
         break;
       }
       case "checkout.session.async_payment_succeeded":
-        status = "paid";
+        status = stripeCheckoutPaidSessionStatus(
+          object as unknown as StripeCheckoutSession,
+        );
         break;
       case "checkout.session.async_payment_failed":
         status = "failed";
@@ -2421,15 +2562,16 @@ export class StripeGateway extends BaseGateway {
         }
     }
 
-    // STRIPE-2: refunded PI snapshots publish cumulative amount_refunded
-    // (same as charge.refunded) so rematched refund.completed dual-write
-    // cannot over-credit wallets with the captured total.
+    // STRIPE-2 / STRIPE-CKO-1: refunded PI / hydrated Checkout snapshots
+    // publish cumulative amount_refunded so rematched refund.completed
+    // cannot over-credit wallets with the captured / session total.
     if (
-      object.object === "payment_intent" &&
+      (object.object === "payment_intent" ||
+        object.object === "checkout.session") &&
       (status === "refunded" || status === "partially_refunded")
     ) {
-      const refundedMinor = stripeExpandedChargeRefundedMinor(
-        (object as { latest_charge?: unknown }).latest_charge,
+      const refundedMinor = resolveStripeRefundedMinor(
+        object as StripeIntentRefundSource,
       );
       amount =
         refundedMinor !== undefined ? convertMinor(refundedMinor) : undefined;
@@ -2825,7 +2967,8 @@ export class StripeGateway extends BaseGateway {
   /**
    * Succeeded PaymentIntent status from money fields.
    * - unexpanded `latest_charge` id → processing (refunds unobservable)
-   * - charge amount_refunded > 0 / refunded → refunded / partially_refunded
+   * - charge amount_refunded > 0 / refunded (expanded latest_charge, or
+   *   omitted latest_charge + charges.data[0]) → refunded / partially_refunded
    * - settled (amount_received → amount_captured) < amount → partially_captured
    * - settled known and not partial → paid
    * - settled missing → processing (fail closed; never claim full paid)

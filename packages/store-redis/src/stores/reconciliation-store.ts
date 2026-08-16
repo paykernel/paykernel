@@ -35,7 +35,7 @@ import {
   recordKey,
   reconciliationDueIndexKey,
 } from "../keys";
-import { enforceMaxSanitizedError } from "../limits";
+import { DEFAULT_DELETE_EXPIRED_LIMIT, enforceMaxSanitizedError } from "../limits";
 import {
   parseReconciliationRecord,
   parseTaggedResult,
@@ -298,8 +298,10 @@ export function createRedisReconciliationStore(
             ? canonicalizeIsoZ(input.now)
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // PERF-1: ZSET is scored at due_ms / lease_expires_ms (claim + REDIS-1
-        // renew). Do not SCAN every record on the poll path.
+        // PERF-1 / PERF-4: ZSET scored at due_ms / lease_expires_ms (claim +
+        // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
+        // ZRANGE members in one Promise.all wave (N keyed Lua GETs; a multi-key
+        // GET Lua still walks N hashes and is not cheaper enough to add).
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",
@@ -326,7 +328,7 @@ export function createRedisReconciliationStore(
         const beforeIso = canonicalizeIsoZ(input.before);
         const beforeMs = msFromIso(beforeIso);
         const match = scanMatchForStore(ctx.keys, "recon");
-        const limit = input.limit ?? Number.POSITIVE_INFINITY;
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         let deleted = 0;
         let cursor = "0";
         do {

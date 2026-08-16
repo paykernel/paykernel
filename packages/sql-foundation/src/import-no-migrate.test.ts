@@ -21,7 +21,7 @@ describe("package import has no migrate side effects", () => {
     const mod = await import("./index");
     expect(executeCalls).toBe(0);
     expect(typeof mod.migrate).toBe("function");
-    expect(mod.CURRENT_SCHEMA_VERSION).toBe(1);
+    expect(mod.CURRENT_SCHEMA_VERSION).toBe(2);
 
     // Only explicit call runs execute
     await mod.migrate(spyExecutor, { dialect: "sqlite" });

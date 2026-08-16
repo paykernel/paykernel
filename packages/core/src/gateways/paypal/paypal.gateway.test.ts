@@ -873,6 +873,168 @@ describe('PayPalGateway', () => {
             })).toBe(false);
         });
 
+        it('ORDER multi-capture last/related REFUNDED + one held sibling uses held capture id (PAYPAL-ID-1)', () => {
+            const payload = {
+                id: 'WH-multi-capture-held-not-last',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-multi-held-not-last',
+                    status: 'COMPLETED',
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-REFUNDED-LAST',
+                        },
+                    },
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-STILL-HELD',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAPTURE-REFUNDED-LAST',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            // Remaining-held money must attach to the still-held capture, not
+            // last / related_ids.capture_id (the already-refunded slice).
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBe(50);
+            expect(event.gatewayPaymentId).toBe('CAPTURE-STILL-HELD');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-REFUNDED-LAST');
+            expect(event.gatewayPaymentId).not.toBe('order-multi-held-not-last');
+        });
+
+        it('ORDER multi-capture two still-held siblings keeps order id (PAYPAL-ID-1)', () => {
+            const payload = {
+                id: 'WH-multi-capture-two-held',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-two-held',
+                    status: 'COMPLETED',
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-HELD-B',
+                        },
+                    },
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-HELD-A',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAPTURE-HELD-B',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('paid');
+            expect(event.gatewayPaymentId).toBe('order-two-held');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-HELD-A');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-HELD-B');
+        });
+
+        it('CAPTURE.REFUNDED multi-capture related_ids refunded slice uses held capture (PAYPAL-ID-1)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-siblings',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-capture-refunded-siblings',
+                    status: 'COMPLETED',
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-REFUNDED-RELATED',
+                        },
+                    },
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-HELD-SIBLING',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                    {
+                                        id: 'CAPTURE-REFUNDED-RELATED',
+                                        status: 'REFUNDED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '50.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.gatewayPaymentId).toBe('CAPTURE-HELD-SIBLING');
+            expect(event.gatewayPaymentId).not.toBe('CAPTURE-REFUNDED-RELATED');
+            expect(event.gatewayPaymentId).not.toBe('order-capture-refunded-siblings');
+            expect(event.stableType).toBe('refund.pending');
+            expect(event.event?.type).toBe('refund.pending');
+        });
+
         it('ORDER multi-capture all REFUNDED → amount 0 remaining with currency (PAYPAL-5)', () => {
             const payload = {
                 id: 'WH-multi-all-refunded',
@@ -1401,6 +1563,41 @@ describe('PayPalGateway', () => {
             // This-op refund face is not remaining held — omit when capture totals unknown.
             expect(event.amount).toBeUndefined();
             expect(event.currency).toBeUndefined();
+            // PAYPAL-DW-1: refund-shaped COMPLETED must not type-only settle.
+            expect(event.type).toBe('PAYMENT.CAPTURE.REFUNDED');
+            expect(event.stableType).toBe('refund.pending');
+            expect(event.stableType).not.toBe('refund.completed');
+            expect(event.event?.type).toBe('refund.pending');
+            expect(event.event?.type).not.toBe('refund.completed');
+            expect(event.provider?.eventType).toBe('PAYMENT.CAPTURE.REFUNDED');
+        });
+
+        it('CAPTURE.REFUNDED refund-resource COMPLETED is not type-only refund.completed (PAYPAL-DW-1)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-type-only',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'refund',
+                resource: {
+                    id: 'REFUND-TYPE-ONLY',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '5.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            capture_id: 'CAPTURE-TYPE-ONLY',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.stableType).not.toBe('refund.completed');
+            expect(event.event?.type).not.toBe('refund.completed');
+            expect(event.stableType).toBe('refund.pending');
+            expect(event.event?.type).toBe('refund.pending');
         });
 
         it('should preserve partially refunded capture webhook status', () => {
@@ -1428,6 +1625,9 @@ describe('PayPalGateway', () => {
             // Audit PAYPAL-2: face without net remaining → omit (not 11 still held).
             expect(event.amount).toBeUndefined();
             expect(event.currency).toBeUndefined();
+            // Incomplete capture settlement must not type-only settle as refund.completed.
+            expect(event.stableType).toBe('refund.pending');
+            expect(event.event?.type).toBe('refund.pending');
         });
 
         it('CAPTURE.REFUNDED fully refunded publishes 0 remaining not face (audit PAYPAL-2)', () => {
@@ -2213,6 +2413,100 @@ describe('PayPalGateway', () => {
 
             expect(capturedHeaders).not.toBeNull();
             expect(capturedHeaders!['PayPal-Request-Id']).toBe('unique-key-abc');
+        });
+
+        it('trims idempotencyKey before sending PayPal-Request-Id (PAYPAL-IDEM-1)', async () => {
+            let capturedHeaders: Record<string, string> | null = null;
+
+            globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('checkout/orders') && init?.headers) {
+                    capturedHeaders = init.headers as Record<string, string>;
+                }
+
+                return createMockResponse({
+                    id: 'ORDER-TRIM-IDEM',
+                    status: 'CREATED',
+                    links: [
+                        { rel: 'payer-action', href: 'https://paypal.com/checkoutnow?token=ORDER-TRIM-IDEM' },
+                    ],
+                });
+            }) as unknown as typeof fetch;
+
+            await gateway.createPayment({
+                amount: 50,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+                idempotencyKey: '  unique-key-abc  ',
+            });
+
+            expect(capturedHeaders).not.toBeNull();
+            expect(capturedHeaders!['PayPal-Request-Id']).toBe('unique-key-abc');
+        });
+
+        it('empty/whitespace idempotencyKey still sends PayPal-Request-Id (PAYPAL-IDEM-1)', async () => {
+            const generatedId = 'generated-paypal-request-id-uuid';
+            const idemGateway = new PayPalGateway(
+                PAYPAL_TEST_CONFIG,
+                hooksManager,
+                undefined,
+                { randomUUID: () => generatedId },
+            );
+
+            // Defense-in-depth: getRequestId must not keep "" / whitespace
+            // ("" ?? uuid is "" and if (requestId) would skip the header).
+            expect((idemGateway as any).getRequestId('', 108)).toBe(generatedId);
+            expect((idemGateway as any).getRequestId('   ', 108)).toBe(generatedId);
+            expect((idemGateway as any).getRequestId(undefined, 108)).toBe(generatedId);
+
+            const emptyHeaders = (idemGateway as any).createJsonHeaders(
+                'token',
+                (idemGateway as any).getRequestId('', 108),
+            ) as Record<string, string>;
+            expect(emptyHeaders['PayPal-Request-Id']).toBe(generatedId);
+
+            let capturedHeaders: Record<string, string> | null = null;
+            globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('checkout/orders') && init?.headers) {
+                    capturedHeaders = init.headers as Record<string, string>;
+                }
+
+                return createMockResponse({
+                    id: 'ORDER-EMPTY-IDEM',
+                    status: 'CREATED',
+                    links: [
+                        { rel: 'payer-action', href: 'https://paypal.com/checkoutnow?token=ORDER-EMPTY-IDEM' },
+                    ],
+                });
+            }) as unknown as typeof fetch;
+
+            // Public path: omitted key still sends the generated Request-Id
+            // so in-process withRetry cannot double-mutate.
+            await idemGateway.createPayment({
+                amount: 50,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            });
+
+            expect(capturedHeaders).not.toBeNull();
+            expect(capturedHeaders!['PayPal-Request-Id']).toBe(generatedId);
         });
 
         it('should use payer-action approval links returned by current PayPal APIs', async () => {

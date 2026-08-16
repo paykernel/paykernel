@@ -168,7 +168,14 @@ export type CompleteReconciliationInput = {
 
 export type FailReconciliationInput = {
   key: ReconciliationKey;
-  /** Required active lease token. Wrong/stale/expired → {@link StoreLeaseLostError}. */
+  /**
+   * Matching lease token on a `claimed` row. Wrong/stale (or after reclaim)
+   * → {@link StoreLeaseLostError}.
+   *
+   * **RECON-LEASE-1:** matching token + `status === "claimed"` succeeds even
+   * after lease expiry so hang/timeout handlers still record the attempt.
+   * `complete` / `renew` / `markManualReview` still require an **unexpired** lease.
+   */
   leaseToken: LeaseToken;
   /** Sanitized error only — never secrets or raw payloads. */
   error: string;
@@ -197,9 +204,14 @@ export type ListDueInput = {
  * Memory: single-isolate only (NON-DISTRIBUTED).
  *
  * ### Lease-gated mutators
- * After acquire, `renew` / `complete` / `fail` / `markManualReview` **require the
+ * After acquire, `renew` / `complete` / `markManualReview` **require the
  * active `leaseToken`**. Wrong/stale/expired → {@link StoreLeaseLostError} or
  * renew `lease_lost`. Stale workers must not complete after lease reclaim or renew.
+ *
+ * **RECON-LEASE-1:** `fail` requires a matching token on a `claimed` row and
+ * **succeeds after lease expiry** so a hang/timeout handler can still record
+ * the attempt. Soft-release is `get` / `listDue` only. After another worker
+ * reclaims, the prior token is fenced.
  */
 export interface ReconciliationStore extends WithTransaction {
   schedule(input: ScheduleReconciliationInput): Promise<ScheduleResult>;
@@ -224,7 +236,9 @@ export interface ReconciliationStore extends WithTransaction {
 
   /**
    * Fail terminal or reschedule via `retryAt`.
-   * **Requires active `leaseToken`.** Stale/wrong → {@link StoreLeaseLostError}.
+   * **Requires matching `leaseToken` on `claimed`.** Succeeds after lease
+   * expiry (RECON-LEASE-1). Stale/wrong/reclaimed → {@link StoreLeaseLostError}.
+   * Do not soft-release the row before applying this mutation.
    */
   fail(input: FailReconciliationInput): Promise<void>;
 

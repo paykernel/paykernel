@@ -131,8 +131,9 @@ const outcome = await engine.processWithVerifier({
   verifyAndNormalize: async (raw) => {
     // Let throws propagate. Classification (WEBHOOKS-1 / WEBHOOKS-3 / WEBHOOKS-4):
     // - verify-false InvalidWebhookError / ok:false → invalid_webhook (~400 forgery)
-    // - parse-stage InvalidWebhookError (Paymob/Moyasar payload shape) →
-    //   handler_failed { retryable: true } (~5xx; not forgery)
+    // - parse-stage InvalidWebhookError (Paymob/Moyasar payload shape;
+    //   core always uses HTTP 403) → handler_failed { retryable: true }
+    //   (~5xx; not forgery / not permanent 4xx)
     // - RateLimitError / TypeError / NetworkError / unknown Error →
     //   handler_failed { retryable: true } (~5xx; providers redeliver)
     // - Permanent structure GatewayApiError → handler_failed { retryable: false }
@@ -231,6 +232,7 @@ Policy notes:
 - Store claim `not_available` (backoff before `availableAt`) → durable `scheduled_for_retry { reason: "not_available", availableAt?, retryAfterMs? }` without burning attempts. **Inline maps `not_available` to `handler_failed { retryable: true }`** (never `scheduled_for_retry`). Adapters should prefer **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will process.
 - `scheduled_for_retry { reason: "parked" }` is emitted **only** after `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` → `already_processing` or `handler_failed { retryable: true }` (the row stays claimed — do **not** HTTP 200 that park). Safe to 200 **only** when a `processRetryable` worker is guaranteed.
 - Handler success but `complete` loses lease → `handler_failed { retryable: true }` (do **not** report `processed`).
+- **WH-LIST-FAIL:** handler throw after lease expiry, when a concurrent `listRetryable` already soft-released the token, is `lease_lost` on `fail()`. Engine still returns `handler_failed { retryable: true }` (best-effort re-record) and **never `complete`s** — at-least-once; handlers must be idempotent.
 - **Handlers must be idempotent** — reclaim after crash re-runs work under a new lease. Soft-release of an expired claim **restores** the unfinished attempt so crash/deploy reclaim does not burn `maxAttempts`.
 - Durable redrive never materializes stub events: missing `payloadRef` → retryable `handler_failed` (row stays pending; WEBHOOKS-4).
 - Terminal claim outcomes (`already_completed` / `duplicate_failed`) take precedence over `payload_hash_conflict` so completed rows redelivered with a mismatched hash still ACK as done (WEBHOOKS-1).

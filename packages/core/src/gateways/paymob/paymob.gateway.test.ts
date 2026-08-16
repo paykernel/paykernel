@@ -112,8 +112,10 @@ class ExpiredThenContendedIdempotencyStore implements PaymobIdempotencyStore {
     if (this.reserveCalls === 1) {
       return {
         ...record,
+        status: "completed",
         createdAt: Date.now() - 25 * 60 * 60 * 1000,
         expiresAt: Date.now() - 1000,
+        result: { gatewayId: "expired_completed" },
       };
     }
 
@@ -828,6 +830,57 @@ describe("PaymobGateway", () => {
       );
     });
 
+    it("keeps the idempotency fence after legacy HTTP 200 missing payment token (PAYMOB-FENCE-3)", async () => {
+      const legacyGateway = new PaymobGateway(PAYMOB_LEGACY_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 777 }),
+        jsonResponse({}),
+        jsonResponse({ token: "payment_key_retry" }),
+      );
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        currency: "EGP",
+        idempotencyKey: "legacy_200_missing_token",
+      };
+
+      const first = await legacyGateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(legacyGateway.createPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://accept.paymob.com/api/auth/tokens",
+        "https://accept.paymob.com/api/ecommerce/orders",
+        "https://accept.paymob.com/api/acceptance/payment_keys",
+      ]);
+    });
+
+    it("keeps the idempotency fence after legacy HTTP 200 missing order id (PAYMOB-FENCE-3)", async () => {
+      const legacyGateway = new PaymobGateway(PAYMOB_LEGACY_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({}),
+        jsonResponse({ id: 888 }),
+        jsonResponse({ token: "payment_key_retry" }),
+      );
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        currency: "EGP",
+        idempotencyKey: "legacy_200_missing_order_id",
+      };
+
+      const first = await legacyGateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(legacyGateway.createPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://accept.paymob.com/api/auth/tokens",
+        "https://accept.paymob.com/api/ecommerce/orders",
+      ]);
+    });
+
     it("rejects whitespace-only Paymob payment method overrides", async () => {
       await expect(gateway.createPayment({
         ...VALID_CREATE_PARAMS,
@@ -1532,6 +1585,120 @@ describe("PaymobGateway", () => {
 
       expect(second).toEqual(first);
       expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("refuses same-key refund after an expired durable unknown fence (PAYMOB-FENCE-1)", async () => {
+      const ttlMs = 24 * 60 * 60 * 1_000;
+      const clock = fakeClock(1_700_000_000_000);
+      const idempotencyStore = new MemoryIdempotencyStore();
+      const firstGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        new Error("socket closed after gateway accepted request"),
+        jsonResponse({ token: "auth_token_456" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 999, success: true, refunded_amount_cents: 5000 }),
+      );
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "expired_unknown_refund",
+      };
+
+      const first = await firstGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(idempotencyStore.records.get("refundPayment:expired_unknown_refund")?.status).toBe(
+        "unknown",
+      );
+
+      clock.advance(ttlMs + 1);
+      const secondGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+
+      await expect(secondGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(idempotencyStore.records.get("refundPayment:expired_unknown_refund")?.status).toBe(
+        "unknown",
+      );
+      expect(fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund"))).toHaveLength(1);
+    });
+
+    it("treats an expired durable in_progress fence as unknown and does not re-reserve (PAYMOB-FENCE-1)", async () => {
+      const clock = fakeClock(1_700_000_000_000);
+      const deleted: string[] = [];
+      const store: PaymobIdempotencyStore = {
+        reserveCalls: 0,
+        async reserve(_key: string, record: PaymobIdempotencyRecord) {
+          this.reserveCalls += 1;
+          return {
+            ...record,
+            status: "in_progress",
+            createdAt: clock.nowMs() - 25 * 60 * 60 * 1000,
+            expiresAt: clock.nowMs() - 1,
+          };
+        },
+        get: () => undefined,
+        set: () => {},
+        delete: (key: string) => {
+          deleted.push(key);
+        },
+      } as PaymobIdempotencyStore & { reserveCalls: number };
+      const actionGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore: store },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 999, success: true, refunded_amount_cents: 5000 }),
+      );
+
+      await expect(actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "expired_in_progress_refund",
+      })).rejects.toThrow(/unknown gateway outcome/i);
+      expect((store as PaymobIdempotencyStore & { reserveCalls: number }).reserveCalls).toBe(1);
+      expect(deleted).toEqual([]);
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("throws when idempotencyStore lacks reserve() on mutations (PAYMOB-TOCTOU)", async () => {
+      const storeWithoutReserve: PaymobIdempotencyStore = {
+        get: () => undefined,
+        set: () => {},
+        delete: () => {},
+      };
+      const actionGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore: storeWithoutReserve },
+        hooksManager,
+      );
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 999, success: true, refunded_amount_cents: 5000 }),
+      );
+
+      await expect(actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "no_reserve_refund",
+      })).rejects.toThrow(/requires idempotencyStore\.reserve/);
+      expect(fetchCalls).toHaveLength(0);
     });
 
     it("does not proceed when an expired shared idempotency record is replaced by another worker", async () => {
@@ -2435,6 +2602,71 @@ describe("PaymobGateway", () => {
         amount: 50,
         currency: "SAR",
       })).rejects.toThrow(InsufficientFundsError);
+    });
+
+    it("keeps the idempotency fence when caller aborts after Intention POST (PAYMOB-FENCE-2)", async () => {
+      const controller = new AbortController();
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(input), init });
+        controller.abort();
+        throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+      }) as typeof fetch;
+
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "intention_abort_after_post",
+        signal: controller.signal,
+      };
+      const first = await gateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(gateway.createPayment({
+        ...VALID_CREATE_PARAMS,
+        idempotencyKey: "intention_abort_after_post",
+      })).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("keeps the idempotency fence when caller aborts after refund POST (PAYMOB-FENCE-2)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      const controller = new AbortController();
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        fetchCalls.push({ url, init });
+        if (url.endsWith("/api/auth/tokens")) {
+          return jsonResponse({ token: "auth_token_123" });
+        }
+        if (url.includes("/api/acceptance/transactions/")) {
+          return jsonResponse({
+            id: 123,
+            amount_cents: 5000,
+            refunded_amount_cents: 0,
+            currency: "SAR",
+          });
+        }
+        controller.abort();
+        throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" });
+      }) as typeof fetch;
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_abort_after_post",
+        signal: controller.signal,
+      };
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_abort_after_post",
+      })).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund"))).toHaveLength(1);
     });
 
     it("aborts Paymob requests when the configured timeout is exceeded", async () => {
@@ -3627,8 +3859,10 @@ describe("PaymobGateway", () => {
       expect(event.type).toBe("TRANSACTION_RESPONSE");
       // Unsigned amounts/is_captured must not promote auth → paid/partial.
       expect(event.status).toBe("authorized");
-      // Redirect demotes paid-like settlement to processing; authorized stays authorized.
-      expect(event.stableType).toBe("payment.authorized");
+      // AUTH redirect is browser-only (PAYMOB-AUTH-REDIR): dual-write is
+      // processing, same as sale redirect. Domain status stays authorized.
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.authorized");
       expect(event.stableType).not.toBe("payment.succeeded");
       expect(event.stableType).not.toBe("capture.completed");
     });

@@ -135,7 +135,8 @@ export type ProcessDueOptions = {
    *
    * - Return `{ disposition: "complete" }` to mark the job completed.
    * - Return `{ disposition: "retry" }` or throw → failAndReschedule (or
-   *   markManualReview when attempts ≥ maxAttempts).
+   *   markManualReview when attempts ≥ maxAttempts). Hang past the lease
+   *   still calls fail so attempts can budget (RECON-LEASE-1).
    * - Return `{ disposition: "retry_later" }` → failAndReschedule **without**
    *   consuming the maxAttempts dead-letter budget (RECON-3 — in-flight
    *   settlement must not park after ~10 claims).
@@ -145,6 +146,33 @@ export type ProcessDueOptions = {
    */
   handler: (job: ClaimedJob) => Promise<ProcessDueDisposition | void>;
 };
+
+/**
+ * Result of {@link ReconciliationScheduler.processDue}.
+ *
+ * `leaseLost` is a foreign reclaim (another worker owns the lease).
+ * `hangOverrun` is a same-worker handler overrun whose complete/fail/
+ * markManualReview was rejected after expiry without a foreign owner —
+ * not a free infinite reclaim (RECON-LEASE-1).
+ */
+export type ProcessDueResult = {
+  processed: number;
+  rescheduled: number;
+  manualReview: number;
+  completed: number;
+  /** Jobs where complete/fail fencing rejected (another worker owns the lease). */
+  leaseLost: number;
+  /**
+   * Handler returned/threw after lease expiry and the terminal mutation
+   * was rejected without a foreign reclaim. Instance hang budget parks
+   * the key at `maxAttempts` even when `fail` still returns `lease_lost`
+   * (token already wiped by `listDue`).
+   */
+  hangOverrun: number;
+};
+
+/** PERF-7: never oversample `listDue` beyond this when applying gateway caps. */
+const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
  * Derive a stable reconciliation job key from target identifiers.
@@ -195,14 +223,7 @@ export type ReconciliationScheduler = {
    * Claim due and run handler; reschedule or markManualReview on failure.
    * Documents per-provider concurrency via maxInFlightByGateway.
    */
-  processDue(options: ProcessDueOptions): Promise<{
-    processed: number;
-    rescheduled: number;
-    manualReview: number;
-    completed: number;
-    /** Jobs where complete/fail fencing rejected (another worker owns the lease). */
-    leaseLost: number;
-  }>;
+  processDue(options: ProcessDueOptions): Promise<ProcessDueResult>;
   readonly store: ReconciliationStore;
   readonly maxAttempts: number;
 };
@@ -213,7 +234,8 @@ export type ReconciliationScheduler = {
  * Crash boundaries: see docs/crash-boundaries.md.
  * - schedule is idempotent by key (already_exists).
  * - claim is atomic via store.claim only.
- * - complete/fail/markManualReview require active leaseToken.
+ * - complete / markManualReview require an active leaseToken.
+ * - fail records with a matching claimed token even after expiry (RECON-LEASE-1).
  */
 export function createReconciliationScheduler(
   options: CreateReconciliationSchedulerOptions,
@@ -232,6 +254,8 @@ export function createReconciliationScheduler(
     });
   const maxAttempts = options.maxAttempts ?? 10;
   const liveByGateway: Record<string, number> = {};
+  /** Per-key hang count on this instance (RECON-LEASE-1 backstop). */
+  const hangByKey: Record<string, number> = {};
 
   const addLive = (gateway: string, delta: number): void => {
     liveByGateway[gateway] = Math.max(0, (liveByGateway[gateway] ?? 0) + delta);
@@ -340,19 +364,22 @@ export function createReconciliationScheduler(
       return out;
     },
 
-    async processDue(options: ProcessDueOptions) {
+    async processDue(options: ProcessDueOptions): Promise<ProcessDueResult> {
       const owner = options.owner ?? defaultOwner;
       const leaseMs = options.leaseMs ?? defaultLeaseMs;
       const limit = options.limit ?? 10;
       const now = new Date(clock.nowMs()).toISOString();
 
-      // RECON-8 / PERF-7: when per-gateway caps are set, oversample listDue
-      // so a cap-dominated prefix cannot starve other gateways — but do not
-      // pull up to 1000 rows for a default-10 batch. Claim fencing is still
-      // per-key store.claim (list is discovery only).
+      // RECON-8 / PERF-7: keep list-then-serial-claim fencing (list is
+      // discovery only; claim is the fence). When per-gateway caps are set,
+      // oversample listDue so a cap-dominated prefix cannot starve other
+      // gateways — never above LIST_DUE_OVERSAMPLE_CAP (200).
       const fetchLimit =
         options.maxInFlightByGateway !== undefined
-          ? Math.min(200, Math.max(limit * 3, limit + 16))
+          ? Math.min(
+              LIST_DUE_OVERSAMPLE_CAP,
+              Math.max(limit * 3, limit + 16),
+            )
           : limit;
       const due = await store.listDue({ now, limit: fetchLimit });
 
@@ -381,6 +408,25 @@ export function createReconciliationScheduler(
       let manualReview = 0;
       let completed = 0;
       let leaseLost = 0;
+      let hangOverrun = 0;
+
+      const parkHangBudget = async (job: ClaimedJob): Promise<boolean> => {
+        const reclaim = await store.claim({
+          key: job.key,
+          owner,
+          leaseMs,
+        });
+        if (reclaim.kind !== "acquired") return false;
+        await this.markManualReview({
+          key: reclaim.record.key,
+          leaseToken: reclaim.leaseToken,
+          note: sanitizeReconciliationError(
+            "processDue handler overran lease repeatedly (hang budget)",
+          ),
+        });
+        delete hangByKey[job.key];
+        return true;
+      };
 
       for (const rec of candidates) {
         const claimResult: ClaimResult = await store.claim({
@@ -399,20 +445,40 @@ export function createReconciliationScheduler(
         addLive(claimedGateway, 1);
         processed++;
 
-        let disposition: ProcessDueDisposition;
-        try {
-          const raw = await options.handler(job);
-          disposition = normalizeHandlerDisposition(raw);
-        } catch (err) {
-          disposition = { disposition: "retry", error: err };
-        }
+        const priorHangs = hangByKey[job.key] ?? 0;
+        let skipAttemptBudget = false;
 
         try {
+          // RECON-LEASE-1: prior hang/lease_lost without a recorded fail —
+          // park on a fresh lease so maxAttempts is not a no-op.
+          if (priorHangs >= maxAttempts) {
+            await this.markManualReview({
+              key: job.key,
+              leaseToken: job.leaseToken,
+              note: sanitizeReconciliationError(
+                "processDue handler overran lease repeatedly (hang budget)",
+              ),
+            });
+            delete hangByKey[job.key];
+            addLive(claimedGateway, -1);
+            manualReview++;
+            continue;
+          }
+
+          let disposition: ProcessDueDisposition;
+          try {
+            const raw = await options.handler(job);
+            disposition = normalizeHandlerDisposition(raw);
+          } catch (err) {
+            disposition = { disposition: "retry", error: err };
+          }
+
           if (disposition.disposition === "complete") {
             await store.complete({
               key: job.key,
               leaseToken: job.leaseToken,
             });
+            delete hangByKey[job.key];
             addLive(claimedGateway, -1);
             completed++;
             continue;
@@ -427,6 +493,7 @@ export function createReconciliationScheduler(
               reviewPayload.note = sanitizeReconciliationError(disposition.note);
             }
             await this.markManualReview(reviewPayload);
+            delete hangByKey[job.key];
             addLive(claimedGateway, -1);
             manualReview++;
             continue;
@@ -435,7 +502,7 @@ export function createReconciliationScheduler(
           // RECON-3: in-flight retry_later must not dead-letter at maxAttempts.
           // Settlement (bank transfer / 3DS / async) can outlive the default
           // 10-claim budget; parking would leave local pending after provider paid.
-          const skipAttemptBudget = disposition.disposition === "retry_later";
+          skipAttemptBudget = disposition.disposition === "retry_later";
 
           // retry (explicit, retry_later, or fail-closed void / throw)
           if (!skipAttemptBudget && job.record.attempts >= maxAttempts) {
@@ -447,6 +514,7 @@ export function createReconciliationScheduler(
               ),
             };
             await this.markManualReview(reviewPayload);
+            delete hangByKey[job.key];
             addLive(claimedGateway, -1);
             manualReview++;
           } else if (
@@ -465,9 +533,12 @@ export function createReconciliationScheduler(
               ),
               retryAt,
             });
+            delete hangByKey[job.key];
             rescheduled++;
             addLive(claimedGateway, -1);
           } else {
+            // RECON-LEASE-1: fail after hang/throw so attempts can reach
+            // maxAttempts when the adapter accepts fail-after-expiry.
             await this.failAndReschedule({
               key: job.key,
               leaseToken: job.leaseToken,
@@ -476,25 +547,90 @@ export function createReconciliationScheduler(
                 "processDue handler did not return explicit complete disposition",
               attempt: job.record.attempts,
             });
+            delete hangByKey[job.key];
             rescheduled++;
             addLive(claimedGateway, -1);
           }
         } catch (err) {
-          // RECON-3: lease_lost after a successful handler (or during terminal
-          // mutation) means another worker owns the job — do not treat as a
-          // business failure / maxAttempts dead-letter.
           addLive(claimedGateway, -1);
-          if (isStoreLeaseLostError(err)) {
+          if (!isStoreLeaseLostError(err)) {
+            throw err;
+          }
+
+          // RECON-3: foreign reclaim after a successful handler (or during
+          // terminal mutation) is not a business failure / dead-letter.
+          // RECON-LEASE-1: same-worker hang after expiry (token still ours,
+          // or listDue already wiped it) is not a free infinite reclaim.
+          let foreign = false;
+          try {
+            const after = await store.get(job.key);
+            foreign = isForeignLeaseOwner(after, job.leaseToken);
+          } catch {
+            foreign = true;
+          }
+          if (foreign) {
             leaseLost++;
             continue;
           }
-          throw err;
+
+          hangByKey[job.key] = priorHangs + 1;
+          hangOverrun++;
+
+          const budgeted =
+            hangByKey[job.key]! >= maxAttempts ||
+            (!skipAttemptBudget && job.record.attempts >= maxAttempts);
+          if (!budgeted) continue;
+
+          try {
+            if (await parkHangBudget(job)) {
+              manualReview++;
+            }
+          } catch (parkErr) {
+            if (isStoreLeaseLostError(parkErr)) {
+              leaseLost++;
+              continue;
+            }
+            throw parkErr;
+          }
         }
       }
 
-      return { processed, rescheduled, manualReview, completed, leaseLost };
+      return {
+        processed,
+        rescheduled,
+        manualReview,
+        completed,
+        leaseLost,
+        hangOverrun,
+      };
     },
   };
+}
+
+/**
+ * True when another worker already owns or finished the job.
+ * Scheduled / still-claimed-with-our-token after expiry is a hang, not stolen.
+ */
+function isForeignLeaseOwner(
+  rec: ReconciliationRecord | undefined,
+  ourToken: LeaseToken,
+): boolean {
+  if (!rec) return true;
+  if (
+    rec.status === "completed" ||
+    rec.status === "failed" ||
+    rec.status === "manual_review"
+  ) {
+    return true;
+  }
+  if (
+    rec.status === "claimed" &&
+    rec.leaseToken !== undefined &&
+    rec.leaseToken !== ourToken
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Only `{ disposition: "complete" }` finishes a job; void → fail-closed retry. */

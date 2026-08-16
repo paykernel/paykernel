@@ -70,7 +70,7 @@ const d = resolveDoDiscoveryPartitions({ kind: "hash", partitions: 16 });
 // d.kind === "partitions" → d.shardNames
 ```
 
-**Cost note:** hash fan-out may touch cold empty partitions (DO materialization). Prefer a modest `partitions` count (e.g. 16–64) and a bounded list `limit`.
+**PERF-5 cost:** there is no cheaper correct global earliest-N. Hash partitions have no shared due/retry index, so `listDue` / `listRetryable` wake **every** enumerable isolate at the caller `limit`, then merge, dedupe, sort, and truncate. Sequential early-exit would miss earlier work on later shards. Cost is **O(partitions)** stub RPCs (and possible cold DO materialization), not O(total rows). Prefer a modest `partitions` count (16–64) and a bounded `limit`. `kind: "key"` hard-fails instead of silently missing work.
 
 ## API
 

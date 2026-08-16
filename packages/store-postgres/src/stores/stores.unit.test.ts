@@ -845,6 +845,8 @@ describe("reconciliation store unit", () => {
     // PERF-2: expired-lease UPDATE is bounded to the list limit
     expect(soft?.sql).toMatch(/LIMIT\s+\$2/i);
     expect(soft?.params[1]).toBe(100);
+    // SQL-UPD-1 / WH-LIST-FAIL: outer WHERE re-checks status='claimed'
+    expect(soft?.sql).toMatch(/WHERE\s+status\s*=\s*'claimed'\s+AND\s+key\s+IN/i);
   });
 
   it("SQL-2: listDue canonicalizes offset input.now for TEXT lexical compares", async () => {
@@ -870,12 +872,41 @@ describe("reconciliation store unit", () => {
     expect(select!.params[0]).toBe(canonicalNow);
   });
 
-  it("markManualReview requires active lease (expired → lease_lost)", async () => {
+  it("RECON-LEASE-1: fail after expiry uses token+claimed (no lease_expires_at >)", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const retryAt = new Date(clock.nowMs() + 60_000).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("UPDATE") && sql.includes("claimed")) {
+          return [{ key: "job-hang", status: "scheduled", generation: 1 }];
+        }
+        return [];
+      },
+    });
+    const store = createPostgresReconciliationStore({ executor, clock });
+    await store.fail({
+      key: "job-hang",
+      leaseToken: "lt_hang",
+      error: "timeout",
+      retryAt,
+    });
+    const call = executor.calls.find(
+      (c) => c.sql.includes("UPDATE") && c.sql.includes("lease_token"),
+    );
+    expect(call).toBeDefined();
+    expect(call!.sql).toContain("status = 'claimed'");
+    expect(call!.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(call!.params).toContain("scheduled");
+    expect(call!.params).toContain("lt_hang");
+    expect(call!.params).toContain(now);
+  });
+
+  it("RECON-LEASE-1: markManualReview matches token on claimed (no lease_expires_at >)", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();
     const executor = createScriptedExecutor({
       onQuery: (sql) => {
-        // No row updated (expired lease fence).
         if (sql.includes("UPDATE") && sql.includes("manual_review")) return [];
         return [];
       },
@@ -892,8 +923,9 @@ describe("reconciliation store unit", () => {
       (c) => c.sql.includes("manual_review") && c.sql.includes("UPDATE"),
     );
     expect(call).toBeDefined();
-    expect(call!.sql).toContain("lease_expires_at");
-    expect(call!.sql).toContain("lease_expires_at >");
+    expect(call!.sql).toContain("status = 'claimed'");
+    expect(call!.sql).toContain("lease_token");
+    expect(call!.sql).not.toMatch(/lease_expires_at\s*>/i);
     expect(call!.params).toContain(now);
   });
 });
@@ -1048,6 +1080,7 @@ describe("listRetryable now canonical (STORES-2)", () => {
     );
     expect(soft).toBeDefined();
     expect(soft!.params[0]).toBe(canonicalNow);
+    expect(soft!.sql).toMatch(/WHERE\s+status\s*=\s*'claimed'\s+AND\s+key\s+IN/i);
     const select = executor.calls.find(
       (c) => c.sql.includes("SELECT") && c.sql.includes("pending"),
     );

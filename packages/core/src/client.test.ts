@@ -2794,6 +2794,83 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
         );
     });
 
+    it.each([
+        {
+            gateway: 'stripe' as const,
+            nativeType: 'payment_intent.succeeded',
+            status: 'processing',
+            expectedType: 'payment.processing',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'authorized',
+            expectedType: 'payment.authorized',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'refunded',
+            expectedType: 'payment.processing',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'partially_refunded',
+            expectedType: 'payment.processing',
+        },
+    ])(
+        'CORE-HW-1: rematches complete v1 payment.succeeded + $status → $expectedType',
+        async ({ gateway, nativeType, status, expectedType }) => {
+            const eventId = `evt_full_v1_${status}`;
+            const client = createWebhookOnlyClient(gateway, (payload) => ({
+                id: eventId,
+                type: nativeType,
+                gateway,
+                paymentId: 'pay_internal',
+                gatewayPaymentId: 'gw_full',
+                status,
+                amount: 50,
+                currency: 'USD',
+                timestamp: new Date('2024-01-01T00:00:00.000Z'),
+                rawPayload: payload,
+                schemaVersion: '1',
+                stableType: 'payment.succeeded',
+                event: {
+                    schemaVersion: '1',
+                    type: 'payment.succeeded',
+                    payment: {
+                        status: 'paid',
+                        amount: 50,
+                        currency: 'USD',
+                        references: { gatewayPaymentId: 'gw_full' },
+                    },
+                    provider: {
+                        gateway,
+                        eventId,
+                        eventType: nativeType,
+                        occurredAt: '2024-01-01T00:00:00.000Z',
+                        receivedAt: '2024-01-01T00:00:00.000Z',
+                    },
+                },
+                provider: {
+                    gateway,
+                    eventId,
+                    eventType: nativeType,
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            }));
+
+            const event = await client.handleWebhook(gateway, { hello: true });
+
+            expect(event.status).toBe(status);
+            expect(event.event?.type).toBe(expectedType);
+            expect(event.stableType).toBe(expectedType);
+            expect(event.event?.type).not.toBe('payment.succeeded');
+        },
+    );
+
     it('CORE-4: thin 3-field PaymentEvent is rebuilt and demoted', async () => {
         const client = createWebhookOnlyClient('stripe', (payload) => ({
             id: 'evt_thin_dual',

@@ -129,6 +129,7 @@ Bare inference (no explicit `outcome`):
 | `true` | `partially_captured` | `requires_action` (open money) |
 | `true` | `pending` / `processing` / `approved` | `requires_action` |
 | `false` | `pending` / `processing` / `approved` | `indeterminate` (not `failed`) |
+| `false` | `paid` / `authorized` / `partially_captured` / `refunded` / `partially_refunded` | `indeterminate` (not `failed`) |
 | `false` | `failed` | `declined` |
 | `false` | `cancelled` | `failed` |
 
@@ -262,6 +263,10 @@ for status-consistent branching only after this coerce.
 `success` with `pending` / `processing` / `approved`) infers **`indeterminate`**,
 not `failed`. A forged decline would invite a retry and can **double-refund**.
 Reconcile; do not retry the mutation as a fresh failure.
+
+**CORE-INF-2:** `{ success: false, status: 'completed' }` (or omitted `success`)
+is also **`indeterminate`**, not `failed`. Status says the refund settled while
+the API flag does not — do not retry the mutation as a fresh failure.
 
 Do not treat a pending refund as settled. Same Engineering Rule 3 applies after
 submit when the refund request may have been accepted.

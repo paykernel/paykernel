@@ -430,6 +430,7 @@ describe("webhook store unit (B5/B4)", () => {
     expect(soft).toBeDefined();
     expect(soft?.sql).toMatch(/LIMIT\s+\?/i);
     expect(soft?.params.at(-1)).toBe(100);
+    expect(soft?.sql).toMatch(/WHERE\s+status\s*=\s*'claimed'\s+AND\s+key\s+IN/i);
   });
 
   it("claim SQL gates pending on available_at", async () => {
@@ -646,6 +647,7 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(soft).toBeDefined();
     expect(soft?.sql).toMatch(/LIMIT\s+\?/i);
     expect(soft?.params.at(-1)).toBe(100);
+    expect(soft?.sql).toMatch(/WHERE\s+status\s*=\s*'claimed'\s+AND\s+key\s+IN/i);
   });
 
   it("SQL-2: listDue canonicalizes offset input.now for TEXT lexical compares", async () => {
@@ -670,7 +672,29 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
     expect(select!.params[0]).toBe(canonicalNow);
   });
 
-  it("markManualReview requires active lease (expired → lease_lost)", async () => {
+  it("RECON-LEASE-1: fail after expiry uses token+claimed (no lease_expires_at >)", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const retryAt = new Date(clock.nowMs() + 60_000).toISOString();
+    const executor = createScriptedExecutor({
+      onQuery: () => [{ key: "job-hang", status: "scheduled", generation: 1 }],
+    });
+    const store = createD1ReconciliationStore({ executor, clock });
+    await store.fail({
+      key: "job-hang",
+      leaseToken: "lt_hang",
+      error: "timeout",
+      retryAt,
+    });
+    const call = executor.calls.find(
+      (c) => c.sql.includes("UPDATE") && c.sql.includes("lease_token"),
+    );
+    expect(call).toBeDefined();
+    expect(call!.sql).toContain("status = 'claimed'");
+    expect(call!.sql).not.toMatch(/lease_expires_at\s*>/i);
+    expect(call!.params).toContain("scheduled");
+  });
+
+  it("RECON-LEASE-1: markManualReview matches token on claimed (no lease_expires_at >)", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();
     const executor = createScriptedExecutor({
@@ -688,8 +712,8 @@ describe("reconciliation store unit (listDue recovery + markManualReview fence)"
       (c) => c.sql.includes("manual_review") && c.sql.includes("UPDATE"),
     );
     expect(call).toBeDefined();
-    expect(call!.sql).toContain("lease_expires_at");
-    expect(call!.sql).toContain("lease_expires_at >");
+    expect(call!.sql).toContain("status = 'claimed'");
+    expect(call!.sql).not.toMatch(/lease_expires_at\s*>/i);
     expect(call!.params).toContain(now);
   });
 });

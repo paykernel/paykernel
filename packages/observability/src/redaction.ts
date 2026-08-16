@@ -42,6 +42,11 @@ const PI_CLIENT_SECRET_VALUE = /^pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+$/i;
 const EMBEDDED_SECRET_IN_MESSAGE =
   /(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/gi;
 
+/** Entire message is a credential — drop it. Do not use core `redact()` for this:
+ * that helper treats any string *containing* a secret substring as fully redacted. */
+const WHOLE_STRING_SECRET =
+  /^(?:(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+)$/i;
+
 /**
  * Operational `authorized` restore is only for booleans (`true`/`false`).
  * Never unmask a leaf core already replaced because the *value* was
@@ -155,7 +160,7 @@ export function sanitizeSpanStatusMessage(
   if (message === undefined) return undefined;
   const trimmed = message.trim();
   if (trimmed.length === 0) return undefined;
-  if (redact(trimmed) === REDACTED || isClientSecretShapedValue(trimmed)) {
+  if (WHOLE_STRING_SECRET.test(trimmed) || isClientSecretShapedValue(trimmed)) {
     return undefined;
   }
   const scrubbed = trimmed.replace(EMBEDDED_SECRET_IN_MESSAGE, REDACTED);

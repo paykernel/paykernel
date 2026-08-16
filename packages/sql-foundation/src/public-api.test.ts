@@ -11,6 +11,7 @@ const EXPECTED_RUNTIME_EXPORTS = [
   // versions
   "CURRENT_SCHEMA_VERSION",
   "SCHEMA_VERSION_V1",
+  "SCHEMA_VERSION_V2",
   "SCHEMA_FAMILY",
   // tables
   "LOGICAL_TABLES",
@@ -71,15 +72,20 @@ const EXPECTED_RUNTIME_EXPORTS = [
   // migrations
   "MIGRATIONS",
   "MIGRATION_001",
+  "MIGRATION_002",
   "getMigration",
   "listMigrationVersions",
   "checksumMigrationSql",
   "buildFoundationMigrationSql",
+  "buildListIndexMigrationSql",
   "indexLabel",
   "INDEX_LABEL_MAX",
   "FOUNDATION_SQL_POSTGRES",
   "FOUNDATION_SQL_SQLITE",
   "FOUNDATION_SQL_PORTABLE",
+  "LIST_INDEX_SQL_POSTGRES",
+  "LIST_INDEX_SQL_SQLITE",
+  "LIST_INDEX_SQL_PORTABLE",
   "migrate",
   "splitSqlStatements",
   "MigrationError",
@@ -110,6 +116,8 @@ const EXPECTED_RUNTIME_EXPORTS = [
   "idempotencyCompleteTemplates",
   "webhookCompleteTemplates",
   "webhookFailTemplates",
+  "reconciliationFailTemplates",
+  "reconciliationMarkManualReviewTemplates",
   "pickClaimTemplate",
   "runClaimContentionHarness",
   "memoryRelationalAsHarnessAdapter",
@@ -181,7 +189,7 @@ describe("public API surface", () => {
     // Module evaluation must not touch storage. Fresh fake DB state after import
     // is empty; migrate remains an explicit callable only.
     expect(typeof api.migrate).toBe("function");
-    expect(api.CURRENT_SCHEMA_VERSION).toBe(1);
+    expect(api.CURRENT_SCHEMA_VERSION).toBe(2);
     const state = api.createFakeDbState();
     expect(state.statements).toEqual([]);
     expect(state.tables.size).toBe(0);

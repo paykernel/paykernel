@@ -587,6 +587,54 @@ describe("MoyasarGateway", () => {
       expect(isPaidOutcome(nonFinite)).toBe(false);
     });
 
+    it("fail-closes paid + finite captured 0 (MOYASAR-CAP-0)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "paid",
+          amount: 10000,
+          captured: 0,
+        }),
+      );
+
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.outcome).not.toBe("succeeded");
+      expect(result.currency).toBe("SAR");
+      expect(result.amount).toBe(100);
+      // Known captured 0 — do not invent the authorization total as captured.
+      expect(result.capturedAmount).toBe(0);
+    });
+
+    it("fail-closes provider captured + finite captured 0 on getPayment (MOYASAR-CAP-0)", async () => {
+      mockFetchJson(
+        paymentResponse({
+          status: "captured",
+          amount: 10000,
+          captured: 0,
+        }),
+      );
+
+      const result = await createGateway().getPayment({
+        gatewayPaymentId: PAYMENT_ID,
+      });
+
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.capturedAmount).toBe(0);
+      expect(result.currency).toBe("SAR");
+    });
+
     it("accepts Money amount input for createPayment (bigint minor conversion)", async () => {
       mockFetchJson(paymentResponse({ amount: 1050, currency: "SAR" }));
 
@@ -2201,6 +2249,18 @@ describe("MoyasarGateway", () => {
         amount: 100,
       },
       {
+        label: "incomplete paid residual (captured 0)",
+        id: "wh_void_paid_cap0",
+        data: {
+          status: "paid",
+          amount: 10000,
+          captured: 0,
+          refunded: 0,
+        },
+        status: "processing",
+        amount: 100,
+      },
+      {
         label: "authorized residual",
         id: "wh_void_auth",
         data: {
@@ -2359,6 +2419,56 @@ describe("MoyasarGateway", () => {
       expect(nonFinite.status).not.toBe("paid");
       expect(nonFinite.stableType).toBe("payment.processing");
       expect(nonFinite.event?.type).toBe("payment.processing");
+    });
+
+    it("fail-closes payment_paid + finite captured 0 (MOYASAR-CAP-0)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_paid_captured_zero",
+        type: "payment_paid",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "paid",
+          amount: 10000,
+          currency: "SAR",
+          captured: 0,
+        },
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      // Do not publish the authorization total as settled captured.
+      expect(event.amount).toBe(0);
+      expect(event.currency).toBe("SAR");
+    });
+
+    it("fail-closes payment_captured + finite captured 0 (MOYASAR-CAP-0)", () => {
+      const event = createGateway().parseWebhookEvent({
+        id: "wh_captured_zero",
+        type: "payment_captured",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: PAYMENT_ID,
+          status: "captured",
+          amount: 10000,
+          currency: "SAR",
+          captured: 0,
+        },
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("capture.completed");
+      expect(event.amount).toBe(0);
+      expect(event.currency).toBe("SAR");
     });
 
     it("hashes webhook via hashWebhookPayload with secret_token redacted in place (P610-MOY-3)", () => {

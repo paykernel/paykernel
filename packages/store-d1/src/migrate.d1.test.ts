@@ -67,7 +67,8 @@ describe("migrateD1Adapter (mock D1 / bun:sqlite)", () => {
       const migrateResult = await migrateD1Adapter(executor, {
         namespace: { tablePrefix: prefix },
       });
-      expect(migrateResult).toBeDefined();
+      expect(migrateResult.applied).toEqual([1, 2]);
+      expect(migrateResult.currentVersion).toBe(2);
 
       const verify = await verifyD1AdapterSchema(executor, {
         namespace: { tablePrefix: prefix },
@@ -116,5 +117,25 @@ describe("migration SQL packaging", () => {
     expect(withoutComments).toMatch(/KEY\s+TEXT/);
     expect(withoutComments).toMatch(/LEASE_TOKEN\s+TEXT/);
     expect(withoutComments).toMatch(/PAYLOAD_HASH\s+TEXT/);
+  });
+
+  it("PERF-3: 0002_list_indexes.sql adds composite list/cleanup indexes", () => {
+    const sqlPath = join(import.meta.dir, "../migrations/0002_list_indexes.sql");
+    const sql = readFileSync(sqlPath, "utf8");
+    const withoutComments = sql
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("--"))
+      .join("\n")
+      .toUpperCase();
+    expect(withoutComments).not.toMatch(/\bBEGIN\b/);
+    expect(withoutComments).not.toMatch(/\bCOMMIT\b/);
+    expect(withoutComments).not.toMatch(/CREATE TABLE/);
+    expect(withoutComments).toContain("CREATE INDEX IF NOT EXISTS");
+    expect(withoutComments).toContain("ST_AVAIL");
+    expect(withoutComments).toContain("ST_DUE");
+    expect(withoutComments).toContain("ST_LEXP");
+    expect(withoutComments).toContain("STATUS, AVAILABLE_AT");
+    expect(withoutComments).toContain("STATUS, DUE_AT");
+    expect(withoutComments).toContain("STATUS, LEASE_EXPIRES_AT");
   });
 });

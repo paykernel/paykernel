@@ -44,6 +44,7 @@ Prefer a **one-shot Worker**, CI step, or ops script — not every request.
 | -------- | ---- |
 | `@paykernel/sql-foundation` `FOUNDATION_SQL_SQLITE` | Authoritative DDL + ledger apply path used by `migrateD1Adapter` |
 | `migrations/0001_foundation.sql` | Full foundation table/index DDL snapshot for Wrangler `d1 migrations`; **no BEGIN/COMMIT** (keep in sync with `FOUNDATION_SQL_SQLITE`) |
+| `migrations/0002_list_indexes.sql` | PERF-3 composite list/cleanup indexes (`CREATE INDEX IF NOT EXISTS`); keep in sync with sql-foundation v2 |
 | `examples/wrangler.toml` | Binding example (`[[d1_databases]]`) |
 
 ---

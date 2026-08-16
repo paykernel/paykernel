@@ -25,7 +25,8 @@
 | ------------------------ | --------------------------------------------------------- |
 | `SCHEMA_FAMILY`          | `"payments-storage"` (logical family id, not npm version) |
 | `SCHEMA_VERSION_V1`      | `1` — foundation four tables                              |
-| `CURRENT_SCHEMA_VERSION` | Highest defined migration version (currently `1`)         |
+| `SCHEMA_VERSION_V2`      | `2` — composite list/cleanup indexes (`IF NOT EXISTS`)    |
+| `CURRENT_SCHEMA_VERSION` | Highest defined migration version (currently `2`)         |
 
 Bump `CURRENT_SCHEMA_VERSION` when appending a new entry to `MIGRATIONS`.
 
@@ -75,6 +76,15 @@ DDL is dialect-tagged:
 | `buildFoundationMigrationSql(dialect, namespace)` | Resolved SQL for a dialect + namespace |
 
 Metadata: `MIGRATION_001` in `MIGRATIONS` (append-only array).
+
+### v2 — `create_payment_storage_list_indexes` (PERF-3)
+
+Already-applied v1 is **not** rewritten. `migrate()` applies v2 as:
+
+- `CREATE INDEX IF NOT EXISTS` `(status, available_at)` and `(status, lease_expires_at)` on webhook inbox
+- `CREATE INDEX IF NOT EXISTS` `(status, due_at)` and `(status, lease_expires_at)` on reconciliation jobs
+
+New installs that ran current v1 DDL already have these indexes; v2 is a no-op. Databases that applied an older v1 (single-column indexes only) gain the composite list/cleanup indexes. Builder: `buildListIndexMigrationSql`. Metadata: `MIGRATION_002`.
 
 Index names use `indexLabel(qualifiedTable)` (keeps the **end** of long names so long `tablePrefix` values do not collide shared suffixes like `_lease_expires` across tables). Colliding index names fail closed at SQL build time rather than silently skipping via `IF NOT EXISTS`.
 

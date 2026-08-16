@@ -50,6 +50,61 @@ describe("createMemoryReconciliationStore", () => {
     expect(second.record.attempts).toBe(first.record.attempts);
   });
 
+  it("RECON-LEASE-1: fail after lease expiry records with matching token", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "rec_fail_expiry",
+      subjectId: "pay_1",
+      reason: "hang",
+      dueAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const first = await store.claim({
+      key: "rec_fail_expiry",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    expect(first.record.attempts).toBe(1);
+    clock.advance(2_000);
+    await store.fail({
+      key: "rec_fail_expiry",
+      leaseToken: first.leaseToken,
+      error: "handler overran lease",
+      retryAt: new Date(clock.nowMs() + 5_000).toISOString(),
+    });
+    const rec = await store.get("rec_fail_expiry");
+    expect(rec?.status).toBe("scheduled");
+    expect(rec?.attempts).toBe(1);
+    expect(rec?.lastError).toBe("handler overran lease");
+  });
+
+  it("complete after lease expiry still throws StoreLeaseLostError", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "rec_complete_expiry",
+      subjectId: "pay_1",
+      reason: "x",
+      dueAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const first = await store.claim({
+      key: "rec_complete_expiry",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.complete({
+        key: "rec_complete_expiry",
+        leaseToken: first.leaseToken,
+      }),
+    ).rejects.toMatchObject({ name: "StoreLeaseLostError" });
+  });
+
   it("direct reclaim of expired claimed does not burn attempts", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });

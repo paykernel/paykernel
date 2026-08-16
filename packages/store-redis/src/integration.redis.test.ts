@@ -234,8 +234,8 @@ describe.skipIf(!live)("integration: abandoned claim re-index", () => {
   }, 60_000);
 });
 
-describe.skipIf(!live)("integration: recon fail lease expiry fence (R7/R9)", () => {
-  it("claim, expire lease (FakeClock), fail → StoreLeaseLostError", async () => {
+describe.skipIf(!live)("integration: recon fail after lease expiry (RECON-LEASE-1)", () => {
+  it("claim, expire lease (FakeClock), fail with matching token → scheduled", async () => {
     const { port, close } = await createLivePort();
     const prefix = uniqueKeyPrefix("recon_fail");
     try {
@@ -259,20 +259,23 @@ describe.skipIf(!live)("integration: recon fail lease expiry fence (R7/R9)", () 
       expect(a.kind).toBe("acquired");
       if (a.kind !== "acquired") return;
       clock.advance(2_000);
+      const retryAt = clock.now().toISOString();
+      await store.fail({
+        key: "job_fail_exp",
+        leaseToken: a.leaseToken,
+        error: "too_late",
+        retryAt,
+      });
+      const after = await store.get("job_fail_exp");
+      expect(after?.status).toBe("scheduled");
+      expect(after?.dueAt).toBe(retryAt);
       await expect(
         store.fail({
           key: "job_fail_exp",
           leaseToken: a.leaseToken,
-          error: "too_late",
+          error: "stale",
         }),
       ).rejects.toBeInstanceOf(StoreLeaseLostError);
-      // Recovery: expired lease reclaim still works
-      const b = await store.claim({
-        key: "job_fail_exp",
-        owner: "w2",
-        leaseMs: 30_000,
-      });
-      expect(b.kind).toBe("acquired");
     } finally {
       await close();
     }

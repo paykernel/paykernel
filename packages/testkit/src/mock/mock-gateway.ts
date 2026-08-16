@@ -397,12 +397,14 @@ function isLedgerSettlingResult(result: GatewayPaymentResult): boolean {
   if (
     result.outcome === "failed" ||
     result.outcome === "indeterminate" ||
-    result.outcome === "requires_action" ||
     result.outcome === "declined"
   ) {
     return false;
   }
   // Domain status — never pending/processing from success:true or outcome alone.
+  // CORE-1 remaps `partially_captured` to outcome `requires_action` (open money,
+  // not fulfillment). The capture still applied; skip only failed/indeterminate/
+  // declined so scripted 3DS create (`requires_action` + pending) stays uncaptured.
   return (
     result.status === "paid" ||
     result.status === "partially_captured" ||

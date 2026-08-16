@@ -170,7 +170,8 @@ const outcome = await engine.processWithVerifier({
   verifyAndNormalize: async (raw) => {
     // Let throws propagate. processWithVerifier classifies (WEBHOOKS-1/5/6):
     // - InvalidWebhookError (verify-false only) / ok:false → invalid_webhook (~400 forgery)
-    // - InvalidRequestError / post-verify parse → handler_failed { retryable: true }
+    // - InvalidRequestError / post-verify parse / parse-stage InvalidWebhookError
+    //   (Paymob/Moyasar payload; always HTTP 403) → handler_failed { retryable: true }
     //   (~5xx; signature-valid paid events must redeliver — never permanent 400)
     // - RateLimitError / TypeError / NetworkError / unknown Error →
     //   handler_failed { retryable: true } (~5xx; redeliver paid events)
@@ -387,6 +388,7 @@ const durableEngine = createWebhookInboxEngine({
 - The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
 - **Crash reclaim:** soft-release of an expired `claimed` lease (via get/listRetryable) restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget.
 - **WEBHOOKS-2 (lease timeout / hang):** `store.fail` with a matching token succeeds even after lease expiry so handler hang/timeout still records an attempt. Soft-release alone must not make `maxAttempts` a no-op — poison/long handlers eventually dead-letter.
+- **WH-LIST-FAIL (at-least-once):** `listRetryable` / `get` soft-release of an expired claim **wipes the lease token**. A late `fail()` from the original worker then `lease_lost`. The engine best-effort re-claims + records fail when it can; if a concurrent poller already took the row, fail-after-handler still returns `handler_failed { retryable: true }` and **never `complete`s**. Handler already ran — treat as at-least-once (idempotent handlers required). Do not 200 that outcome.
 - `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). **durable_retry** maps that to `scheduled_for_retry { reason: "not_available" }`. **inline** maps it to `handler_failed { retryable: true }` (P610-ACK-1 — no worker path). Adapters should map these to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
 - `listRetryable` only returns rows with `availableAt <= now` (same gate). Soft-release on list/get/claim restores unfinished claim attempts.
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
@@ -463,7 +465,7 @@ type WebhookProcessingOutcome =
 | `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown/parse/`InvalidRequestError` throw (WEBHOOKS-1/5); may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail / permanent verify structure (WEBHOOKS-6) | 200 or 4xx per policy (do not infinite-retry forever) |
 | `payload_conflict` | Same key, different hash **while lease active only** (idle pending supersedes and reclaims — not permanent; WEBHOOKS-3/4) | 409 / 400 while lease held — not silent 200; redeliver after expiry with correct hash |
-| `invalid_webhook` | Bad input, `{ ok: false }` (reason sanitized), or verify-false `InvalidWebhookError` only (not parse / `InvalidRequestError` / missing durable snapshot — those are retryable `handler_failed`, WEBHOOKS-2/3) | 400 |
+| `invalid_webhook` | Bad input, `{ ok: false }` (reason sanitized), or verify-false `InvalidWebhookError` only (not parse / parse-stage 403 `InvalidWebhookError` / `InvalidRequestError` / missing durable snapshot — those are retryable `handler_failed`, WEBHOOKS-2/3 / WEBHOOKS-403) | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 

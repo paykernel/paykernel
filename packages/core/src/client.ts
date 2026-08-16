@@ -139,6 +139,48 @@ function clonePlainJson(value: unknown): unknown {
 }
 
 /**
+ * CORE-HW-1 / CORE-6-EXT: a complete v1 `payment.succeeded` arm must not
+ * survive an open-money or refunded envelope. Stripe parse rematches
+ * checkout/PI refunds to `refund.completed` first; this covers custom
+ * attaches. No refund entity here — refunded rematch is `payment.processing`.
+ */
+function rematchSucceededWebhookDualWriteAgainstDomainStatus(
+  event: WebhookEvent,
+): WebhookEvent {
+  const pe = event.event;
+  if (pe === undefined || pe.type !== "payment.succeeded") {
+    return event;
+  }
+  const status = event.status;
+  const nextType =
+    status === "processing" ||
+    status === "partially_captured" ||
+    status === "approved" ||
+    status === "refunded" ||
+    status === "partially_refunded"
+      ? ("payment.processing" as const)
+      : status === "authorized"
+        ? ("payment.authorized" as const)
+        : undefined;
+  if (nextType === undefined) {
+    return event;
+  }
+  const payment = pe.payment;
+  const provider = event.provider ?? pe.provider;
+  return {
+    ...event,
+    stableType: nextType,
+    provider,
+    event: {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: nextType,
+      payment,
+      provider,
+    },
+  };
+}
+
+/**
  * Whether a gateway exposes a Phase 3 capability surface
  * (`capabilities` + `supports`). Pre-Phase-3 plain objects omit these and
  * fall back to optional-method presence checks only.
@@ -683,7 +725,10 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
    * 2. Signature / authenticity verification — failures call `onWebhookFailed`
    * 3. Parse / normalize — failures throw without calling `onWebhookFailed`
    * 4. Dual-write Phase 7 `PaymentEvent` if `event` is missing or not v1
-   * 5. `onWebhookVerified` (trusted event; failures rethrown for provider retry)
+   * 5. Always rematch incomplete-money / incomplete-refund dual-write
+   *    (`processing` / `partially_captured` / `authorized` / `approved` must
+   *    not keep `payment.succeeded`; incomplete `refund_completed` demotes)
+   * 6. `onWebhookVerified` (trusted event; failures rethrown for provider retry)
    *
    * Return type remains {@link WebhookEvent} (0.x). Prefer discrimination via
    * `event.event?.type` or `webhookEventToPaymentEvent(event).type`. Hook
@@ -781,8 +826,10 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     // Safety net: built-in gateways already attach a v1 PaymentEvent (with
     // gateway-specific mapContext + payloadHash). Rebuild when `event` is
     // missing or not a valid schemaVersion-1 PaymentEvent. Do not overwrite
-    // richer valid dual-write. After rebuild, apply Stripe incomplete-money /
-    // incomplete-refund demotes for stripe-like snapshots (P610-SAFE-1).
+    // richer valid dual-write. Always apply incomplete-money / incomplete-refund
+    // demotes after parse (CORE-HW-1 / P610-SAFE-1) — a complete v1
+    // `payment.succeeded` arm must not skip rematch against processing /
+    // partially_captured / authorized / approved envelopes.
     const dualWrite = event.event;
     if (
       dualWrite === undefined ||
@@ -790,10 +837,12 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       dualWrite.schemaVersion !== PAYMENT_EVENT_SCHEMA_VERSION
     ) {
       event = attachPaymentEvent(event, { computePayloadHash: true });
-      event = demoteIncompleteRefundWebhookDualWrite(
-        demoteIncompleteSettledWebhookDualWrite(event),
-      );
     }
+    event = rematchSucceededWebhookDualWriteAgainstDomainStatus(
+      demoteIncompleteRefundWebhookDualWrite(
+        demoteIncompleteSettledWebhookDualWrite(event),
+      ),
+    );
 
     // CORE-2: hooks receive a deep clone. Mutations to status/amount/ids/stableType
     // must not rewrite the verified event returned to callers (false fulfillment).

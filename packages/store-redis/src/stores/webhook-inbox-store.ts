@@ -28,7 +28,12 @@ import {
 } from "../clock";
 import { withMappedErrors } from "../errors";
 import { logicalKeyFromRecordKey, recordKey, webhookRetryIndexKey } from "../keys";
-import { enforceMaxSanitizedError, MAX_PAYLOAD_REF_LENGTH, enforceMaxString } from "../limits";
+import {
+  DEFAULT_DELETE_EXPIRED_LIMIT,
+  enforceMaxSanitizedError,
+  MAX_PAYLOAD_REF_LENGTH,
+  enforceMaxString,
+} from "../limits";
 import {
   parseTaggedResult,
   parseWebhookRecord,
@@ -246,8 +251,9 @@ export function createRedisWebhookInboxStore(
             ? canonicalizeIsoZ(input.now)
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
-        // PERF-1: ZSET is scored at available_ms / lease_expires_ms (claim +
-        // REDIS-1 renew). Do not SCAN every record on the poll path.
+        // PERF-1 / PERF-4: ZSET scored at available_ms / lease_expires_ms (claim +
+        // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
+        // ZRANGE members in one Promise.all wave (N keyed Lua GETs).
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           indexKey,
           "-inf",
@@ -274,7 +280,7 @@ export function createRedisWebhookInboxStore(
         const beforeIso = canonicalizeIsoZ(input.before);
         const beforeMs = msFromIso(beforeIso);
         const match = scanMatchForStore(ctx.keys, "whinbox");
-        const limit = input.limit ?? Number.POSITIVE_INFINITY;
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         let deleted = 0;
         let cursor = "0";
         do {

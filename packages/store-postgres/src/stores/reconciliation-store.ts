@@ -7,6 +7,8 @@ import {
   canonicalizeOptionalIsoTimestamp,
   classifyReconciliationClaimMiss,
   reconciliationClaimTemplates,
+  reconciliationFailTemplates,
+  reconciliationMarkManualReviewTemplates,
   reconciliationTimestampRepairTemplates,
   resolveTableName,
   LOGICAL_TABLES,
@@ -51,6 +53,8 @@ export function createPostgresReconciliationStore(
   const ctx = resolveStoreContext(options);
   const table = resolveTableName(LOGICAL_TABLES.reconciliationJobs, ctx.namespace);
   const claimTpl = reconciliationClaimTemplates(ctx.namespace).postgres;
+  const failTpl = reconciliationFailTemplates(ctx.namespace).postgres;
+  const reviewTpl = reconciliationMarkManualReviewTemplates(ctx.namespace).postgres;
   const repairTpl = reconciliationTimestampRepairTemplates(ctx.namespace).postgres;
 
   async function selectByKey(
@@ -255,47 +259,16 @@ export function createPostgresReconciliationStore(
       return withMappedErrors(async () => {
         const now = clockNowIso(ctx.clock);
         const lastError = enforceMaxSanitizedError(input.error) ?? "";
-
-        if (input.retryAt !== undefined) {
-          const retryAt = canonicalizeIsoTimestamp(input.retryAt, "retryAt");
-          const rows = await ctx.getExecutor().query<Record<string, unknown>>(
-            `UPDATE ${table} SET
-               status = 'scheduled',
-               due_at = $3,
-               last_error_sanitized = $4,
-               lease_owner = NULL,
-               lease_token = NULL,
-               lease_expires_at = NULL,
-               updated_at = $5
-             WHERE key = $1
-               AND lease_token = $2
-               AND status = 'claimed'
-               AND lease_expires_at IS NOT NULL
-               AND lease_expires_at > $5
-             RETURNING key, status, generation`,
-            [input.key, input.leaseToken, retryAt, lastError, now],
-          );
-          if (rows.length === 0) {
-            throw new StoreLeaseLostError("fail: lease token rejected or key not found");
-          }
-          return;
-        }
-
+        // RECON-LEASE-1: matching token on claimed is enough (accept after lease expiry).
+        const statusTarget = input.retryAt !== undefined ? "scheduled" : "failed";
+        const dueAt =
+          input.retryAt !== undefined
+            ? canonicalizeIsoTimestamp(input.retryAt, "retryAt")
+            : now;
+        // params: key, leaseToken, statusTarget, dueAt, lastError, now
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
-          `UPDATE ${table} SET
-             status = 'failed',
-             last_error_sanitized = $3,
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             updated_at = $4
-           WHERE key = $1
-             AND lease_token = $2
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > $4
-           RETURNING key, status, generation`,
-          [input.key, input.leaseToken, lastError, now],
+          failTpl.sql,
+          [input.key, input.leaseToken, statusTarget, dueAt, lastError, now],
         );
         if (rows.length === 0) {
           throw new StoreLeaseLostError("fail: lease token rejected or key not found");
@@ -311,21 +284,10 @@ export function createPostgresReconciliationStore(
             ? enforceMaxSanitizedError(input.note) ?? null
             : null;
 
-        // Active-lease fence (parity with complete/fail).
+        // RECON-LEASE-1: matching token on claimed (allowed after expiry).
+        // params: key, leaseToken, note, now
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
-          `UPDATE ${table} SET
-             status = 'manual_review',
-             last_error_sanitized = $3,
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             updated_at = $4
-           WHERE key = $1
-             AND lease_token = $2
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at > $4
-           RETURNING key, status, generation`,
+          reviewTpl.sql,
           [input.key, input.leaseToken, note, now],
         );
         if (rows.length === 0) {
@@ -352,6 +314,8 @@ export function createPostgresReconciliationStore(
         // rediscover them after worker crash. STORES-1: restore unfinished claim
         // attempt (floor 0) so crash/deploy thrash does not burn maxAttempts;
         // next scheduled claim re-increments (net-zero vs unfinished work).
+        // SQL-UPD-1 / WH-LIST-FAIL: re-check status='claimed' in the outer WHERE
+        // so concurrent pollers cannot double-decrement attempts.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'scheduled',
@@ -360,7 +324,8 @@ export function createPostgresReconciliationStore(
              lease_expires_at = NULL,
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              updated_at = $1
-           WHERE key IN (
+           WHERE status = 'claimed'
+             AND key IN (
              SELECT key FROM ${table}
              WHERE status = 'claimed'
                AND lease_expires_at IS NOT NULL

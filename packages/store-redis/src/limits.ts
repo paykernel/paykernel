@@ -18,6 +18,13 @@ export const MAX_REDIS_KEY_LENGTH = 512;
 export const MAX_PAYLOAD_REF_LENGTH = 512;
 
 /**
+ * Bounded default for `deleteExpired` SCAN (REDIS-CLEAN-1).
+ * SQL adapters bound list/cleanup pages; omit `limit` here must not SCAN the
+ * whole keyspace. Callers may pass an explicit higher limit.
+ */
+export const DEFAULT_DELETE_EXPIRED_LIMIT = 1000;
+
+/**
  * Sanitize and cap an error/diagnostic string.
  * Strips common secret patterns; never stores raw provider payloads.
  */

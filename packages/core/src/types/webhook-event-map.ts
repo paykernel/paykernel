@@ -14,8 +14,10 @@
  *
  * Paymob honesty:
  * - `TRANSACTION_RESPONSE` (browser/redirect) never dual-writes fulfillment-ready
- *   `payment.succeeded` / `capture.completed` — use `payment.processing` and wait
- *   for the processed `TRANSACTION` webhook (or inquiry).
+ *   `payment.succeeded` / `capture.completed` **or** confirmed-auth
+ *   `payment.authorized` — use `payment.processing` and wait for the processed
+ *   `TRANSACTION` webhook (or inquiry). AUTH redirect (`is_auth` + success) is
+ *   browser-only (PAYMOB-AUTH-REDIR).
  * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
  *   `payment.processing`, not `payment.succeeded` (Paymob flags/status and Stripe
  *   `payment_intent.succeeded` dual-write when context.status is partially_captured).
@@ -358,6 +360,14 @@ const PAYMOB_FULFILLMENT_READY_STABLE: ReadonlySet<MappedStableEventType> =
   new Set(["payment.succeeded", "capture.completed"]);
 
 /**
+ * PAYMOB-AUTH-REDIR: browser/redirect callbacks also must not look like a
+ * confirmed auth hold. Processed `TRANSACTION` still dual-writes
+ * `payment.authorized` for `is_auth` + success.
+ */
+const PAYMOB_REDIRECT_DEMOTE_STABLE: ReadonlySet<MappedStableEventType> =
+  new Set([...PAYMOB_FULFILLMENT_READY_STABLE, "payment.authorized"]);
+
+/**
  * True when amount fields show a partial capture (captured > 0 and < auth amount).
  * Missing either side → not proven partial (caller may still use status).
  */
@@ -548,13 +558,11 @@ function mapPaymobEventType(
       return "provider.unmapped";
     }
 
-    // Browser/redirect callbacks must never look fulfillment-ready. Native type
-    // distinguishes them from processed TRANSACTION server webhooks — demote
-    // settlement arms so fulfill-on-succeeded handlers ignore redirects.
-    if (
-      isRedirectResponse &&
-      PAYMOB_FULFILLMENT_READY_STABLE.has(mapped)
-    ) {
+    // Browser/redirect callbacks must never look fulfillment-ready or like a
+    // confirmed auth hold. Native type distinguishes them from processed
+    // TRANSACTION server webhooks — demote settlement / authorized arms so
+    // type-only handlers ignore redirects (PAYMOB-AUTH-REDIR).
+    if (isRedirectResponse && PAYMOB_REDIRECT_DEMOTE_STABLE.has(mapped)) {
       return "payment.processing";
     }
     return mapped;
@@ -566,8 +574,12 @@ function mapPaymobEventType(
 }
 
 /**
- * CORE-6: an already-stable `payment.succeeded` must not survive a failed /
- * pending / processing domain status. Other stable names stay idempotent.
+ * CORE-6 / CORE-6-EXT: an already-stable `payment.succeeded` must not survive
+ * a failed / pending / processing / authorized / approved / partial / refunded
+ * domain status. Type-only handlers must not fulfill. Prefer `payment.processing`
+ * for auth / approved / partial / refunded rematch — this mapper has no refund
+ * entity, so it must not invent `refund.completed`. Other stable names stay
+ * idempotent.
  */
 function coerceStableSucceededToDomainStatus(
   type: StablePaymentEventType,
@@ -580,7 +592,15 @@ function coerceStableSucceededToDomainStatus(
   if (status === "failed") {
     return "payment.failed";
   }
-  if (status === "pending" || status === "processing") {
+  if (
+    status === "pending" ||
+    status === "processing" ||
+    status === "approved" ||
+    status === "authorized" ||
+    status === "partially_captured" ||
+    status === "refunded" ||
+    status === "partially_refunded"
+  ) {
     return "payment.processing";
   }
   return type;
@@ -610,7 +630,8 @@ export function mapProviderEventTypeToStable(
 
   // Already a stable name (e.g. dual-write consumers re-mapping) — accept as-is
   // so mapping is idempotent, except `payment.succeeded` cannot survive a
-  // failed / pending / processing domain status (CORE-6).
+  // failed / pending / processing / authorized / approved / partial / refunded
+  // domain status (CORE-6 / CORE-6-EXT).
   if (isStablePaymentEventType(providerEventType)) {
     return coerceStableSucceededToDomainStatus(providerEventType, context);
   }

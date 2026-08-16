@@ -40,7 +40,7 @@ import {
   splitRecordAndToken,
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
-import { enforceMaxSanitizedError } from "../limits";
+import { DEFAULT_DELETE_EXPIRED_LIMIT, enforceMaxSanitizedError } from "../limits";
 import {
   canonicalizeIsoZ,
   msFromIso,
@@ -233,7 +233,7 @@ export function createRedisIdempotencyStore(
         const beforeMs = msFromIso(beforeIso);
         // Without a global registry of keys, SCAN for our prefix + idemp segment.
         const match = scanMatchForStore(ctx.keys, "idemp");
-        const limit = input.limit ?? Number.POSITIVE_INFINITY;
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         let deleted = 0;
         let cursor = "0";
         do {

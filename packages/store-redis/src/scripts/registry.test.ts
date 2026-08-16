@@ -108,23 +108,23 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
   });
 
 
-  it("recon fail requires unexpired lease (parity with complete, not webhook fail)", () => {
+  it("recon fail accepts matching token after expiry (RECON-LEASE-1; complete still fences)", () => {
     const fail = REDIS_SCRIPT_REGISTRY.reconciliation.fail;
     const complete = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
-    expect(fail).toContain("lease_expires_ms");
     expect(fail).toContain("lease_lost");
-    // Same fence as complete: exp <= nowMs → lease_lost
-    expect(fail).toContain("exp <= nowMs");
+    expect(fail).toContain("lease_token");
+    // RECON-LEASE-1: hang/timeout records retry/dead-letter after lease expiry.
+    expect(fail).not.toContain("exp <= nowMs");
     expect(complete).toContain("exp <= nowMs");
   });
 
 
-  it("recon markManualReview requires unexpired lease (parity with complete/fail)", () => {
+  it("recon markManualReview accepts matching token after expiry (RECON-LEASE-1)", () => {
     const mark = REDIS_SCRIPT_REGISTRY.reconciliation.markManualReview;
     const complete = REDIS_SCRIPT_REGISTRY.reconciliation.complete;
-    expect(mark).toContain("lease_expires_ms");
     expect(mark).toContain("lease_lost");
-    expect(mark).toContain("exp <= nowMs");
+    expect(mark).toContain("lease_token");
+    expect(mark).not.toContain("exp <= nowMs");
     expect(complete).toContain("exp <= nowMs");
   });
 

@@ -128,8 +128,10 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
 }
 
 /**
- * PERF-4: load ZRANGE members in one wave (not serial N+1 GET) and keep
- * list-eligible rows up to `limit`.
+ * PERF-4: load ZRANGE members in one Promise.all wave (not serial N+1 GET)
+ * and keep list-eligible rows up to `limit`. SCAN stays off the poll path
+ * (PERF-1). A multi-key GET Lua would still read every field of N hashes
+ * inside Redis and is not cheaper enough to add.
  */
 export async function loadListedRecords<T>(
   keys: readonly string[],

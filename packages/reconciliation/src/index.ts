@@ -31,6 +31,7 @@ export type {
   MarkManualReviewJobInput,
   ProcessDueDisposition,
   ProcessDueOptions,
+  ProcessDueResult,
   ReconciliationScheduler,
   ScheduleJobInput,
   SchedulerClock,

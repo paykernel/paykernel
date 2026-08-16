@@ -4,6 +4,8 @@
 
 ### Behavior (0.x)
 
+- **RECON-LEASE-1 / processDue hang budget:** a handler that overruns `defaultLeaseMs` (30s) no longer livelocks. Memory `fail` accepts a matching `claimed` token after expiry so attempts can reach `maxAttempts`. If `fail` is still `lease_lost` (token wiped by `listDue`), `processDue` increments `hangOverrun` and parks at `maxAttempts`. `complete` after expiry is not converted into `fail`.
+- **PERF-7:** `processDue` keeps list-then-serial-claim fencing. `listDue` oversample when `maxInFlightByGateway` is set stays capped at 200.
 - **RECON-1 / `reconcileMany` correlation:** generator yields `{ index, target, result }` (`ReconcileManyItem`) in completion order so concurrent results (incl. identity-less `provider_not_found` / `temporarily_unavailable`) map to the correct input target. Breaking for consumers that treated yields as bare `ReconciliationResult`.
 - **RECON-2 / `provider_not_found` policy:** retryable not-found always returns `do_not_create_replacement` (including terminal failed/cancelled local) — never bare `retry_later` that action-only switches could treat as safe recreate.
 - **Inherited paid-like fix:** Provider status `approved` no longer drives `update_local_to_paid` (core `isPaidLikePaymentStatus` excludes buyer pre-capture approval). Only true settled `paid` upgrades local to paid.

@@ -1273,14 +1273,18 @@ export class PayPalGateway extends BaseGateway {
     // PAYPAL-1: multi-capture order webhooks aggregate amount across captures.
     // Never dual-write that aggregate with a single latest capture id (false full-refund target).
     // Prefer order id when more than one refundable capture is present.
+    // PAYPAL-ID-1: when siblings exist and exactly one is still held, publish
+    // that capture — last / related_ids.capture_id can be the already-refunded slice.
     const refundableCaptureCount =
       this.listRefundableCaptures(orderCaptures).length;
     const multiCaptureOrder = refundableCaptureCount > 1;
     const orderResourceId = raw.resource.id ?? raw.resource.order_id;
+    const singleRefundableCaptureId =
+      this.selectSingleRefundableCaptureId(orderCaptures);
     const gatewayPaymentId =
       multiCaptureOrder && orderResourceId
         ? orderResourceId
-        : (captureId ?? orderResourceId);
+        : (singleRefundableCaptureId ?? captureId ?? orderResourceId);
     if (!gatewayPaymentId) {
       throw new GatewayApiError(
         "Invalid webhook payload: missing gateway payment identifier",
@@ -1318,7 +1322,8 @@ export class PayPalGateway extends BaseGateway {
     const attached = attachPaymentEvent(event, { computePayloadHash: true });
     // Non-final / partial captures must not dual-write fulfillment-ready types.
     // Demote to payment.processing so type-only handlers match isPaidOutcome.
-    // Incomplete refund_completed must dual-write refund.pending (not completed).
+    // Incomplete refund_completed / CAPTURE.REFUNDED+partially_refunded must
+    // dual-write refund.pending (not refund.completed) — PAYPAL-DW-1.
     // PAYPAL-5: AUTHORIZATION.CAPTURED without a capture id must not dual-write
     // capture.completed against a non-refundable authorization id.
     return this.demoteAuthCapturedWithoutCaptureId(
@@ -1874,17 +1879,16 @@ export class PayPalGateway extends BaseGateway {
 
   private createJsonHeaders(
     token: string,
-    requestId?: string,
+    requestId: string,
     prefer?: "return=minimal" | "return=representation",
   ): Record<string, string> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
+      // Mutations always send PayPal-Request-Id (caller key or generated UUID)
+      // so in-process withRetry after timeout/5xx cannot double-mutate.
+      "PayPal-Request-Id": requestId,
     };
-
-    if (requestId) {
-      headers["PayPal-Request-Id"] = requestId;
-    }
 
     if (prefer) {
       headers.Prefer = prefer;
@@ -1893,25 +1897,31 @@ export class PayPalGateway extends BaseGateway {
     return headers;
   }
 
+  /**
+   * Resolve PayPal-Request-Id the same way Stripe resolves Idempotency-Key:
+   * trim; empty / whitespace mint an ephemeral UUID. Empty string is not
+   * nullish — `"" ?? uuid` would keep "" and `if (requestId)` would skip the header.
+   */
   private getRequestId(
     idempotencyKey: string | undefined,
     maxLength: number,
   ): string {
-    if (idempotencyKey === undefined) {
+    const trimmed = idempotencyKey?.trim();
+    if (!trimmed) {
       // Ephemeral IDs do not protect app-level retries after crash/timeout.
       this.logger.warn(
         "[PayPal] No idempotencyKey provided; generated ephemeral PayPal-Request-Id. App-level retries after crash/timeout can double-mutate — prefer a stable UUID idempotencyKey on every create/capture/refund/void.",
       );
+      return this.runtime.randomUUID();
     }
-    const requestId = idempotencyKey ?? this.runtime.randomUUID();
 
-    if (requestId.length > maxLength) {
+    if (trimmed.length > maxLength) {
       throw new InvalidRequestError(
         `PayPal idempotencyKey must be ${maxLength} characters or fewer for this operation`,
       );
     }
 
-    return requestId;
+    return trimmed;
   }
 
   /**
@@ -3319,18 +3329,24 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Incomplete refund snapshots (`status === refund_completed`) must not
-   * dual-write `refund.completed` — type-only handlers would mark captures
-   * fully refunded from a this-op refund event (P610-PP-3).
-   * Stripe/Moyasar/Paymob: domain keeps incomplete marker; stable dual-write
-   * is `refund.pending`. Proven full/partial keep `refund.completed`.
+   * Incomplete refund snapshots must not dual-write `refund.completed` —
+   * type-only handlers would mark captures fully refunded (P610-PP-3 / PAYPAL-DW-1):
+   * - `status === refund_completed` (this-op PAYMENT.REFUND.COMPLETED)
+   * - `PAYMENT.CAPTURE.REFUNDED` + `partially_refunded` (refund-shaped COMPLETED
+   *   resource or incomplete capture settlement)
+   * Domain keeps the incomplete marker; stable dual-write is `refund.pending`.
+   * Proven full `refunded` keeps `refund.completed`.
    * Provider-native `event.type` / `provider.eventType` stay unchanged.
    */
   private demoteIncompleteRefundWebhookDualWrite(
     event: WebhookEvent,
   ): WebhookEvent {
+    const isThisOpRefundCompleted = event.status === "refund_completed";
+    const isIncompleteCaptureRefunded =
+      event.type === "PAYMENT.CAPTURE.REFUNDED" &&
+      event.status === "partially_refunded";
     if (
-      event.status !== "refund_completed" ||
+      (!isThisOpRefundCompleted && !isIncompleteCaptureRefunded) ||
       event.stableType !== "refund.completed" ||
       !event.event ||
       event.event.type !== "refund.completed" ||

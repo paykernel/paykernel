@@ -152,10 +152,16 @@ JSON, register a **raw-body** parser for the webhook route only
      `InvalidWebhookError` from parse is reclassified) and **do not** call
      `onWebhookFailed`. Treat them as server/data-shape errors — **not** forged
      webhooks. With `@paykernel/webhooks` `processWithVerifier`, parse /
-     `InvalidRequestError` maps to `handler_failed { retryable: true }` (~5xx)
-     so authentic paid events redeliver; only verify-false `InvalidWebhookError`
-     / `{ ok: false }` maps to `invalid_webhook` (~400).
-4. `onWebhookVerified(event)` — fires **after** verify + parse succeed.
+     `InvalidRequestError` / parse-stage `InvalidWebhookError` (Paymob/Moyasar
+     payload; always HTTP 403) maps to `handler_failed { retryable: true }`
+     (~5xx) so authentic paid events redeliver; only verify-false
+     `InvalidWebhookError` / `{ ok: false }` maps to `invalid_webhook` (~400).
+4. Dual-write / rematch — `handleWebhook` attaches a v1 `PaymentEvent` when
+   missing, then **always** runs incomplete-money / incomplete-refund demotes
+   even when `event.event` already passes `isPaymentEvent`. A complete v1
+   `payment.succeeded` arm with envelope `processing` / `partially_captured` /
+   `authorized` / `approved` is rematched before hooks run (CORE-HW-1).
+5. `onWebhookVerified(event)` — fires **after** verify + parse succeed.
 
 ### Throw matrix (what happens when a webhook hook fails)
 

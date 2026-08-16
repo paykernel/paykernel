@@ -314,11 +314,18 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   if (name === "invalidrequesterror" || code === "invalid_request") {
     return false;
   }
-  // Parse-shaped messages on other types also stay retryable (mis-wrapped parse).
-  if (
-    message.includes("webhook parse failed") ||
-    message.includes("parse failed:")
-  ) {
+  // Parse-stage messages (Paymob/Moyasar payload shape, handleWebhook leftovers)
+  // stay retryable even when wrapped on other types.
+  if (isParseStageInvalidWebhookMessage(message)) {
+    return false;
+  }
+
+  const looksLikeWebhookInvalid =
+    name === "invalidwebhookerror" || code === "invalid_webhook";
+  // WEBHOOKS-403: InvalidWebhookError is always HTTP 403. Forgery is classified
+  // separately. Parse-stage and any non-verify-failure InvalidWebhookError must
+  // not hit the permanent 4xx fall-through (signature-valid paid bodies redeliver).
+  if (looksLikeWebhookInvalid && !isVerifyFailureMessage(message)) {
     return false;
   }
 
@@ -354,11 +361,13 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   }
 
   // Remaining definite client-config 4xx (e.g. GatewayNotConfiguredError).
-  // Exclude forgery (handled first), InvalidRequestError / parse (above),
-  // transient 4xx (408/409/425/429). Leave network/5xx to fail-open.
+  // Exclude forgery (handled first), InvalidWebhookError 403 (above),
+  // InvalidRequestError / parse (above), transient 4xx (408/409/425/429).
   if (typeof e.statusCode === "number") {
     if (isPermanentClientHttpStatus(e.statusCode)) {
-      if (!isForgeryClassVerifyError(err)) return true;
+      if (!isForgeryClassVerifyError(err) && !looksLikeWebhookInvalid) {
+        return true;
+      }
     }
   }
 
@@ -366,7 +375,7 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
 }
 
 /**
- * WEBHOOKS-1 / WEBHOOKS-5: classify verify/normalize throws.
+ * WEBHOOKS-1 / WEBHOOKS-5 / WEBHOOKS-403: classify verify/normalize throws.
  *
  * Policy (fail-open for paid redelivery):
  * 1. Forgery (`InvalidWebhookError` / `INVALID_WEBHOOK` from verify-false only)
@@ -374,6 +383,7 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
  * 2. Permanent non-retryable (structure GatewayApiError, clear config 4xx,
  *    `retryable:false`) → `handler_failed { retryable: false }`
  * 3. **Everything else** including post-verify `InvalidRequestError` / parse,
+ *    parse-stage `InvalidWebhookError` (always HTTP 403 — WEBHOOKS-403),
  *    NetworkError, RateLimitError, TypeError, 5xx, Timeout, unknown Error,
  *    onWebhookVerified throws → `handler_failed { retryable: true }` (HTTP 5xx)
  *
@@ -920,9 +930,11 @@ export function createWebhookInboxEngine(
         await store.fail(failInput);
       } catch (failErr) {
         if (isStoreLeaseLostError(failErr)) {
-          // WEBHOOKS-2 / WEBHOOKS-3: token already cleared (foreign reclaim or
-          // soft-release). Best-effort re-claim + fail so maxAttempts / non-retry
-          // intent still apply — never spin forever as bare retryable.
+          // WEBHOOKS-2 / WEBHOOKS-3 / WH-LIST-FAIL: token already cleared
+          // (foreign reclaim, or listRetryable/get soft-release after expiry).
+          // Best-effort re-claim + fail so maxAttempts / non-retry intent still
+          // apply. Never complete on this path (handler already ran; at-least-once).
+          // If reclaim cannot record, return handler_failed retryable.
           const recovered = await bestEffortRecordFailAfterLeaseLost({
             key: args.key,
             payloadHash: currentRecord.payloadHash,
@@ -1264,11 +1276,12 @@ export function createWebhookInboxEngine(
     try {
       verified = await input.verifyAndNormalize(input.raw);
     } catch (err) {
-      // WEBHOOKS-1 / WEBHOOKS-5: fail-open on verify throws.
+      // WEBHOOKS-1 / WEBHOOKS-5 / WEBHOOKS-403: fail-open on verify throws.
       // Forgery (verify-false InvalidWebhookError only) → invalid_webhook (~400).
       // Permanent structure/config → handler_failed non-retryable.
-      // InvalidRequestError / parse / RateLimitError / TypeError / NetworkError /
-      // unknown / onWebhookVerified → handler_failed retryable (~5xx).
+      // InvalidRequestError / parse-stage InvalidWebhookError (HTTP 403) /
+      // RateLimitError / TypeError / NetworkError / unknown / onWebhookVerified
+      // → handler_failed retryable (~5xx).
       // Explicit ok:false is the other forgery path (below) — never claim.
       const kind = classifyVerifyThrow(err);
       if (kind === "forgery") {

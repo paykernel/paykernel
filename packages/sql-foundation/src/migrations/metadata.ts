@@ -9,6 +9,9 @@ import {
   FOUNDATION_SQL_PORTABLE,
   FOUNDATION_SQL_POSTGRES,
   FOUNDATION_SQL_SQLITE,
+  LIST_INDEX_SQL_PORTABLE,
+  LIST_INDEX_SQL_POSTGRES,
+  LIST_INDEX_SQL_SQLITE,
 } from "./definitions";
 
 export type MigrationSqlBody = {
@@ -38,10 +41,25 @@ export const MIGRATION_001: MigrationDefinition = {
   checksum: "v1_foundation",
 };
 
+/** Migration 002: PERF-3 composite list/cleanup indexes (IF NOT EXISTS). */
+export const MIGRATION_002: MigrationDefinition = {
+  version: 2,
+  name: "create_payment_storage_list_indexes",
+  sql: {
+    postgres: LIST_INDEX_SQL_POSTGRES,
+    sqlite: LIST_INDEX_SQL_SQLITE,
+    portable: LIST_INDEX_SQL_PORTABLE,
+  },
+  checksum: "v2_list_indexes",
+};
+
 /**
  * Ordered migrations. Append-only: never renumber applied versions in the field.
  */
-export const MIGRATIONS: readonly MigrationDefinition[] = Object.freeze([MIGRATION_001]);
+export const MIGRATIONS: readonly MigrationDefinition[] = Object.freeze([
+  MIGRATION_001,
+  MIGRATION_002,
+]);
 
 export { CURRENT_SCHEMA_VERSION };
 

@@ -296,10 +296,17 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("fail: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // RECON-LEASE-1: accept fail with matching token even after lease expiry.
+      // Soft-release-first would clear the token + restore attempts, making
+      // maxAttempts a no-op for hang/timeout handlers that still call fail.
+      // Crash reclaim (get/listDue) still soft-restores unfinished claims.
+      if (
+        existing.status !== "claimed" ||
+        existing.leaseToken !== input.leaseToken
+      ) {
         throw new StoreLeaseLostError("fail: lease token rejected");
       }
+      const rec = existing;
       if (input.retryAt !== undefined) {
         entries.set(input.key, {
           ...rec,

@@ -19,7 +19,7 @@ describe("migrate()", () => {
       dialect: "sqlite",
       nowIso: "2026-01-15T12:00:00.000Z",
     });
-    expect(first.applied).toEqual([1]);
+    expect(first.applied).toEqual([1, 2]);
     expect(first.currentVersion).toBe(CURRENT_SCHEMA_VERSION);
     expect(first.alreadyApplied).toEqual([]);
 
@@ -32,8 +32,8 @@ describe("migrate()", () => {
       nowIso: "2026-01-15T12:05:00.000Z",
     });
     expect(second.applied).toEqual([]);
-    expect(second.alreadyApplied).toEqual([1]);
-    expect(second.currentVersion).toBe(1);
+    expect(second.alreadyApplied).toEqual([1, 2]);
+    expect(second.currentVersion).toBe(2);
   });
 
   it("applies with table prefix and schema namespace", async () => {
@@ -46,7 +46,7 @@ describe("migrate()", () => {
       namespace: nsConfig,
       nowIso: "2026-01-15T12:00:00.000Z",
     });
-    expect(result.applied).toEqual([1]);
+    expect(result.applied).toEqual([1, 2]);
 
     const expected = expectedTablesForNamespace(nsConfig);
     for (const name of expected) {
@@ -208,11 +208,37 @@ describe("verifySchema()", () => {
 
 describe("migration metadata", () => {
   it("exports MIGRATIONS with CURRENT_SCHEMA_VERSION", () => {
-    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(1);
+    expect(MIGRATIONS.length).toBeGreaterThanOrEqual(2);
     expect(MIGRATIONS[0]!.version).toBe(1);
-    expect(CURRENT_SCHEMA_VERSION).toBe(1);
+    expect(MIGRATIONS[1]!.version).toBe(2);
+    expect(CURRENT_SCHEMA_VERSION).toBe(2);
     const ns = createSchemaNamespace({});
     expect(ns.tablePrefix).toBe("");
+  });
+
+  it("PERF-3: migrate applies a new version for list indexes after applied v1", async () => {
+    const state = createFakeDbState();
+    const executor = createFakeExecutor(state);
+    state.migrations.set(1, {
+      name: "create_payment_storage_foundation",
+      appliedAt: "2026-01-01T00:00:00.000Z",
+      checksum: "v1_foundation",
+    });
+    const result = await migrate(executor, {
+      dialect: "sqlite",
+      nowIso: "2026-01-15T12:00:00.000Z",
+    });
+    expect(result.applied).toEqual([2]);
+    expect(result.alreadyApplied).toEqual([1]);
+    expect(result.currentVersion).toBe(2);
+    const joined = state.statements.join("\n");
+    expect(joined).toMatch(/CREATE INDEX IF NOT EXISTS\s+idx_.*_st_avail/i);
+    expect(joined).toMatch(/CREATE INDEX IF NOT EXISTS\s+idx_.*_st_due/i);
+    expect(joined).toMatch(/CREATE INDEX IF NOT EXISTS\s+idx_.*_st_lexp/i);
+    // v2 must not rewrite foundation tables (ledger CREATE TABLE is ok).
+    expect(joined).not.toMatch(/CREATE TABLE IF NOT EXISTS\s+"?payment_idempotency/i);
+    expect(joined).not.toMatch(/CREATE TABLE IF NOT EXISTS\s+"?payment_webhook_inbox/i);
+    expect(joined).not.toMatch(/CREATE TABLE IF NOT EXISTS\s+"?payment_reconciliation_jobs/i);
   });
 });
 

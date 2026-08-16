@@ -5,7 +5,11 @@ import {
 } from "./scheduler";
 import { createMemoryReconciliationStore } from "./memory-store";
 import { createExponentialBackoff } from "./backoff";
-import { isStoreLeaseLostError } from "./store";
+import {
+  isStoreLeaseLostError,
+  StoreLeaseLostError,
+  type ReconciliationStore,
+} from "./store";
 
 type FakeClock = { nowMs: () => number; advance: (ms: number) => void };
 
@@ -584,6 +588,186 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(result.rescheduled).toBe(0);
     expect(result.manualReview).toBe(0);
     expect(result.leaseLost).toBe(1);
+    expect(result.hangOverrun).toBe(0);
+  });
+
+  it("RECON-LEASE-1: processDue handler after lease expiry records fail and budgets", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      defaultLeaseMs: 1_000,
+      maxAttempts: 2,
+      backoff: createExponentialBackoff({
+        baseMs: 1_000,
+        maxMs: 60_000,
+        multiplier: 2,
+        jitterRatio: 0,
+      }),
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_hang_budget" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "hang",
+    });
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_hang_budget",
+    });
+
+    const first = await scheduler.processDue({
+      leaseMs: 1_000,
+      handler: async () => {
+        clock.advance(2_000);
+        return { disposition: "retry" as const, error: "handler overran lease" };
+      },
+    });
+    expect(first.processed).toBe(1);
+    expect(first.rescheduled).toBe(1);
+    expect(first.leaseLost).toBe(0);
+    expect(first.hangOverrun).toBe(0);
+    expect(first.manualReview).toBe(0);
+    const afterFirst = await store.get(key);
+    expect(afterFirst?.status).toBe("scheduled");
+    expect(afterFirst?.attempts).toBe(1);
+
+    clock.advance(60_000);
+    const second = await scheduler.processDue({
+      leaseMs: 1_000,
+      handler: async () => {
+        clock.advance(2_000);
+        return { disposition: "retry" as const, error: "handler overran lease again" };
+      },
+    });
+    expect(second.processed).toBe(1);
+    expect(second.rescheduled).toBe(0);
+    expect(second.leaseLost).toBe(0);
+    const dead = await scheduler.listDeadLetter({ keys: [key] });
+    expect(dead).toHaveLength(1);
+    expect(dead[0]!.status).toBe("manual_review");
+    expect(second.manualReview).toBe(1);
+  });
+
+  it("RECON-LEASE-1: hang/lease_lost without fail-after-expiry still budgets", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    // Simulate a durable adapter that still rejects fail after expiry (or
+    // listDue already wiped the token). Scheduler must not livelock on
+    // leaseLost-only reclaim.
+    const store: ReconciliationStore = {
+      ...inner,
+      async fail() {
+        throw new StoreLeaseLostError("fail: lease expired (adapter)");
+      },
+    };
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      defaultLeaseMs: 1_000,
+      maxAttempts: 1,
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_hang_counter" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "hang",
+    });
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_hang_counter",
+    });
+
+    const result = await scheduler.processDue({
+      leaseMs: 1_000,
+      handler: async () => {
+        clock.advance(2_000);
+        throw new Error("overran defaultLeaseMs");
+      },
+    });
+    expect(result.processed).toBe(1);
+    expect(result.rescheduled).toBe(0);
+    expect(result.leaseLost).toBe(0);
+    expect(result.hangOverrun).toBe(1);
+    expect(result.manualReview).toBe(1);
+    expect((await store.get(key))?.status).toBe("manual_review");
+  });
+
+  it("RECON-LEASE-1: complete after expiry is not converted into fail", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      defaultLeaseMs: 1_000,
+      maxAttempts: 3,
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_complete_hang" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "complete_hang",
+    });
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_complete_hang",
+    });
+
+    const result = await scheduler.processDue({
+      leaseMs: 1_000,
+      handler: async () => {
+        clock.advance(2_000);
+        return { disposition: "complete" as const };
+      },
+    });
+    expect(result.completed).toBe(0);
+    expect(result.rescheduled).toBe(0);
+    expect(result.manualReview).toBe(0);
+    expect(result.leaseLost).toBe(0);
+    expect(result.hangOverrun).toBe(1);
+    const rec = await store.get(key);
+    expect(rec?.status).not.toBe("failed");
+    expect(rec?.status).not.toBe("completed");
+  });
+
+  it("PERF-7: listDue oversample stays at most 200 when gateway caps are set", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    let seenLimit: number | undefined;
+    const store: ReconciliationStore = {
+      ...inner,
+      async listDue(input) {
+        seenLimit = input.limit;
+        return inner.listDue(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({ store, clock });
+    await scheduler.processDue({
+      limit: 80,
+      maxInFlightByGateway: { stripe: 1 },
+      handler: async () => ({ disposition: "complete" as const }),
+    });
+    expect(seenLimit).toBe(200);
+  });
+
+  it("PERF-7: listDue is not oversampled when gateway caps are omitted", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    let seenLimit: number | undefined;
+    const store: ReconciliationStore = {
+      ...inner,
+      async listDue(input) {
+        seenLimit = input.limit;
+        return inner.listDue(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({ store, clock });
+    await scheduler.processDue({
+      limit: 80,
+      handler: async () => ({ disposition: "complete" as const }),
+    });
+    expect(seenLimit).toBe(80);
   });
 
   it("RECON-7: schedule reopens terminal completed job under same key", async () => {

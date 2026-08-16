@@ -1334,15 +1334,17 @@ export class MoyasarGateway extends BaseGateway {
         : undefined;
 
     // Paid-like without a complete money snapshot (finite amount + currency +
-    // finite captured total): demote so isPaidOutcome stays false. Finite 0 is
-    // legitimate only for non-paid paths (e.g. verified → setup_completed).
-    // Currency-stripped paid / paid-captured without captured must not fulfill
-    // (P610-MOY-2 / Stripe/Paymob parity).
+    // positive finite captured total): demote so isPaidOutcome stays false.
+    // Finite 0 is legitimate only for non-paid paths (e.g. verified →
+    // setup_completed). Missing/non-finite/zero captured must not fulfill
+    // or publish the authorization total as settled captured
+    // (P610-MOY-2 / MOYASAR-CAP-0 / Stripe/Paymob parity).
     if (
       status === "paid" &&
       (amountMinor === undefined ||
         currency === undefined ||
-        capturedMinor === undefined)
+        capturedMinor === undefined ||
+        capturedMinor <= 0)
     ) {
       status = "processing";
     }
@@ -1787,14 +1789,16 @@ export class MoyasarGateway extends BaseGateway {
       return "partially_captured";
     }
 
-    // Paid/captured family without a finite captured total: fail closed
-    // (P610-MOY-2 / Stripe/Paymob parity). Missing/non-finite captured must
-    // not fulfill as paid / isPaidOutcome.
+    // Paid/captured family without a positive finite captured total: fail closed
+    // (P610-MOY-2 / MOYASAR-CAP-0 / Stripe/Paymob parity). Missing/non-finite
+    // or finite 0 captured must not fulfill as paid / isPaidOutcome. Finite 0
+    // is legitimate only for non-paid paths (verified → setup_completed).
     if (status === "paid") {
+      const capturedAmount = payment.captured;
       const capturedFinite =
-        typeof payment.captured === "number" &&
-        Number.isFinite(payment.captured);
-      if (!capturedFinite) {
+        typeof capturedAmount === "number" &&
+        Number.isFinite(capturedAmount);
+      if (!capturedFinite || capturedAmount <= 0) {
         return "processing";
       }
     }
@@ -1832,15 +1836,18 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Residual held-money domain statuses on an inconsistent `payment_voided`
+   * Residual / unproven domain statuses on an inconsistent `payment_voided`
    * snapshot. Void is unproven: do not rewrite these to `cancelled` and do not
    * dual-write `payment.cancelled` (type-only restock while funds remain).
+   * Includes incomplete paid snapshots demoted to `processing` (captured
+   * missing/zero) so CAP-0 does not flip the envelope to `payment.cancelled`.
    */
   private isResidualHeldWebhookStatus(status: PaymentStatus): boolean {
     return (
       status === "paid" ||
       status === "authorized" ||
-      status === "partially_captured"
+      status === "partially_captured" ||
+      status === "processing"
     );
   }
 
@@ -2017,7 +2024,9 @@ export class MoyasarGateway extends BaseGateway {
       eventType === "payment_captured" || status === "partially_captured";
 
     if (captureLike) {
-      if (captured !== undefined && captured > 0) {
+      // Include finite 0 — never invent the authorization total as captured
+      // (MOYASAR-CAP-0).
+      if (captured !== undefined) {
         return this.fromMinorUnits(captured, data.currency);
       }
       // Partial without captured field — do not invent full authorization total.
@@ -2026,11 +2035,11 @@ export class MoyasarGateway extends BaseGateway {
       }
     }
 
-    // Paid settlement: prefer captured amount when the snapshot includes it.
+    // Paid settlement: prefer captured amount when the snapshot includes it
+    // (including finite 0 — do not publish full amount as settled captured).
     if (
       (status === "paid" || eventType === "payment_paid") &&
-      captured !== undefined &&
-      captured > 0
+      captured !== undefined
     ) {
       return this.fromMinorUnits(captured, data.currency);
     }

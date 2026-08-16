@@ -71,8 +71,9 @@ export function createFakeExecutor(
     query<T = Record<string, unknown>>(sql: string) {
       state.statements.push(sql);
       if (/SELECT version FROM/i.test(sql)) {
+        const desc = /ORDER BY\s+version\s+DESC/i.test(sql);
         return [...state.migrations.entries()]
-          .sort((a, b) => a[0] - b[0])
+          .sort((a, b) => (desc ? b[0] - a[0] : a[0] - b[0]))
           .map(([version, meta]) => ({
             version,
             name: meta.name,

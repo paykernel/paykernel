@@ -546,6 +546,37 @@ describe("operation-result helpers", () => {
     ).toBe("declined");
   });
 
+  it("CORE-INF-1: success:false + paid/authorized/partial/refunded is indeterminate, not failed", () => {
+    const uncertain: Array<GatewayPaymentResult["status"]> = [
+      "paid",
+      "authorized",
+      "partially_captured",
+      "refunded",
+      "partially_refunded",
+    ];
+    for (const status of uncertain) {
+      const result = baseResult({ success: false, status });
+      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const op = mapGatewayResultToOperationResult(result);
+      expect(op.outcome).toBe("indeterminate");
+      if (op.outcome === "indeterminate") {
+        expect(op.reconciliationRequired).toBe(true);
+      }
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(isIndeterminateOutcome(result)).toBe(true);
+    }
+
+    // Omitted success is the same hole (falsy success, settled snapshot).
+    expect(
+      inferOperationOutcome({
+        gatewayId: "pay_omit",
+        status: "paid",
+        redirectUrl: undefined,
+        rawResponse: {},
+      } as GatewayPaymentResult),
+    ).toBe("indeterminate");
+  });
+
   it("CORE-2: successful void (outcome succeeded + status cancelled) is not failed", () => {
     const voided = baseResult({
       success: true,
@@ -1029,6 +1060,33 @@ describe("operation-result helpers", () => {
       inferRefundOperationOutcome({
         status: "pending",
         gatewayRefundId: "re_omit_success",
+        rawResponse: {},
+      } as Parameters<typeof inferRefundOperationOutcome>[0]),
+    ).toBe("indeterminate");
+
+    // CORE-INF-2: success:false + completed is uncertain (not a retryable fail)
+    expect(
+      inferRefundOperationOutcome({
+        success: false,
+        status: "completed",
+        gatewayRefundId: "re_completed_false",
+        rawResponse: {},
+      }),
+    ).toBe("indeterminate");
+    const mappedCompletedFalse = mapGatewayRefundToOperationResult({
+      success: false,
+      status: "completed",
+      gatewayRefundId: "re_completed_false_map",
+      rawResponse: {},
+    });
+    expect(mappedCompletedFalse.outcome).toBe("indeterminate");
+    if (mappedCompletedFalse.outcome === "indeterminate") {
+      expect(mappedCompletedFalse.reconciliationRequired).toBe(true);
+    }
+    expect(
+      inferRefundOperationOutcome({
+        status: "completed",
+        gatewayRefundId: "re_omit_completed",
         rawResponse: {},
       } as Parameters<typeof inferRefundOperationOutcome>[0]),
     ).toBe("indeterminate");

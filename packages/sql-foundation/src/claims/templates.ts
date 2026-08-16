@@ -840,3 +840,144 @@ WHERE key = ?
     },
   };
 }
+
+/**
+ * Lease-gated reconciliation fail / retry templates.
+ *
+ * RECON-LEASE-1 (webhook WEBHOOKS-2 parity): matching lease_token on claimed is
+ * enough — do NOT require lease_expires_at > now. Hang/timeout handlers must
+ * still record retry (`scheduled`) or terminal (`failed`) after expiry so
+ * maxAttempts is effective. Soft-release via listDue clears the token first;
+ * that path still rejects correctly. `complete` stays unexpired-only.
+ *
+ * statusTarget ($3 / first ?) must be adapter-validated: `scheduled` | `failed`.
+ * When scheduled, due_at is set to dueAt; otherwise due_at is left unchanged.
+ */
+export function reconciliationFailTemplates(
+  namespace?: ResolvedSchemaNamespace,
+): ClaimTemplateSet {
+  const t = table(LOGICAL_TABLES.reconciliationJobs, namespace);
+  const intent =
+    "Atomic recon fail: matching lease_token on claimed (RECON-LEASE-1: allowed after expiry); " +
+    "set scheduled+due_at or failed + sanitized last_error only.";
+
+  // params: key, leaseToken, statusTarget, dueAt, lastError, now
+  const postgresSql = `
+UPDATE ${t} SET
+  status = $3,
+  due_at = CASE WHEN $3 = 'scheduled' THEN $4 ELSE ${t}.due_at END,
+  last_error_sanitized = $5,
+  lease_owner = NULL,
+  lease_token = NULL,
+  lease_expires_at = NULL,
+  updated_at = $6
+WHERE key = $1
+  AND lease_token = $2
+  AND status = 'claimed'
+RETURNING key, status, generation
+`.trim();
+
+  // params: statusTarget, dueAt, lastError, now, key, leaseToken
+  const sqliteSql = `
+UPDATE ${t} SET
+  status = ?,
+  due_at = CASE WHEN ? = 'scheduled' THEN ? ELSE due_at END,
+  last_error_sanitized = ?,
+  lease_owner = NULL,
+  lease_token = NULL,
+  lease_expires_at = NULL,
+  updated_at = ?
+WHERE key = ?
+  AND lease_token = ?
+  AND status = 'claimed'
+`.trim();
+
+  return {
+    intent,
+    postgres: {
+      dialect: "postgres",
+      sql: postgresSql,
+      params: ["key", "leaseToken", "statusTarget", "dueAt", "lastError", "now"],
+      intent,
+    },
+    sqlite: {
+      dialect: "sqlite",
+      sql: sqliteSql,
+      params: ["statusTarget", "statusTarget", "dueAt", "lastError", "now", "key", "leaseToken"],
+      intent,
+    },
+    generic: {
+      dialect: "generic",
+      sql: `-- Portable recon fail: conditional UPDATE by lease_token + claimed (RECON-LEASE-1: token match after expiry ok).`,
+      params: ["key", "leaseToken", "statusTarget", "dueAt", "lastError", "now"],
+      intent,
+    },
+  };
+}
+
+/**
+ * Lease-gated reconciliation markManualReview templates.
+ *
+ * RECON-LEASE-1: matching lease_token on claimed is enough (allowed after expiry)
+ * so a hung worker can still dead-letter to human review. complete stays
+ * unexpired-only.
+ */
+export function reconciliationMarkManualReviewTemplates(
+  namespace?: ResolvedSchemaNamespace,
+): ClaimTemplateSet {
+  const t = table(LOGICAL_TABLES.reconciliationJobs, namespace);
+  const intent =
+    "Atomic recon markManualReview: matching lease_token on claimed (RECON-LEASE-1: allowed after expiry); " +
+    "status→manual_review + sanitized last_error only.";
+
+  // params: key, leaseToken, note, now
+  const postgresSql = `
+UPDATE ${t} SET
+  status = 'manual_review',
+  last_error_sanitized = $3,
+  lease_owner = NULL,
+  lease_token = NULL,
+  lease_expires_at = NULL,
+  updated_at = $4
+WHERE key = $1
+  AND lease_token = $2
+  AND status = 'claimed'
+RETURNING key, status, generation
+`.trim();
+
+  // params: note, now, key, leaseToken
+  const sqliteSql = `
+UPDATE ${t} SET
+  status = 'manual_review',
+  last_error_sanitized = ?,
+  lease_owner = NULL,
+  lease_token = NULL,
+  lease_expires_at = NULL,
+  updated_at = ?
+WHERE key = ?
+  AND lease_token = ?
+  AND status = 'claimed'
+`.trim();
+
+  return {
+    intent,
+    postgres: {
+      dialect: "postgres",
+      sql: postgresSql,
+      params: ["key", "leaseToken", "note", "now"],
+      intent,
+    },
+    sqlite: {
+      dialect: "sqlite",
+      sql: sqliteSql,
+      params: ["note", "now", "key", "leaseToken"],
+      intent,
+    },
+    generic: {
+      dialect: "generic",
+      sql: `-- Portable recon markManualReview: conditional UPDATE by lease_token + claimed (RECON-LEASE-1: token match after expiry ok).`,
+      params: ["key", "leaseToken", "note", "now"],
+      intent,
+    },
+  };
+}

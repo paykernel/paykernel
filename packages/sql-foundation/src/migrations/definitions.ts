@@ -205,3 +205,33 @@ export const FOUNDATION_SQL_SQLITE = buildFoundationMigrationSql("sqlite", defau
 
 export const FOUNDATION_SQL_PORTABLE =
   "Create payment_idempotency, payment_webhook_inbox, payment_reconciliation_jobs, payment_storage_migrations with PKs, status CHECKs, lease/due indexes; ISO TEXT timestamps; payload_hash TEXT.";
+
+/**
+ * PERF-3: composite list/cleanup indexes for already-applied v1 databases.
+ * Do not rewrite v1. `CREATE INDEX IF NOT EXISTS` is a no-op when v1 already
+ * emitted these names (current foundation DDL includes them for new installs).
+ */
+export function buildListIndexMigrationSql(
+  dialect: "postgres" | "sqlite",
+  qualify: (logical: string) => string,
+): string {
+  void dialect;
+  const inbox = qualify("payment_webhook_inbox");
+  const recon = qualify("payment_reconciliation_jobs");
+  const statements: string[] = [];
+  const usedIndexNames = new Set<string>();
+  // listRetryable (status, available_at) and bounded expired-lease UPDATE
+  pushCreateIndex(statements, usedIndexNames, inbox, "st_avail", "status, available_at");
+  pushCreateIndex(statements, usedIndexNames, inbox, "st_lexp", "status, lease_expires_at");
+  // listDue (status, due_at) and bounded expired-lease UPDATE
+  pushCreateIndex(statements, usedIndexNames, recon, "st_due", "status, due_at");
+  pushCreateIndex(statements, usedIndexNames, recon, "st_lexp", "status, lease_expires_at");
+  return statements.join(";\n") + ";";
+}
+
+export const LIST_INDEX_SQL_POSTGRES = buildListIndexMigrationSql("postgres", defaultQualify);
+
+export const LIST_INDEX_SQL_SQLITE = buildListIndexMigrationSql("sqlite", defaultQualify);
+
+export const LIST_INDEX_SQL_PORTABLE =
+  "CREATE INDEX IF NOT EXISTS composite (status, available_at) / (status, due_at) / (status, lease_expires_at) on webhook inbox and reconciliation jobs for listRetryable/listDue and bounded expired-lease cleanup.";

@@ -188,7 +188,10 @@ export interface CreatePaymentParams extends CommonPaymentInput, OperationReques
 
     /**
      * Moyasar payment source.
-     * Supports: creditcard, token, applepay, samsungpay, stcpay.
+     * Backend create accepts: token, applepay, samsungpay, stcpay.
+     * Raw `creditcard` (PAN/CVC) is a Moyasar.js / PCI type only — this adapter
+     * rejects it with InvalidRequestError before any HTTP request. Use a
+     * Moyasar.js `token` source instead.
      * Takes precedence over `tokenId` if both are provided.
      */
     moyasarSource?: MoyasarPaymentSource;

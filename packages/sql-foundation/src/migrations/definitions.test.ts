@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   buildFoundationMigrationSql,
+  buildListIndexMigrationSql,
   INDEX_LABEL_MAX,
   indexLabel,
 } from "./definitions";
@@ -76,6 +77,19 @@ describe("buildFoundationMigrationSql index uniqueness", () => {
     expect(names.some((n) => n.endsWith("_st_avail"))).toBe(true);
     expect(names.some((n) => n.endsWith("_st_due"))).toBe(true);
     expect(names.filter((n) => n.endsWith("_st_lexp")).length).toBe(2);
+  });
+
+  it("PERF-3: buildListIndexMigrationSql emits IF NOT EXISTS composites only", () => {
+    const sql = buildListIndexMigrationSql("sqlite", (logical) => `"${logical}"`);
+    expect(sql).not.toMatch(/CREATE TABLE/i);
+    expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail/i);
+    expect(sql).toMatch(/CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due/i);
+    expect(sql).toMatch(/status, available_at/i);
+    expect(sql).toMatch(/status, due_at/i);
+    expect(sql).toMatch(/status, lease_expires_at/i);
+    const names = extractIndexNames(sql);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toHaveLength(4);
   });
 
   it("schema-qualified long names remain unique", () => {

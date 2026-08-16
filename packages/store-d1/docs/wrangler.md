@@ -65,7 +65,7 @@ npx wrangler d1 migrations apply payments --remote
 ```
 
 Prefer `migrateD1Adapter(env.PAYMENTS_DB)` for parity with `@paykernel/sql-foundation` DDL.  
-Details: [migrations.md](./migrations.md). Reference SQL: `migrations/0001_foundation.sql`.
+Details: [migrations.md](./migrations.md). Reference SQL: `migrations/0001_foundation.sql`, `migrations/0002_list_indexes.sql`.
 
 ---
 

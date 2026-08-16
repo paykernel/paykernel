@@ -635,8 +635,9 @@ export type LeaseMutationDecision =
  * unexpected status → wrong_status.
  *
  * `complete` / `renew` pass `requireActiveLease: true` (default).
- * Webhook `fail` and `markIndeterminate` may pass `requireActiveLease: false`
- * so matching token + claimed/reserved succeeds after expiry (WEBHOOKS-2 / A4).
+ * Webhook `fail`, recon `fail` / `markManualReview`, and `markIndeterminate`
+ * may pass `requireActiveLease: false` so matching token + claimed/reserved
+ * succeeds after expiry (WEBHOOKS-2 / RECON-LEASE-1 / A4).
  *
  * Adapters MUST re-check this condition in the same atomic write as the status
  * transition (WHERE lease_token = $tok AND status = …, plus lease_expires_at > $now

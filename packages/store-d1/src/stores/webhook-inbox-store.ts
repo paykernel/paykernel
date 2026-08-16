@@ -372,6 +372,8 @@ export function createD1WebhookInboxStore(
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0).
+        // SQL-UPD-1 / WH-LIST-FAIL: re-check status='claimed' in the outer WHERE
+        // so concurrent pollers cannot double-decrement attempts.
         await ctx.getExecutor().execute(
           `UPDATE ${table} SET
              status = 'pending',
@@ -381,7 +383,8 @@ export function createD1WebhookInboxStore(
              attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
              available_at = ?,
              updated_at = ?
-           WHERE key IN (
+           WHERE status = 'claimed'
+             AND key IN (
              SELECT key FROM (
                SELECT key FROM ${table}
                WHERE status = 'claimed'
