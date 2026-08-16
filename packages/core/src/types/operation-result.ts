@@ -148,6 +148,55 @@ export type PaymentOperationResult =
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Non-empty ISO 4217-ish code; required to publish any major-unit amount. */
+function publishableCurrency(value: unknown): string | undefined {
+    if (typeof value !== "string") {
+        return undefined;
+    }
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed.toUpperCase() : undefined;
+}
+
+function isFiniteAmount(value: unknown): value is number {
+    return typeof value === "number" && Number.isFinite(value);
+}
+
+type AmountLikeSource = {
+    amount?: number | undefined;
+    currency?: string | undefined;
+    fee?: number | undefined;
+    capturedAmount?: number | undefined;
+    refundedAmount?: number | undefined;
+};
+
+/**
+ * Copy currency + finite major-unit amounts together (NEW-MONEY-1).
+ * Omits incomplete money (no currency, or non-finite amounts). Currency-only
+ * snapshots are still published.
+ */
+function assignPublishableMoneyFields(
+    target: AmountLikeSource,
+    source: AmountLikeSource,
+): void {
+    const currency = publishableCurrency(source.currency);
+    if (currency === undefined) {
+        return;
+    }
+    target.currency = currency;
+    if (isFiniteAmount(source.amount)) {
+        target.amount = source.amount;
+    }
+    if (isFiniteAmount(source.fee)) {
+        target.fee = source.fee;
+    }
+    if (isFiniteAmount(source.capturedAmount)) {
+        target.capturedAmount = source.capturedAmount;
+    }
+    if (isFiniteAmount(source.refundedAmount)) {
+        target.refundedAmount = source.refundedAmount;
+    }
+}
+
 /**
  * Convert a {@link PaymentError} (or similar) to a serializable {@link PaymentErrorLike}.
  */
@@ -199,11 +248,12 @@ export function paymentNextActionToAction(
 /**
  * Build a {@link Payment} snapshot from a gateway result (+ optional gateway name).
  *
- * **CORE-1 / fail-closed money:** amount-like major-unit fields (`amount`,
- * `fee`, `capturedAmount`, `refundedAmount`) are copied only when
- * `result.currency` is a non-empty string. A major-unit number without currency
- * cannot be re-scaled safely and is omitted rather than published incomplete.
- * Currency alone (no amounts) is still copied when present.
+ * **CORE-1 / NEW-MONEY-1 / fail-closed money:** amount-like major-unit fields
+ * (`amount`, `fee`, `capturedAmount`, `refundedAmount`) are copied only when
+ * `result.currency` is a non-empty string **and** the value is
+ * {@link Number.isFinite}. A major-unit number without currency (or NaN /
+ * ±Infinity) cannot be re-scaled safely and is omitted rather than published
+ * incomplete. Currency alone (no amounts) is still copied when present.
  */
 export function paymentFromGatewayResult(
     result: GatewayPaymentResult,
@@ -241,23 +291,7 @@ export function paymentFromGatewayResult(
     if (result.clientSecret !== undefined) payment.clientSecret = result.clientSecret;
     if (result.nextAction !== undefined) payment.nextAction = result.nextAction;
 
-    const currency =
-        typeof result.currency === "string" && result.currency.trim().length > 0
-            ? result.currency.trim().toUpperCase()
-            : undefined;
-
-    if (currency !== undefined) {
-        payment.currency = currency;
-        // Complete money snapshot only — never publish major units without currency.
-        if (result.amount !== undefined) payment.amount = result.amount;
-        if (result.fee !== undefined) payment.fee = result.fee;
-        if (result.capturedAmount !== undefined) {
-            payment.capturedAmount = result.capturedAmount;
-        }
-        if (result.refundedAmount !== undefined) {
-            payment.refundedAmount = result.refundedAmount;
-        }
-    }
+    assignPublishableMoneyFields(payment, result);
 
     return payment;
 }
@@ -404,6 +438,8 @@ function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean
  * `partially_captured` (open capture story) back to `succeeded`.
  * CORE-2: intentional void dual-writes `outcome: succeeded` + `status: cancelled`
  * — preserve that as operation success (not charge paid; {@link isPaidOutcome} false).
+ * NEW-CORE-6: `declined` / `failed` must not persist on paid-like status —
+ * demote to `succeeded` so fulfillment gates stay honest.
  */
 function coercePaymentOutcomeToGatewayStatus(
     outcome: PaymentOperationOutcome,
@@ -445,6 +481,14 @@ function coercePaymentOutcomeToGatewayStatus(
         // Explicit requires_action must not under-fulfill fully settled money
         // (paid / authorized / refunded / partially_refunded).
         if (result.success && isSettledSuccessStatus(result.status)) {
+            return "succeeded";
+        }
+        return outcome;
+    }
+    if (outcome === "declined" || outcome === "failed") {
+        // NEW-CORE-6: a paid-like snapshot is settled money — do not persist a
+        // decline/fail that would close fulfillment while status stays paid.
+        if (isPaidLikePaymentStatus(result.status)) {
             return "succeeded";
         }
         return outcome;
@@ -593,6 +637,13 @@ export type ApplyOutcomeGatewayBase = {
  * (same family as {@link inferOperationOutcome}). `outcome: 'succeeded'` with
  * `status: 'failed'` / `'pending'` is never persisted as `success: true` +
  * `outcome: 'succeeded'`.
+ *
+ * **NEW-CORE-6:** `declined` / `failed` with paid-like `status` is stored as
+ * `succeeded` (status wins) so `isPaidOutcome` stays honest.
+ *
+ * **NEW-MONEY-1:** amount-like major-unit fields are copied only with a
+ * non-empty `currency` and a finite number. Currency is always published
+ * together with those amounts (currency-only snapshots are still allowed).
  */
 export function applyOutcomeToGatewayResult(
     base: ApplyOutcomeGatewayBase,
@@ -669,15 +720,7 @@ export function applyOutcomeToGatewayResult(
     if (base.authorizationId !== undefined) {
         result.authorizationId = base.authorizationId;
     }
-    if (base.amount !== undefined) result.amount = base.amount;
-    if (base.currency !== undefined) result.currency = base.currency;
-    if (base.fee !== undefined) result.fee = base.fee;
-    if (base.capturedAmount !== undefined) {
-        result.capturedAmount = base.capturedAmount;
-    }
-    if (base.refundedAmount !== undefined) {
-        result.refundedAmount = base.refundedAmount;
-    }
+    assignPublishableMoneyFields(result, base);
     if (base.clientSecret !== undefined) {
         result.clientSecret = base.clientSecret;
     }
@@ -690,7 +733,7 @@ export function applyOutcomeToGatewayResult(
         result.providerRequestId = base.providerRequestId;
     }
 
-    if (decline !== undefined) {
+    if (decline !== undefined && storedOutcome === "declined") {
         result.decline = decline;
     }
 
@@ -873,8 +916,10 @@ export type ApplyOutcomeGatewayRefundBase = {
  * | `failed`        | `false` | Definitive refund failure |
  * | `indeterminate` | `false` | **Not** a failure to mark settled/failed — always set `reconciliationRequired: true` |
  *
- * Does **not** invent `succeeded` from a failed `status` — callers pass the
- * explicit {@link RefundOperationOutcome}; `success` is derived only from that.
+ * **NEW-CORE-5:** stored `outcome` / `success` are coerced against `base.status`
+ * (same family as {@link inferRefundOperationOutcome} /
+ * {@link applyOutcomeToGatewayResult}). `outcome: 'succeeded'` with
+ * `status: 'pending'` / `'failed'` is never persisted as a settled success.
  * Prefer building base fields from the provider response, then:
  * `applyOutcomeToGatewayRefundResult(base, outcome)`.
  */
@@ -883,17 +928,21 @@ export function applyOutcomeToGatewayRefundResult(
     outcome: RefundOperationOutcome,
     extras?: {
         /**
-         * Ignored unless `outcome` is `indeterminate`. Never attach
-         * `reconciliationRequired` on a succeeded/pending/failed write.
+         * Ignored unless the stored (coerced) `outcome` is `indeterminate`.
+         * Never attach `reconciliationRequired` on a succeeded/pending/failed write.
          */
         reconciliationRequired?: boolean;
     },
 ): GatewayRefundResult {
-    const success = successFromRefundOutcome(outcome);
+    const storedOutcome = coerceRefundOutcomeToGatewayStatus(
+        outcome,
+        base.status,
+    );
+    const success = successFromRefundOutcome(storedOutcome);
 
     const result: GatewayRefundResult = {
         success,
-        outcome,
+        outcome: storedOutcome,
         gatewayRefundId: base.gatewayRefundId,
         status: base.status,
         rawResponse: base.rawResponse,
@@ -909,7 +958,7 @@ export function applyOutcomeToGatewayRefundResult(
         result.providerRequestId = base.providerRequestId;
     }
 
-    if (outcome === "indeterminate") {
+    if (storedOutcome === "indeterminate") {
         result.reconciliationRequired = true;
     }
 

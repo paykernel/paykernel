@@ -142,9 +142,10 @@ const diffs = compareSnapshots(target.expected, provider);
 
 Only fields present on the local snapshot are compared. Pure function — no I/O.
 
-**Auth-hold vs capture totals (RECON-1 / RECON-2):** when local omits `capturedAmount` but quotes `amount`, a present provider capture is compared against that amount **except**:
+**Auth-hold vs capture totals (RECON-1 / RECON-2 / NEW-RECON-1):** when local omits `capturedAmount` but quotes `amount`, a present provider capture is compared against that amount **except**:
 
 - `authorized` / `approved` / Stripe `requires_capture` with `capturedAmount=0` is a **hold**, not money drift (do not `apply_drift_review`).
+- In-flight `pending` / `processing` with `capturedAmount=0` is the same class (nothing captured yet; still settling). Compare does not invent `capturedAmount` drift; policy is `retry_later`, never `apply_drift_review`.
 - Non-zero provider capture on that same auth-hold is **incremental capture** drift, even if the capture equals `amount`.
 
 `moneyEquals` uses core `toMinorUnits` (bigint) for amount equality. Currency codes compare case-insensitively (`"usd"` ≡ `"USD"`). Equivalent decimal spellings of the same numeric value match; different currencies or unparseable/excess-precision amounts do not.

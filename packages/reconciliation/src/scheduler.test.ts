@@ -770,6 +770,63 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(seenLimit).toBe(80);
   });
 
+  it("NEW-RECON-2: processDue does not bulk-claim the list before the first handler", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      owner: "w1",
+      defaultLeaseMs: 30_000,
+    });
+    const runAt = new Date(clock.nowMs()).toISOString();
+    const keys = ["pi_a", "pi_b", "pi_c"].map((id) =>
+      deriveReconciliationJobKey({ gateway: "stripe", gatewayPaymentId: id }),
+    );
+    for (const id of ["pi_a", "pi_b", "pi_c"]) {
+      await scheduler.schedule({
+        target: { gateway: "stripe", gatewayPaymentId: id },
+        runAt,
+        reason: "due",
+      });
+    }
+
+    let first = true;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const inFirst = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+
+    const running = scheduler.processDue({
+      limit: 3,
+      handler: async () => {
+        if (first) {
+          first = false;
+          entered();
+          await held;
+        }
+        return { disposition: "complete" as const };
+      },
+    });
+
+    await inFirst;
+    const mid = await Promise.all(keys.map((k) => store.get(k)));
+    const claimed = mid.filter((r) => r?.status === "claimed");
+    const scheduled = mid.filter((r) => r?.status === "scheduled");
+    expect(claimed).toHaveLength(1);
+    expect(scheduled).toHaveLength(2);
+    expect(scheduled.every((r) => r?.leaseToken === undefined)).toBe(true);
+
+    release();
+    const result = await running;
+    expect(result.processed).toBe(3);
+    expect(result.completed).toBe(3);
+  });
+
   it("PERF-7: claimDue issues listed claims concurrently", async () => {
     const clock = createFakeClock();
     const inner = createMemoryReconciliationStore({ clock });

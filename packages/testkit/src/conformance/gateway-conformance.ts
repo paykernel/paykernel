@@ -139,11 +139,15 @@ function isScriptableMock(g: PaymentGateway): boolean {
 }
 
 function defaultCreatePayment(caps: GatewayCapabilities) {
+  // NEW-TESTKIT-4: capture:false is an auth hold. Unclaimed authorization
+  // must not request it — payments-only fixtures capture immediately.
+  const authHold =
+    caps.authorization === true && caps.immediateCapture === false;
   return {
     amount: 10.5,
     currency: "SAR",
     callbackUrl: "https://merchant.example/callback",
-    capture: caps.immediateCapture !== false,
+    capture: !authHold,
   };
 }
 
@@ -415,10 +419,17 @@ export async function runGatewayConformanceSuite(
           // Script known statuses and assert SDK PaymentStatus union
           const scripts: Array<{ outcome: string; expect: PaymentStatus }> = [
             { outcome: "succeeded", expect: "paid" },
-            { outcome: "authorized", expect: "authorized" },
             { outcome: "pending", expect: "pending" },
             { outcome: "processing", expect: "processing" },
           ];
+          // NEW-TESTKIT-4: capture:false requires authorization. Do not
+          // script an auth hold when the capability is unclaimed.
+          if (caps.authorization) {
+            scripts.splice(1, 0, {
+              outcome: "authorized",
+              expect: "authorized",
+            });
+          }
           for (const s of scripts) {
             mockish.enqueue!("createPayment", { outcome: s.outcome });
             const result = await g.createPayment({
@@ -915,9 +926,10 @@ export async function runGatewayConformanceSuite(
       name: "partial_capture",
       skipReason: () => {
         if (!caps.partialCapture) return "capability partialCapture not claimed";
-        if (!caps.payments && !caps.authorization) {
-          return "payments/authorization required for partial capture";
+        if (!caps.authorization) {
+          return "capability authorization not claimed";
         }
+        if (!caps.payments) return "capability payments not claimed";
         return undefined;
       },
       run: async () => {

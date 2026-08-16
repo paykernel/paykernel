@@ -301,37 +301,43 @@ describe("modes: inline vs durable_retry (A6)", () => {
     expect(rec?.status).toBe("completed");
   });
 
-  it("PERF-7: processRetryable issues listed claims concurrently", async () => {
+  it("NEW-WEBHOOKS-1: processRetryable does not claim the whole list before the first handler", async () => {
     const clock = createTestClock();
     const inner = createMemoryWebhookInboxStore({ clock });
-    const engine = createWebhookInboxEngine({
+    const parker = createWebhookInboxEngine({
       store: inner,
       mode: "durable_retry",
       ackAfterClaim: true,
       clock,
     });
-    await engine.processVerified({
+    await parker.processVerified({
       gateway: "stripe",
       providerEventId: "evt_a",
       payloadHash: "ha",
       envelope: { id: "evt_a" },
     });
-    await engine.processVerified({
+    await parker.processVerified({
       gateway: "stripe",
       providerEventId: "evt_b",
       payloadHash: "hb",
       envelope: { id: "evt_b" },
     });
+    await parker.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_c",
+      payloadHash: "hc",
+      envelope: { id: "evt_c" },
+    });
 
-    let inflight = 0;
-    let maxInflight = 0;
+    const claimedKeys: string[] = [];
+    let claimsAtFirstHandler = 0;
+    let handlerInFlight = 0;
+    let claimsDuringHandler = 0;
     const store = {
       ...inner,
       async claim(input: Parameters<typeof inner.claim>[0]) {
-        inflight += 1;
-        maxInflight = Math.max(maxInflight, inflight);
-        await Promise.resolve();
-        inflight -= 1;
+        if (handlerInFlight > 0) claimsDuringHandler += 1;
+        claimedKeys.push(input.key);
         return inner.claim(input);
       },
     };
@@ -341,10 +347,18 @@ describe("modes: inline vs durable_retry (A6)", () => {
       clock,
     });
     const result = await worker.processRetryable({
-      handler: async () => {},
+      handler: async () => {
+        handlerInFlight += 1;
+        if (claimsAtFirstHandler === 0) {
+          claimsAtFirstHandler = claimedKeys.length;
+        }
+        handlerInFlight -= 1;
+      },
     });
-    expect(result.items).toHaveLength(2);
-    expect(maxInflight).toBeGreaterThan(1);
+    expect(result.items).toHaveLength(3);
+    expect(claimsAtFirstHandler).toBe(1);
+    expect(claimedKeys).toHaveLength(3);
+    expect(claimsDuringHandler).toBe(0);
   });
 
   it("processRetryable throws on inline engines (no mode mix)", async () => {

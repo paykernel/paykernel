@@ -105,9 +105,9 @@ If `capture: false` is used without `authIntegrationId` and without a per-reques
 
 `idempotencyKey` is used as a fallback Paymob `special_reference` during payment creation and deduplicates repeated SDK calls within the same `PaymentClient`/gateway instance. Reusing the same key with different parameters is rejected. For production with multiple workers, serverless invocations, or deploy restarts, configure `idempotencyStore` with Redis, a database, or another process-wide store so completed results can be replayed across gateway instances. Implement the store's optional `reserve` method atomically, such as Redis `SET NX` or a database unique constraint, for full cross-worker duplicate-call protection. The SDK warns at construction when a store lacks atomic `reserve()`, and when no store is configured in a serverless/edge environment. If `idempotencyStore` is set but has no `reserve()`, keyed mutations throw `InvalidRequestError` instead of falling through to get-then-set.
 
-Paymob does not expose native idempotency keys for capture, refund, void, or Intention creation. If a network failure, caller abort after the mutating POST, Paymob 5xx response, **or HTTP 200 with an empty/malformed body** (missing Intention `id` / checkout URL, missing/invalid `success`, missing refund id, non-boolean success that cannot be coerced, **legacy Egypt missing order id / payment token**) happens after the SDK sends one of those mutating requests, the SDK marks that `idempotencyKey` outcome as unknown and blocks automatic replay. Reconcile via a verified Paymob callback, transaction inquiry, or the Paymob dashboard before issuing a new mutation. String `"true"`/`"false"` success values and string minor-unit money fields on mutation responses are coerced when present.
+Paymob does not expose native idempotency keys for capture, refund, void, or Intention creation. If a network failure, caller abort after the mutating POST, Paymob 5xx **or 429** response, **or HTTP 200 with an empty/malformed body** (missing Intention `id` / checkout URL, missing/invalid `success`, missing refund id, non-boolean success that cannot be coerced, **legacy Egypt missing order id / payment token**) happens after the SDK sends one of those mutating requests, the SDK marks that `idempotencyKey` outcome as unknown and blocks automatic replay. A mutation HTTP 429 is **not** a definite reject — the SDK does not convert it into a retryable `RateLimitError` that clears the fence. Reconcile via a verified Paymob callback, transaction inquiry, or the Paymob dashboard before issuing a new mutation. String `"true"`/`"false"` success values and string minor-unit money fields on mutation responses are coerced when present.
 
-The process-local idempotency map (limit 1000) **never FIFO-evicts in-flight or unknown fences** under pressure — only terminal completed entries are dropped. Durable `idempotencyStore` rows follow the same rule: `unknown` / `in_progress` are never deleted because `expiresAt` passed (expired `in_progress` is treated as unknown and refuses retry). Only completed replay cache may expire. If the map is full of non-evictable fences, new keys are refused fail-closed rather than risk double-apply. Prefer a durable `idempotencyStore` before you approach that limit.
+The process-local idempotency map (limit 1000) **never FIFO-evicts in-flight, unknown, or completed mutation fences** under pressure. Durable `idempotencyStore` rows follow the same rule: completed / `unknown` / `in_progress` are never deleted because `expiresAt` passed (expired `in_progress` is treated as unknown and refuses retry). Completed replay is **not** a free key. If the map is full of non-evictable fences, new keys are refused fail-closed rather than evicting a completed refund/capture/void fence. Prefer a durable `idempotencyStore` before you approach that limit.
 
 > ⚠️ **Serverless / edge deployments:** the built-in idempotency cache is an
 > in-memory `Map` that lives per isolate and is wiped frequently on platforms
@@ -157,6 +157,8 @@ const result = await client.voidPayment({
 }, 'paymob');
 ```
 
+**Pending void:** when Paymob returns `pending: true` on a void mutation, the result has `status: 'pending'` / `outcome: 'requires_action'`, **not** `cancelled`.
+
 ## Refund Payment
 
 ```typescript
@@ -173,7 +175,7 @@ If `amount` is omitted, the SDK first retrieves the Paymob transaction and sends
 
 When an explicit `amount` is provided, the SDK validates it against Paymob's remaining refundable balance before calling the refund endpoint.
 
-**Pending refunds (PAYMOB-1):** when Paymob returns `pending: true`, the result has `status`/`outcome` `pending` and **omits `totalRefunded`**. Do not treat a pending refund as settled or ledger the request amount until a completed refund response or inquiry shows a settled cumulative. Completed refunds set `totalRefunded` from body `refunded_amount_cents` when present, otherwise estimate inquiry prior + this request.
+**Pending refunds (PAYMOB-1 / NEW-PAYMOB-REFUND-0):** when Paymob returns `pending: true`, or `success: true` with missing/`<=0` `refunded_amount_cents` and no proven positive cumulative, the result has `status`/`outcome` `pending` and **omits `totalRefunded`**. Do not treat that as `completed` + `totalRefunded: 0`. Completed + `succeeded` only when `refunded_amount_cents > 0` or inquiry + this request proves a positive cumulative.
 
 ## Legacy Iframe Checkout
 

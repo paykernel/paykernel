@@ -4,6 +4,7 @@ import {
   GatewayApiError,
   InvalidRequestError,
   NetworkError,
+  OperationNotSupportedError,
   defineGatewayCapabilities,
   isIndeterminateOutcome,
   isPaidOutcome,
@@ -1584,5 +1585,173 @@ describe("mockGateway", () => {
       idempotencyKey: "money-fp",
     });
     expect(b.gatewayId).toBe(a.gatewayId);
+  });
+
+  it("same idempotencyKey with different orderId/PM identity is fingerprint_conflict (NEW-TESTKIT-1)", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      orderId: "ord_a",
+      stripePaymentMethodId: "pm_aaa",
+      idempotencyKey: "identity-fp",
+    });
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        orderId: "ord_b",
+        stripePaymentMethodId: "pm_aaa",
+        idempotencyKey: "identity-fp",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        orderId: "ord_a",
+        stripePaymentMethodId: "pm_bbb",
+        idempotencyKey: "identity-fp",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        orderId: "ord_a",
+        stripePaymentMethodId: "pm_aaa",
+        tokenId: "token_other",
+        idempotencyKey: "identity-fp",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        orderId: "ord_a",
+        stripePaymentMethodId: "pm_aaa",
+        moyasarSource: { type: "token", token: "token_other" },
+        idempotencyKey: "identity-fp",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    const replay = await g.createPayment({
+      ...baseCreate,
+      orderId: "ord_a",
+      stripePaymentMethodId: "pm_aaa",
+      idempotencyKey: "identity-fp",
+    });
+    expect(replay.gatewayId).toBe(a.gatewayId);
+  });
+
+  it("remaining capturable hold after partial refund stays capturable (NEW-TESTKIT-2)", async () => {
+    const g = mockGateway({
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: true,
+        partialCapture: true,
+        refunds: true,
+        partialRefunds: true,
+        voids: true,
+      }),
+    });
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 100,
+      capture: false,
+    });
+    const first = await g.capturePayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 40,
+      currency: "USD",
+    });
+    expect(first.status).toBe("partially_captured");
+    expect(first.capturedAmount).toBe(40);
+    const refunded = await g.refundPayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 10,
+      currency: "USD",
+    });
+    expect(refunded.success).toBe(true);
+    expect(refunded.totalRefunded).toBe(10);
+    const mid = g.getPaymentState(pay.gatewayId)!;
+    expect(mid.status).toBe("partially_refunded");
+    expect(mid.capturedAmount).toBe(40);
+    expect(mid.refundedAmount).toBe(10);
+    // Remaining 60 of the 100 hold must still capture — refund must not freeze it.
+    const rest = await g.capturePayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 60,
+      currency: "USD",
+    });
+    expect(rest.capturedAmount).toBe(100);
+    expect(rest.currency).toBe("USD");
+    const after = g.getPaymentState(pay.gatewayId)!;
+    expect(after.capturedAmount).toBe(100);
+    expect(after.refundedAmount).toBe(10);
+    expect(after.status).toBe("partially_refunded");
+  });
+
+  it("getPayment does not rewrite ledger to paid on outcome succeeded (NEW-TESTKIT-3)", async () => {
+    const g = mockGateway({
+      getPayment: [{ outcome: "succeeded" }, { outcome: "succeeded" }],
+    });
+    const pay = await g.createPayment({
+      ...baseCreate,
+      amount: 50,
+      capture: false,
+    });
+    expect(pay.status).toBe("authorized");
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(0);
+
+    const got = await g.getPayment({ gatewayPaymentId: pay.gatewayId });
+    expect(got.status).toBe("authorized");
+    expect(got.outcome).toBe("succeeded");
+    expect(got.amount).toBe(50);
+    expect(got.currency).toBe("USD");
+    expect(got.capturedAmount).toBe(0);
+    expect(got.refundedAmount).toBe(0);
+    expect(isPaidOutcome(got)).toBe(false);
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("authorized");
+    expect(g.getPaymentState(pay.gatewayId)?.capturedAmount).toBe(0);
+
+    await g.capturePayment({
+      gatewayPaymentId: pay.gatewayId,
+      amount: 20,
+      currency: "USD",
+    });
+    const afterPartial = await g.getPayment({
+      gatewayPaymentId: pay.gatewayId,
+    });
+    expect(afterPartial.status).toBe("partially_captured");
+    expect(afterPartial.capturedAmount).toBe(20);
+    expect(afterPartial.amount).toBe(50);
+    expect(isPaidOutcome(afterPartial)).toBe(false);
+    expect(g.getPaymentState(pay.gatewayId)?.status).toBe("partially_captured");
+  });
+
+  it("capture:false without authorization capability is OperationNotSupportedError (NEW-TESTKIT-4)", async () => {
+    const g = mockGateway({
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        immediateCapture: true,
+        authorization: false,
+      }),
+    });
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        capture: false,
+      }),
+    ).rejects.toBeInstanceOf(OperationNotSupportedError);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        capture: false,
+      }),
+    ).rejects.toThrow(/authorization/);
+    expect(g.getPaymentState("pay_mock_1")).toBeUndefined();
+    const paid = await g.createPayment({
+      ...baseCreate,
+      capture: true,
+    });
+    expect(paid.status).toBe("paid");
+    expect(g.getPaymentState(paid.gatewayId)?.status).toBe("paid");
   });
 });

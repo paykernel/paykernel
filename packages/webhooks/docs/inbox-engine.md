@@ -7,7 +7,7 @@ Full guide: **[webhook-inbox.md](./webhook-inbox.md)** · Crash matrix: **[crash
 ## Pipeline (10.1)
 
 1. Validate inputs (`gateway`, `providerEventId`, `payloadHash`).
-2. Derive key: `deriveWebhookEventKey(gateway, providerEventId, notificationClass?)` → `gateway:providerEventId` (Paymob: `paymob:{TRANSACTION|TRANSACTION_RESPONSE}:{txnId}` when class is present — WEBHOOKS-1).
+2. Derive key: `deriveWebhookEventKey(gateway, providerEventId, notificationClass?)` → `gateway:providerEventId` (Paymob: `paymob:{TRANSACTION|TRANSACTION_RESPONSE}:{txnId}` when class is present — WEBHOOKS-1). Processed Paymob `TRANSACTION` key is `obj.id`; later same-id snapshots are `already_completed`; child refunds have new ids. Do not complete on Paymob `payment.processing` (NEW-WEBHOOKS-2).
 3. Atomic `store.claim` (never get-then-set in the engine).
 4. Map claim kinds to outcomes (no handler on non-`acquired`).
 5. Mode branch (`inline` / `durable_retry` / `ackAfterClaim`).
@@ -43,7 +43,7 @@ Engine returns `handler_failed { retryable: true }` (at-least-once) and never
 | `durable_retry` | yes | `scheduled_for_retry { reason: "handler_retry" }` if retryable; else `handler_failed` |
 | `durable_retry` + `ackAfterClaim` | yes | N/A — parks with `scheduled_for_retry { reason: "parked" }`; requires `envelope`; worker via `processRetryable` |
 
-Modes are never mixed implicitly inside `process*`. `processRetryable` throws on `inline` engines.
+Modes are never mixed implicitly inside `process*`. `processRetryable` throws on `inline` engines. `processRetryable` claims one-at-a-time so later leases cannot expire during earlier handler I/O (NEW-WEBHOOKS-1).
 
 ## Outcomes (10.4)
 

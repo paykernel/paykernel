@@ -856,8 +856,86 @@ function mapStripeRefundWebhookStatus(
   return "refund_pending";
 }
 
-function isUnexpandedStripeChargeId(value: unknown): boolean {
+function isNonEmptyStripeString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function isUnexpandedStripeChargeId(value: unknown): boolean {
+  return isNonEmptyStripeString(value);
+}
+
+/**
+ * Refund fields are observable only when Stripe proves them:
+ * `refunded === true` or finite `amount_refunded` (including 0).
+ * Id-only `{ id: "ch_…" }` is not a snapshot — same as a string charge id.
+ */
+function isObservableStripeChargeSnapshot(
+  charge: unknown,
+): charge is StripeChargeSnapshot {
+  if (typeof charge !== "object" || charge === null) {
+    return false;
+  }
+  const snapshot = charge as StripeChargeSnapshot;
+  return (
+    snapshot.refunded === true ||
+    finiteStripeMinor(snapshot.amount_refunded) !== undefined
+  );
+}
+
+function stripeChargeRefId(value: unknown): string | undefined {
+  if (isNonEmptyStripeString(value)) {
+    return value;
+  }
+  if (typeof value === "object" && value !== null) {
+    const id = (value as { id?: unknown }).id;
+    if (isNonEmptyStripeString(id)) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
+/** String id or expanded object whose refund fields are unobservable. */
+function isUnobservableStripeChargeRef(value: unknown): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (isUnexpandedStripeChargeId(value)) {
+    return true;
+  }
+  if (typeof value === "object") {
+    return !isObservableStripeChargeSnapshot(value);
+  }
+  return false;
+}
+
+function throwStripeIndeterminateResponse(
+  message: string,
+  raw: unknown,
+): never {
+  throw new NetworkError(message, raw, { afterProviderSubmit: true });
+}
+
+function requireStripeMutationId(
+  value: unknown,
+  message: string,
+  raw: unknown,
+): string {
+  if (isNonEmptyStripeString(value)) {
+    return value;
+  }
+  throwStripeIndeterminateResponse(message, raw);
+}
+
+function requireStripeMutationStatus(
+  value: unknown,
+  message: string,
+  raw: unknown,
+): string {
+  if (isNonEmptyStripeString(value)) {
+    return value;
+  }
+  throwStripeIndeterminateResponse(message, raw);
 }
 
 type StripeIntentRefundSource = {
@@ -870,32 +948,33 @@ type StripeIntentRefundSource = {
 
 /**
  * Charge snapshot used for succeeded-intent refund math.
- * Prefer expanded `latest_charge`. When that field is omitted (not an
- * unexpanded id), fall through to `charges.data[0]` (legacy list shape).
- * Unexpanded `latest_charge` ids stay unobservable here.
+ * Prefer expanded `latest_charge` when refund fields are observable.
+ * When that field is omitted (not an unexpanded / id-only ref), fall through
+ * to `charges.data[0]` (legacy list shape). Unexpanded string ids and
+ * id-only `{ id }` objects stay unobservable here.
  */
 function stripeChargeSnapshotForRefundStatus(
   pi: StripeIntentRefundSource,
 ): StripeChargeSnapshot | undefined {
   const latest = pi.latest_charge;
   if (typeof latest === "object" && latest !== null) {
-    return latest as StripeChargeSnapshot;
+    return isObservableStripeChargeSnapshot(latest) ? latest : undefined;
   }
   if (isUnexpandedStripeChargeId(latest)) {
     return undefined;
   }
   const firstCharge = pi.charges?.data?.[0];
-  if (firstCharge && typeof firstCharge === "object") {
-    return firstCharge;
-  }
-  return undefined;
+  return isObservableStripeChargeSnapshot(firstCharge)
+    ? firstCharge
+    : undefined;
 }
 
 /**
  * Charge-level refund domain status on a succeeded PaymentIntent.
- * Aligns with getPayment (~1591-1607): amount_refunded > 0 vs captured base
- * (amount_received → amount_captured). `refunded: true` is a full refund.
- * Returns undefined when refunds are unproven (caller continues settled math).
+ * Shared by webhooks, checkout hydration, and getPayment: amount_refunded > 0
+ * vs captured base (amount_received → amount_captured). `refunded: true` is a
+ * full refund. Returns undefined when refunds are unproven (caller continues
+ * settled math).
  */
 function stripeSucceededIntentRefundStatus(
   pi: StripeIntentRefundSource,
@@ -1012,7 +1091,7 @@ function stripeCheckoutPaidSessionStatus(session: {
   if (hydrated === undefined) {
     return "paid";
   }
-  if (isUnexpandedStripeChargeId(hydrated.latest_charge)) {
+  if (isUnobservableStripeChargeRef(hydrated.latest_charge)) {
     return "processing";
   }
   const refundStatus = stripeSucceededIntentRefundStatus(hydrated);
@@ -1524,6 +1603,16 @@ export class StripeGateway extends BaseGateway {
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           extractAbortSignal(p),
         );
+        requireStripeMutationId(
+          response.id,
+          "Stripe PaymentIntent response missing id",
+          response,
+        );
+        requireStripeMutationStatus(
+          response.status,
+          "Stripe PaymentIntent response missing status",
+          response,
+        );
 
         // Succeeded PI: same settled-amount fail-closed as getPayment/capture.
         // Missing amount_received/amount_captured → processing (not full paid).
@@ -1540,13 +1629,16 @@ export class StripeGateway extends BaseGateway {
         const currencyCode = response.currency ?? currency;
         const settledMinor = resolveStripeCapturedMinor(response);
         const amountMinor =
-          settledMinor !== undefined ? settledMinor : response.amount;
+          settledMinor !== undefined
+            ? settledMinor
+            : finiteStripeMinor(response.amount);
         // STRIPE-1: always publish currency with major-unit amount fields.
+        // Never fromStripeAmount(undefined) → major 0 on create.
         const normalizedCurrency = stripeCurrencyCode(currencyCode);
 
         return this.mapPaymentIntentResult(response, {
           ...(status !== undefined ? { status } : {}),
-          ...(normalizedCurrency !== undefined
+          ...(amountMinor !== undefined && normalizedCurrency !== undefined
             ? {
                 amount: fromStripeAmount(amountMinor, normalizedCurrency),
                 currency: normalizedCurrency.toUpperCase(),
@@ -1588,6 +1680,16 @@ export class StripeGateway extends BaseGateway {
           body,
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           callerSignal,
+        );
+        requireStripeMutationId(
+          response.id,
+          "Stripe PaymentIntent response missing id",
+          response,
+        );
+        requireStripeMutationStatus(
+          response.status,
+          "Stripe PaymentIntent response missing status",
+          response,
         );
 
         // Partial capture: succeeded + settled < authorized amount.
@@ -1678,6 +1780,17 @@ export class StripeGateway extends BaseGateway {
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           callerSignal,
         );
+        requireStripeMutationId(
+          response.id,
+          "Stripe refund response missing id",
+          response,
+        );
+        if (!isNonEmptyStripeString(response.status)) {
+          throwStripeIndeterminateResponse(
+            "Stripe refund response missing status",
+            response,
+          );
+        }
         // STRIPE-4: never invent "usd" for cumulative conversion.
         const refundCurrency = stripeCurrencyCode(
           response.currency,
@@ -1754,6 +1867,11 @@ export class StripeGateway extends BaseGateway {
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           extractAbortSignal(p),
         );
+        requireStripeMutationId(
+          response.id,
+          "Stripe PaymentIntent response missing id",
+          response,
+        );
 
         // STRIPE-4: omit amount when currency is missing — never invent "usd".
         const currency = stripeCurrencyCode(response.currency);
@@ -1796,30 +1914,60 @@ export class StripeGateway extends BaseGateway {
           callerSignal,
         );
 
-        // Prefer expanded object; re-fetch when Stripe returns an unexpanded
-        // string charge ID so refund fields remain observable (STRIPE-1).
+        const piCharges = (
+          paymentIntent as {
+            charges?: { data?: Array<StripeChargeSnapshot> };
+          }
+        ).charges;
+
+        // Prefer an observable expanded charge. Re-fetch string ids and
+        // id-only `{ id }` objects so refund fields stay visible (STRIPE-1/2).
+        // When latest_charge is omitted, use charges.data[0] (same helper as
+        // webhooks) — or re-fetch that charge when it is id-only.
         let latestCharge: StripeChargeSnapshot | undefined =
-          typeof paymentIntent.latest_charge === "object" &&
-          paymentIntent.latest_charge !== null
+          isObservableStripeChargeSnapshot(paymentIntent.latest_charge)
             ? paymentIntent.latest_charge
             : undefined;
         let chargeRefundStateUnknown = false;
-        if (
-          latestCharge === undefined &&
-          typeof paymentIntent.latest_charge === "string" &&
-          paymentIntent.latest_charge.length > 0
-        ) {
-          try {
-            latestCharge = await this.stripeRequest<StripeChargeSnapshot>(
-              "GET",
-              `/charges/${encodeURIComponent(paymentIntent.latest_charge)}`,
-              undefined,
-              undefined,
-              callerSignal,
-            );
-          } catch {
-            // Cannot observe amount_refunded without a charge snapshot.
-            chargeRefundStateUnknown = true;
+        if (latestCharge === undefined) {
+          const omittedLatest =
+            paymentIntent.latest_charge === undefined ||
+            paymentIntent.latest_charge === null;
+          const fallbackCharge = omittedLatest
+            ? piCharges?.data?.[0]
+            : undefined;
+          if (isObservableStripeChargeSnapshot(fallbackCharge)) {
+            latestCharge = fallbackCharge;
+          } else {
+            const chargeId =
+              stripeChargeRefId(paymentIntent.latest_charge) ??
+              stripeChargeRefId(fallbackCharge);
+            if (
+              chargeId !== undefined &&
+              (isUnobservableStripeChargeRef(paymentIntent.latest_charge) ||
+                (omittedLatest && fallbackCharge !== undefined))
+            ) {
+              try {
+                const fetched = await this.stripeRequest<StripeChargeSnapshot>(
+                  "GET",
+                  `/charges/${encodeURIComponent(chargeId)}`,
+                  undefined,
+                  undefined,
+                  callerSignal,
+                );
+                if (isObservableStripeChargeSnapshot(fetched)) {
+                  latestCharge = fetched;
+                } else {
+                  chargeRefundStateUnknown = true;
+                }
+              } catch {
+                chargeRefundStateUnknown = true;
+              }
+            } else if (
+              isUnobservableStripeChargeRef(paymentIntent.latest_charge)
+            ) {
+              chargeRefundStateUnknown = true;
+            }
           }
         }
 
@@ -1830,84 +1978,69 @@ export class StripeGateway extends BaseGateway {
         );
         let status = this.mapStatus(paymentIntent.status);
 
+        const refundSource: StripeIntentRefundSource = {
+          amount: paymentIntent.amount,
+          amount_received: paymentIntent.amount_received,
+          latest_charge: latestCharge ?? paymentIntent.latest_charge,
+          ...(piCharges !== undefined ? { charges: piCharges } : {}),
+        };
+
         // Settled amount: amount_received → latest_charge.amount_captured (no auth fallback).
         // Include re-fetched charge so amount_captured is visible when expand failed.
-        const piCharges = (
-          paymentIntent as {
-            charges?: { data?: Array<{ amount_captured?: unknown }> };
-          }
-        ).charges;
         const settledMinor = resolveStripeCapturedMinor({
           amount_received: paymentIntent.amount_received,
           latest_charge: latestCharge ?? paymentIntent.latest_charge,
           ...(piCharges !== undefined ? { charges: piCharges } : {}),
         });
-        const amountReceived = paymentIntent.amount_received;
-        const hasAmountReceived =
-          typeof amountReceived === "number" && Number.isFinite(amountReceived);
-        const amountCaptured =
-          typeof latestCharge?.amount_captured === "number" &&
-          Number.isFinite(latestCharge.amount_captured)
-            ? latestCharge.amount_captured
-            : undefined;
-        // Captured base for refund completeness: amount_received → amount_captured only.
-        // STRIPE-4: never fall back to authorized `amount` — that would claim full
-        // `refunded` against the auth total when only a partial capture settled.
-        const capturedBase = hasAmountReceived
-          ? amountReceived
-          : amountCaptured;
         // Result amount prefers settled total when known; else authorized amount.
         const amountMinor =
           paymentIntent.status === "succeeded" && settledMinor !== undefined
             ? settledMinor
             : paymentIntent.amount;
 
-        // Refund status overrides partial-capture status when both apply.
-        // Full refund when amount_refunded covers the captured base (not the original auth).
-        const amountRefunded = latestCharge?.amount_refunded;
-        if (chargeRefundStateUnknown && paymentIntent.status === "succeeded") {
-          // STRIPE-1 fail-closed: succeeded + unobservable refunds must never
-          // map to paid (Stripe keeps PI status succeeded after refunds).
-          status = "processing";
-        } else if (
-          paymentIntent.status === "succeeded" &&
-          typeof amountRefunded === "number" &&
-          amountRefunded > 0
-        ) {
-          // Known captured base only: full refund when amount_refunded covers it.
-          // Missing captured fields → partially_refunded (fail closed; STRIPE-4).
-          status =
-            typeof capturedBase === "number" &&
-            capturedBase > 0 &&
-            amountRefunded >= capturedBase
-              ? "refunded"
-              : "partially_refunded";
-        } else if (paymentIntent.status === "succeeded") {
-          if (settledMinor === undefined) {
-            // Incomplete money snapshot: do not claim full paid (fail closed).
+        if (paymentIntent.status === "succeeded") {
+          if (chargeRefundStateUnknown) {
+            // Succeeded + unobservable refunds must never map to paid
+            // (Stripe keeps PI status succeeded after refunds).
             status = "processing";
-          } else if (
-            typeof paymentIntent.amount === "number" &&
-            Number.isFinite(paymentIntent.amount) &&
-            settledMinor < paymentIntent.amount
-          ) {
-            status = "partially_captured";
+          } else {
+            const refundStatus =
+              stripeSucceededIntentRefundStatus(refundSource);
+            if (refundStatus !== undefined) {
+              status = refundStatus;
+            } else if (
+              isUnobservableStripeChargeRef(refundSource.latest_charge)
+            ) {
+              status = "processing";
+            } else if (settledMinor === undefined) {
+              status = "processing";
+            } else if (
+              typeof paymentIntent.amount === "number" &&
+              Number.isFinite(paymentIntent.amount) &&
+              settledMinor < paymentIntent.amount
+            ) {
+              status = "partially_captured";
+            }
           }
         }
 
+        const observedCharge =
+          stripeChargeSnapshotForRefundStatus(refundSource) ?? latestCharge;
         const refundCurrency = stripeCurrencyCode(
-          latestCharge?.currency,
+          observedCharge?.currency,
           currency,
         );
+        const observedRefundedMinor = finiteStripeMinor(
+          observedCharge?.amount_refunded,
+        );
         const refundedAmount =
-          latestCharge?.amount_refunded !== undefined &&
-          refundCurrency !== undefined
-            ? fromStripeAmount(latestCharge.amount_refunded, refundCurrency)
+          observedRefundedMinor !== undefined && refundCurrency !== undefined
+            ? fromStripeAmount(observedRefundedMinor, refundCurrency)
             : undefined;
         const chargeId =
-          typeof paymentIntent.latest_charge === "string"
-            ? paymentIntent.latest_charge
-            : latestCharge?.id;
+          stripeChargeRefId(paymentIntent.latest_charge) ??
+          stripeChargeRefId(observedCharge) ??
+          latestCharge?.id;
         // STRIPE-1: never pass major-unit money without currency (mapper also
         // fail-closes, but callers should not construct incomplete options).
         const moneyCurrency =
@@ -1965,11 +2098,20 @@ export class StripeGateway extends BaseGateway {
           undefined,
           extractAbortSignal(p),
         );
+        const sessionId = isNonEmptyStripeString(session.id)
+          ? session.id
+          : undefined;
+        if (sessionId === undefined) {
+          throw new NetworkError(
+            "Stripe Checkout Session response missing id",
+            session,
+          );
+        }
         const currency = session.currency?.toLowerCase();
 
         return {
           success: true,
-          sessionId: session.id,
+          sessionId,
           paymentIntentId: expandableId(session.payment_intent),
           url: session.url,
           status: session.status,
@@ -2107,10 +2249,15 @@ export class StripeGateway extends BaseGateway {
           resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
           extractAbortSignal(p),
         );
+        const sessionId = requireStripeMutationId(
+          response.id,
+          "Stripe Checkout Session response missing id",
+          response,
+        );
 
         return {
           success: true,
-          sessionId: response.id,
+          sessionId,
           url: response.url,
           rawResponse: response,
         };
@@ -2776,10 +2923,12 @@ export class StripeGateway extends BaseGateway {
     }
 
     let data: any = {};
+    let jsonParseFailed = false;
     if (responseText) {
       try {
         data = JSON.parse(responseText);
-      } catch (e) {
+      } catch {
+        jsonParseFailed = true;
         data = { error: { message: responseText, type: "api_error" } };
       }
     }
@@ -2814,6 +2963,19 @@ export class StripeGateway extends BaseGateway {
         data.error?.message ?? "Stripe API error",
         "stripe",
         { ...data, statusCode: response.status },
+      );
+    }
+
+    // HTTP 200 empty / non-JSON is not a PaymentIntent, Refund, or Session.
+    // Mutating methods may already have been accepted — fail closed as
+    // NetworkError afterProviderSubmit (indeterminate), never {} as success.
+    if (!responseText.trim() || jsonParseFailed) {
+      throw new NetworkError(
+        jsonParseFailed
+          ? "Stripe API returned a non-JSON response"
+          : "Stripe API returned an empty response",
+        jsonParseFailed ? data : { statusCode: response.status },
+        isMutatingHttpMethod(method) ? { afterProviderSubmit: true } : undefined,
       );
     }
 
@@ -2985,10 +3147,11 @@ export class StripeGateway extends BaseGateway {
     const unexpandedMode = options?.unexpandedCharge ?? "processing";
     if (
       unexpandedMode === "processing" &&
-      isUnexpandedStripeChargeId(pi.latest_charge)
+      isUnobservableStripeChargeRef(pi.latest_charge)
     ) {
-      // Thin-event hydration typically leaves latest_charge as a string id.
-      // Stripe keeps PI status succeeded after refunds — do not invent paid.
+      // Thin-event hydration typically leaves latest_charge as a string id
+      // or id-only `{ id }`. Stripe keeps PI status succeeded after refunds
+      // — do not invent paid.
       return "processing";
     }
     const refundStatus = stripeSucceededIntentRefundStatus(pi);

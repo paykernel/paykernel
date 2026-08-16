@@ -83,9 +83,26 @@ const AUTH_HOLD_STATUSES = new Set<string>([
   "requires_capture",
 ]);
 
-function isAuthHoldStatus(status: string | undefined): boolean {
+/**
+ * In-flight settlement statuses. A present `capturedAmount=0` against
+ * `local.amount` is "nothing captured yet", not money drift (NEW-RECON-1).
+ */
+const IN_FLIGHT_SETTLING_STATUSES = new Set<string>([
+  "pending",
+  "processing",
+]);
+
+function statusInSet(status: string | undefined, set: Set<string>): boolean {
   if (status === undefined) return false;
-  return AUTH_HOLD_STATUSES.has(status) || AUTH_HOLD_STATUSES.has(status.trim().toLowerCase());
+  return set.has(status) || set.has(status.trim().toLowerCase());
+}
+
+function isAuthHoldStatus(status: string | undefined): boolean {
+  return statusInSet(status, AUTH_HOLD_STATUSES);
+}
+
+function isInFlightSettlingStatus(status: string | undefined): boolean {
+  return statusInSet(status, IN_FLIGHT_SETTLING_STATUSES);
 }
 
 /**
@@ -103,6 +120,15 @@ function isAuthHoldPair(
     isAuthHoldStatus(provider.status) ||
     isAuthHoldStatus(provider.providerStatus)
   );
+}
+
+/**
+ * Provider still settling (`pending` / `processing`). Normalized status
+ * wins — a paid-like snapshot is never treated as in-flight even if the
+ * raw `providerStatus` string looks pending.
+ */
+function isInFlightSettlingProvider(provider: ProviderPaymentSnapshot): boolean {
+  return isInFlightSettlingStatus(provider.status);
 }
 
 /**
@@ -131,6 +157,8 @@ function moneyIsZero(m: Money): boolean {
  *
  * RECON-1: auth-hold (`authorized` / `approved` / `requires_capture`) with
  * `capturedAmount=0` vs `local.amount` is consistent, not money drift.
+ * NEW-RECON-1: in-flight `pending` / `processing` + `capturedAmount=0` vs
+ * `local.amount` is the same class (nothing captured yet; still settling).
  * RECON-2: non-zero provider capture while local omitted `capturedAmount` on
  * an auth-hold is incremental capture drift (even if capture equals amount).
  */
@@ -180,10 +208,13 @@ export function compareSnapshots(
     provider.capturedAmount !== undefined
   ) {
     const authHold = isAuthHoldPair(local, provider);
+    const inFlight = isInFlightSettlingProvider(provider);
     const capturedZero = moneyIsZero(provider.capturedAmount);
     // RECON-1: authorized / approved / requires_capture + captured 0 is a
     // hold against local.amount — not apply_drift_review money drift.
-    if (!(authHold && capturedZero)) {
+    // NEW-RECON-1: pending / processing + captured 0 is "nothing captured
+    // yet" (still settling) — same class as the hold, not money drift.
+    if (!((authHold || inFlight) && capturedZero)) {
       if (authHold) {
         // RECON-2: incremental capture while still on an auth-hold. Local
         // omitted capturedAmount (implied 0); do not compare to charge amount.

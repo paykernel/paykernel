@@ -132,6 +132,10 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
  * and keep list-eligible rows up to `limit`. SCAN stays off the poll path
  * (PERF-1). A multi-key GET Lua would still read every field of N hashes
  * inside Redis and is not cheaper enough to add.
+ *
+ * NEW-STORE-1: `undefined` from `load` is a missing hash. The loader
+ * (GET_LUA) must ZREM that ZRANGE member atomically so LIMIT windows
+ * cannot refill with dead keys on the next poll.
  */
 export async function loadListedRecords<T>(
   keys: readonly string[],
@@ -143,7 +147,9 @@ export async function loadListedRecords<T>(
   const records = await Promise.all(keys.map((key) => load(key)));
   const out: T[] = [];
   for (const rec of records) {
-    if (rec !== undefined && keep(rec)) out.push(rec);
+    // Missing GET: ghost already dropped inside GET_LUA (NEW-STORE-1).
+    if (rec === undefined) continue;
+    if (keep(rec)) out.push(rec);
     if (out.length >= limit) break;
   }
   return out;

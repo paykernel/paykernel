@@ -47,6 +47,20 @@ const EMBEDDED_SECRET_IN_MESSAGE =
 const WHOLE_STRING_SECRET =
   /^(?:(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+)$/i;
 
+/** Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes). */
+const EMBEDDED_PAN_IN_MESSAGE = /\d[\d\s-]{11,21}\d/g;
+
+function isPanDigitRun(value: string): boolean {
+  const digits = value.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
+
+function redactEmbeddedPans(message: string): string {
+  return message.replace(EMBEDDED_PAN_IN_MESSAGE, (run) =>
+    isPanDigitRun(run) ? REDACTED : run,
+  );
+}
+
 /**
  * Operational `authorized` restore is only for booleans (`true`/`false`).
  * Never unmask a leaf core already replaced because the *value* was
@@ -151,8 +165,9 @@ export function redactTelemetryData(
 
 /**
  * Sanitize a span `end()` status message before it reaches OTEL `setStatus`
- * (OBS-1). Whole-string secrets are dropped; embedded `sk_live_` / `cs_live_`
- * / Bearer / PI client-secret fragments are replaced with `[REDACTED]`.
+ * (OBS-1 / NEW-OBS-1). Whole-string secrets and opaque PANs are dropped;
+ * embedded `sk_live_` / `cs_live_` / Bearer / PI client-secret / 13–19 digit
+ * PAN fragments are replaced with `[REDACTED]`.
  */
 export function sanitizeSpanStatusMessage(
   message: string | undefined,
@@ -160,10 +175,16 @@ export function sanitizeSpanStatusMessage(
   if (message === undefined) return undefined;
   const trimmed = message.trim();
   if (trimmed.length === 0) return undefined;
-  if (WHOLE_STRING_SECRET.test(trimmed) || isClientSecretShapedValue(trimmed)) {
+  if (
+    WHOLE_STRING_SECRET.test(trimmed) ||
+    isClientSecretShapedValue(trimmed) ||
+    isPanDigitRun(trimmed)
+  ) {
     return undefined;
   }
-  const scrubbed = trimmed.replace(EMBEDDED_SECRET_IN_MESSAGE, REDACTED);
+  const scrubbed = redactEmbeddedPans(
+    trimmed.replace(EMBEDDED_SECRET_IN_MESSAGE, REDACTED),
+  );
   if (scrubbed === REDACTED) return undefined;
   return scrubbed;
 }

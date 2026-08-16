@@ -433,14 +433,16 @@ return {'ok'}
 
 /**
  * KEYS[1]=record KEYS[2]=dueIndex
- * ARGV: nowMs, nowIso
+ * ARGV: nowMs, nowIso, logicalKey
  * Soft-release expired claim → scheduled and re-index so listDue sees it.
+ * Missing hash ZREMs ARGV logicalKey from the due index (NEW-STORE-1).
  */
 export const RECON_GET_LUA = `
 local rec = KEYS[1]
 local idx = KEYS[2]
 local nowMs = tonumber(ARGV[1])
 local nowIso = ARGV[2]
+local listedKey = ARGV[3] or ''
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -470,6 +472,11 @@ local function pack(m)
 end
 
 if redis.call('EXISTS', rec) == 0 then
+  -- NEW-STORE-1: drop ghost ZSET members so listDue LIMIT windows
+  -- cannot fill with dead keys (hash gone, due member left).
+  if idx ~= nil and idx ~= '' and listedKey ~= '' then
+    redis.call('ZREM', idx, listedKey)
+  end
   return {'missing'}
 end
 

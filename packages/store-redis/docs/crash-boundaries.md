@@ -101,7 +101,7 @@ Claim **ZADD**s the key onto the retry/due ZSET scored by `lease_expires_ms`. Af
 | Path | Behavior |
 | ---- | -------- |
 | Key-addressed `get` | Soft-releases expired `claimed` → `pending`/`scheduled` (restores one unfinished attempt) and **ZADD**s the retry/due index. |
-| `listRetryable` / `listDue` | **`ZRANGEBYSCORE` the lease-expiry ZSET** up to `nowMs`, soft-release those claimed rows, re-index retry/due, then `ZRANGEBYSCORE` the due/retry index — so `processRetryable` / `claimDue`/`processDue` rediscover abandoned work **without** a prior `get`. |
+| `listRetryable` / `listDue` | **`ZRANGEBYSCORE` the lease-expiry ZSET** up to `nowMs`, soft-release those claimed rows, re-index retry/due, then `ZRANGEBYSCORE` the due/retry index — so `processRetryable` / `claimDue`/`processDue` rediscover abandoned work **without** a prior `get`. Missing hash **ZREM**s the ghost member (NEW-STORE-1) so `LIMIT` cannot fill with dead keys. |
 | Key-addressed `claim` | Reclaims expired leases with a new token. Pending/scheduled burns an attempt; expired `claimed` reclaim does not. |
 
 `SCAN` is optional extra on **standalone** only (housekeeping / `deleteExpired`). It is not Cluster-safe recovery (per-node cursor would miss keys).

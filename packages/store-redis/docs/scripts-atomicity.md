@@ -84,6 +84,8 @@ For scheduler poll paths (`listRetryable` / `listDue`):
 
 Key-addressed `get` still soft-releases an expired `claimed` row and **ZADD**s the retry/due index.
 
+Missing GET (hash gone, ZSET member left) **ZREM**s the logical key (NEW-STORE-1) so `listDue` / `listRetryable` `LIMIT` windows cannot fill with ghosts.
+
 Without the lease-expiry ZSET path, `processRetryable` / `claimDue`/`processDue` starve after a mid-claim crash because abandoned keys stay off the due/retry index until an external `get`.
 
 ## Per-store scripts (registry)

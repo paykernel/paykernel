@@ -231,7 +231,12 @@ export type ProcessWithVerifierInput = {
 
 export type ProcessRetryableInput = {
   handler: WebhookHandler;
-  /** Max rows to claim+process in this poll. Default 10. */
+  /**
+   * Max rows to claim+process in this poll. Default 10.
+   * Claims are one-at-a-time (NEW-WEBHOOKS-1): the next `store.claim` runs
+   * only after the previous handler returns so default `leaseMs` (30s)
+   * cannot expire on later rows while earlier handlers I/O.
+   */
   limit?: number;
   leaseMs?: number;
   owner?: string;

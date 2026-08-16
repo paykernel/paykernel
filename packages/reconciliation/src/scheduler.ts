@@ -174,9 +174,11 @@ export type ProcessDueResult = {
 const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
- * PERF-7: list is discovery only; claim is the fence. Issue listed claims
- * concurrently, then return acquired jobs in list order. Handlers stay serial
- * so one job's disposition cannot race another on the same scheduler.
+ * PERF-7 / claimDue: list is discovery only; claim is the fence. Issue listed
+ * claims concurrently, then return acquired jobs in list order.
+ *
+ * `processDue` must **not** use this — serial handlers would hold N unexpired
+ * leases (NEW-RECON-2 / same class as NEW-WEBHOOKS-1).
  */
 async function claimListedDue(
   store: ReconciliationStore,
@@ -385,10 +387,12 @@ export function createReconciliationScheduler(
       const limit = options.limit ?? 10;
       const now = new Date(clock.nowMs()).toISOString();
 
-      // RECON-8 / PERF-7: list is discovery only; claim is the fence
-      // (parallel after the candidate set is chosen). When per-gateway caps
-      // are set, oversample listDue so a cap-dominated prefix cannot starve
-      // other gateways — never above LIST_DUE_OVERSAMPLE_CAP (200).
+      // RECON-8 / PERF-7: list is discovery only; claim is the fence.
+      // When per-gateway caps are set, oversample listDue so a cap-dominated
+      // prefix cannot starve other gateways — never above LIST_DUE_OVERSAMPLE_CAP (200).
+      // NEW-RECON-2: processDue claims one-at-a-time (handlers are serial).
+      // Bulk-claiming the candidate list would hold N leases across the first
+      // handler and let a peer reclaim after expiry.
       const fetchLimit =
         options.maxInFlightByGateway !== undefined
           ? Math.min(
@@ -443,9 +447,22 @@ export function createReconciliationScheduler(
         return true;
       };
 
-      const acquired = await claimListedDue(store, candidates, owner, leaseMs);
+      for (const rec of candidates) {
+        // NEW-RECON-2: claim one-at-a-time so serial handlers do not hold
+        // N unexpired leases (peer reclaim + this worker still handles).
+        const claim = await store.claim({
+          key: rec.key,
+          owner,
+          leaseMs,
+        });
+        if (claim.kind !== "acquired") continue;
 
-      for (const job of acquired) {
+        const job: ClaimedJob = {
+          key: claim.record.key,
+          leaseToken: claim.leaseToken,
+          record: claim.record,
+        };
+
         const claimedGateway = gatewayFromKey(job.key);
         addLive(claimedGateway, 1);
         processed++;

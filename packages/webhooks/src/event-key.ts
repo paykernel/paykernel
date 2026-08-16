@@ -8,12 +8,16 @@
  * store key namespaces collide (e.g. `a:b` + `c` vs `a` + `b:c`).
  * `providerEventId` may contain colons (rest of the key after the first colon).
  *
- * **Paymob (WEBHOOKS-1):** redirect `TRANSACTION_RESPONSE` and processed
- * `TRANSACTION` share the same transaction id on `WebhookEvent.id`. When
- * `notificationClass` is provided (provider-native type / HMAC notification
- * class), the key is `paymob:{class}:{txnId}` so a normal return on redirect
- * cannot `already_completed`-suppress the later paid snapshot. Other gateways
- * ignore `notificationClass` (their provider event ids are already unique).
+ * **Paymob (WEBHOOKS-1 / NEW-WEBHOOKS-2):** redirect `TRANSACTION_RESPONSE`
+ * and processed `TRANSACTION` share the same transaction id on
+ * `WebhookEvent.id`. When `notificationClass` is provided (provider-native
+ * type / HMAC notification class), the key is `paymob:{class}:{txnId}` so a
+ * normal return on redirect cannot `already_completed`-suppress the later
+ * paid snapshot. Processed `TRANSACTION` keys use `obj.id` — a later
+ * same-id snapshot is `already_completed`. Child refund/capture callbacks
+ * mint a new `obj.id` (new inbox key). Do not complete fulfillment on
+ * Paymob `payment.processing` (redirect). Other gateways ignore
+ * `notificationClass` (their provider event ids are already unique).
  */
 
 const PAYMOB_GATEWAY = "paymob";

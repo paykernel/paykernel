@@ -245,12 +245,16 @@ deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
 - Both parts must be non-empty after trim; otherwise `deriveWebhookEventKey` throws and `processVerified` returns `invalid_webhook`.
 - **Gateway must not contain `:`** (colon is the key separator). Rejecting colon-in-gateway prevents collisions such as `a:b`+`c` vs `a`+`b:c`. `providerEventId` may still contain colons.
 - Format: `{gateway}:{providerEventId}` (first colon splits for parse).
-- **Paymob (WEBHOOKS-1):** `processVerified` qualifies the id with
-  `event.type` / `provider.eventType` (`TRANSACTION` vs
+- **Paymob (WEBHOOKS-1 / NEW-WEBHOOKS-2):** `processVerified` qualifies the
+  id with `event.type` / `provider.eventType` (`TRANSACTION` vs
   `TRANSACTION_RESPONSE`). Redirect and processed share `WebhookEvent.id`;
   they must not share an inbox key. Pass `event` (or a type-qualified
   `providerEventId`) — do not inbox-dedupe Paymob on raw `event.id` and
-  complete the documented redirect.
+  complete the documented redirect. Processed `TRANSACTION` key is
+  `obj.id` (`paymob:TRANSACTION:{id}`). A later same-id snapshot is
+  `already_completed`. Child refund/capture webhooks mint a **new**
+  `obj.id` (new inbox row). Do **not** complete fulfillment on Paymob
+  `payment.processing` (redirect); wait for processed `TRANSACTION`.
 
 ### Payload hash (one canonical source — WEBHOOKS-2)
 
@@ -407,6 +411,13 @@ const durableEngine = createWebhookInboxEngine({
 ### Worker path
 
 `processRetryable` is **only valid on `durable_retry` engines** (throws if `mode === "inline"`). Use a dedicated durable worker engine; do not mix modes via the retry path.
+
+**NEW-WEBHOOKS-1:** `processRetryable` claims **one row at a time**. The next
+`store.claim` runs only after the previous handler returns (list is
+discovery; the lease is the fence). Defaults `limit=10` / `leaseMs=30s`
+are unsafe if N leases were held across serial handler I/O (handlers
+averaging ≥3s would let a peer reclaim the tail). Handlers that need
+more than `leaseMs` must call `ctx.renew`.
 
 **Default event materialization:** when `payloadRef` parses as a core
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),

@@ -153,6 +153,24 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
   });
 
+  it("NEW-STORE-1: GET Lua ZREMs ghost index members when hash is missing", () => {
+    // listDue / listRetryable is ZRANGE + keyed GET. A missing hash must drop
+    // the ZSET member (ARGV logicalKey) so LIMIT windows cannot fill with dead keys.
+    for (const get of [
+      REDIS_SCRIPT_REGISTRY.webhookInbox.get,
+      REDIS_SCRIPT_REGISTRY.reconciliation.get,
+    ]) {
+      const exists = get.search(/EXISTS',\s*rec\)\s*==\s*0/);
+      const zrem = get.search(/redis\.call\(\s*['"]ZREM['"]\s*,\s*idx/);
+      const missing = get.indexOf("'missing'");
+      expect(exists).toBeGreaterThan(-1);
+      expect(zrem).toBeGreaterThan(exists);
+      expect(missing).toBeGreaterThan(zrem);
+      expect(get).toContain("ARGV[3]");
+      expect(get).toContain("listedKey");
+    }
+  });
+
   it("REDIS-1: renew Lua rescored the due/retry index at leaseExpiresMs", () => {
     const recon = REDIS_SCRIPT_REGISTRY.reconciliation.renew;
     const webhook = REDIS_SCRIPT_REGISTRY.webhookInbox.renew;

@@ -381,6 +381,12 @@ export const WEBHOOK_PAYLOAD_SECRET_KEYS: readonly string[] = [
   "stripe-signature",
   "paypal-transmission-sig",
   "paypal_transmission_sig",
+  // NEW-MONEY-2: PAN / CVC keys the logger already scrubs
+  "number",
+  "cvc",
+  "cvv",
+  "pan",
+  "card",
 ];
 
 const SECRET_KEY_SET: ReadonlySet<string> = new Set(

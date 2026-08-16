@@ -1133,6 +1133,29 @@ describe("PaymobGateway", () => {
       expect(result.gatewayRefundId).toBe("999002");
     });
 
+    it("does not complete a refund 200 success with refunded_amount_cents 0 (NEW-PAYMOB-REFUND-0)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 999003, success: true, refunded_amount_cents: 0, currency: "SAR" }),
+      );
+
+      const result = await actionGateway.refundPayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+      });
+
+      expect(result.status).toBe("pending");
+      expect(result.outcome).toBe("pending");
+      expect(result.status).not.toBe("completed");
+      expect(result.outcome).not.toBe("succeeded");
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.totalRefunded).not.toBe(0);
+      expect(result.gatewayRefundId).toBe("999003");
+    });
+
     it("estimates totalRefunded when refund body omits refunded_amount_cents (PAYMOB-3)", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       mockFetchSequence(
@@ -1312,7 +1335,7 @@ describe("PaymobGateway", () => {
       ]);
     });
 
-    it("does not FIFO-evict unknown fences under cache pressure (PAYMOB-3)", async () => {
+    it("does not FIFO-evict unknown or completed fences under cache pressure (PAYMOB-3 / NEW-PAYMOB-TTL)", async () => {
       const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
       // Seed an unknown fence via indeterminate network failure after POST
       mockFetchSequence(
@@ -1329,13 +1352,12 @@ describe("PaymobGateway", () => {
       const unknownFirst = await actionGateway.refundPayment(unknownParams);
       expect(unknownFirst.outcome).toBe("indeterminate");
 
-      // Fill the in-memory map to capacity with terminal completed entries.
-      // Only completed entries are FIFO-evictable — unknown must survive.
+      // Fill the in-memory map to capacity with completed mutation fences.
+      // Completed refund/capture/void keys are not evictable (NEW-PAYMOB-TTL).
       const cache = (actionGateway as unknown as {
         idempotencyCache: Map<string, { fingerprint: string; createdAt: number; status?: string }>;
       }).idempotencyCache;
       const limit = 1_000;
-      // Keep the unknown entry; pad with completed until full
       for (let i = 0; cache.size < limit; i++) {
         cache.set(`refundPayment:pad_completed_${i}`, {
           fingerprint: `fp_${i}`,
@@ -1345,21 +1367,27 @@ describe("PaymobGateway", () => {
       }
       expect(cache.size).toBe(limit);
 
-      // New key at capacity: must evict a completed pad, not the unknown fence
-      mockFetchSequence(
-        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
-        jsonResponse({ id: 456, success: true, refunded_amount_cents: 1000 }),
-      );
-      await actionGateway.refundPayment({
+      // New key at capacity: refuse rather than evict a completed refund fence
+      await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
         amount: 10,
         currency: "SAR",
         idempotencyKey: "refund_new_under_pressure",
-      });
+      })).rejects.toThrow(/full of in-flight, unknown, or completed mutation fences/i);
+      expect(fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund"))).toHaveLength(1);
 
-      // Unknown fence still blocks retry (no double-apply) — observable behavior,
-      // not private Map membership.
+      // Unknown fence still blocks retry (no double-apply)
       await expect(actionGateway.refundPayment(unknownParams)).rejects.toThrow(InvalidRequestError);
+    });
+
+    it("fingerprints Date params with the shared Date tag (NEW-PAYMOB-FP)", () => {
+      const fp = (gateway as unknown as {
+        fingerprintParams(value: unknown): string;
+      }).fingerprintParams.bind(gateway);
+      const at = new Date("2026-01-15T12:00:00.000Z");
+
+      expect(fp({ at })).toContain("__date__:2026-01-15T12:00:00.000Z");
+      expect(fp({ at })).not.toBe(fp({ at: "2026-01-15T12:00:00.000Z" }));
     });
 
     it("stamps idempotency createdAt/expiresAt from this.clock.nowMs() (P610-CLK-2)", async () => {
@@ -1385,7 +1413,7 @@ describe("PaymobGateway", () => {
       expect(record?.createdAt).not.toBe(Date.now());
     });
 
-    it("prunes completed idempotency entries against this.clock.nowMs() (P610-CLK-2)", async () => {
+    it("does not prune completed idempotency fences as a free key (NEW-PAYMOB-TTL)", async () => {
       const ttlMs = 24 * 60 * 60 * 1_000;
       const clock = fakeClock(5_000_000_000_000);
       const clockGateway = new PaymobGateway(
@@ -1409,7 +1437,7 @@ describe("PaymobGateway", () => {
         idempotencyKey: "create_trigger_clock_prune",
       });
 
-      expect(cache.has("createPayment:old_completed_clock")).toBe(false);
+      expect(cache.has("createPayment:old_completed_clock")).toBe(true);
     });
 
     it("never prunes in_progress or unknown idempotency fences (P610-CLK-3)", async () => {
@@ -1452,7 +1480,7 @@ describe("PaymobGateway", () => {
 
       expect(cache.has("refundPayment:ancient_unknown")).toBe(true);
       expect(cache.has("refundPayment:ancient_in_progress")).toBe(true);
-      expect(cache.has("createPayment:ancient_completed")).toBe(false);
+      expect(cache.has("createPayment:ancient_completed")).toBe(true);
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
@@ -1481,9 +1509,34 @@ describe("PaymobGateway", () => {
         amount: 10,
         currency: "SAR",
         idempotencyKey: "refund_when_cache_full_unknown",
-      })).rejects.toThrow(/full of in-flight or unknown fences/i);
+      })).rejects.toThrow(/full of in-flight, unknown, or completed mutation fences/i);
       // Must not call Paymob (fail-closed before mutate)
       expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("keeps the idempotency fence after refund POST HTTP 429 (NEW-PAYMOB-2)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ detail: "Too many requests" }, 429),
+      );
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_429_after_post",
+      };
+
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://ksa.paymob.com/api/auth/tokens",
+        "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        "https://ksa.paymob.com/api/acceptance/void_refund/refund",
+      ]);
     });
 
     it("keeps idempotency keys blocked after Paymob 5xx responses on mutating calls", async () => {
@@ -1701,21 +1754,64 @@ describe("PaymobGateway", () => {
       expect(fetchCalls).toHaveLength(0);
     });
 
-    it("does not proceed when an expired shared idempotency record is replaced by another worker", async () => {
+    it("replays an expired completed fence instead of delete+re-reserve (NEW-PAYMOB-TTL)", async () => {
       const idempotencyStore = new ExpiredThenContendedIdempotencyStore();
       const actionGateway = new PaymobGateway(
         { ...PAYMOB_TEST_CONFIG, idempotencyStore },
         hooksManager,
       );
 
-      await expect(actionGateway.createPayment({
+      const result = await actionGateway.createPayment({
         ...VALID_CREATE_PARAMS,
         idempotencyKey: "create_expired_race",
-      })).rejects.toThrow(InvalidRequestError);
+      });
 
-      expect(idempotencyStore.reserveCalls).toBe(2);
-      expect(idempotencyStore.deleted).toEqual(["createPayment:create_expired_race"]);
+      expect(result).toEqual({ gatewayId: "expired_completed" });
+      expect(idempotencyStore.reserveCalls).toBe(1);
+      expect(idempotencyStore.deleted).toEqual([]);
       expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("does not re-enter a mutation after a completed fence TTL elapses (NEW-PAYMOB-TTL)", async () => {
+      const ttlMs = 24 * 60 * 60 * 1_000;
+      const clock = fakeClock(1_700_000_000_000);
+      const idempotencyStore = new MemoryIdempotencyStore();
+      const firstGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 123, success: true, refunded_amount_cents: 5000 }),
+      );
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "expired_completed_refund",
+      };
+
+      const first = await firstGateway.refundPayment(params);
+      expect(first.status).toBe("completed");
+      expect(first.totalRefunded).toBe(50);
+
+      clock.advance(ttlMs + 1);
+      const secondGateway = new PaymobGateway(
+        { ...PAYMOB_ACTION_CONFIG, idempotencyStore },
+        hooksManager,
+        undefined,
+        { clock },
+      );
+      const second = await secondGateway.refundPayment(params);
+
+      expect(second).toEqual(first);
+      expect(fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund"))).toHaveLength(1);
+      expect(idempotencyStore.records.get("refundPayment:expired_completed_refund")?.status).toBe(
+        "completed",
+      );
     });
 
     it("does not fail a completed Paymob mutation when the shared idempotency result write fails", async () => {
@@ -2530,6 +2626,21 @@ describe("PaymobGateway", () => {
       expect(refund.status).toBe("completed");
       expect(refund.totalRefunded).toBe(25);
       expect(refund.gatewayRefundId).toBe("999002");
+    });
+
+    it("maps pending void to pending/requires_action not cancelled (NEW-PAYMOB-VOID-P)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, success: true, pending: true }),
+      );
+
+      const result = await actionGateway.voidPayment({ gatewayPaymentId: "123456789" });
+
+      expect(result.status).toBe("pending");
+      expect(result.outcome).toBe("requires_action");
+      expect(result.status).not.toBe("cancelled");
+      expect(isPaidOutcome(result)).toBe(false);
     });
 
     it("keeps parent gatewayId on void even when response id differs (PAYMOB-3)", async () => {

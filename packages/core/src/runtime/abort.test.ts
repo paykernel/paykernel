@@ -422,6 +422,47 @@ describe("isAbortError / mapHttpAbortError", () => {
     expect(isMutatingHttpMethod("POST")).toBe(true);
     expect(isMutatingHttpMethod("GET")).toBe(false);
   });
+
+  it("NEW-CORE-1: caller abort after provider submit is NetworkError not PaymentAbortedError", () => {
+    const caller = new AbortController();
+    caller.abort();
+    const timeout = new AbortController();
+    const mapped = mapHttpAbortError(
+      new DOMException("Aborted", "AbortError"),
+      {
+        callerSignal: caller.signal,
+        timeoutSignal: timeout.signal,
+        timeoutMessage: "timed out",
+        networkMessage: "network failed",
+        afterProviderSubmit: true,
+      },
+    );
+    expect(mapped).toBeInstanceOf(NetworkError);
+    expect(mapped).not.toBeInstanceOf(PaymentAbortedError);
+    expect((mapped as NetworkError).afterProviderSubmit).toBe(true);
+  });
+
+  it("NEW-CORE-1: both caller and timeout abort after submit stay NetworkError", () => {
+    const caller = new AbortController();
+    caller.abort();
+    const timeout = new AbortController();
+    timeout.abort();
+    const mapped = mapHttpAbortError(
+      new DOMException("Aborted", "AbortError"),
+      {
+        callerSignal: caller.signal,
+        timeoutSignal: timeout.signal,
+        timeoutMessage: "timed out",
+        networkMessage: "network failed",
+        callerAbortMessage: "custom caller abort",
+        afterProviderSubmit: true,
+      },
+    );
+    expect(mapped).toBeInstanceOf(NetworkError);
+    expect(mapped).not.toBeInstanceOf(PaymentAbortedError);
+    expect((mapped as NetworkError).afterProviderSubmit).toBe(true);
+    expect(mapped.message).toBe("custom caller abort");
+  });
 });
 
 describe("extract / strip / withAbortSignal", () => {

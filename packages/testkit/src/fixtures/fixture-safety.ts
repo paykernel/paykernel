@@ -3,6 +3,7 @@
  *
  * Policy (aligned with core logger intent, fixture-oriented):
  * - **Hard fail**: `sk_live_`, `pk_live_`, `rk_live_`, live `whsec_` (not `whsec_test_…`),
+ *   Stripe Checkout `cs_live_` / `cs_test_`, Paymob `csk_`, PI `pi_…_secret_…`,
  *   PAN-like 13–19 digit runs, long Bearer tokens that are not test-shaped.
  * - **Allow**: `sk_test_`, `pk_test_`, `whsec_test_…`, placeholders like `test_secret`.
  * - Sensitive keys (`Authorization`, `password`, `token`, …) must not hold cleartext
@@ -38,6 +39,16 @@ export const SECRET_PATTERNS: readonly RegExp[] = [
   /\brk_live_(?![A-Za-z0-9_])/,
   // Live webhook secrets: `whsec_` that is NOT `whsec_test…`
   /\bwhsec_(?!test(?:[A-Za-z0-9_+\-/]|$))[A-Za-z0-9_+\-/]+\b/,
+  // Stripe Checkout Session client secrets (NEW-TESTKIT-5)
+  /\bcs_live_[A-Za-z0-9_]+\b/,
+  /\bcs_test_[A-Za-z0-9_]+\b/,
+  /\bcs_live_(?![A-Za-z0-9_])/,
+  /\bcs_test_(?![A-Za-z0-9_])/,
+  // Paymob-style client secrets
+  /\bcsk_[A-Za-z0-9_]+\b/,
+  /\bcsk_(?![A-Za-z0-9_])/,
+  // Stripe PaymentIntent client secrets (`pi_<id>_secret_<secret>`)
+  /\bpi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+\b/,
   // Common cloud key shapes
   /\bAIza[0-9A-Za-z\-_]{20,}\b/,
   /\bAKIA[0-9A-Z]{16}\b/,

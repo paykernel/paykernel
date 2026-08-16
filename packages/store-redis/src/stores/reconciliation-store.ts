@@ -79,7 +79,7 @@ export function createRedisReconciliationStore(
     const raw = await ctx.eval.eval(
       RECON_GET_LUA,
       [rk(key), dueIndex],
-      [nowMs, nowIso],
+      [nowMs, nowIso, key],
     );
     const tagged = parseTaggedResult(raw);
     if (tagged.tag === "missing") return undefined;
@@ -302,6 +302,8 @@ export function createRedisReconciliationStore(
         // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
         // ZRANGE members in one Promise.all wave (N keyed Lua GETs; a multi-key
         // GET Lua still walks N hashes and is not cheaper enough to add).
+        // NEW-STORE-1: GET_LUA ZREMs the member when the hash is missing so
+        // LIMIT windows cannot fill with dead keys.
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",

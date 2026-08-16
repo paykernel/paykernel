@@ -18,7 +18,7 @@ const client = new PaymentClient({
     // Optional: API timeout in milliseconds (default: 30000)
     timeoutMs: 30000,
 
-    // Required at runtime for capture/refund/void (throws InvalidRequestError if omitted)
+    // Required at runtime for capture/refund/void/confirmStcPayOtp (throws if omitted)
     // Prefer a shared store with atomic reserve() in production.
     // idempotencyStore: sharedStoreWithAtomicReserve,
 
@@ -31,11 +31,11 @@ const client = new PaymentClient({
 > **Sandbox flag**: `MoyasarConfig.sandbox` is deprecated and ignored. Use a
 > `sk_test_…` key for test mode or a `sk_live_…` key for production.
 >
-> **Mutations require a store**: Capture, refund, and void have **no** native
-> Moyasar idempotency. `idempotencyStore` (with atomic `reserve()`) is **required
-> at runtime** for those methods — omitting it throws `InvalidRequestError`.
-> Pass `idempotencyKey` on each mutation. Prefer a shared store in multi-worker
-> production. See
+> **Mutations require a store**: Capture, refund, void, and `confirmStcPayOtp`
+> have **no** native Moyasar idempotency. `idempotencyStore` (with atomic
+> `reserve()`) is **required at runtime** for those methods — omitting it throws
+> `InvalidRequestError`. Pass `idempotencyKey` on each mutation. Prefer a shared
+> store in multi-worker production. See
 > [Idempotency for refunds, captures, and voids](#idempotency-for-refunds-captures-and-voids).
 
 ## Payment Sources
@@ -133,6 +133,7 @@ const moyasar = client.gateway('moyasar');
 const confirmed = await moyasar.confirmStcPayOtp({
   transactionUrl: stcTransactionUrl, // result.nextAction.transactionUrl
   otpValue: '123456',
+  idempotencyKey: 'stc-otp-order-123',
 });
 
 if (confirmed.status === 'paid') {
@@ -201,9 +202,10 @@ const result = await client.createPayment({
 | **Metadata** | Moyasar metadata supports up to 30 string key/value pairs; keys are limited to 40 characters and values to 500 characters |
 | **Order Correlation** | `orderId` is copied into `metadata.orderId` and `metadata.paymentId` unless you set those metadata keys yourself |
 | **Idempotency (create)** | Use `idempotencyKey` as a UUID; Moyasar uses it as the created payment ID (`given_id`) |
-| **Idempotency (mutations)** | Capture/refund/void have **no** native Moyasar idempotency and are **not** auto-retried by the SDK (`withRetry`). Configure `idempotencyStore` (shared across workers) and pass `idempotencyKey` so **your** retries are safe — required for multi-worker refund safety |
+| **Idempotency (mutations)** | Capture/refund/void/`confirmStcPayOtp` have **no** native Moyasar idempotency and are **not** auto-retried by the SDK (`withRetry`). Configure `idempotencyStore` (shared across workers) and pass `idempotencyKey` so **your** retries are safe — required for multi-worker refund / OTP safety |
 | **Payment IDs** | Moyasar payment operation IDs are UUIDs; `getPayment`, `capturePayment`, `refundPayment`, and `voidPayment` reject non-UUID IDs before calling Moyasar |
 | **Failed Attempts** | Moyasar can return HTTP 201 with `status: 'failed'` (or `abandoned`); this SDK returns `success: false` and `status: 'failed'` for those payment objects |
+| **Create 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** declined/`failed`. Create is unfenced — the SDK returns `outcome: 'indeterminate'` + `reconciliationRequired` so callers reconcile via `given_id` / `getPayment` instead of minting a new idempotency key |
 | **`success` vs status** | `success: true` only means the payment did not map to `failed` (provider `failed`/`abandoned`, or an **unmapped** status). An `initiated` payment returns `success: true` with `status: 'pending'`. **Fulfill only when `status` is `paid`** (or `authorized` for intentional auth-only holds). Complete 3DS/OTP first when required |
 | **AFT (account funding)** | Optional `recipient` and `sender` on create are Moyasar Account Funding Transaction (AFT) fields. They require AFT-enabled account capability from Moyasar; omit them for ordinary payments |
 | **Callback / 3DS return** | After the customer returns to `callback_url`, **never trust query-string status alone**. Always `getPayment` (or a verified webhook), then verify `amount` and `currency` against your order. Prefer webhooks as the source of truth |
@@ -214,7 +216,7 @@ const result = await client.createPayment({
 | **Partial statuses** | Refund completeness uses a **captured baseline** when `captured > 0`, else authorization `amount`: `refunded > 0 && refunded < baseline` → `partially_refunded`; `refunded >= baseline && baseline > 0` → `refunded` (so full refund of a partial capture is `refunded`); provider `refunded` with **missing/zero** `refunded` amount → `refund_completed` (fail-closed, not full `refunded`); partial capture maps to `partially_captured` |
 | **Webhook money fields** | Refund/capture events set `event.amount` from cumulative `refunded` / `captured` (not always the payment total). Incomplete refunds without a `refunded` field omit `amount` rather than inventing the full total |
 | **Callback URL** | Moyasar requires it for card/token sources. When omitting `callbackUrl` (STC Pay, etc.) or using Moyasar-only fields (`splits`), pass the second arg `'moyasar'` or call `client.gateway('moyasar').createPayment(...)` |
-| **STC Pay Confirmation** | Do not browser-redirect to `source.transaction_url`; `redirectUrl` is undefined for STC Pay, so collect the OTP and call `confirmStcPayOtp` |
+| **STC Pay Confirmation** | Do not browser-redirect to `source.transaction_url`; `redirectUrl` is undefined for STC Pay, so collect the OTP and call `confirmStcPayOtp` with `idempotencyStore` + `idempotencyKey` (OTP confirm is a mutation POST) |
 | **Sandbox** | `sandbox` config is ignored; test/live is determined by the secret key prefix |
 | **Webhook livemode** | When the payload includes boolean `live`, the SDK sets `event.livemode` to that value |
 | **Webhook secrets** | After verification, `event.rawPayload` is a clone **without** `secret_token` so the webhook secret is not re-logged or forwarded |
@@ -543,30 +545,34 @@ residual (money-honest — funds remain captured or held) and dual-write is demo
 `status === 'cancelled'` and `stableType === 'payment.cancelled'`, not envelope type
 alone. Re-fetch with `getPayment` when the snapshot is inconsistent.
 
-### Unsupported: card authentication webhooks
+### Card authentication webhooks
 
 Standalone 3DS (`card_auth_*`) webhooks — e.g. `card_auth_authenticated`,
-`card_auth_failed` — carry a card authentication object, not a payment. The SDK
-throws `InvalidWebhookError` for these event types so they are not mistaken for
-`payment.pending`. Handle `card_auth_*` events in a separate endpoint or branch
-if your account uses Moyasar's standalone card authentication API.
+`card_auth_failed` — carry a card authentication object, not a payment. After
+signature verification the SDK **parses** them as `provider.unmapped` (setup-like
+`setup_completed`, or `failed` for `card_auth_failed`) so they are not mistaken
+for `payment.pending` / `payment.succeeded` and so authentic events are ACK'd
+instead of retried forever. Do not fulfill from `card_auth_*`; handle them as
+setup / 3DS signals or ignore them if you only process payment envelopes.
 
 ## Idempotency for refunds, captures, and voids
 
-> **Required for all capture/refund/void (MOYASAR-1/2):** configure
-> `moyasar.idempotencyStore` with atomic `reserve()` and pass `idempotencyKey`
-> on every mutation. The SDK **throws** `InvalidRequestError` when the store,
-> key, or atomic `reserve()` is missing — unguarded mutations are refused
-> (double-refund class). Prefer a shared store (Redis/SQL) in multi-worker
-> deployments; `InMemoryIdempotencyStore` only protects a single process.
+> **Required for all capture/refund/void/confirmStcPayOtp (MOYASAR-1/2):**
+> configure `moyasar.idempotencyStore` with atomic `reserve()` and pass
+> `idempotencyKey` on every mutation. The SDK **throws** `InvalidRequestError`
+> when the store, key, or atomic `reserve()` is missing — unguarded mutations
+> are refused (double-refund / double-OTP class). Prefer a shared store
+> (Redis/SQL) in multi-worker deployments; `InMemoryIdempotencyStore` only
+> protects a single process.
 
-Moyasar's API has **no native idempotency** for the refund, capture, and void
-endpoints. Without protection, a retried refund (e.g. after a network timeout)
-can refund the customer twice.
+Moyasar's API has **no native idempotency** for the refund, capture, void, and
+STC Pay OTP confirm endpoints. Without protection, a retried refund (e.g. after
+a network timeout) can refund the customer twice.
 
-The SDK does **not** auto-retry capture/refund/void with `withRetry` (a lost
-response after a successful mutation could double-apply). `idempotencyStore` +
-`idempotencyKey` make **your** retries safe: completed results are cached,
+The SDK does **not** auto-retry capture/refund/void/confirmStcPayOtp with
+`withRetry` (a lost response after a successful mutation could double-apply).
+`idempotencyStore` + `idempotencyKey` make **your** retries safe: completed
+results are cached,
 in-progress / unknown outcomes refuse a second attempt, and **only** definite
 4xx rejections (Moyasar refused the mutation; excluding 429) clear the
 reservation so a caller retry is allowed. Post-2xx invalid JSON, mapping
@@ -584,7 +590,7 @@ import { PaymentClient, InMemoryIdempotencyStore } from '@paykernel/core';
 const client = new PaymentClient({
   moyasar: {
     secretKey: process.env.MOYASAR_SECRET_KEY!,
-    // Required for multi-worker refund/capture/void safety. Prefer a shared
+    // Required for multi-worker refund/capture/void/OTP safety. Prefer a shared
     // store with atomic reserve() in production; InMemoryIdempotencyStore only
     // protects a single process.
     idempotencyStore: new InMemoryIdempotencyStore(),

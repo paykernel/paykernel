@@ -19,8 +19,9 @@
  *   `TRANSACTION` webhook (or inquiry). AUTH redirect (`is_auth` + success) is
  *   browser-only (PAYMOB-AUTH-REDIR).
  * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
- *   `payment.processing`, not `payment.succeeded` (Paymob flags/status and Stripe
- *   `payment_intent.succeeded` dual-write when context.status is partially_captured).
+ *   `payment.processing`, not `payment.succeeded` **or** `capture.completed`
+ *   (Paymob `is_capture` / flags / amounts and Stripe `payment_intent.succeeded`
+ *   when context.status is partially_captured).
  *
  * Cross-gateway: domain status `approved` (PayPal buyer pre-capture) is never
  * mapped to `payment.succeeded` on status-only fallbacks — use `payment.processing`.
@@ -395,19 +396,22 @@ function isPartialCaptureAmounts(
 }
 
 /**
- * Map amount-/flag-derived capture (without status) to a stable type.
- * Explicit `is_capture` keeps the capture domain; amount-only partial capture
- * is `payment.processing` (aligns with `isPaidOutcome` excluding partial).
+ * Map amount-/flag-derived capture to a stable type.
+ * Partial capture (status `partially_captured` or captured < amount) is
+ * `payment.processing` even when `is_capture` is set — never `capture.completed`
+ * (NEW-CORE-4). Full `is_capture` stays capture-domain.
  */
 function mapPaymobCaptureSettle(
   flags: NonNullable<ProviderEventMapContext["flags"]>,
   amounts?: ProviderEventMapContext["amounts"],
+  status?: string,
 ): MappedStableEventType {
+  const s = (status ?? "").toLowerCase();
+  if (s === "partially_captured" || isPartialCaptureAmounts(amounts)) {
+    return "payment.processing";
+  }
   if (flags.isCapture === true) {
     return "capture.completed";
-  }
-  if (isPartialCaptureAmounts(amounts)) {
-    return "payment.processing";
   }
   return "payment.succeeded";
 }
@@ -431,15 +435,15 @@ function mapPaymobFromFlags(
   const hasAmountCapture =
     amounts?.capturedAmountCents !== undefined && amounts.capturedAmountCents > 0;
 
-  // Explicit capture action on paid-like / partial status keeps capture domain
-  // (before generic status map). Capture-domain arms still require amount-aware
-  // fulfillment for partials; they are not `payment.succeeded`.
+  // Explicit capture action on paid / approved / partial status is decided
+  // before the generic status map. Partials must not emit capture.completed
+  // (NEW-CORE-4); full paid capture stays capture-domain.
   if (
     (s === "paid" || s === "approved" || s === "partially_captured") &&
     flags.isCapture === true &&
     flags.success === true
   ) {
-    return "capture.completed";
+    return mapPaymobCaptureSettle(flags, amounts, status);
   }
 
   // Status wins over bare success / sticky is_auth (amount-only refunds, auth+capture).
@@ -467,15 +471,15 @@ function mapPaymobFromFlags(
   // Capture amounts / is_capture beat sticky is_auth.
   if (flags.isAuth === true && flags.success === true) {
     if (flags.isCapture === true || hasAmountCapture) {
-      return mapPaymobCaptureSettle(flags, amounts);
+      return mapPaymobCaptureSettle(flags, amounts, status);
     }
     return "payment.authorized";
   }
   if (flags.isCapture === true && flags.success === true) {
-    return "capture.completed";
+    return mapPaymobCaptureSettle(flags, amounts, status);
   }
   if (hasAmountCapture && flags.success === true) {
-    return mapPaymobCaptureSettle(flags, amounts);
+    return mapPaymobCaptureSettle(flags, amounts, status);
   }
   if (flags.success === true) {
     return "payment.succeeded";

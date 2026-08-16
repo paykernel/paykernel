@@ -183,4 +183,22 @@ describe("sanitizeSpanStatusMessage (OBS-1)", () => {
     expect(sanitizeSpanStatusMessage(undefined)).toBeUndefined();
     expect(sanitizeSpanStatusMessage("   ")).toBeUndefined();
   });
+
+  it("drops embedded PANs in span status messages (NEW-OBS-1)", () => {
+    expect(sanitizeSpanStatusMessage("4242424242424242")).toBeUndefined();
+    expect(sanitizeSpanStatusMessage("4111 1111 1111 1111")).toBeUndefined();
+    expect(
+      sanitizeSpanStatusMessage("charge failed 4242424242424242"),
+    ).toBe("charge failed [REDACTED]");
+    expect(
+      sanitizeSpanStatusMessage("card 4242-4242-4242-4242 declined"),
+    ).toBe("card [REDACTED] declined");
+    expect(sanitizeSpanStatusMessage("amount 12345")).toBe("amount 12345");
+    expect(sanitizeSpanStatusMessage("failed")).toBe("failed");
+    const scrubbed = sanitizeSpanStatusMessage(
+      "capture failed 4242424242424242",
+    );
+    expect(scrubbed).not.toMatch(/\d{13,19}/);
+    expect(scrubbed).not.toContain("4242424242424242");
+  });
 });

@@ -135,9 +135,49 @@ function resolveChargeAmount(
   };
 }
 
-/** Capture is only valid on an open auth hold or incremental capture. */
+/**
+ * Capture is valid on an open auth hold, incremental capture, or a
+ * partially_refunded payment that still has uncaptured hold
+ * (NEW-TESTKIT-2: refunding captured funds must not freeze remaining hold).
+ * Remaining-amount checks still reject fully captured ledgers.
+ */
 function isCapturableMockStatus(status: PaymentStatus): boolean {
-  return status === "authorized" || status === "partially_captured";
+  return (
+    status === "authorized" ||
+    status === "partially_captured" ||
+    status === "partially_refunded"
+  );
+}
+
+/**
+ * Identity fields that must participate in createPayment idempotency.
+ * Different order / payment-method / source + same key → fingerprint_conflict
+ * (NEW-TESTKIT-1). Token/source ids only — never PAN/CVC/dpan leaves.
+ */
+function createPaymentIdentityFields(
+  params: CreatePaymentParams,
+): Record<string, unknown> {
+  const identity: Record<string, unknown> = {};
+  if (params.orderId !== undefined) identity.orderId = params.orderId;
+  if (params.stripePaymentMethodId !== undefined) {
+    identity.stripePaymentMethodId = params.stripePaymentMethodId;
+  }
+  if (params.tokenId !== undefined) identity.tokenId = params.tokenId;
+  if (params.moyasarSource !== undefined) {
+    const source = params.moyasarSource;
+    if (typeof source === "object" && source !== null) {
+      const bag = source as unknown as Record<string, unknown>;
+      const src: Record<string, unknown> = {};
+      if (bag.type !== undefined) src.type = bag.type;
+      if (typeof bag.token === "string") src.token = bag.token;
+      if (typeof bag.tokenId === "string") src.tokenId = bag.tokenId;
+      if (typeof bag.mobile === "string") src.mobile = bag.mobile;
+      identity.moyasarSource = src;
+    } else {
+      identity.moyasarSource = source;
+    }
+  }
+  return identity;
 }
 
 /**
@@ -367,6 +407,31 @@ function isThrowStep(
 }
 
 /**
+ * getPayment scripted arms that are retrieve faults, not money settlement.
+ * `succeeded` is intentionally excluded so it cannot rewrite a ledger snapshot
+ * to paid (NEW-TESTKIT-3).
+ */
+function isGetPaymentScriptedFault(
+  step: ScriptedPaymentOutcome | undefined,
+): step is ScriptedPaymentOutcome {
+  if (!step) return false;
+  if (isThrowStep(step)) return true;
+  const o = step.outcome;
+  return (
+    o === "custom" ||
+    o === "declined" ||
+    o === "insufficient_funds" ||
+    o === "network_error" ||
+    o === "timeout" ||
+    o === "gateway_api_error" ||
+    o === "indeterminate" ||
+    o === "failed" ||
+    o === "provider_ok_client_timeout" ||
+    o === "provider_success_client_timeout"
+  );
+}
+
+/**
  * History error summary: name + optional code only.
  * Never stores raw Error.message / stacks (may carry tokens or card fragments).
  */
@@ -502,7 +567,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
    * Fingerprint charge-identity params for createPayment idempotency.
    * Uses resolved integer **minor** units (not raw major number / Money shape)
    * so economically identical amounts collide; capture/callback/metadata still
-   * participate. Omits idempotencyKey / AbortSignal.
+   * participate. Includes orderId + provider PM/source ids (NEW-TESTKIT-1).
+   * Omits idempotencyKey / AbortSignal.
    */
   function createPaymentFingerprint(
     params: CreatePaymentParams,
@@ -513,6 +579,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       currency: params.currency.toUpperCase(),
       capture: params.capture !== false,
       callbackUrl: params.callbackUrl,
+      ...createPaymentIdentityFields(params),
       ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
       ...(params.description !== undefined
         ? { description: params.description }
@@ -1184,6 +1251,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        // NEW-TESTKIT-4: capture:false is authorization, not a silent paid create.
+        if (params.capture === false && !capabilities.authorization) {
+          throw new OperationNotSupportedError(name, "createPayment", {
+            capability: "authorization",
+            claimedSupport: false,
+          });
+        }
 
         const resolved = resolveChargeAmount(params.amount, params.currency);
         const major = resolved.major;
@@ -1442,9 +1516,16 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               const finalCapturedMinor = fullyCaptured
                 ? state.amountMinor
                 : nextCapturedMinor;
+              // Refunded captured funds do not close remaining hold
+              // (NEW-TESTKIT-2). Full capture with prior refund stays
+              // partially_refunded — not a silent paid rewrite.
               const nextStatus: PaymentStatus = fullyCaptured
-                ? "paid"
-                : "partially_captured";
+                ? state.refundedAmountMinor > 0
+                  ? "partially_refunded"
+                  : "paid"
+                : state.refundedAmountMinor > 0
+                  ? "partially_refunded"
+                  : "partially_captured";
               const amountMajor = minorToMajor(
                 state.amountMinor,
                 state.currency,
@@ -1726,32 +1807,50 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       return track("getPayment", params, async () => {
         const outcome = takePaymentStep("getPayment");
         const signal = getSignal(params);
-        return resolvePaymentOutcome(
-          outcome,
-          () => {
-            const state = payments.get(params.gatewayPaymentId);
-            if (!state) {
-              throw new GatewayApiError(
-                `Payment ${params.gatewayPaymentId} not found (mock)`,
-                name,
-              );
-            }
-            const publicState = toPublicPaymentState(state);
-            return {
-              ...defaultPaymentResult(
-                params.gatewayPaymentId,
-                publicState.status,
-                publicState.amount,
-                name,
-                publicState.currency,
-              ),
-              currency: publicState.currency,
-              capturedAmount: publicState.capturedAmount,
-              refundedAmount: publicState.refundedAmount,
-            };
-          },
-          signal,
-        );
+
+        const ledgerSnapshot = (): GatewayPaymentResult => {
+          const state = payments.get(params.gatewayPaymentId);
+          if (!state) {
+            throw new GatewayApiError(
+              `Payment ${params.gatewayPaymentId} not found (mock)`,
+              name,
+            );
+          }
+          const publicState = toPublicPaymentState(state);
+          return {
+            ...defaultPaymentResult(
+              params.gatewayPaymentId,
+              publicState.status,
+              publicState.amount,
+              name,
+              publicState.currency,
+            ),
+            currency: publicState.currency,
+            capturedAmount: publicState.capturedAmount,
+            refundedAmount: publicState.refundedAmount,
+          };
+        };
+
+        // NEW-TESTKIT-3: getPayment is a read. Scripted succeeded / defaultOutcome
+        // must not rewrite the returned (or stored) ledger to paid. Fault
+        // outcomes still apply so retrieve failures stay testable.
+        if (isGetPaymentScriptedFault(outcome)) {
+          if (
+            !isThrowStep(outcome) &&
+            (outcome.outcome === "provider_ok_client_timeout" ||
+              outcome.outcome === "provider_success_client_timeout")
+          ) {
+            await applyLatency(outcome, signal);
+            throw new NetworkError(
+              outcome.message ??
+                "Client timeout after provider-side success (mock; reconcile via getPaymentState)",
+            );
+          }
+          return resolvePaymentOutcome(outcome, ledgerSnapshot, signal);
+        }
+
+        await applyLatency(outcome, signal);
+        return ledgerSnapshot();
       });
     },
 

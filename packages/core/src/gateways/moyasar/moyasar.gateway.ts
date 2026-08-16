@@ -290,8 +290,8 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Construction-time heads-up: capture/refund/void **require** a store that
-   * implements atomic `reserve()` and an `idempotencyKey` (see
+   * Construction-time heads-up: capture/refund/void/confirmStcPayOtp **require**
+   * a store that implements atomic `reserve()` and an `idempotencyKey` (see
    * {@link runIdempotentMutation}). Warn so a missing store is visible before
    * the first mutation throws `InvalidRequestError`.
    */
@@ -299,27 +299,29 @@ export class MoyasarGateway extends BaseGateway {
     const store = this.moyasarConfig.idempotencyStore;
     if (!store) {
       this.logger.warn(
-        "[Moyasar] idempotencyStore is required for capture, refund, and void. " +
-          "Those mutations throw InvalidRequestError until moyasar.idempotencyStore " +
-          "(with atomic reserve()) and idempotencyKey are provided — Moyasar has " +
-          "no native mutation idempotency (double-refund class).",
+        "[Moyasar] idempotencyStore is required for capture, refund, void, and " +
+          "confirmStcPayOtp. Those mutations throw InvalidRequestError until " +
+          "moyasar.idempotencyStore (with atomic reserve()) and idempotencyKey " +
+          "are provided — Moyasar has no native mutation idempotency " +
+          "(double-refund / double-OTP class).",
       );
       return;
     }
     if (!store.reserve) {
       this.logger.warn(
         "[Moyasar] idempotencyStore does not implement atomic reserve(). " +
-          "Capture, refund, and void will throw until a store with atomic " +
-          "reserve() is provided (e.g. Redis SET NX or a SQL unique constraint).",
+          "Capture, refund, void, and confirmStcPayOtp will throw until a store " +
+          "with atomic reserve() is provided (e.g. Redis SET NX or a SQL unique " +
+          "constraint).",
       );
     }
   }
 
   /**
-   * Guard a non-idempotent mutation (refund/capture/void) with an injectable
-   * dedupe store, keyed by idempotencyKey + operation + paymentId. Moyasar has
-   * no native idempotency for these endpoints, so this prevents a **caller**
-   * retry from applying the mutation twice (e.g. a double refund).
+   * Guard a non-idempotent mutation (refund/capture/void/STC OTP confirm) with
+   * an injectable dedupe store, keyed by idempotencyKey + operation + paymentId.
+   * Moyasar has no native idempotency for these endpoints, so this prevents a
+   * **caller** retry from applying the mutation twice (e.g. a double refund).
    *
    * This does **not** wrap the HTTP call in `withRetry`. Auto-retry after a
    * network blip is unsafe: the first request may already have succeeded on
@@ -342,7 +344,11 @@ export class MoyasarGateway extends BaseGateway {
    *   the same key (MOYASAR-1).
    */
   private async runIdempotentMutation<R>(
-    operation: "capturePayment" | "refundPayment" | "voidPayment",
+    operation:
+      | "capturePayment"
+      | "refundPayment"
+      | "voidPayment"
+      | "confirmStcPayOtp",
     paymentId: string,
     idempotencyKey: string | undefined,
     fingerprintInput: unknown,
@@ -354,9 +360,10 @@ export class MoyasarGateway extends BaseGateway {
     if (!store) {
       throw new InvalidRequestError(
         `Moyasar ${operation} requires moyasar.idempotencyStore and idempotencyKey. ` +
-          "Capture, refund, and void have no native Moyasar idempotency; unguarded " +
-          "retries or multi-worker races can double-apply the mutation. Configure " +
-          "idempotencyStore (with atomic reserve()) and pass idempotencyKey.",
+          "Capture, refund, void, and confirmStcPayOtp have no native Moyasar " +
+          "idempotency; unguarded retries or multi-worker races can double-apply " +
+          "the mutation. Configure idempotencyStore (with atomic reserve()) and " +
+          "pass idempotencyKey.",
         [{ path: ["idempotencyKey"] }],
       );
     }
@@ -374,7 +381,7 @@ export class MoyasarGateway extends BaseGateway {
       throw new InvalidRequestError(
         `Moyasar ${operation} requires idempotencyStore.reserve() for atomic ` +
           "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
-          "get-then-set stores can double-apply refund/capture/void under concurrency.",
+          "get-then-set stores can double-apply refund/capture/void/OTP under concurrency.",
         [{ path: ["idempotencyStore"] }],
       );
     }
@@ -556,6 +563,10 @@ export class MoyasarGateway extends BaseGateway {
         | MoyasarErrorResponse;
 
       const payment = data as MoyasarPaymentResponse;
+      // NEW-MOYASAR-1: HTTP 200 `{}` / missing id is post-submit unknown.
+      // create is not fenced — throw NetworkError.afterProviderSubmit so
+      // executeWithHooks returns indeterminate (not declined/failed) and
+      // callers reconcile via given_id / getPayment.
       return this.mapPaymentResponse(payment);
     }, MoyasarCreatePaymentParamsSchema);
   }
@@ -1003,10 +1014,11 @@ export class MoyasarGateway extends BaseGateway {
 
   /**
    * Confirm an initiated STC Pay payment using the OTP sent to the customer.
+   * Mutation POST — fenced like capture/refund/void (NEW-MOYASAR-3).
    * @see https://docs.moyasar.com/guides/stc-pay/custom-ui/
    */
   async confirmStcPayOtp(
-    params: MoyasarConfirmStcPayOtpParams,
+    params: MoyasarConfirmStcPayOtpParams & { idempotencyKey?: string },
   ): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("confirmStcPayOtp", params, async (p) => {
       return this.confirmStcPayOtpRequest(p);
@@ -1014,7 +1026,7 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   private async confirmStcPayOtpRequest(
-    params: MoyasarConfirmStcPayOtpParams,
+    params: MoyasarConfirmStcPayOtpParams & { idempotencyKey?: string },
   ): Promise<GatewayPaymentResult> {
     if (!params.transactionUrl) {
       throw new InvalidRequestError(
@@ -1034,23 +1046,37 @@ export class MoyasarGateway extends BaseGateway {
     const transactionUrl = this.assertMoyasarStcTransactionUrl(
       params.transactionUrl,
     );
-    const otpInit: RequestInit = {
-      method: "POST",
-      headers: this.getHeaders({ auth: false }),
-      body: JSON.stringify({ otp_value: params.otpValue }),
-    };
-    const otpSignal = extractAbortSignal(params);
-    if (otpSignal) {
-      otpInit.signal = otpSignal;
-    }
-    const data = (await this.requestJson(
-      transactionUrl,
-      otpInit,
-      "Failed to confirm STC Pay OTP",
-    )) as MoyasarPaymentResponse | MoyasarErrorResponse;
+    // Validate URL/OTP before the fence so a bad URL never sticks the key.
+    const fenceKey =
+      typeof params.idempotencyKey === "string" &&
+      params.idempotencyKey.trim().length > 0
+        ? params.idempotencyKey.trim()
+        : undefined;
 
-    const payment = data as MoyasarPaymentResponse;
-    return this.mapPaymentResponse(payment);
+    return this.runIdempotentMutation(
+      "confirmStcPayOtp",
+      transactionUrl,
+      fenceKey,
+      { transactionUrl, otpValue: params.otpValue },
+      async () => {
+        const otpInit: RequestInit = {
+          method: "POST",
+          headers: this.getHeaders({ auth: false }),
+          body: JSON.stringify({ otp_value: params.otpValue }),
+        };
+        const otpSignal = extractAbortSignal(params);
+        if (otpSignal) {
+          otpInit.signal = otpSignal;
+        }
+        const data = (await this.requestJson(
+          transactionUrl,
+          otpInit,
+          "Failed to confirm STC Pay OTP",
+        )) as MoyasarPaymentResponse | MoyasarErrorResponse;
+
+        return this.mapPaymentResponse(data as MoyasarPaymentResponse);
+      },
+    );
   }
 
   /**
@@ -1136,12 +1162,12 @@ export class MoyasarGateway extends BaseGateway {
   parseWebhookEvent(payload: unknown): WebhookEvent {
     const raw = this.assertMoyasarWebhookPayload(payload);
 
-    // card_auth_* events carry a card authentication object, not a payment.
-    // Refuse rather than mapping them as payment.pending.
+    // NEW-MOYASAR-2: card_auth_* is a card-authentication object, not a payment.
+    // Do not throw InvalidWebhookError — handleWebhook remaps that to retryable
+    // InvalidRequestError and authentic card-auth would redeliver forever.
+    // Parse as provider.unmapped (setup-like status; never payment.pending).
     if (raw.type.startsWith("card_auth_")) {
-      throw new InvalidWebhookError(
-        `Moyasar card authentication webhooks (${raw.type}) are not supported; handle card_auth_* events separately from payment webhooks`,
-      );
+      return this.parseCardAuthWebhookEvent(raw);
     }
 
     const paymentId = this.extractPaymentId(raw.data.metadata);
@@ -1296,6 +1322,9 @@ export class MoyasarGateway extends BaseGateway {
     payment: MoyasarPaymentResponse,
     options: { forceOutcome?: PaymentOperationOutcome } = {},
   ): GatewayPaymentResult {
+    // NEW-MOYASAR-1: never map a 2xx body with no id to failed/declined.
+    this.assertObservedPaymentId(payment);
+
     const transactionUrl = payment.source?.transaction_url ?? undefined;
     const redirectUrl = payment.source?.type === "stcpay"
       ? undefined
@@ -1542,6 +1571,69 @@ export class MoyasarGateway extends BaseGateway {
     }
 
     return timingSafeEqualBytes(leftBytes, rightBytes);
+  }
+
+  /**
+   * Require a non-empty payment.id on an HTTP 2xx body.
+   * Missing/blank id after a mutating POST is post-submit unknown — throw
+   * {@link NetworkError} with `afterProviderSubmit` so create/OTP are not
+   * treated as declined/failed (NEW-MOYASAR-1) and mutation fences stay
+   * `unknown` instead of clearing.
+   */
+  private assertObservedPaymentId(payment: unknown): asserts payment is MoyasarPaymentResponse {
+    if (payment !== null && typeof payment === "object" && !Array.isArray(payment)) {
+      const id = (payment as { id?: unknown }).id;
+      if (typeof id === "string" && id.trim().length > 0) {
+        return;
+      }
+    }
+    throw new NetworkError(
+      "Moyasar API returned HTTP 2xx without a payment id; gateway outcome is unknown — reconcile via given_id/getPayment",
+      payment,
+      { afterProviderSubmit: true },
+    );
+  }
+
+  /**
+   * Standalone card-auth webhooks: keep provider-native type, dual-write
+   * `provider.unmapped`. Never throw — verified payloads must ACK.
+   */
+  private parseCardAuthWebhookEvent(raw: MoyasarWebhookPayload): WebhookEvent {
+    const payloadHash = hashWebhookPayload(raw);
+    const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
+    const data = raw.data;
+    const currency =
+      typeof data.currency === "string" && data.currency.trim().length > 0
+        ? data.currency.trim().toUpperCase()
+        : undefined;
+    const failed =
+      /fail/i.test(raw.type) ||
+      (typeof data.status === "string" && data.status.toLowerCase() === "failed");
+    const amountMinor =
+      typeof data.amount === "number" && Number.isFinite(data.amount)
+        ? data.amount
+        : undefined;
+    const legacy: WebhookEvent = {
+      id: raw.id,
+      type: raw.type,
+      gateway: "moyasar",
+      paymentId: this.extractPaymentId(data.metadata),
+      gatewayPaymentId: data.id,
+      // Setup-like when authenticated; failed only for explicit fail types.
+      status: failed ? "failed" : "setup_completed",
+      ...(currency !== undefined && amountMinor !== undefined
+        ? { amount: this.fromMinorUnits(amountMinor, currency), currency }
+        : currency !== undefined
+          ? { currency }
+          : {}),
+      timestamp: new Date(raw.created_at),
+      ...(typeof raw.live === "boolean" ? { livemode: raw.live } : {}),
+      rawPayload: rawWithoutSecret,
+    };
+    return {
+      ...attachPaymentEvent(legacy),
+      payloadHash,
+    };
   }
 
   private assertMoyasarWebhookPayload(payload: unknown): MoyasarWebhookPayload {

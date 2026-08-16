@@ -75,7 +75,7 @@ export function createRedisWebhookInboxStore(
     const raw = await ctx.eval.eval(
       WEBHOOK_GET_LUA,
       [rk(key), indexKey],
-      [nowMs, nowIso],
+      [nowMs, nowIso, key],
     );
     const tagged = parseTaggedResult(raw);
     if (tagged.tag === "missing") return undefined;
@@ -254,6 +254,8 @@ export function createRedisWebhookInboxStore(
         // PERF-1 / PERF-4: ZSET scored at available_ms / lease_expires_ms (claim +
         // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
         // ZRANGE members in one Promise.all wave (N keyed Lua GETs).
+        // NEW-STORE-1: GET_LUA ZREMs the member when the hash is missing so
+        // LIMIT windows cannot fill with dead keys.
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           indexKey,
           "-inf",

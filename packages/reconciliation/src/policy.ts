@@ -279,6 +279,71 @@ function providerPaidWithCaptureMismatch(
 }
 
 /**
+ * Proven-zero money on a difference payload. Unparseable / incomplete
+ * snapshots are not zero (fail-closed — those stay apply_drift_review).
+ */
+function isProvenZeroMoney(value: unknown): boolean {
+  if (value === undefined || value === null || typeof value !== "object") {
+    return false;
+  }
+  const rec = value as { amount?: unknown; currency?: unknown };
+  if (
+    (typeof rec.amount !== "string" && typeof rec.amount !== "number") ||
+    typeof rec.currency !== "string"
+  ) {
+    return false;
+  }
+  // moneyIsNonZero is fail-closed: incomplete / unparseable → true.
+  return !moneyIsNonZero({
+    amount: String(rec.amount),
+    currency: rec.currency,
+  });
+}
+
+/**
+ * NEW-RECON-1: invented `capturedAmount` drift while the provider is still
+ * settling (`pending` / `processing`) and local omitted `capturedAmount`
+ * (compare used `local.amount` as the implied capture). Status pending↔
+ * processing is still settling. Any other field is real drift.
+ */
+function isInFlightZeroCaptureDriftOnly(
+  local: LocalPaymentSnapshot | undefined,
+  provider: ProviderPaymentSnapshot,
+  differences: ReconciliationDifference[],
+): boolean {
+  if (!isIndeterminateLocal(local)) return false;
+  if (local?.capturedAmount !== undefined) return false;
+  if (!isInFlightSettlingProvider(provider.status)) return false;
+
+  let sawCaptureZero = false;
+  for (const d of differences) {
+    if (d.field === "status") {
+      const loc = typeof d.local === "string" ? d.local : undefined;
+      const prov = typeof d.provider === "string" ? d.provider : undefined;
+      if (loc !== undefined && !INDETERMINATE_LOCAL_STATUSES.has(loc)) {
+        return false;
+      }
+      if (
+        prov !== undefined &&
+        !IN_FLIGHT_SETTLING_PROVIDER_STATUSES.has(prov)
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (d.field === "capturedAmount") {
+      const providerMoney =
+        d.provider !== undefined ? d.provider : provider.capturedAmount;
+      if (!isProvenZeroMoney(providerMoney)) return false;
+      sawCaptureZero = true;
+      continue;
+    }
+    return false;
+  }
+  return sawCaptureZero;
+}
+
+/**
  * RECON-2: determinate auth / partial local must not `mark_consistent` while
  * ignoring provider capture / refund totals.
  *
@@ -359,6 +424,8 @@ function maySafeUpdateToFailed(
  *   and not paid-like with present capturedAmount zero/≠ amount — P19-CAPTURE,
  *   and not determinate auth/partial local ignoring capture/refund totals — RECON-2)
  * - drift_detected → apply_drift_review (never auto-mutate money totals)
+ *   except NEW-RECON-1: in-flight `pending`/`processing` + capturedAmount=0
+ *   vs local.amount (implied capture) is `retry_later`, not drift review
  * - local pending/indeterminate + provider paid + identity-bound → update_local_to_paid
  *   (RECON-2: not when provider.refundedAmount is non-zero;
  *   P19-CAPTURE: not when present capturedAmount is zero vs non-zero amount
@@ -583,6 +650,21 @@ export function decideReconciliationPolicy(
           safe: false,
           differences: result.differences,
           provider: result.provider,
+        };
+      }
+      // NEW-RECON-1: in-flight pending/processing + capturedAmount=0 vs
+      // local.amount is still settling — retry_later, not apply_drift_review
+      // (even when compare still reports the implied-capture inequality).
+      if (
+        isInFlightZeroCaptureDriftOnly(
+          local,
+          result.provider,
+          result.differences,
+        )
+      ) {
+        return {
+          action: "retry_later",
+          safe: false,
         };
       }
       return {

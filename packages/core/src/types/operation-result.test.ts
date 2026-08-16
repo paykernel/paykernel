@@ -682,6 +682,58 @@ describe("operation-result helpers", () => {
     expect(currencyOnly.amount).toBeUndefined();
   });
 
+  it("NEW-MONEY-1: omit non-finite amount-like fields even when currency is set", () => {
+    const payment = paymentFromGatewayResult(
+      baseResult({
+        amount: Number.NaN,
+        currency: "usd",
+        fee: Number.POSITIVE_INFINITY,
+        capturedAmount: 10,
+        refundedAmount: Number.NEGATIVE_INFINITY,
+      }),
+    );
+    expect(payment.currency).toBe("USD");
+    expect(payment.amount).toBeUndefined();
+    expect(payment.fee).toBeUndefined();
+    expect(payment.capturedAmount).toBe(10);
+    expect(payment.refundedAmount).toBeUndefined();
+
+    const appliedBare = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_bare",
+        status: "paid",
+        rawResponse: {},
+        amount: 25,
+        fee: 1,
+        capturedAmount: 25,
+        refundedAmount: 0,
+      },
+      "succeeded",
+    );
+    expect(appliedBare.amount).toBeUndefined();
+    expect(appliedBare.currency).toBeUndefined();
+    expect(appliedBare.fee).toBeUndefined();
+    expect(appliedBare.capturedAmount).toBeUndefined();
+    expect(appliedBare.refundedAmount).toBeUndefined();
+
+    const appliedBad = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_nan",
+        status: "paid",
+        rawResponse: {},
+        amount: Number.NaN,
+        currency: " sar ",
+        fee: Number.POSITIVE_INFINITY,
+        capturedAmount: 12,
+      },
+      "succeeded",
+    );
+    expect(appliedBad.currency).toBe("SAR");
+    expect(appliedBad.amount).toBeUndefined();
+    expect(appliedBad.fee).toBeUndefined();
+    expect(appliedBad.capturedAmount).toBe(12);
+  });
+
   it("inferOperationOutcome covers failed/declined/processing branches", () => {
     expect(
       inferOperationOutcome(
@@ -879,6 +931,49 @@ describe("operation-result helpers", () => {
     expect(incompleteRefund.status).toBe("refund_completed");
   });
 
+  it("NEW-CORE-6: declined/failed does not persist on paid status", () => {
+    const declinedPaid = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_paid_decline",
+        status: "paid",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "declined",
+      { decline: { code: "card_declined", message: "nope" } },
+    );
+    expect(declinedPaid.outcome).toBe("succeeded");
+    expect(declinedPaid.success).toBe(true);
+    expect(declinedPaid.status).toBe("paid");
+    expect(declinedPaid.decline).toBeUndefined();
+    expect(isPaidOutcome(declinedPaid)).toBe(true);
+    expect(inferOperationOutcome(declinedPaid)).toBe("succeeded");
+
+    const failedPaid = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_paid_fail",
+        status: "paid",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "failed",
+    );
+    expect(failedPaid.outcome).toBe("succeeded");
+    expect(failedPaid.success).toBe(true);
+    expect(failedPaid.status).toBe("paid");
+    expect(isPaidOutcome(failedPaid)).toBe(true);
+
+    expect(
+      inferOperationOutcome(
+        baseResult({
+          success: false,
+          status: "paid",
+          outcome: "declined",
+        }),
+      ),
+    ).toBe("succeeded");
+  });
+
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {
     const completed = applyOutcomeToGatewayRefundResult(
       {
@@ -949,6 +1044,49 @@ describe("operation-result helpers", () => {
     if (mappedInd.outcome === "indeterminate") {
       expect(mappedInd.reconciliationRequired).toBe(true);
     }
+  });
+
+  it("NEW-CORE-5: applyOutcomeToGatewayRefundResult coerces outcome vs status", () => {
+    const pending = applyOutcomeToGatewayRefundResult(
+      {
+        gatewayRefundId: "re_pending_lie",
+        status: "pending",
+        rawResponse: {},
+      },
+      "succeeded",
+    );
+    expect(pending.outcome).toBe("pending");
+    expect(pending.success).toBe(true);
+    expect(pending.success).toBe(successFromRefundOutcome(pending.outcome!));
+    expect(pending.status).toBe("pending");
+    expect(inferRefundOperationOutcome(pending)).toBe(pending.outcome);
+
+    const failed = applyOutcomeToGatewayRefundResult(
+      {
+        gatewayRefundId: "re_failed_lie",
+        status: "failed",
+        rawResponse: {},
+      },
+      "succeeded",
+    );
+    expect(failed.outcome).toBe("failed");
+    expect(failed.success).toBe(false);
+    expect(failed.success).toBe(successFromRefundOutcome(failed.outcome!));
+    expect(failed.status).toBe("failed");
+    expect(inferRefundOperationOutcome(failed)).toBe(failed.outcome);
+
+    const completed = applyOutcomeToGatewayRefundResult(
+      {
+        gatewayRefundId: "re_completed_from_pending",
+        status: "completed",
+        rawResponse: {},
+      },
+      "pending",
+    );
+    expect(completed.outcome).toBe("succeeded");
+    expect(completed.success).toBe(true);
+    expect(completed.status).toBe("completed");
+    expect(inferRefundOperationOutcome(completed)).toBe(completed.outcome);
   });
 
   it("inferRefundOperationOutcome + map cover indeterminate and failed", () => {

@@ -10,7 +10,7 @@ import {
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { money } from "../../utils/money";
-import { InvalidRequestError, PaymentAbortedError } from "../../errors";
+import { InvalidRequestError, NetworkError } from "../../errors";
 import { createHmac } from "node:crypto";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1610,6 +1610,7 @@ describe("StripeGateway", () => {
             latest_charge: {
               id: "ch_captured_fallback",
               amount_captured: 6000,
+              amount_refunded: 0,
               currency: "usd",
             },
             metadata: {},
@@ -1638,6 +1639,7 @@ describe("StripeGateway", () => {
             latest_charge: {
               id: "ch_full_via_captured",
               amount_captured: 10000,
+              amount_refunded: 0,
               currency: "usd",
             },
             metadata: {},
@@ -1716,6 +1718,33 @@ describe("StripeGateway", () => {
       expect(event.amount).toBe(25);
       expect(event.stableType).toBe("refund.completed");
       expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("NEW-STRIPE-2: payment_intent.succeeded with id-only latest_charge is processing not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_id_only_charge",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_id_only_charge",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: { id: "ch_id_only" },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
@@ -1821,6 +1850,39 @@ describe("StripeGateway", () => {
       expect(event.status).not.toBe("refunded");
       expect(event.stableType).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("NEW-STRIPE-2: hydrated checkout.session.completed with id-only latest_charge is processing", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_id_only_charge",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_id_only_charge",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_id_only_charge",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              latest_charge: { id: "ch_cs_id_only" },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
     });
 
     it("should omit currency when Stripe omits it on the webhook object", () => {
@@ -2595,6 +2657,73 @@ describe("StripeGateway", () => {
       expect(result.amount).toBe(50);
     });
 
+    it("NEW-STRIPE-3: empty HTTP 200 on create is indeterminate, not failed/pending", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse(""),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.status).not.toBe("pending");
+      expect(result.success).not.toBe(true);
+    });
+
+    it("NEW-STRIPE-3: HTTP 200 {} on create is indeterminate, not failed/pending", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({}),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.status).not.toBe("pending");
+      expect(result.success).not.toBe(true);
+      expect(result.amount).toBeUndefined();
+    });
+
+    it("NEW-STRIPE-3: create HTTP 200 with id but no status is indeterminate, not failed", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({ id: "pi_missing_status", object: "payment_intent" }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.success).not.toBe(true);
+    });
+
+    it("NEW-STRIPE-3: non-JSON HTTP 200 on create is indeterminate, not failed", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse("<html>upstream</html>"),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createPayment({
+        amount: 50,
+        currency: "USD",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.success).not.toBe(true);
+    });
+
     it("should mark createPayment paid when succeeded with amount_received", async () => {
       globalThis.fetch = mock(async () =>
         createMockResponse({
@@ -2738,6 +2867,21 @@ describe("StripeGateway", () => {
       expect(result.status).not.toBe("paid");
       expect(result.amount).toBe(100);
       expect(result.outcome).not.toBe("succeeded");
+    });
+
+    it("NEW-STRIPE-3: capture HTTP 200 with id but no status is indeterminate, not failed", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({ id: "pi_cap_missing_status", object: "payment_intent" }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.capturePayment({
+        gatewayPaymentId: "pi_cap_missing_status",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.success).not.toBe(true);
     });
 
     it("should use amount_captured for capture status/amount when amount_received missing", async () => {
@@ -2967,6 +3111,44 @@ describe("StripeGateway", () => {
         "10000",
       ); // 100 * 100
       expect(params.get("line_items[0][quantity]")).toBe("1");
+    });
+
+    it("NEW-STRIPE-CKO-200: empty HTTP 200 on createCheckoutSession is not success:true", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse(""),
+      ) as unknown as typeof fetch;
+
+      await expect(
+        gateway.createCheckoutSession({
+          amount: 100,
+          currency: "USD",
+          successUrl: "https://success",
+          cancelUrl: "https://cancel",
+        }),
+      ).rejects.toBeInstanceOf(NetworkError);
+    });
+
+    it("NEW-STRIPE-CKO-200: HTTP 200 {} on createCheckoutSession is not success:true", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({}),
+      ) as unknown as typeof fetch;
+
+      let thrown: unknown;
+      try {
+        await gateway.createCheckoutSession({
+          amount: 100,
+          currency: "USD",
+          successUrl: "https://success",
+          cancelUrl: "https://cancel",
+        });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(NetworkError);
+      expect(thrown).not.toEqual(
+        expect.objectContaining({ success: true }),
+      );
     });
 
     it("should accept Money amount input for simple createCheckoutSession", async () => {
@@ -3792,6 +3974,51 @@ describe("StripeGateway", () => {
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("500");
     });
 
+    it("NEW-STRIPE-3: empty HTTP 200 on refund is indeterminate, not pending/success", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse(""),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_refund_empty_body",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.success).not.toBe(true);
+    });
+
+    it("NEW-STRIPE-3: HTTP 200 {} on refund is indeterminate, not pending/success", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({}),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_refund_empty_obj",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.success).not.toBe(true);
+    });
+
+    it("NEW-STRIPE-3: refund HTTP 200 with id but no status is indeterminate", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({ id: "re_missing_status" }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_refund_missing_status",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("completed");
+      expect(result.success).not.toBe(true);
+    });
+
     it("should reject partial refund without currency", async () => {
       await expect(
         gateway.refundPayment({
@@ -4502,6 +4729,93 @@ describe("StripeGateway", () => {
       expect(result.references?.relatedIds?.chargeId).toBe("ch_missing");
       expect(result.refundedAmount).toBeUndefined();
     });
+
+    it("NEW-STRIPE-1: omitted latest_charge + charges.data[0].amount_refunded is not paid", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_charges_data_get",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          charges: {
+            data: [
+              {
+                id: "ch_charges_data_get",
+                amount_captured: 10000,
+                amount_refunded: 10000,
+                refunded: true,
+                currency: "usd",
+              },
+            ],
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_charges_data_get",
+      });
+
+      expect(result.status).toBe("refunded");
+      expect(result.status).not.toBe("paid");
+      expect(result.refundedAmount).toBe(100);
+      expect(result.currency).toBe("USD");
+    });
+
+    it("NEW-STRIPE-1: getPayment refunded:true without amount_refunded is refunded not paid", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_refunded_flag_only",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 5000,
+          amount_received: 5000,
+          currency: "usd",
+          latest_charge: {
+            id: "ch_refunded_flag_only",
+            refunded: true,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_refunded_flag_only",
+      });
+
+      expect(result.status).toBe("refunded");
+      expect(result.status).not.toBe("paid");
+    });
+
+    it("NEW-STRIPE-2: getPayment id-only latest_charge is processing not paid", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse(
+            { error: { message: "Charge not found", type: "invalid_request_error" } },
+            false,
+            404,
+          );
+        }
+        return createMockResponse({
+          id: "pi_get_id_only",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: { id: "ch_get_id_only" },
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.getPayment({
+        gatewayPaymentId: "pi_get_id_only",
+      });
+
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("paid");
+      expect(result.references?.relatedIds?.chargeId).toBe("ch_get_id_only");
+    });
   });
 
   describe("getCheckoutSession", () => {
@@ -4531,6 +4845,24 @@ describe("StripeGateway", () => {
       expect(result.paymentIntentId).toBe("pi_from_session");
       expect(result.amount).toBe(10);
       expect(result.currency).toBe("usd");
+    });
+
+    it("NEW-STRIPE-CKO-200: HTTP 200 {} on getCheckoutSession is not success:true", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({}),
+      ) as unknown as typeof fetch;
+
+      let thrown: unknown;
+      try {
+        await gateway.getCheckoutSession({ sessionId: "cs_missing_id_body" });
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(NetworkError);
+      expect(thrown).not.toEqual(
+        expect.objectContaining({ success: true, sessionId: undefined }),
+      );
     });
 
     it("should reject malformed Checkout Session IDs before calling Stripe", async () => {
@@ -4712,19 +5044,24 @@ describe("StripeGateway", () => {
       const controller = new AbortController();
       controller.abort();
 
-      await expect(
-        gateway.createPayment({
-          amount: 10,
-          currency: "USD",
-          signal: controller.signal,
-        }),
-      ).rejects.toBeInstanceOf(PaymentAbortedError);
+      // NEW-CORE-1: caller abort after a mutating POST is indeterminate
+      // (NetworkError afterProviderSubmit), not PaymentAbortedError.
+      const aborted = await gateway.createPayment({
+        amount: 10,
+        currency: "USD",
+        signal: controller.signal,
+      });
+      expect(aborted.outcome).toBe("indeterminate");
+      expect(aborted.reconciliationRequired).toBe(true);
     });
 
     it("aborts in-flight createPayment when caller signal fires", async () => {
       const controller = new AbortController();
 
       globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        if (opts.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
         return new Promise<Response>((_resolve, reject) => {
           opts.signal?.addEventListener("abort", () => {
             reject(new DOMException("Aborted", "AbortError"));
@@ -4734,13 +5071,14 @@ describe("StripeGateway", () => {
         });
       }) as unknown as typeof fetch;
 
-      await expect(
-        gateway.createPayment({
-          amount: 10,
-          currency: "USD",
-          signal: controller.signal,
-        }),
-      ).rejects.toBeInstanceOf(PaymentAbortedError);
+      // Post-submit abort is indeterminate, not a clean PaymentAbortedError.
+      const aborted = await gateway.createPayment({
+        amount: 10,
+        currency: "USD",
+        signal: controller.signal,
+      });
+      expect(aborted.outcome).toBe("indeterminate");
+      expect(aborted.reconciliationRequired).toBe(true);
     });
 
     it("survives Zod validation — signal is not stripped before HTTP", async () => {

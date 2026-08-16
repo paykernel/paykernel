@@ -2528,7 +2528,7 @@ describe('PayPalGateway', () => {
             expect(result.status).toBe('pending');
         });
 
-        it('should reject successful create-order responses that do not include an approval link', async () => {
+        it('create HTTP 200 missing approval link is indeterminate, not a clean API throw', async () => {
             globalThis.fetch = mock(async (input: RequestInfo | URL) => {
                 const url = typeof input === 'string' ? input : (input as Request).url;
 
@@ -2545,16 +2545,17 @@ describe('PayPalGateway', () => {
                 });
             }) as unknown as typeof fetch;
 
-            await expect(
-                gateway.createPayment({
-                    amount: 50,
-                    currency: 'USD',
-                    callbackUrl: 'https://example.com/callback',
-                })
-            ).rejects.toThrow(GatewayApiError);
+            const result = await gateway.createPayment({
+                amount: 50,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
         });
 
-        it('should reject malformed successful create-order responses', async () => {
+        it('create HTTP 200 missing id is indeterminate, not a clean API throw', async () => {
             globalThis.fetch = createMockFetch({
                 status: 'CREATED',
                 links: [
@@ -2562,13 +2563,27 @@ describe('PayPalGateway', () => {
                 ],
             });
 
-            await expect(
-                gateway.createPayment({
-                    amount: 50,
-                    currency: 'USD',
-                    callbackUrl: 'https://example.com/callback',
-                })
-            ).rejects.toThrow(GatewayApiError);
+            const result = await gateway.createPayment({
+                amount: 50,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
+        });
+
+        it('create HTTP 200 empty body is indeterminate, not a clean API throw', async () => {
+            globalThis.fetch = createMockFetch({});
+
+            const result = await gateway.createPayment({
+                amount: 50,
+                currency: 'USD',
+                callbackUrl: 'https://example.com/callback',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
         });
 
         it('should create AUTHORIZE-intent orders when capture is false', async () => {
@@ -3079,11 +3094,12 @@ describe('PayPalGateway', () => {
                 ],
             });
 
-            await expect(
-                gateway.capturePayment({
-                    gatewayPaymentId: 'ORDER-NO-CAPTURE',
-                })
-            ).rejects.toThrow(GatewayApiError);
+            const result = await gateway.capturePayment({
+                gatewayPaymentId: 'ORDER-NO-CAPTURE',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
         });
 
         it('should include PayPal-Request-Id header when capturing orders', async () => {
@@ -3448,11 +3464,12 @@ describe('PayPalGateway', () => {
                 ],
             });
 
-            await expect(
-                gateway.authorizePayment({
-                    gatewayPaymentId: 'ORDER-AUTH-MISSING',
-                })
-            ).rejects.toThrow(GatewayApiError);
+            const result = await gateway.authorizePayment({
+                gatewayPaymentId: 'ORDER-AUTH-MISSING',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
         });
 
         it('should reject capture-only fields on authorizePayment before calling PayPal', async () => {
@@ -3693,16 +3710,28 @@ describe('PayPalGateway', () => {
             expect(result.totalRefunded).toBe(45);
         });
 
-        it('should reject malformed successful refund responses', async () => {
+        it('refund HTTP 200 missing id is indeterminate, not a clean API throw', async () => {
             globalThis.fetch = createMockFetch({
                 status: 'COMPLETED',
             });
 
-            await expect(
-                gateway.refundPayment({
-                    gatewayPaymentId: 'CAPTURE-123',
-                })
-            ).rejects.toThrow(GatewayApiError);
+            const result = await gateway.refundPayment({
+                gatewayPaymentId: 'CAPTURE-123',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
+        });
+
+        it('refund HTTP 200 empty body is indeterminate, not a clean API throw', async () => {
+            globalThis.fetch = createMockFetch({});
+
+            const result = await gateway.refundPayment({
+                gatewayPaymentId: 'CAPTURE-123',
+            });
+            expect(result.outcome).toBe('indeterminate');
+            expect(result.reconciliationRequired).toBe(true);
+            expect(result.success).toBe(false);
         });
 
         it('should map failed refund statuses to failed with success false', async () => {

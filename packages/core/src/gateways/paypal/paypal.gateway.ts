@@ -300,7 +300,15 @@ function isRetryableError(error: unknown): boolean {
   }
   // Network errors (timeout maps to NetworkError). Caller aborts map to
   // PaymentAbortedError and must not be retried.
-  return error instanceof NetworkError || error instanceof TypeError;
+  // HTTP 200 with unreadable id/status is already an observed mutation
+  // outcome — do not re-POST (timeouts/drops still retry via Request-Id).
+  if (error instanceof NetworkError) {
+    return !(
+      error.afterProviderSubmit === true &&
+      error.message.includes("Invalid PayPal")
+    );
+  }
+  return error instanceof TypeError;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -532,7 +540,9 @@ export class PayPalGateway extends BaseGateway {
           throw this.createApiError(data, response.status, response.headers);
         }
 
-        this.assertOrderResponse(data, "create payment");
+        this.assertOrderResponse(data, "create payment", {
+          afterProviderSubmit: true,
+        });
 
         // Find approval URL
         const approvalLink = data.links?.find(
@@ -542,6 +552,7 @@ export class PayPalGateway extends BaseGateway {
           throw this.createMalformedResponseError(
             "Invalid PayPal create payment response: missing approval link",
             data,
+            { afterProviderSubmit: true },
           );
         }
 
@@ -642,7 +653,9 @@ export class PayPalGateway extends BaseGateway {
           throw this.createApiError(data, response.status, response.headers);
         }
 
-        this.assertOrderResponse(data, "capture payment");
+        this.assertOrderResponse(data, "capture payment", {
+          afterProviderSubmit: true,
+        });
 
         // Extract capture details (prefer last capture on multi-capture order responses)
         const capture = isAuthorizationCapture
@@ -656,7 +669,9 @@ export class PayPalGateway extends BaseGateway {
             data.purchase_units?.[0]?.payments?.captures,
           );
 
-        this.assertPaymentResource(capture, "capture payment");
+        this.assertPaymentResource(capture, "capture payment", {
+          afterProviderSubmit: true,
+        });
 
         let status = capture
           ? this.mapResourceStatus(capture.status)
@@ -782,7 +797,7 @@ export class PayPalGateway extends BaseGateway {
           throw this.createApiError(data, response.status, response.headers);
         }
 
-        this.assertRefundResponse(data);
+        this.assertRefundResponse(data, { afterProviderSubmit: true });
 
         const status = this.mapRefundStatus(data.status);
         const outcome: RefundOperationOutcome =
@@ -911,7 +926,9 @@ export class PayPalGateway extends BaseGateway {
           throw this.createApiError(data, response.status, response.headers);
         }
 
-        this.assertOrderResponse(data, "void payment");
+        this.assertOrderResponse(data, "void payment", {
+          afterProviderSubmit: true,
+        });
 
         return this.mapPayPalPaymentResult({
           gatewayId: data.id ?? p.gatewayPaymentId,
@@ -950,9 +967,13 @@ export class PayPalGateway extends BaseGateway {
           throw this.createApiError(data, response.status, response.headers);
         }
 
-        this.assertOrderResponse(data, "authorize payment");
+        this.assertOrderResponse(data, "authorize payment", {
+          afterProviderSubmit: true,
+        });
         const authorization = data.purchase_units?.[0]?.payments?.authorizations?.[0];
-        this.assertPaymentResource(authorization, "authorize payment");
+        this.assertPaymentResource(authorization, "authorize payment", {
+          afterProviderSubmit: true,
+        });
 
         const status = this.mapResourceStatus(authorization.status);
         const authMoney = this.parsePayPalMoney(
@@ -1797,10 +1818,22 @@ export class PayPalGateway extends BaseGateway {
     );
   }
 
+  /**
+   * Unreadable provider body. After a mutating POST, throw NetworkError with
+   * afterProviderSubmit so executeWithHooks maps to indeterminate — never
+   * PayPalApiError status 0, which app retries treat as a clean failure and
+   * mint a new PayPal-Request-Id.
+   */
   private createMalformedResponseError(
     message: string,
     rawResponse: unknown,
-  ): PayPalApiError {
+    options?: { afterProviderSubmit?: boolean },
+  ): PayPalApiError | NetworkError {
+    if (options?.afterProviderSubmit === true) {
+      return new NetworkError(message, rawResponse, {
+        afterProviderSubmit: true,
+      });
+    }
     return new PayPalApiError(message, rawResponse, 0);
   }
 
@@ -2250,11 +2283,13 @@ export class PayPalGateway extends BaseGateway {
   private assertOrderResponse(
     data: PayPalOrderResponse,
     operation: string,
+    options?: { afterProviderSubmit?: boolean },
   ): asserts data is PayPalOrderResponse {
     if (typeof data.id !== "string" || data.id.length === 0) {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing id`,
         data,
+        options,
       );
     }
 
@@ -2262,17 +2297,20 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing status`,
         data,
+        options,
       );
     }
   }
 
   private assertRefundResponse(
     data: PayPalRefundResponse,
+    options?: { afterProviderSubmit?: boolean },
   ): asserts data is PayPalRefundResponse {
     if (typeof data.id !== "string" || data.id.length === 0) {
       throw this.createMalformedResponseError(
         "Invalid PayPal refund response: missing id",
         data,
+        options,
       );
     }
 
@@ -2280,6 +2318,7 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         "Invalid PayPal refund response: missing status",
         data,
+        options,
       );
     }
   }
@@ -2287,11 +2326,13 @@ export class PayPalGateway extends BaseGateway {
   private assertPaymentResource(
     resource: unknown,
     operation: string,
+    options?: { afterProviderSubmit?: boolean },
   ): asserts resource is PayPalPaymentResource {
     if (!resource || typeof resource !== "object") {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing payment resource`,
         resource,
+        options,
       );
     }
 
@@ -2300,6 +2341,7 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing payment resource id`,
         resource,
+        options,
       );
     }
 
@@ -2307,10 +2349,11 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing payment resource status`,
         resource,
+        options,
       );
     }
 
-    this.parseAmount(paymentResource.amount, operation);
+    this.parseAmount(paymentResource.amount, operation, options);
   }
 
   private normalizeCurrencyCode(currency: string): string {
@@ -2411,11 +2454,13 @@ export class PayPalGateway extends BaseGateway {
   private parsePayPalMoney(
     amount: unknown,
     operation: string,
+    options?: { afterProviderSubmit?: boolean },
   ): { amount: number; currency: string } {
     if (!amount || typeof amount !== "object") {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing amount`,
         amount,
+        options,
       );
     }
 
@@ -2424,6 +2469,7 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing amount currency`,
         amount,
+        options,
       );
     }
 
@@ -2431,6 +2477,7 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: missing amount value`,
         amount,
+        options,
       );
     }
 
@@ -2456,13 +2503,18 @@ export class PayPalGateway extends BaseGateway {
       throw this.createMalformedResponseError(
         `Invalid PayPal ${operation} response: invalid amount value`,
         amount,
+        options,
       );
     }
   }
 
   /** Major-unit only convenience; prefer {@link parsePayPalMoney} when currency is needed. */
-  private parseAmount(amount: unknown, operation: string): number {
-    return this.parsePayPalMoney(amount, operation).amount;
+  private parseAmount(
+    amount: unknown,
+    operation: string,
+    options?: { afterProviderSubmit?: boolean },
+  ): number {
+    return this.parsePayPalMoney(amount, operation, options).amount;
   }
 
   /**

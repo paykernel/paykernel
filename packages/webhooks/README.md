@@ -192,6 +192,10 @@ Mode is fixed at `createWebhookInboxEngine` construction. Process methods never 
 `processRetryable` is valid **only** on `durable_retry` engines (throws on `inline`).
 `ackAfterClaim` is valid **only** with `durable_retry` (constructor throws otherwise).
 `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / call throws otherwise; default remains 30s).
+`processRetryable` **claims one row at a time** (NEW-WEBHOOKS-1): the next
+lease is acquired only after the previous handler returns. Do not assume
+`limit=10` + `leaseMs=30s` covers N serial handlers if claims were taken
+up front — they are not.
 
 **Default `processRetryable` materialization:** if `payloadRef` is a
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
@@ -251,12 +255,17 @@ deriveWebhookEventKey("paymob", "123456789", "TRANSACTION");
 
 Empty gateway or providerEventId throws / yields `invalid_webhook`.
 
-**Paymob (WEBHOOKS-1):** `WebhookEvent.id` is the transaction id on both
-redirect `TRANSACTION_RESPONSE` (`payment.processing`) and processed
-`TRANSACTION` (`payment.succeeded`). `processVerified` includes the
-notification class in the key when `event` / `envelope` carries
-`type` or `provider.eventType`. Do **not** inbox-dedupe Paymob on raw
-`event.id` and no-op the redirect — that combo ACK-suppresses later paid.
+**Paymob (WEBHOOKS-1 / NEW-WEBHOOKS-2):** `WebhookEvent.id` is the
+transaction id on both redirect `TRANSACTION_RESPONSE` (`payment.processing`)
+and processed `TRANSACTION`. `processVerified` includes the notification
+class in the key when `event` / `envelope` carries `type` or
+`provider.eventType`. Do **not** inbox-dedupe Paymob on raw `event.id`
+and no-op the redirect — that combo ACK-suppresses later paid.
+Processed `TRANSACTION` inbox key is `obj.id` (`paymob:TRANSACTION:{id}`).
+A later same-id snapshot is `already_completed`. Child refund/capture
+callbacks have **new** `obj.id`s (new inbox keys). Do **not** complete
+fulfillment on Paymob `payment.processing` — wait for processed
+`TRANSACTION` + a settlement stable type.
 
 ## Store contract
 

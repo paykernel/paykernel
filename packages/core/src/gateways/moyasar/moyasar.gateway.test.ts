@@ -971,6 +971,56 @@ describe("MoyasarGateway", () => {
 
       expect(fetchCalls).toHaveLength(0);
     });
+
+    it("treats HTTP 200 empty {} as indeterminate, not declined failed (NEW-MOYASAR-1)", async () => {
+      mockFetchJson({});
+
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        callbackUrl: "https://example.com/callback",
+        moyasarSource: {
+          type: "token",
+          token: "token_test_123",
+        },
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.outcome).not.toBe("declined");
+      expect(result.status).not.toBe("paid");
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.success).toBe(false);
+      expect(result.gatewayId).not.toBeUndefined();
+    });
+
+    it("treats HTTP 200 missing payment.id as indeterminate even when status is paid (NEW-MOYASAR-1)", async () => {
+      mockFetchJson({
+        status: "paid",
+        amount: 10000,
+        currency: "SAR",
+        captured: 10000,
+      });
+
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        moyasarSource: {
+          type: "applepay",
+          token: "encrypted_token",
+        },
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.outcome).not.toBe("declined");
+      expect(isPaidOutcome(result)).toBe(false);
+      // given_id is the only handle callers can reconcile with
+      expect(result.gatewayId).toBe(DEFAULT_MUTATION_IDEMPOTENCY_KEY);
+    });
   });
 
   describe("capturePayment and refundPayment", () => {
@@ -1572,6 +1622,7 @@ describe("MoyasarGateway", () => {
       const result = await createGateway().confirmStcPayOtp({
         transactionUrl,
         otpValue: "123456",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(fetchCalls[0]?.url).toBe(transactionUrl);
@@ -1608,6 +1659,7 @@ describe("MoyasarGateway", () => {
       }).confirmStcPayOtp({
         transactionUrl,
         otpValue: "123456",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(operations).toEqual([
@@ -1625,6 +1677,52 @@ describe("MoyasarGateway", () => {
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("throws when store/key is missing for OTP confirm (NEW-MOYASAR-3)", async () => {
+      const transactionUrl =
+        "https://api.moyasar.com/v1/stc_pays/6187b1f9-ihn2-457b-a8bc-e2j5c808ff94/proceed?otp_token=abc";
+      mockFetchJson(paymentResponse({ status: "paid" }));
+
+      const noStore = new MoyasarGateway(CONFIG, new HooksManager());
+      await expect(
+        noStore.confirmStcPayOtp({
+          transactionUrl,
+          otpValue: "123456",
+          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+        }),
+      ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
+
+      await expect(
+        createGateway().confirmStcPayOtp({
+          transactionUrl,
+          otpValue: "123456",
+        }),
+      ).rejects.toThrow(/requires idempotencyKey/);
+
+      expect(fetchCalls).toHaveLength(0);
+    });
+
+    it("keeps the OTP fence after a post-submit transport error (NEW-MOYASAR-3)", async () => {
+      const transactionUrl =
+        "https://api.moyasar.com/v1/stc_pays/6187b1f9-ihn2-457b-a8bc-e2j5c808ff94/proceed?otp_token=abc";
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      mockFetchError(new Error("socket closed"));
+
+      const params = {
+        transactionUrl,
+        otpValue: "123456",
+        idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
+      };
+
+      const first = await gateway.confirmStcPayOtp(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+      await expect(gateway.confirmStcPayOtp(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
     });
   });
 
@@ -1763,7 +1861,7 @@ describe("MoyasarGateway", () => {
       ).rejects.toBeInstanceOf(PaymentAbortedError);
     });
 
-    it("aborts mid-flight createPayment when caller signal fires", async () => {
+    it("treats mid-flight createPayment caller abort as indeterminate (NEW-CORE-1)", async () => {
       const controller = new AbortController();
 
       globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -1777,15 +1875,20 @@ describe("MoyasarGateway", () => {
         throw new Error("unreachable");
       }) as typeof fetch;
 
-      await expect(
-        createGateway().createPayment({
-          amount: 100,
-          currency: "SAR",
-          callbackUrl: "https://example.com/callback",
-          moyasarSource: { type: "token", token: "token_test_abc" },
-          signal: controller.signal,
-        }),
-      ).rejects.toBeInstanceOf(PaymentAbortedError);
+      // POST may already have been accepted — not PaymentAbortedError (clean
+      // cancel / retry-as-failed). executeWithHooks maps afterProviderSubmit
+      // NetworkError to an indeterminate result.
+      const result = await createGateway().createPayment({
+        amount: 100,
+        currency: "SAR",
+        callbackUrl: "https://example.com/callback",
+        moyasarSource: { type: "token", token: "token_test_abc" },
+        signal: controller.signal,
+      });
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.status).not.toBe("failed");
+      expect(result.outcome).not.toBe("declined");
     });
 
     it("keeps timeout NetworkError when no caller signal is provided", async () => {
@@ -2613,36 +2716,44 @@ describe("MoyasarGateway", () => {
       expect(event.status).toBe("failed");
     });
 
-    it("rejects card_auth_* webhooks instead of mapping them as payments", () => {
-      expect(() =>
-        createGateway().parseWebhookEvent({
-          id: "wh_card_auth",
-          type: "card_auth_authenticated",
-          secret_token: "webhook_secret",
-          created_at: "2026-05-21T10:00:00Z",
-          data: {
-            id: "ca_2a1b3c4d",
-            status: "authenticated",
-            amount: 10000,
-            currency: "SAR",
-          },
-        }),
-      ).toThrow(InvalidWebhookError);
+    it("parses verified card_auth_* as provider.unmapped, not InvalidWebhookError (NEW-MOYASAR-2)", () => {
+      const authenticated = createGateway().parseWebhookEvent({
+        id: "wh_card_auth",
+        type: "card_auth_authenticated",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: "ca_2a1b3c4d",
+          status: "authenticated",
+          amount: 10000,
+          currency: "SAR",
+        },
+      });
 
-      expect(() =>
-        createGateway().parseWebhookEvent({
-          id: "wh_card_auth_fail",
-          type: "card_auth_failed",
-          secret_token: "webhook_secret",
-          created_at: "2026-05-21T10:00:00Z",
-          data: {
-            id: "ca_2a1b3c4d",
-            status: "failed",
-            amount: 10000,
-            currency: "SAR",
-          },
-        }),
-      ).toThrow(InvalidWebhookError);
+      expect(authenticated.type).toBe("card_auth_authenticated");
+      expect(authenticated.event?.type).toBe("provider.unmapped");
+      expect(authenticated.stableType).toBeUndefined();
+      expect(authenticated.status).toBe("setup_completed");
+      expect(authenticated.status).not.toBe("pending");
+      expect(authenticated.status).not.toBe("paid");
+
+      const failed = createGateway().parseWebhookEvent({
+        id: "wh_card_auth_fail",
+        type: "card_auth_failed",
+        secret_token: "webhook_secret",
+        created_at: "2026-05-21T10:00:00Z",
+        data: {
+          id: "ca_2a1b3c4d",
+          status: "failed",
+          amount: 10000,
+          currency: "SAR",
+        },
+      });
+
+      expect(failed.type).toBe("card_auth_failed");
+      expect(failed.event?.type).toBe("provider.unmapped");
+      expect(failed.stableType).toBeUndefined();
+      expect(failed.status).toBe("failed");
     });
 
     it("Phase 7 dual-write: payment_paid → payment.succeeded + redacted envelope", () => {
@@ -3096,6 +3207,15 @@ describe("MoyasarGateway", () => {
         gateway.voidPayment({
           gatewayPaymentId: PAYMENT_ID,
           idempotencyKey: "unguarded-void",
+        }),
+      ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
+
+      await expect(
+        gateway.confirmStcPayOtp({
+          transactionUrl:
+            "https://api.moyasar.com/v1/stc_pays/6187b1f9-ihn2-457b-a8bc-e2j5c808ff94/proceed?otp_token=abc",
+          otpValue: "123456",
+          idempotencyKey: "unguarded-otp",
         }),
       ).rejects.toThrow(/requires moyasar\.idempotencyStore and idempotencyKey/);
 

@@ -176,8 +176,11 @@ export function isAbortError(error: unknown): boolean {
  * Map a failed HTTP fetch abort to {@link PaymentAbortedError} (caller signal)
  * or {@link NetworkError} (timeout / transport).
  *
- * Does not convert indeterminate money outcomes — only classifies transport
- * cancellation before a settled provider response.
+ * After a mutating request may already have been accepted
+ * (`afterProviderSubmit: true`), always return {@link NetworkError} tagged
+ * `afterProviderSubmit` — including caller-signal abort. {@link PaymentAbortedError}
+ * is a clean cancel and would let `executeIdempotent` drop the fence
+ * (NEW-CORE-1). GET / auth preflight must leave `afterProviderSubmit` unset.
  */
 export function mapHttpAbortError(
   error: unknown,
@@ -194,7 +197,7 @@ export function mapHttpAbortError(
     callerAbortMessage?: string | undefined;
     /**
      * When true, the request was a money mutation that may already be
-     * accepted (P610-IND-1). GET/auth preflight must leave this unset.
+     * accepted (P610-IND-1 / NEW-CORE-1). GET/auth preflight must leave this unset.
      */
     afterProviderSubmit?: boolean | undefined;
   },
@@ -213,6 +216,21 @@ export function mapHttpAbortError(
 
   const callerAborted = options.callerSignal?.aborted === true;
   const timeoutAborted = options.timeoutSignal?.aborted === true;
+
+  // Post-submit: never PaymentAbortedError. Timeout path already used NetworkError;
+  // caller abort after a mutating POST is the same uncertainty class.
+  if (options.afterProviderSubmit === true) {
+    if (timeoutAborted && !callerAborted) {
+      return network(options.timeoutMessage, error);
+    }
+    if (callerAborted) {
+      return network(
+        options.callerAbortMessage ?? options.networkMessage,
+        error,
+      );
+    }
+    return network(options.timeoutMessage, error);
+  }
 
   // Prefer caller abort when the caller's signal is aborted (even if timeout
   // also raced); timeout-only when only the timeout signal fired.

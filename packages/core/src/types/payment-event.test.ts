@@ -267,7 +267,9 @@ describe("webhookEventToPaymentEvent", () => {
   });
 
   it("capture dual-write uses partially_completed for partials (CORE-4)", () => {
-    const partial = webhookEventToPaymentEvent(
+    // NEW-CORE-4: Paymob is_capture + partial is payment.processing, not
+    // capture.completed (open money must not look fully captured).
+    const paymobPartial = webhookEventToPaymentEvent(
       baseWebhook({
         type: "TRANSACTION",
         gateway: "paymob",
@@ -282,11 +284,28 @@ describe("webhookEventToPaymentEvent", () => {
         },
       },
     );
-    expect(partial.type).toBe("capture.completed");
-    if (partial.type !== "capture.completed") throw new Error("narrow");
-    expect(partial.capture.status).toBe("partially_completed");
-    expect(partial.capture.amount).toBe(5);
-    expect(partial.capture.currency).toBe("EGP");
+    expect(paymobPartial.type).toBe("payment.processing");
+    if (paymobPartial.type !== "payment.processing") throw new Error("narrow");
+    expect(paymobPartial.payment.status).toBe("partially_captured");
+    expect(paymobPartial.payment.amount).toBe(5);
+    expect(paymobPartial.payment.currency).toBe("EGP");
+
+    // Capture-domain arm that still arrives with a partial status must not
+    // claim entity completed (Moyasar payment_captured + partial snapshot).
+    const capturePartial = webhookEventToPaymentEvent(
+      baseWebhook({
+        type: "payment_captured",
+        gateway: "moyasar",
+        status: "partially_captured",
+        amount: 5,
+        currency: "EGP",
+      }),
+    );
+    expect(capturePartial.type).toBe("capture.completed");
+    if (capturePartial.type !== "capture.completed") throw new Error("narrow");
+    expect(capturePartial.capture.status).toBe("partially_completed");
+    expect(capturePartial.capture.amount).toBe(5);
+    expect(capturePartial.capture.currency).toBe("EGP");
 
     const full = webhookEventToPaymentEvent(
       baseWebhook({
@@ -814,10 +833,23 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.succeeded");
     });
 
-    it("TRANSACTION is_capture + partially_captured → capture.completed (not payment.succeeded)", () => {
+    it("TRANSACTION is_capture + partially_captured → payment.processing (NEW-CORE-4)", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
           status: "partially_captured",
+          flags: { success: true, isCapture: true },
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          flags: { success: true, isCapture: true },
+          amounts: { amountCents: 10000, capturedAmountCents: 5000 },
+        }),
+      ).toBe("payment.processing");
+      // Full capture still stays capture-domain.
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "paid",
           flags: { success: true, isCapture: true },
         }),
       ).toBe("capture.completed");
@@ -1098,6 +1130,27 @@ describe("envelope + hash + secrets", () => {
     ).toBe(
       hashWebhookPayload({ id: "1", clientSecret: "[REDACTED]", n: 1 }),
     );
+  });
+
+  it("NEW-MONEY-2: PAN/CVC keys the logger scrubs are redacted", () => {
+    expect(WEBHOOK_PAYLOAD_SECRET_KEYS).toEqual(
+      expect.arrayContaining(["number", "cvc", "cvv", "pan", "card"]),
+    );
+
+    const out = redactWebhookPayloadSecrets({
+      number: "4111111111111111",
+      cvc: "123",
+      cvv: "456",
+      pan: "5555555555554444",
+      card: { number: "4242424242424242" },
+      keep: 1,
+    }) as Record<string, unknown>;
+    expect(out.number).toBe("[REDACTED]");
+    expect(out.cvc).toBe("[REDACTED]");
+    expect(out.cvv).toBe("[REDACTED]");
+    expect(out.pan).toBe("[REDACTED]");
+    expect(out.card).toBe("[REDACTED]");
+    expect(out.keep).toBe(1);
   });
 
   it("P610-RED-1: stripRawFromPaymentEvent strips nested nextAction.clientSecret", () => {

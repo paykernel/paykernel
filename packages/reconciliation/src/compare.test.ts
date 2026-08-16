@@ -161,6 +161,52 @@ describe("compareSnapshots (A2 machine-readable fields)", () => {
     expect(diffs).toEqual([]);
   });
 
+  it("NEW-RECON-1: processing + amount vs capturedAmount 0 is not drift", () => {
+    for (const status of ["pending", "processing"] as const) {
+      const diffs = compareSnapshots(
+        { status, amount: money("10.00", "USD") },
+        buildProviderPaymentSnapshot({
+          gatewayPaymentId: "pi_inflight",
+          status,
+          amount: money("10.00", "USD"),
+          capturedAmount: money("0", "USD"),
+          providerStatus: status,
+        }),
+      );
+      expect(diffs.some((d) => d.field === "capturedAmount")).toBe(false);
+      expect(diffs).toEqual([]);
+    }
+  });
+
+  it("NEW-RECON-1: pending local + processing provider captured 0 is not capturedAmount drift", () => {
+    const diffs = compareSnapshots(
+      { status: "pending", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_inflight",
+        status: "processing",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("0.00", "USD"),
+        providerStatus: "processing",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(false);
+    expect(diffs.some((d) => d.field === "status")).toBe(true);
+  });
+
+  it("NEW-RECON-1: processing + non-zero capturedAmount vs amount is still drift", () => {
+    const diffs = compareSnapshots(
+      { status: "processing", amount: money("10.00", "USD") },
+      buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_partial_inflight",
+        status: "processing",
+        amount: money("10.00", "USD"),
+        capturedAmount: money("4.00", "USD"),
+        providerStatus: "processing",
+      }),
+    );
+    expect(diffs.some((d) => d.field === "capturedAmount")).toBe(true);
+  });
+
   it("RECON-2: incremental capture while authorized is capturedAmount drift", () => {
     const diffs = compareSnapshots(
       { status: "authorized", amount: money("10.00", "USD") },

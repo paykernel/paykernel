@@ -242,6 +242,7 @@ After reclaim, the **old** worker’s `complete`/`fail`/`renew` with the pre-rec
 - **Hash source (WEBHOOKS-5):** `hashWebhookPayload` does **not** JSON-parse non-object strings. `hashWebhookPayload(rawBodyString)` and `hashWebhookPayload(parsedObject)` are different digests. Prefer `resolveInboxPayloadHash({ eventPayloadHash, payloadForHash })` with the same object shape the gateway hashed. Mixing sources on an **idle** row supersedes; an **active lease** returns `payload_conflict`. Do not treat those hashes as interchangeable under a live lease.
 - Max **handler** attempts / default `NonRetryableHandlerError` → dead letter → `handler_failed { retryable: false }`. `{ deadLetter: false }` leaves pending until `maxAttempts` (prefer default).
 - `processRetryable` is **only** valid on `durable_retry` engines (throws if the engine was built with `inline`).
+- **NEW-WEBHOOKS-1:** `processRetryable` claims one listed row at a time (next lease after the previous handler returns). It does not hold N unexpired leases across serial handler I/O.
 
 ---
 

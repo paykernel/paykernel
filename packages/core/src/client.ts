@@ -22,7 +22,9 @@ import type { WebhookEvent } from "./types/webhook.types";
 import {
   attachPaymentEvent,
   isPaymentEvent,
+  paymentFromWebhookEvent,
   PAYMENT_EVENT_SCHEMA_VERSION,
+  type PaymentEvent,
 } from "./types/payment-event";
 import type {
   CreatePaymentClientOptions,
@@ -149,45 +151,105 @@ function clonePlainJson(value: unknown): unknown {
   return out;
 }
 
+type RematchedSucceededStableType =
+  | "payment.processing"
+  | "payment.authorized"
+  | "payment.failed"
+  | "payment.cancelled";
+
 /**
- * CORE-HW-1 / CORE-6-EXT: a complete v1 `payment.succeeded` arm must not
- * survive an open-money or refunded envelope. Stripe parse rematches
- * checkout/PI refunds to `refund.completed` first; this covers custom
- * attaches. No refund entity here — refunded rematch is `payment.processing`.
+ * CORE-HW-1 / CORE-6-EXT / NEW-CORE-2 / NEW-CORE-3: a complete v1
+ * `payment.succeeded` arm must not survive an open-money, failed, cancelled,
+ * or refunded envelope. Stripe parse rematches checkout/PI refunds to
+ * `refund.completed` first; this covers custom attaches. No refund entity
+ * here — refunded rematch is `payment.processing`. Nested `event.payment`
+ * is rebuilt from the envelope so `status` cannot stay `paid`.
  */
+function rematchSucceededTypeFromDomainStatus(
+  status: string,
+): RematchedSucceededStableType | undefined {
+  switch (status) {
+    case "pending":
+    case "processing":
+    case "partially_captured":
+    case "approved":
+    case "refunded":
+    case "partially_refunded":
+      return "payment.processing";
+    case "authorized":
+      return "payment.authorized";
+    case "failed":
+      return "payment.failed";
+    case "cancelled":
+    case "reversed":
+      return "payment.cancelled";
+    default:
+      return undefined;
+  }
+}
+
+function rematchedSucceededPaymentEvent(
+  nextType: RematchedSucceededStableType,
+  payment: ReturnType<typeof paymentFromWebhookEvent>,
+  provider: NonNullable<WebhookEvent["provider"]>,
+  envelopeStatus: string,
+): PaymentEvent {
+  if (nextType === "payment.failed") {
+    return {
+      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+      type: "payment.failed",
+      payment,
+      provider,
+      failure: {
+        code: "payment_failed",
+        message: `Payment failed (${envelopeStatus})`,
+        providerCode: envelopeStatus,
+      },
+    };
+  }
+  return {
+    schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+    type: nextType,
+    payment,
+    provider,
+  };
+}
+
 function rematchSucceededWebhookDualWriteAgainstDomainStatus(
   event: WebhookEvent,
 ): WebhookEvent {
   const pe = event.event;
-  if (pe === undefined || pe.type !== "payment.succeeded") {
+  if (pe === undefined) {
     return event;
   }
-  const status = event.status;
-  const nextType =
-    status === "processing" ||
-    status === "partially_captured" ||
-    status === "approved" ||
-    status === "refunded" ||
-    status === "partially_refunded"
-      ? ("payment.processing" as const)
-      : status === "authorized"
-        ? ("payment.authorized" as const)
-        : undefined;
+  const nextType = rematchSucceededTypeFromDomainStatus(event.status);
   if (nextType === undefined) {
     return event;
   }
-  const payment = pe.payment;
+  const nestedStatus =
+    "payment" in pe && pe.payment !== undefined ? pe.payment.status : undefined;
+  const typeStillSucceeded = pe.type === "payment.succeeded";
+  // Stripe demote rematches type first and can leave nested `paid`.
+  const nestedStatusLies = nestedStatus !== undefined && nestedStatus !== event.status;
+  if (!typeStillSucceeded && !(pe.type === nextType && nestedStatusLies)) {
+    return event;
+  }
+  // NEW-CORE-2: rebuild from envelope status/money — do not keep nested `paid`.
+  const payment = paymentFromWebhookEvent(event);
   const provider = event.provider ?? pe.provider;
+  if (provider === undefined) {
+    return event;
+  }
   return {
     ...event,
     stableType: nextType,
     provider,
-    event: {
-      schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
-      type: nextType,
+    event: rematchedSucceededPaymentEvent(
+      nextType,
       payment,
       provider,
-    },
+      event.status,
+    ),
   };
 }
 
@@ -838,9 +900,11 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     // gateway-specific mapContext + payloadHash). Rebuild when `event` is
     // missing or not a valid schemaVersion-1 PaymentEvent. Do not overwrite
     // richer valid dual-write. Always apply incomplete-money / incomplete-refund
-    // demotes after parse (CORE-HW-1 / P610-SAFE-1) — a complete v1
-    // `payment.succeeded` arm must not skip rematch against processing /
-    // partially_captured / authorized / approved envelopes.
+    // demotes after parse (CORE-HW-1 / P610-SAFE-1 / NEW-CORE-2 / NEW-CORE-3)
+    // — a complete v1 `payment.succeeded` arm must not skip rematch against
+    // processing / partial / authorized / approved / pending / failed /
+    // cancelled / reversed / refunded envelopes, and nested payment.status
+    // is rebuilt from the envelope.
     const dualWrite = event.event;
     if (
       dualWrite === undefined ||

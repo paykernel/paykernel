@@ -74,6 +74,7 @@ import { NonRetryableHandlerError } from "./types";
 // ─── Defaults ────────────────────────────────────────────────────────────────
 
 const DEFAULT_OWNER = "webhook-worker";
+/** Default claim lease. `processRetryable` claims one-at-a-time so this 30s window is per handler, not shared across a batch (NEW-WEBHOOKS-1). */
 const DEFAULT_LEASE_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 5;
 const DEFAULT_RETRY_AFTER_MS = 5_000;
@@ -660,10 +661,14 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
  *   or durable snapshot) — same path as redrive.
  */
 /**
- * WEBHOOKS-1: notification class for Paymob inbox qualification.
+ * WEBHOOKS-1 / NEW-WEBHOOKS-2: notification class for Paymob inbox
+ * qualification.
  *
  * Prefer `provider.eventType` (PaymentEvent native type: TRANSACTION vs
  * TRANSACTION_RESPONSE). Fall back to WebhookEvent.type / nested event.type.
+ * Processed TRANSACTION inbox key is `paymob:TRANSACTION:{obj.id}` — later
+ * same-id snapshots are `already_completed`. Child refunds have new ids.
+ * Do not complete fulfillment on Paymob `payment.processing` (redirect).
  */
 function readProviderNativeEventType(provider: unknown): string | undefined {
   if (provider === null || typeof provider !== "object") return undefined;
@@ -1392,23 +1397,18 @@ export function createWebhookInboxEngine(
       });
     }
 
-    // PERF-7: list is discovery; claim is the fence. Issue claims in parallel,
-    // then run handlers serially so one paid handler cannot race another.
-    const claims = await Promise.all(
-      prepared.map((row) =>
-        store.claim({
-          key: row.rec.key,
-          payloadHash: row.payloadHash,
-          owner,
-          leaseMs,
-          ...(row.payloadRef !== undefined ? { payloadRef: row.payloadRef } : {}),
-        }),
-      ),
-    );
-
-    for (let i = 0; i < prepared.length; i++) {
-      const row = prepared[i]!;
-      const claim = claims[i]!;
+    // NEW-WEBHOOKS-1: list is discovery only. Do not hold N unexpired leases
+    // across serial handler I/O — defaults (limit=10, leaseMs=30s) overrun
+    // if handlers average >=3s and a peer reclaims the tail. Claim the next
+    // row only after the previous handler returns.
+    for (const row of prepared) {
+      const claim = await store.claim({
+        key: row.rec.key,
+        payloadHash: row.payloadHash,
+        owner,
+        leaseMs,
+        ...(row.payloadRef !== undefined ? { payloadRef: row.payloadRef } : {}),
+      });
       const { rec, gateway, providerEventId, event } = row;
 
       if (claim.kind !== "acquired") {

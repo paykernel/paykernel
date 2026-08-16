@@ -160,7 +160,11 @@ JSON, register a **raw-body** parser for the webhook route only
    missing, then **always** runs incomplete-money / incomplete-refund demotes
    even when `event.event` already passes `isPaymentEvent`. A complete v1
    `payment.succeeded` arm with envelope `processing` / `partially_captured` /
-   `authorized` / `approved` is rematched before hooks run (CORE-HW-1).
+   `authorized` / `approved` / `pending` / `failed` / `cancelled` /
+   `reversed` / refunded is rematched before hooks run (CORE-HW-1 /
+   NEW-CORE-2 / NEW-CORE-3). Rematch rebuilds nested `event.payment` from
+   the envelope so `payment.status` cannot stay `paid` when the envelope is
+   not. Type-only handlers must not fulfill on a rematched arm.
 5. `onWebhookVerified(event)` — fires **after** verify + parse succeed.
 
 ### Throw matrix (what happens when a webhook hook fails)
@@ -190,7 +194,11 @@ key is `event.id`. **Paymob must not use raw `event.id` alone** — redirect
 `TRANSACTION_RESPONSE` and processed `TRANSACTION` share the same transaction
 id. Use `deriveWebhookEventKey('paymob', event.id, event.type)` (or
 `event.provider?.eventType`) so a no-op redirect cannot ACK-suppress the later
-paid snapshot (WEBHOOKS-1).
+paid snapshot (WEBHOOKS-1). Processed Paymob `TRANSACTION` inbox key is
+`obj.id` (`paymob:TRANSACTION:{id}`). A later same-id snapshot is
+`already_completed`. Child refund/capture callbacks have **new** `obj.id`s
+(new inbox keys). Do **not** complete fulfillment on Paymob
+`payment.processing` — wait for processed `TRANSACTION` (NEW-WEBHOOKS-2).
 
 Providers redeliver the same event when your endpoint returns 5xx (including when
 `onWebhookVerified` throws). Without an idempotency check on the inbox key, a

@@ -1900,17 +1900,17 @@ describe('PaymentClient webhook error isolation', () => {
             },
         });
 
-        // secret_token matches → verify succeeds; card_auth_* → parse throws
+        // secret_token matches → verify succeeds; missing data.id → parse throws.
         // WEBHOOKS-1: parse-after-verify is InvalidRequestError (not forgery).
+        // card_auth_* is no longer a parse throw (NEW-MOYASAR-2).
         try {
             await client.handleWebhook('moyasar', {
-                id: 'evt_card_auth',
-                type: 'card_auth_succeeded',
+                id: 'evt_malformed',
+                type: 'payment_paid',
                 created_at: '2024-01-01T00:00:00Z',
                 secret_token: 'whsec_moyasar_test',
                 data: {
-                    id: 'card_auth_1',
-                    status: 'authenticated',
+                    status: 'paid',
                     amount: 100,
                     currency: 'SAR',
                 },
@@ -1919,7 +1919,7 @@ describe('PaymentClient webhook error isolation', () => {
         } catch (error) {
             expect(error).toBeInstanceOf(InvalidRequestError);
             expect(error).not.toBeInstanceOf(InvalidWebhookError);
-            expect((error as Error).message).toMatch(/card authentication|card_auth/i);
+            expect((error as Error).message).toMatch(/payload fields|missing data/i);
         }
         expect(onWebhookFailedCalled).toBe(false);
     });
@@ -2819,8 +2819,32 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
             status: 'partially_refunded',
             expectedType: 'payment.processing',
         },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'pending',
+            expectedType: 'payment.processing',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'failed',
+            expectedType: 'payment.failed',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'cancelled',
+            expectedType: 'payment.cancelled',
+        },
+        {
+            gateway: 'custom' as const,
+            nativeType: 'payment_paid',
+            status: 'reversed',
+            expectedType: 'payment.cancelled',
+        },
     ])(
-        'CORE-HW-1: rematches complete v1 payment.succeeded + $status → $expectedType',
+        'CORE-HW-1 / NEW-CORE-3: rematches complete v1 payment.succeeded + $status → $expectedType',
         async ({ gateway, nativeType, status, expectedType }) => {
             const eventId = `evt_full_v1_${status}`;
             const client = createWebhookOnlyClient(gateway, (payload) => ({
@@ -2868,8 +2892,116 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
             expect(event.event?.type).toBe(expectedType);
             expect(event.stableType).toBe(expectedType);
             expect(event.event?.type).not.toBe('payment.succeeded');
+            expect(
+                event.event && 'payment' in event.event
+                    ? event.event.payment?.status
+                    : undefined,
+            ).toBe(status);
         },
     );
+
+    it('NEW-CORE-2: rematch payment.succeeded + processing overwrites nested payment.status', async () => {
+        const client = createWebhookOnlyClient('stripe', (payload) => ({
+            id: 'evt_nested_paid_lie',
+            type: 'payment_intent.succeeded',
+            gateway: 'stripe',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'pi_nested',
+            status: 'processing',
+            amount: 50,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '1',
+            stableType: 'payment.succeeded',
+            event: {
+                schemaVersion: '1',
+                type: 'payment.succeeded',
+                payment: {
+                    status: 'paid',
+                    amount: 50,
+                    currency: 'USD',
+                    references: { gatewayPaymentId: 'pi_nested' },
+                },
+                provider: {
+                    gateway: 'stripe',
+                    eventId: 'evt_nested_paid_lie',
+                    eventType: 'payment_intent.succeeded',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            },
+            provider: {
+                gateway: 'stripe',
+                eventId: 'evt_nested_paid_lie',
+                eventType: 'payment_intent.succeeded',
+                occurredAt: '2024-01-01T00:00:00.000Z',
+                receivedAt: '2024-01-01T00:00:00.000Z',
+            },
+        }));
+
+        const event = await client.handleWebhook('stripe', { hello: true });
+
+        expect(event.event?.type).toBe('payment.processing');
+        expect(event.stableType).toBe('payment.processing');
+        expect(event.status).toBe('processing');
+        expect(
+            event.event && 'payment' in event.event
+                ? event.event.payment?.status
+                : undefined,
+        ).toBe('processing');
+        expect(
+            event.event && 'payment' in event.event
+                ? event.event.payment?.status
+                : undefined,
+        ).not.toBe('paid');
+    });
+
+    it('NEW-CORE-3: rematch payment.succeeded + failed is not type-only succeeded', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_failed_type_lie',
+            type: 'payment_paid',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_failed',
+            status: 'failed',
+            amount: 50,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '1',
+            stableType: 'payment.succeeded',
+            event: {
+                schemaVersion: '1',
+                type: 'payment.succeeded',
+                payment: {
+                    status: 'paid',
+                    amount: 50,
+                    currency: 'USD',
+                    references: { gatewayPaymentId: 'gw_failed' },
+                },
+                provider: {
+                    gateway: 'custom',
+                    eventId: 'evt_failed_type_lie',
+                    eventType: 'payment_paid',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            },
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.event?.type).toBe('payment.failed');
+        expect(event.stableType).toBe('payment.failed');
+        expect(event.event?.type).not.toBe('payment.succeeded');
+        expect(event.status).toBe('failed');
+        expect(
+            event.event && 'payment' in event.event
+                ? event.event.payment?.status
+                : undefined,
+        ).toBe('failed');
+    });
 
     it('CORE-4: thin 3-field PaymentEvent is rebuilt and demoted', async () => {
         const client = createWebhookOnlyClient('stripe', (payload) => ({

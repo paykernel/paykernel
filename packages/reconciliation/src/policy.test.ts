@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import type { Money } from "@paykernel/core";
+import { compareSnapshots } from "./compare";
 import {
   decideReconciliationPolicy,
   shouldForbidReplacementCharge,
@@ -331,6 +332,87 @@ describe("decideReconciliationPolicy", () => {
       expect(d.safe).toBe(false);
       expect(d.action).not.toBe("mark_consistent");
     }
+  });
+
+  it("NEW-RECON-1: processing + capturedAmount 0 vs amount is not apply_drift_review", () => {
+    for (const status of ["pending", "processing"] as const) {
+      const provider = buildProviderPaymentSnapshot({
+        gatewayPaymentId: "pi_inflight",
+        status,
+        amount: money("10.00", "USD"),
+        capturedAmount: money("0", "USD"),
+        providerStatus: status,
+      });
+      const target: ReconciliationTarget = {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_inflight",
+        expected: { status, amount: money("10.00", "USD") },
+      };
+      const differences = compareSnapshots(target.expected, provider);
+      expect(differences.some((d) => d.field === "capturedAmount")).toBe(false);
+
+      const fromCompare = decideReconciliationPolicy(
+        differences.length === 0
+          ? { outcome: "consistent", provider }
+          : { outcome: "drift_detected", provider, differences },
+        target,
+      );
+      expect(fromCompare.action).toBe("retry_later");
+      expect(fromCompare.action).not.toBe("apply_drift_review");
+      expect(fromCompare.safe).toBe(false);
+
+      // Failsafe: even if compare still reported the implied-capture inequality.
+      const invented: ReconciliationResult = {
+        outcome: "drift_detected",
+        provider,
+        differences: [
+          {
+            field: "capturedAmount",
+            local: money("10.00", "USD"),
+            provider: money("0", "USD"),
+            message: "capturedAmount mismatch",
+          },
+        ],
+      };
+      const fromInvented = decideReconciliationPolicy(invented, target);
+      expect(fromInvented.action).toBe("retry_later");
+      expect(fromInvented.action).not.toBe("apply_drift_review");
+      expect(fromInvented.safe).toBe(false);
+    }
+  });
+
+  it("NEW-RECON-1: in-flight captured 0 does not hide real amount drift", () => {
+    const provider = buildProviderPaymentSnapshot({
+      gatewayPaymentId: "pi_amt",
+      status: "processing",
+      amount: money("10.00", "USD"),
+      capturedAmount: money("0", "USD"),
+      providerStatus: "processing",
+    });
+    const d = decideReconciliationPolicy(
+      {
+        outcome: "drift_detected",
+        provider,
+        differences: [
+          {
+            field: "amount",
+            local: money("9.00", "USD"),
+            provider: money("10.00", "USD"),
+          },
+          {
+            field: "capturedAmount",
+            local: money("9.00", "USD"),
+            provider: money("0", "USD"),
+          },
+        ],
+      },
+      {
+        gateway: "stripe",
+        gatewayPaymentId: "pi_amt",
+        expected: { status: "processing", amount: money("9.00", "USD") },
+      },
+    );
+    expect(d.action).toBe("apply_drift_review");
   });
 
   it("RECON-3: in-flight pending/processing consistent → retry_later not manual_review", () => {

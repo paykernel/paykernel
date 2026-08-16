@@ -153,6 +153,28 @@ describe("fixture safety", () => {
     ).not.toThrow();
   });
 
+  it("assertFixtureSafe rejects cs_live_ / cs_test_ / csk_ / PI client secrets (NEW-TESTKIT-5)", () => {
+    expect(() =>
+      assertFixtureSafe({ session: "cs_live_checkout_secret_abc" }),
+    ).toThrow(/cs_live_|secret pattern|fixture safety/i);
+    expect(() =>
+      assertFixtureSafe({ session: "cs_test_checkout_secret_xyz" }),
+    ).toThrow(/cs_test_|secret pattern|fixture safety/i);
+    expect(() =>
+      assertFixtureSafe({ clientSecret: "csk_test_paymob_secret" }),
+    ).toThrow(/csk_|secret pattern|fixture safety|sensitive key/i);
+    expect(() =>
+      assertFixtureSafe({ note: "pi_3N3xYZABC_secret_abc123def" }),
+    ).toThrow(/pi_|secret pattern|fixture safety/i);
+    const leaks = findSecretLeaks({
+      checkout: "cs_live_abc",
+      testCheckout: "cs_test_abc",
+      paymob: "csk_live_abc",
+      intent: "pi_abc_secret_xyz",
+    });
+    expect(leaks.length).toBeGreaterThanOrEqual(4);
+  });
+
   it("assertFixtureSafe rejects non-string cleartext under sensitive keys (TESTKIT-2)", () => {
     // Numeric PAN-shaped value under a sensitive key must not pass CI
     expect(() =>

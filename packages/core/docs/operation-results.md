@@ -37,7 +37,7 @@ if (isPaidOutcome(result)) {
 }
 ```
 
-**Post-submit transport (P610-IND-1):** `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` no longer throw `NetworkError` when the mutating HTTP request may already have been accepted (timeout, connection drop, or 5xx after POST). `BaseGateway` returns `outcome: 'indeterminate'` + `reconciliationRequired: true`. Preflight auth and GET still throw `NetworkError`. Caller abort still throws `PaymentAbortedError`.
+**Post-submit transport (P610-IND-1 / NEW-CORE-1):** `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` no longer throw `NetworkError` when the mutating HTTP request may already have been accepted (timeout, connection drop, or 5xx after POST). `BaseGateway` returns `outcome: 'indeterminate'` + `reconciliationRequired: true`. Preflight auth and GET still throw `NetworkError`. Caller abort **before** submit still throws `PaymentAbortedError`. Caller abort **after** a mutating POST maps to `NetworkError` with `afterProviderSubmit: true` (same uncertainty class as a timeout) so the idempotency fence is not cleared.
 
 ## `PaymentOperationResult` arms
 

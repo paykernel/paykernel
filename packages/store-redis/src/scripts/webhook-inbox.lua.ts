@@ -352,14 +352,16 @@ return {'ok'}
 
 /**
  * KEYS[1]=record KEYS[2]=retryIndex
- * ARGV: nowMs, nowIso
+ * ARGV: nowMs, nowIso, logicalKey
  * Soft-release expired claim → pending and re-index so listRetryable sees it.
+ * Missing hash ZREMs ARGV logicalKey from the retry index (NEW-STORE-1).
  */
 export const WEBHOOK_GET_LUA = `
 local rec = KEYS[1]
 local idx = KEYS[2]
 local nowMs = tonumber(ARGV[1])
 local nowIso = ARGV[2]
+local listedKey = ARGV[3] or ''
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -389,6 +391,11 @@ local function pack(m)
 end
 
 if redis.call('EXISTS', rec) == 0 then
+  -- NEW-STORE-1: drop ghost ZSET members so listRetryable LIMIT windows
+  -- cannot fill with dead keys (hash gone, retry member left).
+  if idx ~= nil and idx ~= '' and listedKey ~= '' then
+    redis.call('ZREM', idx, listedKey)
+  end
   return {'missing'}
 end
 

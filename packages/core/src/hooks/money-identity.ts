@@ -4,15 +4,17 @@
  * etc.); these keys are restored from the original gateway result whenever they
  * were present on that original object.
  *
- * Includes fee / capturedAmount / refundedAmount / clientSecret so after-hooks
- * cannot forge settlement totals or client secrets. Top-level `redirectUrl` and
- * `gatewayObjectId` are frozen so hooks cannot phishing-redirect customers or
- * forge secondary provider object IDs. `nextAction`, `references`, and `decline`
- * are deep-cloned (including nested redirect graphs such as
- * `redirect_to_url.url` and nested decline `code`/`message`/`softDecline`) so
- * hooks cannot forge/strip 3DS / redirect / OTP action payloads, hard-fail vs
- * soft-retry decline identity, or provider identity refs (`rawResponse` remains
- * additive and is intentionally not listed / not deep-cloned).
+ * Includes fee / capturedAmount / refundedAmount / refundedAt / clientSecret so
+ * after-hooks cannot forge settlement totals, refund timestamps, or client
+ * secrets. Top-level `redirectUrl` and `gatewayObjectId` are frozen so hooks
+ * cannot phishing-redirect customers or forge secondary provider object IDs.
+ * `nextAction`, `references`, and `decline` are deep-cloned (including nested
+ * redirect graphs such as `redirect_to_url.url` and nested decline
+ * `code`/`message`/`softDecline`) so hooks cannot forge/strip 3DS / redirect /
+ * OTP action payloads, hard-fail vs soft-retry decline identity, or provider
+ * identity refs (`rawResponse` remains additive and is intentionally not listed
+ * / not deep-cloned). Dates (`refundedAt`) are cloned so in-place `setTime`
+ * cannot poison the freeze snapshot.
  */
 const MONEY_IDENTITY_KEYS = [
     'success',
@@ -28,6 +30,7 @@ const MONEY_IDENTITY_KEYS = [
     'totalRefunded',
     'refundId',
     'gatewayRefundId',
+    'refundedAt',
     'fee',
     'capturedAmount',
     'refundedAmount',
@@ -99,6 +102,11 @@ function deepClonePlain(value: unknown, seen?: WeakMap<object, unknown>): unknow
     return out;
 }
 
+/** Detach a Date so in-place `setTime` cannot poison the freeze snapshot. */
+function cloneDateIfNeeded(value: unknown): unknown {
+    return value instanceof Date ? new Date(value.getTime()) : value;
+}
+
 /**
  * Deep-detach nested identity fields on the committed gateway result so the
  * freeze snapshot is independent of any `rawResponse` alias (Stripe sets
@@ -158,9 +166,12 @@ export function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
                 // Always re-snapshot nested identity (deep) from the freeze original.
                 out[key] = deepClonePlain(origVal);
                 touched = true;
-            } else if (out[key] !== origVal) {
-                out[key] = origVal;
-                touched = true;
+            } else {
+                const restored = cloneDateIfNeeded(origVal);
+                if (out[key] !== restored) {
+                    out[key] = restored;
+                    touched = true;
+                }
             }
         } else if (Object.prototype.hasOwnProperty.call(out, key)) {
             // Hook added an identity field the gateway never set — strip it so
@@ -180,6 +191,7 @@ export function restoreMoneyIdentityFields<R>(original: R, modified: R): R {
  * Also deep-detaches nested identity objects (`nextAction`, `references`,
  * `decline`) so multi-level rewrites (e.g. `redirect_to_url.url`,
  * `providerObjectId`, `decline.softDecline`) do not mutate the freeze snapshot.
+ * Top-level `Date` values (`refundedAt`) are cloned (NEW-CORE-7).
  * `rawResponse` is intentionally not deep-cloned.
  */
 export function shallowCloneResult<R>(result: R): R {
@@ -193,6 +205,9 @@ export function shallowCloneResult<R>(result: R): R {
         if (Object.prototype.hasOwnProperty.call(clone, key)) {
             clone[key] = deepClonePlain(clone[key]);
         }
+    }
+    for (const key of Object.keys(clone)) {
+        clone[key] = cloneDateIfNeeded(clone[key]);
     }
     return clone as R;
 }

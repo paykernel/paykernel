@@ -67,6 +67,7 @@ import {
 } from "../../utils/retry";
 import type { Logger } from "../../utils/logger";
 import { getCurrencyExponent } from "../../utils/currency";
+import { fingerprintParams as sharedFingerprintParams } from "../../utils/idempotency";
 import {
   fromMinorUnits as sharedFromMinorUnits,
   MoneyAmountError,
@@ -239,6 +240,7 @@ interface PaymobCaptureResponse {
 interface PaymobVoidResponse {
   id?: number;
   success?: boolean;
+  pending?: boolean;
   message?: string;
 }
 
@@ -278,7 +280,7 @@ interface PaymobIdempotencyCacheEntry<R = unknown> {
   createdAt: number;
   /**
    * - in_progress: mutation outstanding (never FIFO-evict)
-   * - completed: terminal success result (evictable under pressure)
+   * - completed: terminal success result (never evict — Paymob has no native idempotency)
    * - unknown: indeterminate post-mutate outcome (never FIFO-evict)
    */
   status?: "in_progress" | "completed" | "unknown";
@@ -339,6 +341,22 @@ function isPaymobIndeterminateError(error: unknown): boolean {
     error instanceof PaymobIndeterminateGatewayError ||
     error instanceof PaymobIndeterminateResponseError
   );
+}
+
+/**
+ * True when a mutation error must keep the idempotency fence.
+ * 429 / RateLimitError after POST is not a definite reject — Paymob may have
+ * applied the money op (NEW-PAYMOB-2). Moyasar excludes 429 the same way.
+ */
+function shouldRetainPaymobMutationFence(error: unknown): boolean {
+  if (isPaymobIndeterminateError(error) || error instanceof RateLimitError) {
+    return true;
+  }
+  if (error instanceof GatewayApiError) {
+    const status = (error.rawError as { status?: number } | undefined)?.status;
+    return status === 429;
+  }
+  return false;
 }
 
 /**
@@ -947,10 +965,18 @@ export class PaymobGateway extends BaseGateway {
           data,
           "Void",
         );
-        const status: PaymentStatus = success ? "cancelled" : "failed";
-        const outcome: PaymentOperationOutcome = success
-          ? "succeeded"
-          : "declined";
+        // NEW-PAYMOB-VOID-P: honor pending like capture/refund — not cancelled.
+        const pending = this.parseBoolean(data.pending) === true;
+        const status: PaymentStatus = pending
+          ? "pending"
+          : success
+            ? "cancelled"
+            : "failed";
+        const outcome: PaymentOperationOutcome = pending
+          ? "requires_action"
+          : success
+            ? "succeeded"
+            : "declined";
 
         // PAYMOB-3: keep parent payment/txn id as gatewayId (same as capture).
         // Child void response id is not a stable parent handle for later ops.
@@ -959,7 +985,7 @@ export class PaymobGateway extends BaseGateway {
             gatewayId: p.gatewayPaymentId,
             status,
             rawResponse: data,
-            providerNativeStatus: success ? "voided" : "failed",
+            providerNativeStatus: pending ? "pending" : success ? "voided" : "failed",
             gateway: "paymob",
           },
           outcome,
@@ -1036,12 +1062,28 @@ export class PaymobGateway extends BaseGateway {
           "Refund",
         );
         const currency = this.resolveCurrency(data.currency ?? resolvedAmount.currency);
+        // PAYMOB-4: coerce string money fields from mutation bodies.
+        const providerRefundedAmountCents = this.parseNumber(data.refunded_amount_cents);
+        // Missing body total: inquiry prior + this request (PAYMOB-3).
+        const estimatedRefundedAmountCents =
+          (resolvedAmount.refundedAmountCents ?? 0) + resolvedAmount.amountCents;
+        // NEW-PAYMOB-REFUND-0: success + missing/<=0 refunded_amount_cents must
+        // not be completed + totalRefunded:0. Only complete when the body
+        // reports >0 or inquiry + this request proves a positive cumulative.
+        const provenRefundedAmountCents =
+          providerRefundedAmountCents !== undefined && providerRefundedAmountCents > 0
+            ? providerRefundedAmountCents
+            : providerRefundedAmountCents === undefined && estimatedRefundedAmountCents > 0
+              ? estimatedRefundedAmountCents
+              : undefined;
         const status =
           this.parseBoolean(data.pending) === true
             ? "pending"
-            : success
-              ? "completed"
-              : "failed";
+            : !success
+              ? "failed"
+              : provenRefundedAmountCents !== undefined
+                ? "completed"
+                : "pending";
         const outcome: RefundOperationOutcome =
           status === "completed"
             ? "succeeded"
@@ -1061,19 +1103,11 @@ export class PaymobGateway extends BaseGateway {
         }
 
         // PAYMOB-1: never invent/ledger totalRefunded while status is pending.
-        // Align with operation-results.md + Stripe: pending refunds are not
-        // counted until settled. Only set totalRefunded for completed refunds
-        // (body cumulative when present; else inquiry prior + this request).
         // Failed outcomes also omit — never invent a refund total on failure.
-        // PAYMOB-4: coerce string money fields from mutation bodies.
-        const providerRefundedAmountCents = this.parseNumber(data.refunded_amount_cents);
         const totalRefundedCents =
           status === "pending" || status === "failed"
             ? undefined
-            : providerRefundedAmountCents !== undefined
-              ? providerRefundedAmountCents
-              : (resolvedAmount.refundedAmountCents ?? 0) +
-                resolvedAmount.amountCents;
+            : provenRefundedAmountCents;
 
         return applyOutcomeToGatewayRefundResult(
           {
@@ -2714,7 +2748,9 @@ export class PaymobGateway extends BaseGateway {
     operation: string,
     options: { unknownOnServerError?: boolean } = {},
   ): never {
-    if (options.unknownOnServerError && response.status >= 500) {
+    // 5xx and 429 after a mutating POST are not definite rejects — Paymob may
+    // have applied the money op. Keep the fence (NEW-PAYMOB-2).
+    if (options.unknownOnServerError && (response.status >= 500 || response.status === 429)) {
       throw new PaymobIndeterminateGatewayError(operation, response.status, data);
     }
 
@@ -2922,8 +2958,6 @@ export class PaymobGateway extends BaseGateway {
       return executor();
     }
 
-    this.pruneExpiredIdempotencyEntries();
-
     const cacheKey = `${operation}:${idempotencyKey}`;
     const fingerprint = this.fingerprintParams(params);
     const existing = this.idempotencyCache.get(cacheKey) as PaymobIdempotencyCacheEntry<R> | undefined;
@@ -2950,9 +2984,9 @@ export class PaymobGateway extends BaseGateway {
       expiresAt: nowMs + IDEMPOTENCY_CACHE_TTL_MS,
     };
 
-    // PAYMOB-3: never FIFO-evict in-flight or unknown fences (double-apply risk).
-    // Only drop terminal completed entries; if the map is full of non-evictable
-    // fences, refuse the new key fail-closed rather than re-enter an old key.
+    // PAYMOB-3 / NEW-PAYMOB-TTL: never FIFO-evict in-flight, unknown, or
+    // completed mutation fences (Paymob has no native idempotency). If the map
+    // is full, refuse the new key fail-closed rather than re-enter an old key.
     if (!this.idempotencyCache.has(cacheKey)) {
       this.ensureIdempotencyCacheCapacity(operation);
     }
@@ -3012,9 +3046,10 @@ export class PaymobGateway extends BaseGateway {
       }, operation);
       return result;
     }).catch(async (error) => {
-      // Network/5xx/caller-abort after POST and HTTP-200 body validation
-      // failures all fence: Paymob may have applied the money op (PAYMOB-1).
-      if (isPaymobIndeterminateError(error)) {
+      // Network/5xx/429/caller-abort after POST and HTTP-200 body validation
+      // failures all fence: Paymob may have applied the money op (PAYMOB-1,
+      // NEW-PAYMOB-2). RateLimitError after mapError must not clear the key.
+      if (shouldRetainPaymobMutationFence(error)) {
         const unknownAt = this.clock.nowMs();
         this.idempotencyCache.set(cacheKey, {
           fingerprint,
@@ -3047,23 +3082,17 @@ export class PaymobGateway extends BaseGateway {
 
   /**
    * Free one slot when the in-memory map is at capacity.
-   * Only terminal completed entries are eligible; in-progress and unknown
-   * fences are retained so the same idempotencyKey cannot double-apply.
+   * In-progress, unknown, and completed mutation fences are all retained —
+   * evicting a completed refund/capture/void key would allow same-key re-apply
+   * (Paymob has no native idempotency). Refuse new keys when full.
    */
   private ensureIdempotencyCacheCapacity(operation: string): void {
     if (this.idempotencyCache.size < IDEMPOTENCY_CACHE_LIMIT) {
       return;
     }
 
-    for (const [key, entry] of this.idempotencyCache) {
-      if (entry.status === "completed") {
-        this.idempotencyCache.delete(key);
-        return;
-      }
-    }
-
     throw new InvalidRequestError(
-      `Paymob ${operation} idempotency cache is full of in-flight or unknown fences; configure a durable idempotencyStore or retry after existing mutations settle`,
+      `Paymob ${operation} idempotency cache is full of in-flight, unknown, or completed mutation fences; configure a durable idempotencyStore or retry after existing mutations settle`,
       [{ path: ["idempotencyKey"] }],
     );
   }
@@ -3099,25 +3128,9 @@ export class PaymobGateway extends BaseGateway {
       return undefined;
     }
 
-    if (!this.isStoredIdempotencyReplayExpired(existing)) {
-      return this.retainStoredIdempotencyFence(existing);
-    }
-
-    // isStoredIdempotencyReplayExpired is only true for completed + expiresAt.
-    await store.delete(key);
-    return await store.reserve(key, record);
-  }
-
-  /** Completed replay cache may expire. unknown / in_progress never do. */
-  private isStoredIdempotencyReplayExpired(record: {
-    status?: "in_progress" | "completed" | "unknown";
-    expiresAt?: number;
-  }): boolean {
-    return (
-      record.status === "completed" &&
-      typeof record.expiresAt === "number" &&
-      record.expiresAt <= this.clock.nowMs()
-    );
+    // NEW-PAYMOB-TTL: completed / unknown / in_progress are never a free key.
+    // Do not delete+re-reserve — Paymob has no native idempotency.
+    return this.retainStoredIdempotencyFence(existing);
   }
 
   /**
@@ -3192,21 +3205,8 @@ export class PaymobGateway extends BaseGateway {
     }
   }
 
-  private pruneExpiredIdempotencyEntries(): void {
-    const expiresBefore = this.clock.nowMs() - IDEMPOTENCY_CACHE_TTL_MS;
-    for (const [key, entry] of this.idempotencyCache) {
-      // Never drop in-flight or unknown fences (double-apply / lost outcome).
-      if (entry.status === "in_progress" || entry.status === "unknown") {
-        continue;
-      }
-      if (entry.createdAt < expiresBefore) {
-        this.idempotencyCache.delete(key);
-      }
-    }
-  }
-
   private fingerprintParams(value: unknown): string {
-    return JSON.stringify(this.sortForFingerprint(value));
+    return sharedFingerprintParams(this.omitAbortSignalsForFingerprint(value));
   }
 
   private idempotencyOutcomeUnknownError(operation: string): InvalidRequestError {
@@ -3216,35 +3216,37 @@ export class PaymobGateway extends BaseGateway {
     );
   }
 
-  private sortForFingerprint(value: unknown): unknown {
+  /**
+   * Drop AbortSignal values before the shared Date-aware fingerprint so caller
+   * signals are not part of the business-params identity (NEW-PAYMOB-FP).
+   */
+  private omitAbortSignalsForFingerprint(value: unknown): unknown {
     if (Array.isArray(value)) {
-      return value.map((item) => this.sortForFingerprint(item));
+      return value.map((item) => this.omitAbortSignalsForFingerprint(item));
     }
 
-    if (value && typeof value === "object") {
-      // Skip AbortSignal — not part of business params / idempotency fingerprint.
-      if (typeof AbortSignal !== "undefined" && value instanceof AbortSignal) {
-        return undefined;
+    if (!value || typeof value !== "object") {
+      return value;
+    }
+
+    if (value instanceof Date) {
+      return value;
+    }
+
+    if (typeof AbortSignal !== "undefined" && value instanceof AbortSignal) {
+      return undefined;
+    }
+
+    const record = value as Record<string, unknown>;
+    const cleaned: Record<string, unknown> = {};
+    for (const key of Object.keys(record)) {
+      const nested = record[key];
+      if (typeof AbortSignal !== "undefined" && nested instanceof AbortSignal) {
+        continue;
       }
-      const record = value as Record<string, unknown>;
-      return Object.keys(record)
-        .filter((key) => {
-          if (key !== "signal") {
-            return true;
-          }
-          const v = record[key];
-          return !(
-            typeof AbortSignal !== "undefined" && v instanceof AbortSignal
-          );
-        })
-        .sort()
-        .reduce<Record<string, unknown>>((acc, key) => {
-          acc[key] = this.sortForFingerprint(record[key]);
-          return acc;
-        }, {});
+      cleaned[key] = this.omitAbortSignalsForFingerprint(nested);
     }
-
-    return value;
+    return cleaned;
   }
 
   private requireString(value: unknown, message: string, raw: unknown): string {
