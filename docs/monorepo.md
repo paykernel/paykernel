@@ -99,6 +99,10 @@ paykernel/                         # private workspace root (not published)
 │       ├── dist/
 │       ├── package.json              # private: true — never publish
 │       └── README.md
+├── examples/                         # private consumer apps (not published)
+│   ├── checkout-kernel/              # @paykernel/example-checkout-kernel (shared composition)
+│   ├── bun-hono-sqlite/              # thin Hono fetch host
+│   └── bun-elysia-sqlite/            # thin Elysia fetch host
 ├── docs/
 │   ├── monorepo.md                   # this guide
 │   ├── workspace-boundaries.md       # package boundary policy + gate
@@ -106,7 +110,7 @@ paykernel/                         # private workspace root (not published)
 │   ├── adapter-selection.md          # Phase 18 capability matrix + decision tree + defaults
 │   └── adapter-capability-matrix.json # Phase 18 machine-readable matrix (TS twin in testkit)
 ├── scripts/                          # baseline, pack, smoke, boundaries, honesty cross-check
-├── package.json                      # private root + workspaces ["packages/*","internal/*"]
+├── package.json                      # private root + workspaces ["packages/*","internal/*","examples/*"]
 ├── tsconfig.base.json                # shared TypeScript options
 ├── eslint.config.js                  # shared ESLint flat config
 ├── .prettierrc                       # shared Prettier options
@@ -115,7 +119,7 @@ paykernel/                         # private workspace root (not published)
 └── roadmap.md
 ```
 
-Root workspaces: `["packages/*", "internal/*"]`. Production adapters live under `packages/store-*` (Phase 12: `store-postgres`; Phase 13: `store-redis` — **optional**; Phase 14: `store-sqlite` — **single-host only**; Phase 15: `store-turso` — **multi-host remote** Turso/libSQL; Phase 16: `store-d1` — **multi-host** Workers D1 binding; Phase 17: `store-durable-objects` — **multi-host partitioned** SQLite-backed Durable Objects). Domain packages: `webhooks` (Phase 10), `reconciliation` (Phase 19), `observability` (Phase 20), and `routing` (Phase 21) — all portable; webhooks/reconciliation/observability/routing depend on **core only** among workspace packages (storage / OTEL injected at the app layer; routing never depends on observability). Further adapters and plugins land later without changing the core consumer import path. `@paykernel/sql-foundation` is the shared foundation for **relational** adapters only — Redis adapter must **not** depend on it. Adapters depend on `@paykernel/store-contracts` at runtime (not full testkit).
+Root workspaces: `["packages/*", "internal/*", "examples/*"]`. `examples/*` are private consumer apps (not published); the boundary checker does not scan them. Production adapters live under `packages/store-*` (Phase 12: `store-postgres`; Phase 13: `store-redis` — **optional**; Phase 14: `store-sqlite` — **single-host only**; Phase 15: `store-turso` — **multi-host remote** Turso/libSQL; Phase 16: `store-d1` — **multi-host** Workers D1 binding; Phase 17: `store-durable-objects` — **multi-host partitioned** SQLite-backed Durable Objects). Domain packages: `webhooks` (Phase 10), `reconciliation` (Phase 19), `observability` (Phase 20), and `routing` (Phase 21) — all portable; webhooks/reconciliation/observability/routing depend on **core only** among workspace packages (storage / OTEL injected at the app layer; routing never depends on observability). Further adapters and plugins land later without changing the core consumer import path. `@paykernel/sql-foundation` is the shared foundation for **relational** adapters only — Redis adapter must **not** depend on it. Adapters depend on `@paykernel/store-contracts` at runtime (not full testkit).
 
 **Redis is optional infrastructure.** PostgreSQL alone can satisfy Phase 9 store contracts. Do not introduce Redis solely because this monorepo ships an adapter.
 
@@ -180,7 +184,8 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 | ---------------------------------- | -------------------------------------------------------------------------------------------- |
 | `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
 | `bun run build:types`              | Emit declaration files (same order, including reconciliation, observability, routing, and adapters) |
-| `bun test`                         | Run core + store-contracts + testkit + webhooks + reconciliation + observability + routing + sql-foundation + internal-sql-store + store-* adapters |
+| `bun test`                         | Run core + store-contracts + testkit + webhooks + reconciliation + observability + routing + sql-foundation + internal-sql-store + store-* adapters + `examples` |
+| `bun run test:examples`            | Example apps only (`bun test examples`)                                                      |
 | `bun run test:coverage`            | Core tests with coverage thresholds (`bunfig.toml`; core-focused)                            |
 | `bun run test:testkit`             | Testkit tests only                                                                           |
 | `bun run test:sql-store`           | Private sql-store tests only                                                                 |
@@ -192,12 +197,12 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 | `bun run test:adapter-turso`       | Turso adapter tests (file: libsql CI; live remote skip unless TURSO_*/LIBSQL_* set)          |
 | `bun run test:adapter-cloudflare-d1` | D1 adapter tests (mock D1 CI; live/miniflare skip unless harness env set)                  |
 | `bun run test:adapter-cloudflare-do` | DO adapter tests (mock DO SQL CI; live/miniflare skip unless harness env set)              |
-| `bun run typecheck`                | `tsc --noEmit` for core, webhooks, reconciliation, observability, routing, testkit, sql-store, postgres, redis, sqlite, turso, D1, DO adapters |
+| `bun run typecheck`                | `tsc --noEmit` for core, webhooks, reconciliation, observability, routing, testkit, sql-store, postgres, redis, sqlite, turso, D1, DO adapters, and `examples/*` |
 | `bun run typecheck:types`          | Public API type tests (core)                                                                 |
 | `bun run typecheck:all`            | Both typecheck gates                                                                         |
 | `bun run format`                   | Prettier write                                                                               |
 | `bun run format:check`             | Prettier check (no write)                                                                    |
-| `bun run lint`                     | ESLint over `packages/*/src` and `internal/*/src`                                            |
+| `bun run lint`                     | ESLint over `packages/*/src`, `internal/*/src`, and `examples/*/src`                         |
 | `bun run check:boundaries`         | Workspace dependency / import boundary gate                                                  |
 | `bun run pack:check`               | Dry-run npm pack of core                                                                     |
 | `bun run publint` / `bun run attw` | Package surface validation (core)                                                            |
@@ -266,6 +271,10 @@ cd packages/store-durable-objects
 bun run build
 bun test
 # default: mock DO SQL; live/miniflare only when harness env marks DO available
+
+cd examples/checkout-kernel
+bun test
+# in-memory Bun SQLite after migrateSqliteAdapter — single-host, not multi-host
 ```
 
 ## Shared TypeScript
@@ -277,7 +286,7 @@ bun test
 ## Formatting & lint
 
 - **Prettier** (`.prettierrc`): `semi: true`, double quotes (majority of current core imports), `trailingComma: all`, `printWidth: 100`.
-- **ESLint** (`eslint.config.js`): flat config with `@eslint/js` recommended + `typescript-eslint` recommended, scoped to `packages/*/src/**/*.ts`. Rules are tuned so existing core code stays clean without mass rewrites.
+- **ESLint** (`eslint.config.js`): flat config with `@eslint/js` recommended + `typescript-eslint` recommended, scoped to `packages/*/src/**/*.ts`, `internal/*/src/**/*.ts`, and `examples/*/src/**/*.ts`. Rules are tuned so existing core code stays clean without mass rewrites.
 - `.prettierignore` excludes build artifacts, lockfiles, `resources/`, Changeset markdown, and **pre-Phase-1** trees (`packages/core/src`, `packages/core/docs`, legacy baseline scripts) so `format:check` stays green without a mass style rewrite.
 
 ```bash
@@ -306,6 +315,7 @@ Summary:
 - **Observability must not depend on adapters, testkit, webhooks, reconciliation, routing, Redis clients, or `@paykernel/sql-foundation` (or private internal re-export)** (depends on core only; optional peer `@opentelemetry/api` for the OTEL bridge). Portable (`paymentsSdk.portable: true`). Core must never depend on observability or OTEL.
 - **Routing must not depend on adapters, testkit, webhooks, reconciliation, observability, Redis clients, or `@paykernel/sql-foundation` (or private internal re-export)** (depends on core only; select-only — never mutates payments). Portable (`paymentsSdk.portable: true`). Core must never depend on routing.
 - **Internal packages** under `internal/*` must be `"private": true` and are never published (e.g. `@paykernel/internal-sql-store`).
+- **Example apps** under `examples/*` are private consumer apps. The boundary checker does not scan them. They may depend on `hono` / `elysia` / `store-sqlite` / `testkit`. `packages/*` must never import them.
 - **store-postgres** may depend on store-contracts + sql-foundation (testkit in devDependencies only); optional drivers only on subpaths.
 - **store-redis** may depend on store-contracts at runtime (testkit in devDependencies only); **must not** depend on sql-store, core, or webhooks; optional Redis drivers only on subpaths; root entry imports no drivers.
 - **store-sqlite** may depend on store-contracts + sql-foundation (testkit in devDependencies only); root entry must **not** import `bun:sqlite` / `node:sqlite` / `better-sqlite3` (drivers only on `/bun`, `/node`, `/better-sqlite3`); **single-host** only (honest manifest); must not be depended on by core/webhooks/postgres/redis/turso/d1/do.
@@ -331,7 +341,7 @@ bun run version-packages   # bump versions + changelogs
 bun run release            # publish (CI; OIDC provenance)
 ```
 
-The monorepo root package is **private** and must never be published. Publishable packages include `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may version and publish **separately** from core). **Never** publish packages under `internal/*`. Relational adapters depend on publishable `@paykernel/sql-foundation` + `@paykernel/store-contracts` at runtime (not private internal-sql-store, not full testkit). Redis depends only on `@paykernel/store-contracts` among workspace runtime deps (testkit is devDependency for conformance).
+The monorepo root package is **private** and must never be published. Publishable packages include `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may version and publish **separately** from core). **Never** publish packages under `internal/*` or `examples/*`. Relational adapters depend on publishable `@paykernel/sql-foundation` + `@paykernel/store-contracts` at runtime (not private internal-sql-store, not full testkit). Redis depends only on `@paykernel/store-contracts` among workspace runtime deps (testkit is devDependency for conformance).
 
 ## Consumer import (unchanged for core)
 
@@ -550,6 +560,7 @@ const stores = createDoPaymentStores({
 ## Related docs
 
 - **Docs home / getting started:** [`docs/README.md`](./README.md) · [`docs/getting-started.md`](./getting-started.md)
+- **Examples (private consumer apps):** [`examples/README.md`](../examples/README.md)
 - **Adapter selection (Phase 18):** [`docs/adapter-selection.md`](./adapter-selection.md) — capability matrix, decision tree, recommended defaults
 - Workspace boundaries: [`docs/workspace-boundaries.md`](./workspace-boundaries.md)
 - Releases / Changesets: [`docs/releases.md`](./releases.md)

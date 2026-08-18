@@ -1,0 +1,31 @@
+{
+  "name": "@paykernel/example-checkout-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared checkout kernel for PayKernel HTTP examples: mock+Stripe, SQLite inbox, HTTP policy, Stripe fixtures, and bun:test scenarios.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/core": "workspace:*",
+    "@paykernel/webhooks": "workspace:*",
+    "@paykernel/reconciliation": "workspace:*",
+    "@paykernel/testkit": "workspace:*",
+    "@paykernel/store-sqlite": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

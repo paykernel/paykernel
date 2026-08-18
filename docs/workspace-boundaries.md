@@ -32,6 +32,10 @@ paykernel/
 │   └── gateway-*/            # future extracted gateways
 ├── internal/                 # private workspaces only (must not publish)
 │   └── sql-store/            # @paykernel/internal-sql-store (thin re-export of sql-foundation)
+├── examples/                 # private consumer apps (not scanned by the checker)
+│   ├── checkout-kernel/      # @paykernel/example-checkout-kernel
+│   ├── bun-hono-sqlite/      # thin Hono host
+│   └── bun-elysia-sqlite/    # thin Elysia host
 ├── scripts/
 │   └── check-workspace-boundaries.ts
 └── docs/
@@ -39,7 +43,7 @@ paykernel/
     └── adapter-selection.md      # Phase 18 matrix + decision tree (capability honesty)
 ```
 
-Root `package.json` is private (`paykernel`) and is never published. Workspaces: `["packages/*", "internal/*"]`. Publishable surface: `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may publish on their own cadence). Internal packages (e.g. `internal/sql-store`) are **never** published.
+Root `package.json` is private (`paykernel`) and is never published. Workspaces: `["packages/*", "internal/*", "examples/*"]`. Publishable surface: `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters may publish on their own cadence). Internal packages (e.g. `internal/sql-store`) and example apps under `examples/*` are **never** published.
 
 **Name / ownership honesty:**
 
@@ -86,10 +90,11 @@ Root `package.json` is private (`paykernel`) and is never published. Workspaces:
 | Adapter root entry        | Importing `@paykernel/store-*` root must **not** auto-import `bun:sqlite`, `bun:sql`, `node:sqlite`, `pg`, `postgres`, `drizzle-orm`, `ioredis`, `redis`, `@upstash/redis`, `better-sqlite3`, `@libsql/client`, `@tursodatabase/serverless`, or other optional peer drivers. D1 and DO roots must not static-import `cloudflare:workers`.                                                                                                                                                                                                                              |
 | Cloudflare                | CF packages must not leak Workers-only imports (`cloudflare:workers`, etc.) into Node/Bun/Deno portable packages (core/webhooks/reconciliation/observability/routing/testkit). D1 and DO adapters are `cloudflare-only` and use structural binding/storage types. Do **not** create a generic `packages/store-cloudflare` umbrella or put DO code in the D1 package (or D1 in the DO package).                                                                                                                                                                                                                                                                                                                        |
 | Internal                  | Packages under `internal/*` (or `packages/internal/*`) must be `"private": true` and must not be published.                                                                                                                                                                                                                                                                                                                              |
+| Examples                  | Private consumer apps under `examples/*` (`"private": true`, not published). **`check-workspace-boundaries.ts` does not scan them** (discovery is `packages/*` + `internal/*` only). They **may** depend on `hono`, `elysia`, `@paykernel/store-sqlite`, `@paykernel/testkit`, and `@paykernel/example-checkout-kernel`. **`packages/*` must never import `examples/*` or `@paykernel/example-*`.** In-memory / local SQLite in these apps is **single-host**, never multi-host. |
 
 ## Automated rules (enforced now)
 
-These fail CI today when violated. Packages under `packages/*` are discovered automatically (`core`, `webhooks`, `reconciliation`, `observability`, `routing`, `testkit`, `store-postgres`, `store-redis`, `store-sqlite`, `store-turso`, `store-d1`, `store-durable-objects`, …).
+These fail CI today when violated. Packages under `packages/*` are discovered automatically (`core`, `webhooks`, `reconciliation`, `observability`, `routing`, `testkit`, `store-postgres`, `store-redis`, `store-sqlite`, `store-turso`, `store-d1`, `store-durable-objects`, …). **`examples/*` is a Bun workspace glob but is not discovered** — example apps are consumer composition and may pull frameworks the portable matrix forbids. Policy still holds: no `packages/*` → `examples/*` import.
 
 ### a) Core / Phase 10 / Phase 19 / Phase 20 / Phase 21 dependency matrix
 
@@ -386,6 +391,16 @@ export * from "./types";
 }
 ```
 
+```jsonc
+// packages/core/package.json — FORBIDDEN (packages/* must never depend on examples)
+{
+  "name": "@paykernel/core",
+  "dependencies": {
+    "@paykernel/example-checkout-kernel": "workspace:*",
+  },
+}
+```
+
 ## Positive examples (allowed)
 
 ```ts
@@ -579,6 +594,20 @@ import { describe, it, expect } from "bun:test";
 }
 ```
 
+```jsonc
+// examples/bun-hono-sqlite/package.json — ALLOWED (private consumer app; checker does not scan)
+{
+  "name": "@paykernel/example-bun-hono-sqlite",
+  "private": true,
+  "dependencies": {
+    "@paykernel/example-checkout-kernel": "workspace:*",
+    "hono": "^4.0.0",
+  },
+}
+```
+
+Example apps may also depend on `elysia`, `@paykernel/store-sqlite`, and `@paykernel/testkit`. That is application-layer composition, not an SDK package edge.
+
 ## Running and extending
 
 ```bash
@@ -591,8 +620,8 @@ bun test scripts/check-workspace-boundaries.test.ts
 
 When adding a new package:
 
-1. Place it under `packages/<name>/` (or `internal/<name>/` if private-only).
-2. Respect the dependency matrix above.
+1. Place it under `packages/<name>/` (or `internal/<name>/` if private-only). Consumer walkthroughs go under `examples/<name>/` (`"private": true`) — the checker will not pick them up.
+2. Respect the dependency matrix above. Publishable packages must not import `examples/*`.
 3. If a package is intentionally Node-only, set:
 
 ```json

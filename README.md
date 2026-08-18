@@ -71,7 +71,7 @@ import { PaymentClient } from "@paykernel/core";
 
 ## Package structure (monorepo)
 
-Workspaces are `packages/*` and `internal/*`. The root package is private and is never published. Layout, build order, and commands: [`docs/monorepo.md`](./docs/monorepo.md).
+Workspaces are `packages/*`, `internal/*`, and `examples/*`. The root package is private and is never published. Layout, build order, and commands: [`docs/monorepo.md`](./docs/monorepo.md).
 
 ## Development
 
@@ -81,6 +81,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 bun install
 bun run build
 bun test
+bun test examples
 bun run test:coverage
 bun run typecheck
 bun run typecheck:types
@@ -153,6 +154,7 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 | --- | --- |
 | First payment / production composition | [`docs/getting-started.md`](./docs/getting-started.md) |
 | Which store | [`docs/adapter-selection.md`](./docs/adapter-selection.md) |
+| Examples | [`examples/README.md`](./examples/README.md) — private checkout kernel + Bun Hono/Elysia (single-host in-memory SQLite) |
 | Core | [`packages/core/README.md`](./packages/core/README.md) · [money](./packages/core/docs/money.md) · [outcomes](./packages/core/docs/operation-results.md) · [webhooks](./packages/core/docs/webhooks.md) · [events](./packages/core/docs/webhook-events.md) · [runtime](./packages/core/docs/runtime.md) |
 | Inbox | [`packages/webhooks/README.md`](./packages/webhooks/README.md) · [webhook-inbox.md](./packages/webhooks/docs/webhook-inbox.md) |
 | Reconciliation | [`packages/reconciliation/README.md`](./packages/reconciliation/README.md) |
