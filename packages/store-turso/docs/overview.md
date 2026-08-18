@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-turso`  
 **Path:** `packages/store-turso`  
-**Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
+**Contracts:** Phase 9 lease-aware stores in [`@paykernel/store-contracts`](../../store-contracts/docs/contracts.md)  
 **Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**; private shim: `internal/sql-store`)
 
 This package is the **multi-host remote SQLite-compatible** production storage adapter for **shared** Turso Cloud / libSQL remote databases. It implements durable **idempotency**, **webhook inbox**, and **reconciliation** stores.
@@ -111,5 +111,5 @@ Multi-statement only inside a write transaction / transactional `batch`. **Remot
 | [guarantees.md](./guarantees.md) | Manifest honesty notes |
 | [embedded-replicas.md](./embedded-replicas.md) | Why `/sync` is not shipped |
 | [drizzle.md](./drizzle.md) | Optional ORM schema notes (claims stay on adapter path) |
-| [store-contracts.md](../../testkit/docs/store-contracts.md) | Phase 9 contracts |
+| [store-contracts.md](../../store-contracts/docs/contracts.md) | Phase 9 contracts |
 | [workspace-boundaries.md](../../../docs/workspace-boundaries.md) | Monorepo matrix |

@@ -26,7 +26,7 @@ Choosing the wrong adapter (or overclaiming scope) creates silent cross-host rac
 | **Memory is NON-PRODUCTION** | `MEMORY_STORAGE_ADAPTER_MANIFEST` is test-only (`single-process` + `ephemeral`). |
 | **Matrix cells must match manifests** | If a cell would overclaim, this guide uses the **weaker honest** value and names the limitation. |
 
-Machine-readable guarantees live on each adapter’s manifest constant (validated by `assertStorageAdapterManifest` from `@paykernel/testkit`). Shared contract language: [packages/testkit/docs/store-contracts.md](../packages/testkit/docs/store-contracts.md) §7. Relational adapters share schemas/claim templates via publishable **`@paykernel/sql-foundation`** (not the private `@paykernel/internal-sql-store` shim). Store interfaces are dual-owned across domain packages, `@paykernel/store-contracts`, and testkit re-exports — inject production adapters at the app layer.
+Machine-readable guarantees live on each adapter’s manifest constant (validated by `assertStorageAdapterManifest` from `@paykernel/store-contracts`, re-exported by testkit). Shared contract language: [packages/store-contracts/docs/contracts.md](../packages/store-contracts/docs/contracts.md) §7. Relational adapters share schemas/claim templates via publishable **`@paykernel/sql-foundation`** (not the private `@paykernel/internal-sql-store` shim). Store interfaces are dual-owned across domain packages, `@paykernel/store-contracts`, and testkit re-exports — inject production adapters at the app layer.
 
 **Frozen selection matrix (tests + agents):**
 
@@ -202,7 +202,7 @@ When uncertain: **fail closed** (weaker guarantee, or refuse the deployment shap
 | `@paykernel/store-turso` | [`packages/store-turso`](../packages/store-turso) | `multi-host` | `createTursoServerlessStores` / `createLibsqlStores` (+ `migrateTursoAdapter`) | [README](../packages/store-turso/README.md) · [overview](../packages/store-turso/docs/overview.md) · [guarantees](../packages/store-turso/docs/guarantees.md) · [embedded-replicas](../packages/store-turso/docs/embedded-replicas.md) · [crash-boundaries](../packages/store-turso/docs/crash-boundaries.md) |
 | `@paykernel/store-d1` | [`packages/store-d1`](../packages/store-d1) | `multi-host` | `createD1PaymentStores({ db: env.PAYMENTS_DB })` | [README](../packages/store-d1/README.md) · [overview](../packages/store-d1/docs/overview.md) · [guarantees](../packages/store-d1/docs/guarantees.md) · [sessions](../packages/store-d1/docs/sessions-and-replication.md) · [crash-boundaries](../packages/store-d1/docs/crash-boundaries.md) |
 | `@paykernel/store-durable-objects` | [`packages/store-durable-objects`](../packages/store-durable-objects) | `multi-host` (partitioned) | `createDoPaymentStores({ namespace, sharding })` | [README](../packages/store-durable-objects/README.md) · [overview](../packages/store-durable-objects/docs/overview.md) · [guarantees](../packages/store-durable-objects/docs/guarantees.md) · [sharding](../packages/store-durable-objects/docs/sharding.md) · [crash-boundaries](../packages/store-durable-objects/docs/crash-boundaries.md) |
-| `@paykernel/testkit` (memory) | [`packages/testkit`](../packages/testkit) | `single-process` | `createMemoryStores()` | [store-contracts §7](../packages/testkit/docs/store-contracts.md) · `MEMORY_STORAGE_ADAPTER_MANIFEST` |
+| `@paykernel/testkit` (memory) | [`packages/testkit`](../packages/testkit) | `single-process` | `createMemoryStores()` | [store-contracts §7](../packages/store-contracts/docs/contracts.md) · `MEMORY_STORAGE_ADAPTER_MANIFEST` |
 
 Manifest constants (importable where exported):
 
@@ -228,9 +228,9 @@ Helpers: `assertStorageAdapterManifest`, `isProductionSafeCoordination`, `isStro
 | [docs/workspace-boundaries.md](./workspace-boundaries.md) | What may depend on what (no core → adapter edges) |
 | [docs/releases.md](./releases.md) | Changesets / publish policy |
 | [docs/adapter-capability-matrix.json](./adapter-capability-matrix.json) | Machine-readable Phase 18 matrix (frozen honesty cells) |
-| [packages/testkit/docs/store-contracts.md](../packages/testkit/docs/store-contracts.md) | Phase 9 lease-aware contracts + **§7 manifests** |
+| [packages/store-contracts/docs/contracts.md](../packages/store-contracts/docs/contracts.md) | Phase 9 lease-aware contracts + **§7 manifests** |
 | [roadmap.md](../roadmap.md) Phase 9 | Store contracts foundation |
-| [roadmap.md](../roadmap.md) Phase 11 | Internal SQL foundation (`internal/sql-store`) |
+| [packages/sql-foundation/docs/relational-foundation.md](../packages/sql-foundation/docs/relational-foundation.md) | Shared schemas, migrations, claim templates |
 | [roadmap.md](../roadmap.md) Phases 12–17 | Postgres → Redis → SQLite → Turso → D1 → DO adapter deliveries |
 | [roadmap.md](../roadmap.md) Phase 18 | This matrix + selection guide (objective / acceptance) |
 | Root [README.md](../README.md) | Install table and honesty banners for each adapter package |

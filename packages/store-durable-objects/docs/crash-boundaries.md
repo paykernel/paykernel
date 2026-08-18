@@ -1,7 +1,7 @@
 # Crash boundaries (Durable Objects)
 
 **Package:** `@paykernel/store-durable-objects`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md) · webhooks [crash-boundaries.md](../../webhooks/docs/crash-boundaries.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md) · webhooks [crash-boundaries.md](../../webhooks/docs/crash-boundaries.md)
 
 How failures interact with leases, `transactionSync`, object eviction, and optional alarms.
 

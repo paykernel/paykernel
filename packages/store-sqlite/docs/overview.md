@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-sqlite`  
 **Path:** `packages/store-sqlite`  
-**Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
+**Contracts:** Phase 9 lease-aware stores in [`@paykernel/store-contracts`](../../store-contracts/docs/contracts.md)  
 **Manifest type:** `StorageAdapterManifest` from `@paykernel/store-contracts`  
 **Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) — **not** `internal/sql-store`
 
@@ -136,5 +136,5 @@ Details: [drivers.md](./drivers.md).
 | [migrations.md](./migrations.md) | Explicit migrate / verify |
 | [testing.md](./testing.md) | Conformance + skips |
 | [guarantees.md](./guarantees.md) | Manifest honesty |
-| [store-contracts.md](../../testkit/docs/store-contracts.md) | Phase 9 contracts |
+| [store-contracts.md](../../store-contracts/docs/contracts.md) | Phase 9 contracts |
 | [workspace-boundaries.md](../../../docs/workspace-boundaries.md) | Monorepo matrix |

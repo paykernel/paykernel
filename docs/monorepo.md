@@ -146,7 +146,7 @@ That guide is the single consumer-facing selection home. It includes:
 - Capability matrix aligned to each package’s `StorageAdapterManifest` + conformance (not marketing)
 - Mermaid + Q&A decision tree
 - Recommended defaults
-- Deep links to each adapter’s overview / guarantees / crash-boundaries and [store-contracts §7](../packages/testkit/docs/store-contracts.md)
+- Deep links to each adapter’s overview / guarantees / crash-boundaries and [store-contracts §7](../packages/store-contracts/docs/contracts.md)
 
 **Quick reaffirmations** (same rules as the banners above):
 
@@ -549,6 +549,7 @@ const stores = createDoPaymentStores({
 
 ## Related docs
 
+- **Docs home / getting started:** [`docs/README.md`](./README.md) · [`docs/getting-started.md`](./getting-started.md)
 - **Adapter selection (Phase 18):** [`docs/adapter-selection.md`](./adapter-selection.md) — capability matrix, decision tree, recommended defaults
 - Workspace boundaries: [`docs/workspace-boundaries.md`](./workspace-boundaries.md)
 - Releases / Changesets: [`docs/releases.md`](./releases.md)
@@ -581,9 +582,9 @@ const stores = createDoPaymentStores({
 - Matching: [`packages/routing/docs/matching.md`](../packages/routing/docs/matching.md)
 - Testkit README: [`packages/testkit/README.md`](../packages/testkit/README.md)
 - Phase 9 store contracts (lease-aware stores + manifests in testkit; dual-type with webhooks + reconciliation):
-  [`packages/testkit/docs/store-contracts.md`](../packages/testkit/docs/store-contracts.md)
-- Phase 11 private SQL foundation: [`internal/sql-store/README.md`](../internal/sql-store/README.md),
-  [`relational-foundation.md`](../internal/sql-store/docs/relational-foundation.md)
+  [`packages/store-contracts/docs/contracts.md`](../packages/store-contracts/docs/contracts.md)
+- Phase 11 SQL foundation: [`packages/sql-foundation/README.md`](../packages/sql-foundation/README.md),
+  [`relational-foundation.md`](../packages/sql-foundation/docs/relational-foundation.md)
 - Phase 12 PostgreSQL adapter: [`packages/store-postgres/README.md`](../packages/store-postgres/README.md),
   [`overview.md`](../packages/store-postgres/docs/overview.md)
 - Phase 13 Redis adapter (optional): [`packages/store-redis/README.md`](../packages/store-redis/README.md),

@@ -153,6 +153,6 @@ bun run test:adapter-postgres
 
 ## Related
 
-- [store-contracts.md](../../testkit/docs/store-contracts.md) — suite semantics
+- [store-contracts.md](../../store-contracts/docs/contracts.md) — suite semantics
 - [guarantees.md](./guarantees.md) — what multi-host means
 - [crash-boundaries.md](./crash-boundaries.md)

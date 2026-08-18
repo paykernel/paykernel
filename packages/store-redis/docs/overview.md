@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-redis`  
 **Path:** `packages/store-redis`  
-**Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)
+**Contracts:** Phase 9 lease-aware stores in [`@paykernel/store-contracts`](../../store-contracts/docs/contracts.md)
 
 This package is an **optional** production storage adapter. It implements multi-host-safe **idempotency**, **webhook inbox**, and **reconciliation** coordination against shared Redis, Valkey, or Upstash.
 
@@ -93,5 +93,5 @@ Details: [crash-boundaries.md](./crash-boundaries.md).
 | [hybrid-examples.md](./hybrid-examples.md) | Redis+Postgres, Upstash+SQL, Redis-only, no-Redis |
 | [testing.md](./testing.md) | Env, docker-compose, conformance, skips |
 | [guarantees.md](./guarantees.md) | Manifest honesty notes |
-| [store-contracts.md](../../testkit/docs/store-contracts.md) | Phase 9 contracts |
+| [store-contracts.md](../../store-contracts/docs/contracts.md) | Phase 9 contracts |
 | [workspace-boundaries.md](../../../docs/workspace-boundaries.md) | Monorepo matrix |

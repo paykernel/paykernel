@@ -1,7 +1,7 @@
 # Atomic claims (D1)
 
 **Package:** `@paykernel/store-d1`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)  
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)  
 **Templates / algorithms:** [`@paykernel/sql-foundation` atomic claims](../../sql-foundation/docs/atomic-claims.md)
 
 How Phase 9 `reserve` / `claim` atomicity is achieved on **async multi-host D1**.  

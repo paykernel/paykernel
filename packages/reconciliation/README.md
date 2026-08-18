@@ -171,7 +171,7 @@ Unsupported methods are skipped (capability-aware). Missing all methods for avai
 | **[docs/scheduling.md](./docs/scheduling.md)** | Scheduler, backoff/jitter, manual review, no queue |
 | **[docs/batch.md](./docs/batch.md)** | `reconcileMany`, concurrency, app persist/alert |
 | **[docs/crash-boundaries.md](./docs/crash-boundaries.md)** | Schedule / claim / lookup / complete under crash |
-| [testkit store-contracts](../testkit/docs/store-contracts.md) | Lease-aware store semantics + conformance |
+| [testkit store-contracts](../store-contracts/docs/contracts.md) | Lease-aware store semantics + conformance |
 | [adapter selection](../../docs/adapter-selection.md) | Choosing a durable store adapter |
 
 ## Package boundary

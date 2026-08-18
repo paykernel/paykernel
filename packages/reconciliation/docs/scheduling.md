@@ -2,7 +2,7 @@
 
 **Package:** [`@paykernel/reconciliation`](../README.md)  
 **Source:** [`scheduler.ts`](../src/scheduler.ts), [`backoff.ts`](../src/backoff.ts), [`store.ts`](../src/store.ts)  
-**Related:** [crash-boundaries.md](./crash-boundaries.md) · [testkit store-contracts](../../testkit/docs/store-contracts.md)
+**Related:** [crash-boundaries.md](./crash-boundaries.md) · [testkit store-contracts](../../store-contracts/docs/contracts.md)
 
 ---
 

@@ -1,7 +1,7 @@
 # Numeric and string portability (D1)
 
 **Package:** `@paykernel/store-d1`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md) § portable IDs/timestamps  
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md) § portable IDs/timestamps  
 **Foundation codecs:** [`@paykernel/sql-foundation` codecs](../../sql-foundation/docs/relational-foundation.md)
 
 D1 is SQLite-backed. This adapter still stores **identity, lease, hash, and money-like** values as **TEXT** (and ISO-8601 strings for time) so JavaScript number precision and cross-runtime ports stay safe.

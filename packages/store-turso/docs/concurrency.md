@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-turso`  
 **Manifest:** `coordinationScope: "multi-host"`, `claims: "strong"`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)
 
 This document describes multi-instance behavior, concurrent claims, rollback, read-after-write, and reconnect expectations for remote Turso / libSQL.
 

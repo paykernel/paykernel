@@ -248,7 +248,7 @@ and pass `runWebhookInboxStoreConformanceSuite` /
 `runIdempotencyStoreConformanceSuite` /
 `runReconciliationStoreConformanceSuite`. In-memory stores in testkit are
 **NON-PRODUCTION** only. Semantics (atomicity, fencing, manifests, crash
-boundaries): [`packages/testkit/docs/store-contracts.md`](../../testkit/docs/store-contracts.md).
+boundaries): [`packages/store-contracts/docs/contracts.md`](../../store-contracts/docs/contracts.md).
 
 See also [`packages/testkit/README.md`](../../testkit/README.md).
 

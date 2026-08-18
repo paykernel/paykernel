@@ -1,10 +1,10 @@
 # Claim strategy — Turso adapter
 
 **Package:** `@paykernel/store-turso`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)  
-**Templates / algorithms:** private [`internal/sql-store` atomic claims](../../../internal/sql-store/docs/atomic-claims.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)  
+**Templates / algorithms:** [`@paykernel/sql-foundation` atomic claims](../../sql-foundation/docs/atomic-claims.md)
 
-This document defines how Phase 9 `reserve` / `claim` atomicity is achieved for **remote multi-host** Turso / libSQL. Contrast with local [`adapter-sqlite` claims](../../store-sqlite/docs/claims.md) (`BEGIN IMMEDIATE` sync).
+This document defines how Phase 9 `reserve` / `claim` atomicity is achieved for **remote multi-host** Turso / libSQL. Contrast with local [`store-sqlite` claims](../../store-sqlite/docs/claims.md) (`BEGIN IMMEDIATE` sync).
 
 ---
 
@@ -108,4 +108,4 @@ Production stores use **bound** `?` placeholders for claim and mutator paths. Do
 - [crash-boundaries.md](./crash-boundaries.md)
 - [drivers.md](./drivers.md)
 - [drizzle.md](./drizzle.md) — claims must not use ORM builders alone
-- sql-store [atomic-claims.md](../../../internal/sql-store/docs/atomic-claims.md)
+- sql-foundation [atomic-claims.md](../../sql-foundation/docs/atomic-claims.md)

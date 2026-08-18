@@ -76,5 +76,5 @@ Full detail: [crash-boundaries.md](./crash-boundaries.md).
 - [overview.md](./overview.md)
 - [persistence.md](./persistence.md)
 - [hybrid-examples.md](./hybrid-examples.md)
-- [store-contracts.md](../../testkit/docs/store-contracts.md) §7
+- [store-contracts.md](../../store-contracts/docs/contracts.md) §7
 - Package source: `src/manifest.ts`

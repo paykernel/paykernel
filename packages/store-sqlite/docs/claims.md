@@ -1,7 +1,7 @@
 # Claim strategy — SQLite adapter
 
 **Package:** `@paykernel/store-sqlite`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)  
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)  
 **Templates:** [`@paykernel/sql-foundation` atomic claims](../../sql-foundation/docs/atomic-claims.md)
 
 This document defines how Phase 9 `reserve` / `claim` atomicity is achieved for local SQLite. It is the production counterpart to `@paykernel/sql-foundation` sqlite templates — **not** the NON_PRODUCTION `internal/sql-store` bun reference store.

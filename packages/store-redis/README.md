@@ -143,7 +143,7 @@ See monorepo [`docs/adapter-selection.md`](../../docs/adapter-selection.md) for 
 | [docs/hybrid-examples.md](./docs/hybrid-examples.md) | Hybrid and no-Redis scenarios |
 | [docs/testing.md](./docs/testing.md) | Env, docker-compose, conformance |
 | [docs/guarantees.md](./docs/guarantees.md) | `REDIS_STORAGE_ADAPTER_MANIFEST` |
-| [store-contracts.md](../testkit/docs/store-contracts.md) | Phase 9 contracts |
+| [store-contracts.md](../store-contracts/docs/contracts.md) | Phase 9 contracts |
 
 ## License
 

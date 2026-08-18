@@ -75,5 +75,5 @@ Full detail: [crash-boundaries.md](./crash-boundaries.md).
 
 - [overview.md](./overview.md)
 - [deployment-limits.md](./deployment-limits.md)
-- [store-contracts.md](../../testkit/docs/store-contracts.md) §7
+- [store-contracts.md](../../store-contracts/docs/contracts.md) §7
 - Package source: `src/manifest.ts`

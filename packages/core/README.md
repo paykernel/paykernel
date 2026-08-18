@@ -1,14 +1,17 @@
 # @paykernel/core
 
-Unified, framework-agnostic payment SDK for Bun & TypeScript. Seamlessly integrate Moyasar, PayPal, Paymob and Stripe payment gateways with type-safe lifecycle hooks and normalized webhooks.
+Type-safe payment orchestration for TypeScript: Moyasar, PayPal, Paymob, Stripe, plus a plugin registry. Portable across Node ≥ 18, Bun, Deno, and Cloudflare Workers (see [runtime.md](./docs/runtime.md)). Server-side only for secret keys.
+
+**Production fulfillment** is not this package alone. `handleWebhook` verifies and normalizes. Claim, lease, and durable retry live in [`@paykernel/webhooks`](../webhooks/README.md) plus a store from [adapter-selection.md](../../docs/adapter-selection.md). Composition walkthrough: [docs/getting-started.md](../../docs/getting-started.md).
 
 ## Features
 
 - 🔌 **Multi-Gateway Support**: Moyasar, PayPal, Paymob, Stripe + third-party plugins
+- 💰 **Safe money + outcomes**: `money()`, `isPaidOutcome`, indeterminate post-submit results ([money](./docs/money.md), [operation-results](./docs/operation-results.md))
 - 🧩 **Open plugin API**: `createPaymentClient` + `GatewayAdapter` registry (see [plugin architecture](./docs/plugin-architecture.md))
 - 🪝 **Lifecycle Hooks**: Before, after, and error hooks on hooked operations (global + per-op where supported — not every method has a dedicated hook; see [hooks matrix](./docs/hooks.md#which-operations-fire-which-hooks))
 - 🔒 **Type-Safe**: Full TypeScript support with strict types (names inferred from your registry)
-- 🌐 **Framework-Agnostic**: Works with Elysia, Express, Hono, or vanilla
+- 🌐 **Runtime-portable**: Web APIs + pure crypto; no required Express/Hono/Elysia adapter
 
 ## Documentation
 
@@ -34,9 +37,11 @@ Unified, framework-agnostic payment SDK for Bun & TypeScript. Seamlessly integra
   - [`@paykernel/testkit`](../testkit/README.md) — `mockGateway`, `runGatewayConformanceSuite`, store harnesses, fixture safety (core does **not** depend on testkit)
 - **Storage adapters (app-layer; core does not depend on them)**
   - [Storage adapters pointer](./docs/storage-adapters.md) → monorepo [adapter-selection.md](../../docs/adapter-selection.md) (Phase 18 matrix + decision tree)
-- **Contracts & Baseline (Phase 0)**
+- **Composition (monorepo)**
+  - [Getting started](../../docs/getting-started.md) — inbox + store + reconcile
+  - [Store contracts](../store-contracts/docs/contracts.md)
+- **Contracts**
   - [Behavioral contracts](./docs/behavioral-contracts.md)
-  - [Baseline artifacts](./docs/baseline/)
 
 ## Package Structure
 

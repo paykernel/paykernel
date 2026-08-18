@@ -5,12 +5,12 @@
 
 ## Generation metadata
 
-- **Generated at (UTC)**: 2026-08-14T13:12:11.636Z
+- **Generated at (UTC)**: 2026-08-18T11:25:53.394Z
 - **Command**: `bun run scripts/generate-api-baseline.ts`
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 397971 bytes, sha256 `cd7698d31f78610aff726b960cf9c5096ae3d0109d6bd0ebebb955681485d846`
+- **Bundle**: `dist/index.js` — 424089 bytes, sha256 `47614693dfd9576efa436f2001761969a58e907e45483f7c973cc0b6ea394a40`
 
 ## Package
 
@@ -38,6 +38,8 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 
 | Name | Kind |
 | --- | --- |
+| `applyIndeterminatePaymentOutcome` | function |
+| `applyIndeterminateRefundOutcome` | function |
 | `applyOutcomeToGatewayRefundResult` | function |
 | `applyOutcomeToGatewayResult` | function |
 | `assertNoSecretsInEnvelope` | function |
@@ -188,7 +190,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `withAbortSignal` | function |
 | `withRetry` | function |
 
-**Count**: 149
+**Count**: 151
 
 ## Type-only exports
 
@@ -350,7 +352,7 @@ These exist only in the TypeScript declaration surface.
 - Parsed value exports present on runtime module: **yes**
 - Runtime keys not listed in `src/index.ts` value exports: _none_
 - Type-only names that also exist as runtime values: _none_
-- Total distinct public names (runtime + type-only): **294**
+- Total distinct public names (runtime + type-only): **296**
 
 ## Declaration output tree (`dist/**/*.d.ts`)
 
@@ -376,6 +378,7 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `gateways/stripe/stripe.gateway.d.ts`
 - `hooks/hooks.manager.d.ts`
 - `hooks/hooks.types.d.ts`
+- `hooks/money-identity.d.ts`
 - `index.d.ts`
 - `runtime/abort.d.ts`
 - `runtime/clock.d.ts`
@@ -401,7 +404,7 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `utils/money.d.ts`
 - `utils/retry.d.ts`
 
-**Count**: 44
+**Count**: 45
 
 ## Notes
 

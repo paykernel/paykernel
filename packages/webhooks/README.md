@@ -323,7 +323,7 @@ Stale token → renew fails (`lease_lost`); complete/fail with old token throw `
 | **[docs/crash-boundaries.md](./docs/crash-boundaries.md)** | Phase 10.6 crash matrix (store / handler / provider / outcome) |
 | [docs/inbox-engine.md](./docs/inbox-engine.md) | Short pipeline cheat sheet |
 | [core webhooks.md](../core/docs/webhooks.md) | Verify + normalize (`handleWebhook`) |
-| [testkit store-contracts.md](../testkit/docs/store-contracts.md) | Lease-aware store semantics + conformance |
+| [testkit store-contracts.md](../store-contracts/docs/contracts.md) | Lease-aware store semantics + conformance |
 
 ## Engineering rules
 

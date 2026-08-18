@@ -1,7 +1,7 @@
 # Testing (Durable Object adapter)
 
 **Package:** `@paykernel/store-durable-objects`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)
 
 Default CI path uses **mock DO SQL** (no Workers runtime). Live/miniflare suites **skip cleanly** when env is unset.
 

@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-postgres`  
 **Path:** `packages/store-postgres`  
-**Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
+**Contracts:** Phase 9 lease-aware stores in [`@paykernel/store-contracts`](../../store-contracts/docs/contracts.md)  
 **Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (private shim: `internal/sql-store`)
 
 This package is the **first production storage adapter**. It implements durable, multi-host-safe **idempotency**, **webhook inbox**, and **reconciliation** stores against a shared PostgreSQL cluster.
@@ -105,5 +105,5 @@ See Phase 13 hybrid patterns: [`packages/store-redis/docs/hybrid-examples.md`](.
 | [migrations.md](./migrations.md) | Migrate / verify policy |
 | [testing.md](./testing.md) | Unit + live PG + docker-compose |
 | [guarantees.md](./guarantees.md) | Manifest honesty notes |
-| [store-contracts.md](../../testkit/docs/store-contracts.md) | Phase 9 contracts |
+| [store-contracts.md](../../store-contracts/docs/contracts.md) | Phase 9 contracts |
 | [workspace-boundaries.md](../../../docs/workspace-boundaries.md) | Monorepo matrix |

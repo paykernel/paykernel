@@ -2,7 +2,7 @@
 
 **Package:** [`@paykernel/webhooks`](../README.md)  
 **Source:** [`engine.ts`](../src/engine.ts), [`types.ts`](../src/types.ts), [`store.ts`](../src/store.ts)  
-**Related:** [crash-boundaries.md](./crash-boundaries.md) · [core webhooks](../../core/docs/webhooks.md) · [PaymentEvent](../../core/docs/webhook-events.md) · [store contracts (testkit)](../../testkit/docs/store-contracts.md)
+**Related:** [crash-boundaries.md](./crash-boundaries.md) · [core webhooks](../../core/docs/webhooks.md) · [PaymentEvent](../../core/docs/webhook-events.md) · [store contracts (testkit)](../../store-contracts/docs/contracts.md)
 
 Storage-agnostic **claim / dedupe / retry / audit** for verified webhook deliveries. The engine is gateway-agnostic: verification and normalization are injected; HTTP status codes are never hardcoded.
 
@@ -687,4 +687,4 @@ Runtime exports are frozen by package tests. Memory stores are **not** exported 
 - [inbox-engine.md](./inbox-engine.md) — short pipeline cheat sheet
 - [README](../README.md) — install / quickstart
 - [core webhooks.md](../../core/docs/webhooks.md) — verify path
-- [testkit store-contracts.md](../../testkit/docs/store-contracts.md) — lease/store semantics + conformance
+- [testkit store-contracts.md](../../store-contracts/docs/contracts.md) — lease/store semantics + conformance

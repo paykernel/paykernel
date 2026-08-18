@@ -172,7 +172,11 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Gateway | Native type | Stable | Notes |
 |---------|-------------|--------|-------|
 | Stripe | `payment_intent.succeeded` (full / status `paid`) | `payment.succeeded` | Default map when not partial |
-| Stripe | `payment_intent.succeeded` + status `partially_captured` | **`payment.processing`** | Partial capture dual-write demotion; aligns with `isPaidOutcome` / Paymob |
+| Stripe | `payment_intent.succeeded` + status `partially_captured` / `processing` / `pending` / `approved` | **`payment.processing`** | Catalog rematch (`coerceStableSucceededToDomainStatus`); not paid |
+| Stripe | `payment_intent.succeeded` + status `refunded` / `partially_refunded` | **`payment.processing`** | Not `payment.succeeded` — no refund entity invented here |
+| Stripe | `payment_intent.succeeded` + status `failed` | **`payment.failed`** | Rematch; type-only handlers must not fulfill |
+| Stripe | `payment_intent.succeeded` + status `cancelled` / `reversed` | **`payment.cancelled`** | Rematch |
+| Stripe | `payment_intent.succeeded` + status `authorized` | **`payment.authorized`** | Rematch; auth hold is not paid |
 | Stripe | `payment_intent.payment_failed` | `payment.failed` | |
 | Stripe | `payment_intent.canceled` | `payment.cancelled` | |
 | Stripe | `checkout.session.completed` + `payment_status=paid` | `payment.succeeded` | Needs context |
@@ -183,7 +187,7 @@ mapProviderEventTypeToStable('stripe', 'invoice.paid');
 | Moyasar | `payment_paid` | `payment.succeeded` | |
 | Moyasar | `payment_failed` / `payment_faild` | `payment.failed` | Typo normalized by gateway |
 | Moyasar | `payment_authorized` | `payment.authorized` | |
-| PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded` |
+| PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded`. Rematch if domain status is `partially_captured` / `processing` / `failed` / `cancelled` / `refunded` (same table as `handleWebhook`) |
 | PayPal | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | **`payment.processing`** | Status `partially_captured`; **not** `capture.completed` / `payment.succeeded` — open capture story |
 | PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` when status is `refunded`; otherwise `refund.pending` | Type-only / refund-shaped / `partially_refunded` must not close a capture as fully refunded |
 | PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource; capture id via `rel: up` / related_ids |
@@ -354,7 +358,7 @@ type PersistedPaymentEventEnvelope = {
 ```
 
 Lease-aware inbox **store contracts** remain in testkit for conformance and the
-memory reference impl (Phase 9 — [`store-contracts.md`](../../testkit/docs/store-contracts.md)).
+memory reference impl (Phase 9 — [`store-contracts.md`](../../store-contracts/docs/contracts.md)).
 The Phase 10 webhook **inbox engine** lives in **`@paykernel/webhooks`**
 ([guide](../../webhooks/docs/webhook-inbox.md)); it owns domain `WebhookInboxStore`
 types (structurally compatible with testkit) and `createWebhookInboxEngine`.

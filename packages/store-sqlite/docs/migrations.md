@@ -66,4 +66,4 @@ The private `internal/sql-store` **bun reference** store may apply schema on cre
 
 - [overview.md](./overview.md)
 - [testing.md](./testing.md) — import-no-migrate tests
-- sql-store [migrations.md](../../../internal/sql-store/docs/migrations.md)
+- sql-foundation [migrations.md](../../sql-foundation/docs/migrations.md)

@@ -8,6 +8,8 @@ Portable **lease-aware store contracts**, **StoreError** taxonomy, and
 > [`@paykernel/testkit`](../testkit) (which re-exports this package for
 > backward compatibility).
 
+**Full contract book:** [docs/contracts.md](./docs/contracts.md)
+
 ## Install
 
 ```bash
@@ -19,9 +21,9 @@ bun add @paykernel/store-contracts
 
 | Surface | Contents |
 | --- | --- |
-| Contracts | `IdempotencyStore`, `WebhookInboxStore`, `ReconciliationStore` (+ input/result types) |
-| Errors | `StoreError` hierarchy (`StoreLeaseLostError`, `StoreUnavailableError`, …) |
-| Manifests | `StorageAdapterManifest`, `assertStorageAdapterManifest`, helpers |
+| Contracts | `IdempotencyStore`, `LeaseAwareIdempotencyStore`, `WebhookInboxStore`, `ReconciliationStore` (+ input/result types) |
+| Errors | `StoreError`, `StoreConflictError`, `StoreLeaseLostError`, `StoreUnavailableError`, `StoreTimeoutError`, `StoreSerializationFailureError`, `StoreInvalidSchemaError`, `StoreUnsupportedFeatureError`, `StoreCorruptedRecordError`, `StorePayloadHashConflictError`, `isStoreLeaseLostError` |
+| Manifests | `StorageAdapterManifest`, `assertStorageAdapterManifest`, `MEMORY_STORAGE_ADAPTER_MANIFEST`, `isProductionSafeCoordination`, `isStrongClaimAdapter` |
 
 Production store adapters (`@paykernel/store-*`) depend on **this** package at
 runtime — not full `@paykernel/testkit`.
@@ -42,5 +44,7 @@ declare const store: IdempotencyStore;
 
 ## Related
 
+- Contract book: [docs/contracts.md](./docs/contracts.md)
 - Testkit re-exports (BC + conformance + memory factories): [`@paykernel/testkit`](../testkit)
 - Shared SQL foundation for relational adapters: [`@paykernel/sql-foundation`](../sql-foundation)
+- How to choose an adapter: [docs/adapter-selection.md](../../docs/adapter-selection.md)

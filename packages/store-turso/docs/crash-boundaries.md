@@ -1,7 +1,7 @@
 # Crash boundaries — Turso adapter
 
 **Package:** `@paykernel/store-turso`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)  
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)  
 **Engine-level webhook pipeline:** [webhooks crash-boundaries](../../webhooks/docs/crash-boundaries.md)
 
 This document answers: if a worker dies before or after a side effect and before durable complete, what does the shared Turso / libSQL store still hold, and how does reclaim behave?

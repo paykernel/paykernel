@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-sqlite`  
 **Conformance:** Phase 9 suites from `@paykernel/testkit`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)
 
 ---
 

@@ -287,13 +287,13 @@ Claim / dedupe / lease fencing / explicit modes live in:
 **[`@paykernel/webhooks`](../../webhooks/README.md)**
 
 ```typescript
-import { hashWebhookPayload } from '@paykernel/core';
 import {
   createWebhookInboxEngine,
+  resolveInboxPayloadHash,
   type WebhookInboxStore,
 } from '@paykernel/webhooks';
 
-declare const store: WebhookInboxStore; // testkit memory in tests; Phase 11+ durable adapters
+declare const store: WebhookInboxStore; // testkit memory in tests; production: @paykernel/store-*
 
 const engine = createWebhookInboxEngine({ store, mode: 'inline' });
 
@@ -302,8 +302,12 @@ const event = await client.handleWebhook('stripe', rawBody, signature);
 const outcome = await engine.processVerified({
   gateway: 'stripe',
   providerEventId: event.id,
-  payloadHash: event.payloadHash ?? hashWebhookPayload(rawBody),
-  // Pass event so Paymob keys include notification class (WEBHOOKS-1).
+  // Prefer event.payloadHash. Never hash rawBody as a fallback for an object hash.
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: event.payloadHash,
+    payloadForHash: event.rawPayload ?? event,
+  }),
+  // PaymentEvent is event.event — Paymob keys need payment.status / provider.eventType.
   event: event.event ?? event,
   handler: async (ctx) => {
     await fulfillOrder(ctx.event);
@@ -314,7 +318,7 @@ const outcome = await engine.processVerified({
 
 - Engine guide: [webhook-inbox.md](../../webhooks/docs/webhook-inbox.md)
 - Crash boundaries: [crash-boundaries.md](../../webhooks/docs/crash-boundaries.md)
-- Store semantics (Phase 9 contracts + conformance): [store-contracts.md](../../testkit/docs/store-contracts.md)
+- Store semantics: [store-contracts](../../store-contracts/docs/contracts.md) (testkit re-exports + conformance)
 
 Core **must not** depend on `@paykernel/webhooks`. Apps that need inbox
 behavior add the webhooks package as a separate dependency.

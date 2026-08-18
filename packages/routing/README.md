@@ -34,6 +34,8 @@ const router = createPaymentRouter({
 const decision = router.select({
   currency: "SAR",
   paymentMethod: "mada",
+  // If you pass Money, currency must match input.currency or select throws
+  // NoRouteMatchError { reason: "currency_mismatch_honesty" }.
 });
 
 // Pass decision.gateway into createPayment + OperationContext (A3)
@@ -89,6 +91,7 @@ async function createRoutedPayment(params: {
 | **Never after indeterminate** | Timeout, connection reset, indeterminate, uncertain 5xx, submitted → no auto multi-gateway retry. |
 | **Expert override opt-in** | Unsafe path requires `{ confirmUnsafeFallback: true, reason }` — never defaulted. |
 | **Money-safe ranges** | Amount comparisons use `toMinorUnits` bigint — never float. |
+| **Currency honesty** | If `input.currency` and `amount.currency` are both set and differ, `select` throws `NoRouteMatchError` (`currency_mismatch_honesty`). Pass `money()` or the same currency on both. Unconstrained fallback is not used. |
 | **No secret telemetry** | `decisionToTelemetryAttributes` exposes only gateway + match metadata. |
 
 ## ⚠ Unsafe fallback warnings

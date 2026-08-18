@@ -1,7 +1,7 @@
 # Atomic claims (Phase 11)
 
 **Package:** `@paykernel/sql-foundation`  
-**Contracts:** [store-contracts.md](../../../packages/testkit/docs/store-contracts.md)  
+**Contracts:** [store-contracts.md](../../../packages/store-contracts/docs/contracts.md)  
 **Foundation:** [relational-foundation.md](./relational-foundation.md)
 
 ---

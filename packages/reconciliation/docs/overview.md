@@ -102,7 +102,7 @@ Indeterminate op / drift signal
 | **[scheduling.md](./scheduling.md)** | Scheduler over store; backoff/jitter; manual review; no queue |
 | **[batch.md](./batch.md)** | `reconcileMany` concurrency; app persistence/alerts |
 | **[crash-boundaries.md](./crash-boundaries.md)** | Schedule / claim / lookup / complete under process death |
-| [testkit store-contracts](../../testkit/docs/store-contracts.md) | Lease-aware store semantics + conformance |
+| [testkit store-contracts](../../store-contracts/docs/contracts.md) | Lease-aware store semantics + conformance |
 | [adapter-selection](../../../docs/adapter-selection.md) | Which durable store adapter to inject |
 
 ---

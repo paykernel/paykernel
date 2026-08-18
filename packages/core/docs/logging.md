@@ -64,20 +64,28 @@ redact({ gatewayId: 'pi_123', idempotencyKey: 'idem_abc', authorization: 'Bearer
 // => { gatewayId: 'pi_123', idempotencyKey: 'idem_abc', authorization: '[REDACTED]' }
 ```
 
-### Residual: message strings are not redacted
+### Messages and opaque tokens
 
-Redaction applies **only** to the structured `context` object (second argument).
-The free-form `message` string is passed through **unchanged**. Never
-interpolate secrets, card data, tokens, or PII into the message itself:
+`createRedactingLogger` (what gateways actually call) scrubs **both** the
+structured context and the message string:
+
+- Context keys that look sensitive (`secret`, `token`, `authorization`, …)
+- Opaque leaves that look like PANs (13–19 digits)
+- Embedded `sk_live_` / `whsec_` / `Bearer …` / Stripe `pi|seti_…_secret_…`
+  client secrets / PayPal `A21AA…` access tokens, even on allow-listed keys
+  (`internalReference`, `hookError`, …)
+- Short public ids (`seti_1MqLiJ…` without `_secret_`, prefix-only `A21AA`) stay visible
 
 ```typescript
-// Bad — secret lands in the message and is not redacted
+// Still bad style — keep secrets out of messages — but the default redacting
+// logger replaces sk_live_ / seti_…_secret_… / A21AA… tokens in the string.
 logger.error(`charge failed token=${token}`);
 
-// Good — secret only in structured context (redacted)
+// Preferred: secret only in structured context
 logger.error('charge failed', { token });
 ```
 
-This message-string non-redaction is an intentional residual: scrubbing free
-text would require fragile heuristics and false positives. Keep secrets out of
-messages at the call site.
+A raw `Logger` you pass in is wrapped. Do not bypass `createRedactingLogger`
+and interpolate card data or tokens into free text. Observability
+[`redaction.md`](../../observability/docs/redaction.md) applies the same
+patterns to span messages.

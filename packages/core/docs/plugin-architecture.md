@@ -8,7 +8,7 @@ below; the full provider matrix is [generated from code](./gateway-capabilities.
 For mock gateways, capability-gated conformance, Phase 9 lease-aware store
 contracts, and fixture safety, use **`@paykernel/testkit`**
 (`packages/testkit`). Core does **not** depend on testkit. Store contracts:
-[`packages/testkit/docs/store-contracts.md`](../../testkit/docs/store-contracts.md).
+[`packages/store-contracts/docs/contracts.md`](../../store-contracts/docs/contracts.md).
 See [Custom gateways](./custom-gateways.md) and
 [`packages/testkit/README.md`](../../testkit/README.md).
 
@@ -235,7 +235,7 @@ Hooks, redacting logger, error hierarchy, and webhook staging are shared.
 Conformance, mock gateway, Phase 9 lease-aware store contracts (defined in
 testkit; not core 0.x `IdempotencyStore`), and fixture safety live in
 **`@paykernel/testkit`** — not in core. See
-[`store-contracts.md`](../../testkit/docs/store-contracts.md),
+[`store-contracts.md`](../../store-contracts/docs/contracts.md),
 [`packages/testkit/README.md`](../../testkit/README.md), and
 [Custom gateways → Conformance suite](./custom-gateways.md#conformance-suite-testkit).
 

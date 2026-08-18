@@ -71,101 +71,7 @@ import { PaymentClient } from "@paykernel/core";
 
 ## Package structure (monorepo)
 
-```
-paykernel/                         # private workspace root (not published)
-├── packages/
-│   ├── core/                      # @paykernel/core (publishable; portable)
-│   │   ├── src/
-│   │   ├── dist/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── webhooks/                  # @paykernel/webhooks (publishable; portable)
-│   │   ├── src/
-│   │   ├── dist/
-│   │   ├── docs/                  # webhook-inbox.md, crash-boundaries.md
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── reconciliation/            # @paykernel/reconciliation (Phase 19; portable)
-│   │   ├── src/
-│   │   ├── dist/
-│   │   ├── docs/                  # overview, reconciliation, safe-lookup, scheduling, batch, crash-boundaries
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── observability/             # @paykernel/opentelemetry (Phase 20; portable)
-│   │   ├── src/
-│   │   ├── dist/
-│   │   ├── docs/                  # overview, operation-context, metrics, redaction, opentelemetry, instrumentation
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── routing/                   # @paykernel/routing (Phase 21; portable)
-│   │   ├── src/
-│   │   ├── dist/
-│   │   ├── docs/                  # overview, routing-inputs, selection, safe-fallback, telemetry
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── testkit/                   # @paykernel/testkit (publishable; portable)
-│   │   ├── src/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-contracts/           # @paykernel/store-contracts (Phase 9; portable contracts)
-│   │   ├── src/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── sql-foundation/            # @paykernel/sql-foundation (Phase 11; publishable)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-postgres/            # @paykernel/store-postgres (Phase 12)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-redis/               # @paykernel/store-redis (Phase 13; optional)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-sqlite/              # @paykernel/store-sqlite (Phase 14; single-host)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-turso/               # @paykernel/store-turso (Phase 15; multi-host remote)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── package.json
-│   │   └── README.md
-│   ├── store-d1/     # @paykernel/store-d1 (Phase 16; multi-host D1)
-│   │   ├── src/
-│   │   ├── docs/
-│   │   ├── examples/              # wrangler.toml
-│   │   ├── migrations/
-│   │   ├── package.json
-│   │   └── README.md
-│   └── store-durable-objects/     # @paykernel/store-durable-objects (Phase 17; partitioned SQLite DO)
-│       ├── src/
-│       ├── docs/
-│       ├── examples/              # wrangler.toml (new_sqlite_classes)
-│       ├── package.json
-│       └── README.md
-├── internal/
-│   └── sql-store/                 # @paykernel/internal-sql-store (private re-export of sql-foundation)
-├── scripts/                       # monorepo tooling (baseline, pack, smoke, boundaries)
-├── docs/
-│   ├── monorepo.md                # workspace DX guide
-│   ├── workspace-boundaries.md    # package boundary policy
-│   ├── releases.md                # changesets / publish
-│   └── adapter-selection.md       # Phase 18 capability matrix + decision tree
-├── package.json                   # private workspaces root (packages/* + internal/*)
-├── tsconfig.base.json             # shared TypeScript options
-├── eslint.config.js               # shared ESLint flat config
-├── .prettierrc                    # shared Prettier options
-├── bunfig.toml
-├── bun.lock
-└── roadmap.md
-```
+Workspaces are `packages/*` and `internal/*`. The root package is private and is never published. Layout, build order, and commands: [`docs/monorepo.md`](./docs/monorepo.md).
 
 ## Development
 
@@ -241,35 +147,24 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 
 ## Documentation
 
-- **Monorepo DX:** [`docs/monorepo.md`](./docs/monorepo.md)
-- **Workspace boundaries:** [`docs/workspace-boundaries.md`](./docs/workspace-boundaries.md)
-- **Releases:** [`docs/releases.md`](./docs/releases.md)
-- **Adapter selection (Phase 18):** [`docs/adapter-selection.md`](./docs/adapter-selection.md) — capability matrix, decision tree, recommended defaults (honest manifests)
-- **Storage adapters pointer (core):** [`packages/core/docs/storage-adapters.md`](./packages/core/docs/storage-adapters.md)
-- **Published package docs:** [`packages/core/docs/`](./packages/core/docs/)
-- **Runtime portability (Phase 8):** [`packages/core/docs/runtime.md`](./packages/core/docs/runtime.md)
-- **Store contracts / adapter manifests (Phase 9):** [`packages/testkit/docs/store-contracts.md`](./packages/testkit/docs/store-contracts.md)
-- **Webhook inbox engine (Phase 10):** [`packages/webhooks/docs/webhook-inbox.md`](./packages/webhooks/docs/webhook-inbox.md)
-- **Crash boundaries (10.6):** [`packages/webhooks/docs/crash-boundaries.md`](./packages/webhooks/docs/crash-boundaries.md)
-- **SQL foundation (Phase 11):** [`internal/sql-store/docs/relational-foundation.md`](./internal/sql-store/docs/relational-foundation.md)
-- **PostgreSQL adapter (Phase 12):** [`packages/store-postgres/docs/overview.md`](./packages/store-postgres/docs/overview.md)
-- **Redis adapter (Phase 13, optional):** [`packages/store-redis/docs/overview.md`](./packages/store-redis/docs/overview.md)
-- **SQLite adapter (Phase 14, single-host):** [`packages/store-sqlite/docs/overview.md`](./packages/store-sqlite/docs/overview.md)
-- **Turso adapter (Phase 15, multi-host remote):** [`packages/store-turso/docs/overview.md`](./packages/store-turso/docs/overview.md)
-- **Cloudflare D1 adapter (Phase 16, multi-host Workers):** [`packages/store-d1/docs/overview.md`](./packages/store-d1/docs/overview.md)
-- **Cloudflare DO adapter (Phase 17, multi-host partitioned):** [`packages/store-durable-objects/docs/overview.md`](./packages/store-durable-objects/docs/overview.md)
-- **Behavioral contracts:** [`packages/core/docs/behavioral-contracts.md`](./packages/core/docs/behavioral-contracts.md)
-- **Phase 0 baseline:** [`packages/core/docs/baseline/`](./packages/core/docs/baseline/)
-- **Roadmap:** [`roadmap.md`](./roadmap.md)
-- **Core README:** [`packages/core/README.md`](./packages/core/README.md)
-- **Webhooks README:** [`packages/webhooks/README.md`](./packages/webhooks/README.md)
-- **Testkit README:** [`packages/testkit/README.md`](./packages/testkit/README.md)
-- **Adapter postgres README:** [`packages/store-postgres/README.md`](./packages/store-postgres/README.md)
-- **Adapter redis README:** [`packages/store-redis/README.md`](./packages/store-redis/README.md)
-- **Adapter sqlite README:** [`packages/store-sqlite/README.md`](./packages/store-sqlite/README.md)
-- **Adapter turso README:** [`packages/store-turso/README.md`](./packages/store-turso/README.md)
-- **Adapter cloudflare-d1 README:** [`packages/store-d1/README.md`](./packages/store-d1/README.md)
-- **Adapter cloudflare-do README:** [`packages/store-durable-objects/README.md`](./packages/store-durable-objects/README.md)
+**Start here:** [`docs/README.md`](./docs/README.md) · [`docs/getting-started.md`](./docs/getting-started.md) (create payment → verify → inbox claim → fulfill → reconcile)
+
+| Audience | Docs |
+| --- | --- |
+| First payment / production composition | [`docs/getting-started.md`](./docs/getting-started.md) |
+| Which store | [`docs/adapter-selection.md`](./docs/adapter-selection.md) |
+| Core | [`packages/core/README.md`](./packages/core/README.md) · [money](./packages/core/docs/money.md) · [outcomes](./packages/core/docs/operation-results.md) · [webhooks](./packages/core/docs/webhooks.md) · [events](./packages/core/docs/webhook-events.md) · [runtime](./packages/core/docs/runtime.md) |
+| Inbox | [`packages/webhooks/README.md`](./packages/webhooks/README.md) · [webhook-inbox.md](./packages/webhooks/docs/webhook-inbox.md) |
+| Reconciliation | [`packages/reconciliation/README.md`](./packages/reconciliation/README.md) |
+| Routing | [`packages/routing/README.md`](./packages/routing/README.md) |
+| Observability | [`packages/observability/README.md`](./packages/observability/README.md) (`@paykernel/opentelemetry`) |
+| Contracts | [`packages/store-contracts/README.md`](./packages/store-contracts/README.md) · [contracts.md](./packages/store-contracts/docs/contracts.md) |
+| SQL foundation | [`packages/sql-foundation/README.md`](./packages/sql-foundation/README.md) · [relational-foundation.md](./packages/sql-foundation/docs/relational-foundation.md) |
+| Testkit | [`packages/testkit/README.md`](./packages/testkit/README.md) |
+| Stores | [postgres](./packages/store-postgres/README.md) · [redis](./packages/store-redis/README.md) · [sqlite](./packages/store-sqlite/README.md) · [turso](./packages/store-turso/README.md) · [d1](./packages/store-d1/README.md) · [durable objects](./packages/store-durable-objects/README.md) |
+| Contributors | [`docs/monorepo.md`](./docs/monorepo.md) · [`docs/workspace-boundaries.md`](./docs/workspace-boundaries.md) · [`docs/releases.md`](./docs/releases.md) |
+
+`roadmap.md` is a completed phase log (0–21 shipped) plus leftover product work (22–23). It is not the consumer index.
 
 ## License
 

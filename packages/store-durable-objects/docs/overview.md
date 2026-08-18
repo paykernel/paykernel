@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/store-durable-objects`  
 **Path:** `packages/store-durable-objects`  
-**Contracts:** Phase 9 lease-aware stores in [`@paykernel/testkit`](../../testkit/docs/store-contracts.md)  
+**Contracts:** Phase 9 lease-aware stores in [`@paykernel/store-contracts`](../../store-contracts/docs/contracts.md)  
 **Foundation:** publishable [`@paykernel/sql-foundation`](../../sql-foundation/docs/relational-foundation.md) (dialect **`sqlite`**; private shim: `internal/sql-store`)
 
 This package is the **multi-host partitioned Durable Object** production storage adapter using **SQLite-backed** DO storage (`new_sqlite_classes`). It implements durable **idempotency**, **webhook inbox**, and **reconciliation** stores via Worker → DO stub RPC and in-object sync SQL.

@@ -26,7 +26,7 @@ That guide is the single consumer-facing home. Values come from each package’s
 
 Lease-aware store interfaces, error taxonomy, and adapter manifests:
 
-→ [packages/testkit/docs/store-contracts.md](../../testkit/docs/store-contracts.md) (§7 manifests)
+→ [packages/store-contracts/docs/contracts.md](../../store-contracts/docs/contracts.md) (§7 manifests)
 
 ## Package map
 

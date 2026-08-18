@@ -1,7 +1,7 @@
 # Atomic claims (Durable Objects)
 
 **Package:** `@paykernel/store-durable-objects`  
-**Contracts:** [store-contracts.md](../../testkit/docs/store-contracts.md)
+**Contracts:** [store-contracts.md](../../store-contracts/docs/contracts.md)
 
 How Phase 9 `reserve` / `claim` atomicity is achieved on **SQLite-backed Durable Objects**.
 

@@ -263,4 +263,4 @@ After reclaim, the **old** worker’s `complete`/`fail`/`renew` with the pre-rec
 
 - [webhook-inbox.md](./webhook-inbox.md) — full engine guide
 - [inbox-engine.md](./inbox-engine.md) — short pipeline cheat sheet
-- [testkit store-contracts.md](../../testkit/docs/store-contracts.md) — store-level fencing and conformance
+- [testkit store-contracts.md](../../store-contracts/docs/contracts.md) — store-level fencing and conformance

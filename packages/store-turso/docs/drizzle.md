@@ -143,4 +143,4 @@ export const paymentReconciliationJobs = sqliteTable("payment_reconciliation_job
 - [claims.md](./claims.md)
 - [migrations.md](./migrations.md)
 - [overview.md](./overview.md)
-- sql-store [relational-foundation.md](../../../internal/sql-store/docs/relational-foundation.md)
+- sql-foundation [relational-foundation.md](../../sql-foundation/docs/relational-foundation.md)

@@ -2,7 +2,7 @@
 
 **Package:** `@paykernel/sql-foundation` (`packages/sql-foundation`)  
 **Status:** **Publishable** public package (npm). Private monorepo shim: `internal/sql-store` → `@paykernel/internal-sql-store` (thin re-export of this package; never published).  
-**Contracts (Phase 9):** [`packages/testkit/docs/store-contracts.md`](../../../packages/testkit/docs/store-contracts.md) · production contract types also in [`@paykernel/store-contracts`](../../store-contracts)
+**Contracts (Phase 9):** [`packages/store-contracts/docs/contracts.md`](../../../packages/store-contracts/docs/contracts.md) · production contract types also in [`@paykernel/store-contracts`](../../store-contracts)
 
 This document describes the shared **relational foundation** used by durable adapters (Phase 12+). Related package docs:
 
@@ -23,29 +23,29 @@ Phase 11 provides **shared schemas and claim algorithms** without shipping a gen
 
 | In scope                                                                     | Out of scope                                                                        |
 | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Canonical logical tables / columns aligned with Phase 9 store records        | Shipping production drivers here (those live in `packages/adapter-*`)               |
+| Canonical logical tables / columns aligned with Phase 9 store records        | Shipping production drivers here (those live in `packages/store-*`)               |
 | Validated namespace (prefix, PG schema, optional tenant column — **not** isolation) | Auto-migrate on import or store construction                                        |
 | Row codecs + shared validation (status enums, max error length, hash policy) | Public npm SQL product / general query builder                                      |
 | Versioned migrations + explicit `migrate()` / `verifySchema()`               | Core or webhooks depending on this package                                          |
 | Pure claim decision functions + dialect-tagged SQL templates                 | Pretending PostgreSQL === SQLite syntax                                             |
 | In-process memory-relational **reference** for unit/contention tests (NON-PRODUCTION; `migrate()` only lists tables whose `CREATE TABLE` ran) | Replacing testkit memory stores as the Phase 9 conformance home; do not treat the always-ok executor as production-adjacent (NEW-PKG-2) |
 
-**Production relational consumers (present):** `packages/store-postgres` (Phase 12, multi-host PostgreSQL), `packages/store-sqlite` (Phase 14, **single-host** local SQLite), `packages/store-turso` (Phase 15, **multi-host remote** Turso/libSQL, dialect `sqlite`), `packages/store-d1` (Phase 16, **multi-host Workers D1**, dialect `sqlite`), and `packages/store-durable-objects` (Phase 17, **multi-host partitioned** SQLite-backed Durable Objects, dialect `sqlite`). Further relational adapters remain later phases. Redis (`adapter-redis`) is optional coordination and must **not** depend on this package.
+**Production relational consumers (present):** `packages/store-postgres` (Phase 12, multi-host PostgreSQL), `packages/store-sqlite` (Phase 14, **single-host** local SQLite), `packages/store-turso` (Phase 15, **multi-host remote** Turso/libSQL, dialect `sqlite`), `packages/store-d1` (Phase 16, **multi-host Workers D1**, dialect `sqlite`), and `packages/store-durable-objects` (Phase 17, **multi-host partitioned** SQLite-backed Durable Objects, dialect `sqlite`). Further relational adapters remain later phases. Redis (`@paykernel/store-redis`) is optional coordination and must **not** depend on this package.
 
 **Design stance:** share **intent** (tables, decisions, parameter lists) and **dialectize syntax**. Adapters own driver sessions, transactions, and connection pooling.
 
 ---
 
-## 2. Private package — not a public SQL ORM
+## 2. Publishable foundation — not a public SQL ORM
 
-| Rule                          | Detail                                                                             |
-| ----------------------------- | ---------------------------------------------------------------------------------- |
-| `"private": true`             | Enforced by `bun run check:boundaries` for any package under `internal/*`          |
-| Not published                 | Changesets / release workflow skip private packages; never `npm publish` this tree |
-| Not a general SQL abstraction | No public “run any SQL” product surface; narrow helpers only                       |
-| In-workspace only             | `packages/adapter-*` may depend via `workspace:*` (e.g. `adapter-postgres`)        |
+| Rule | Detail |
+| --- | --- |
+| Public package | `@paykernel/sql-foundation` is published. `internal/sql-store` is a private thin re-export only. |
+| Not a general SQL abstraction | No public “run any SQL” product surface; schemas, codecs, migrations, claim templates |
+| Adapter consumers | `packages/store-postgres`, `store-sqlite`, `store-turso`, `store-d1`, `store-durable-objects` depend on this package |
+| Not a core/webhooks dependency | Apps inject stores; core and webhooks never import this package |
 
-Consumers of the **publishable** SDK (`@paykernel/core`, webhooks, testkit) never need this package. Apps inject stores; adapters implement contracts.
+Consumers of `@paykernel/core` / webhooks do not need this package unless they write a relational adapter.
 
 ---
 
@@ -195,7 +195,7 @@ packages/store-redis          ──must not──►  internal/sql-store  (Phas
          └── wrap driver as SqlExecutor for migrate/verify (relational only)
 ```
 
-### Phase 12: `adapter-postgres` (present)
+### Phase 12: `@paykernel/store-postgres` (present)
 
 `@paykernel/store-postgres` is a production multi-host consumer of this foundation:
 
@@ -209,7 +209,7 @@ packages/store-redis          ──must not──►  internal/sql-store  (Phas
 
 Docs: [adapter overview](../../../packages/store-postgres/docs/overview.md) · [migrations](../../../packages/store-postgres/docs/migrations.md).
 
-### Phase 14: `adapter-sqlite` (present; single-host)
+### Phase 14: `@paykernel/store-sqlite` (present; single-host)
 
 `@paykernel/store-sqlite` is a production **single-host** consumer of this foundation:
 
@@ -224,7 +224,7 @@ Docs: [adapter overview](../../../packages/store-postgres/docs/overview.md) · [
 
 Docs: [adapter overview](../../../packages/store-sqlite/docs/overview.md) · [claims](../../../packages/store-sqlite/docs/claims.md) · [deployment-limits](../../../packages/store-sqlite/docs/deployment-limits.md).
 
-### Phase 15: `adapter-turso` (present; multi-host remote)
+### Phase 15: `@paykernel/store-turso` (present; multi-host remote)
 
 `@paykernel/store-turso` is a production **multi-host remote** consumer of this foundation (dialect **`sqlite`**):
 
@@ -239,7 +239,7 @@ Docs: [adapter overview](../../../packages/store-sqlite/docs/overview.md) · [cl
 
 Docs: [adapter overview](../../../packages/store-turso/docs/overview.md) · [claims](../../../packages/store-turso/docs/claims.md) · [embedded-replicas](../../../packages/store-turso/docs/embedded-replicas.md).
 
-### Phase 16: `adapter-cloudflare-d1` (present; multi-host Workers D1)
+### Phase 16: `@paykernel/store-d1` (present; multi-host Workers D1)
 
 `@paykernel/store-d1` is a production **multi-host** consumer of this foundation (dialect **`sqlite`**) via the Cloudflare D1 Workers binding:
 
@@ -254,7 +254,7 @@ Docs: [adapter overview](../../../packages/store-turso/docs/overview.md) · [cla
 
 Docs: [adapter overview](../../../packages/store-d1/docs/overview.md) · [claims](../../../packages/store-d1/docs/claims.md) · [sessions-and-replication](../../../packages/store-d1/docs/sessions-and-replication.md).
 
-### Phase 17: `adapter-cloudflare-do` (present; multi-host partitioned SQLite-backed DO)
+### Phase 17: `@paykernel/store-durable-objects` (present; multi-host partitioned SQLite-backed DO)
 
 `@paykernel/store-durable-objects` is a production **multi-host partitioned** consumer of this foundation (dialect **`sqlite`**) via SQLite-backed Durable Objects (`new_sqlite_classes`):
 
@@ -329,11 +329,11 @@ Relational claims **do not** couple arbitrary provider HTTP with the claim row u
 
 - [migrations.md](./migrations.md)
 - [atomic-claims.md](./atomic-claims.md)
-- [store-contracts.md](../../../packages/testkit/docs/store-contracts.md)
-- Phase 12 adapter: [adapter-postgres README](../../../packages/store-postgres/README.md)
-- Phase 14 adapter (single-host): [adapter-sqlite README](../../../packages/store-sqlite/README.md)
-- Phase 15 adapter (multi-host remote): [adapter-turso README](../../../packages/store-turso/README.md)
-- Phase 16 adapter (multi-host Workers D1): [adapter-cloudflare-d1 README](../../../packages/store-d1/README.md)
-- Phase 17 adapter (multi-host partitioned DO): [adapter-cloudflare-do README](../../../packages/store-durable-objects/README.md)
+- [store-contracts.md](../../../packages/store-contracts/docs/contracts.md)
+- Phase 12 adapter: [store-postgres README](../../store-postgres/README.md)
+- Phase 14 adapter (single-host): [store-sqlite README](../../store-sqlite/README.md)
+- Phase 15 adapter (multi-host remote): [store-turso README](../../store-turso/README.md)
+- Phase 16 adapter (multi-host Workers D1): [store-d1 README](../../store-d1/README.md)
+- Phase 17 adapter (multi-host partitioned DO): [store-durable-objects README](../../store-durable-objects/README.md)
 - [workspace-boundaries.md](../../../docs/workspace-boundaries.md)
 - [monorepo.md](../../../docs/monorepo.md)

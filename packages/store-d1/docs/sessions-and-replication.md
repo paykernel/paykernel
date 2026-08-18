@@ -6,8 +6,6 @@
 
 When D1 **read replication** is enabled, unbound queries may hit **replicas** and observe **stale** data after a write on the primary. Correctness-critical **read-after-write (RAW)** must use the **Sessions API**.
 
-Alias: historical short doc [`sessions.md`](./sessions.md) points here.
-
 ---
 
 ## Primary writes vs replica reads

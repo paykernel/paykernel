@@ -1,7 +1,7 @@
 # Migrations — PostgreSQL adapter
 
 **Helpers:** `migratePostgresAdapter`, `verifyPostgresAdapterSchema`  
-**Foundation:** [`internal/sql-store` migrations](../../../internal/sql-store/docs/migrations.md)
+**Foundation:** [`@paykernel/sql-foundation` migrations](../../sql-foundation/docs/migrations.md)
 
 ## Policy (non-negotiable)
 
@@ -99,4 +99,4 @@ Use in health checks or pre-flight deploy gates.
 - [overview.md](./overview.md)
 - [drivers.md](./drivers.md)
 - [testing.md](./testing.md)
-- sql-store [migrations.md](../../../internal/sql-store/docs/migrations.md)
+- sql-foundation [migrations.md](../../sql-foundation/docs/migrations.md)
