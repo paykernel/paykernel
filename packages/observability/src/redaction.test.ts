@@ -149,6 +149,38 @@ describe("redactAttributeBag", () => {
     expect(JSON.stringify(piSecret)).not.toContain("_secret_");
   });
 
+  it("redacts seti_*_secret_* and PayPal A21 tokens on allow-listed keys (NEW-OBS-3)", () => {
+    const setiSecret = "seti_1MqLiJLkdIwHu7ix_secret_NbqtAIXdFSJwUCNa";
+    const paypalA21AA =
+      "A21AAFEpjF0wAHLmN8s7xKzExamplePayPalAccessTokenValueXYZ123456";
+    const paypalA21Alnum = "A21BCdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    const out = redactAttributeBag({
+      providerObjectId: setiSecret,
+      internalReference: paypalA21AA,
+      providerRequestId: paypalA21Alnum,
+      operationId: "op_1",
+      gateway: "paypal",
+    });
+    expect(out?.providerObjectId).toBe("[REDACTED]");
+    expect(out?.internalReference).toBe("[REDACTED]");
+    expect(out?.providerRequestId).toBe("[REDACTED]");
+    expect(out?.operationId).toBe("op_1");
+    expect(out?.gateway).toBe("paypal");
+    expect(JSON.stringify(out)).not.toContain("_secret_");
+    expect(JSON.stringify(out)).not.toContain("seti_1MqLiJ");
+    expect(JSON.stringify(out)).not.toContain("A21AAFEpj");
+    expect(JSON.stringify(out)).not.toContain(paypalA21Alnum);
+
+    const publicIds = redactAttributeBag({
+      providerObjectId: "seti_1MqLiJLkdIwHu7ix",
+      internalReference: "A21AA",
+      operationId: "op_2",
+    });
+    expect(publicIds?.providerObjectId).toBe("seti_1MqLiJLkdIwHu7ix");
+    expect(publicIds?.internalReference).toBe("A21AA");
+    expect(publicIds?.operationId).toBe("op_2");
+  });
+
   it("redacts sensitive labels and keeps authorized/gateway", () => {
     const out = redactAttributeBag({
       gateway: "stripe",
@@ -194,6 +226,30 @@ describe("sanitizeSpanStatusMessage (OBS-1)", () => {
     );
     expect(scrubbed).not.toContain("_secret_");
     expect(scrubbed).not.toContain("abc123def");
+  });
+
+  it("redacts seti client secrets and PayPal A21 tokens in span status messages (NEW-OBS-3)", () => {
+    const setiSecret = "seti_1MqLiJLkdIwHu7ix_secret_NbqtAIXdFSJwUCNa";
+    const paypalA21AA =
+      "A21AAFEpjF0wAHLmN8s7xKzExamplePayPalAccessTokenValueXYZ123456";
+    expect(sanitizeSpanStatusMessage(setiSecret)).toBeUndefined();
+    expect(sanitizeSpanStatusMessage(paypalA21AA)).toBeUndefined();
+    expect(sanitizeSpanStatusMessage(`next_action ${setiSecret}`)).toBe(
+      "next_action [REDACTED]",
+    );
+    expect(sanitizeSpanStatusMessage(`oauth failed ${paypalA21AA}`)).toBe(
+      "oauth failed [REDACTED]",
+    );
+    const scrubbed = sanitizeSpanStatusMessage(
+      `client_secret=${setiSecret} token=${paypalA21AA}`,
+    );
+    expect(scrubbed).not.toContain("_secret_");
+    expect(scrubbed).not.toContain("NbqtAIXdFSJwUCNa");
+    expect(scrubbed).not.toContain("A21AAFEpj");
+    expect(sanitizeSpanStatusMessage("seti_1MqLiJLkdIwHu7ix")).toBe(
+      "seti_1MqLiJLkdIwHu7ix",
+    );
+    expect(sanitizeSpanStatusMessage("A21AA")).toBe("A21AA");
   });
 
   it("drops embedded PANs in span status messages (NEW-OBS-1)", () => {

@@ -11,7 +11,7 @@
  * - merchantPreference on a rule: case-insensitive match against input.merchantPreference.
  */
 
-import { amountInRange } from "./amount-range";
+import { amountInRange, resolveDeclaredAmountCurrency } from "./amount-range";
 import type { RouteMatchCriteria, RoutingInput, RoutingRule } from "./types";
 
 /** Case-insensitive trim equality for optional string fields. */
@@ -76,6 +76,15 @@ export function ruleMatchesIgnoringAmountAndCapabilities(
   if (m.currency !== undefined) {
     if (input.currency === undefined) return false;
     if (!stringsEqualCi(m.currency, input.currency)) return false;
+    // NEW-ROUTE-CCY-1: do not match a USD rule when the Money / amountCurrency
+    // is EUR (or any other present, disagreeing amount currency).
+    const amountCurrency = resolveDeclaredAmountCurrency(input);
+    if (
+      amountCurrency !== undefined &&
+      !stringsEqualCi(m.currency, amountCurrency)
+    ) {
+      return false;
+    }
   }
 
   if (m.country !== undefined) {

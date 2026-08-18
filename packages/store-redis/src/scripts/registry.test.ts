@@ -154,11 +154,13 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
   });
 
   it("NEW-STORE-1: GET Lua ZREMs ghost index members when hash is missing", () => {
-    // listDue / listRetryable is ZRANGE + keyed GET. A missing hash must drop
-    // the ZSET member (ARGV logicalKey) so LIMIT windows cannot fill with dead keys.
+    // listDue / listRetryable is ZRANGE + list GET. A missing hash must drop
+    // the ZSET member (listedKey) so LIMIT windows cannot fill with dead keys.
     for (const get of [
       REDIS_SCRIPT_REGISTRY.webhookInbox.get,
       REDIS_SCRIPT_REGISTRY.reconciliation.get,
+      REDIS_SCRIPT_REGISTRY.webhookInbox.listGet,
+      REDIS_SCRIPT_REGISTRY.reconciliation.listGet,
     ]) {
       const exists = get.search(/EXISTS',\s*rec\)\s*==\s*0/);
       const zrem = get.search(/redis\.call\(\s*['"]ZREM['"]\s*,\s*idx/);
@@ -166,8 +168,17 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
       expect(exists).toBeGreaterThan(-1);
       expect(zrem).toBeGreaterThan(exists);
       expect(missing).toBeGreaterThan(zrem);
-      expect(get).toContain("ARGV[3]");
       expect(get).toContain("listedKey");
+    }
+  });
+
+  it("PERF-4: list GET scripts load a ZRANGE page in one EVAL", () => {
+    for (const listGet of [
+      REDIS_SCRIPT_REGISTRY.webhookInbox.listGet,
+      REDIS_SCRIPT_REGISTRY.reconciliation.listGet,
+    ]) {
+      expect(listGet).toContain("for i = 2, #KEYS");
+      expect(listGet).toContain("ARGV[i + 1]");
     }
   });
 

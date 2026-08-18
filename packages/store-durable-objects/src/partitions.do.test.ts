@@ -618,6 +618,66 @@ describe("do multi-partition discovery fan-out", () => {
     }
   });
 
+  it("PERF-5: single enumerable isolate lists without peek", async () => {
+    const prefix = uniqueTablePrefix("pk5s");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const peekNames: string[] = [];
+      const listNames: string[] = [];
+      const inner = ns.namespace;
+      function wrapStub(stub: DoStubLike, name: string): DoStubLike {
+        return new Proxy(stub, {
+          get(target, prop, recv) {
+            const value = Reflect.get(target, prop, recv);
+            if (typeof value !== "function") return value;
+            if (prop === "peekDueReconciliation") {
+              return async (...args: unknown[]) => {
+                peekNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            if (prop === "listDueReconciliation") {
+              return async (...args: unknown[]) => {
+                listNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            return value;
+          },
+        });
+      }
+      const wrapped: DoNamespaceLike = {
+        idFromName: (n) => inner.idFromName(n),
+        get: (id) => wrapStub(inner.get(id), id.toString()),
+        getByName: (name) => wrapStub(inner.getByName!(name), name),
+      };
+
+      const stores = createDoPaymentStores({
+        namespace: wrapped,
+        sharding: { kind: "hash", partitions: 1 },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+      await stores.reconciliation.schedule({
+        key: "recon:stripe:solo",
+        subjectId: "pay_solo",
+        reason: "timeout",
+        dueAt: now,
+      });
+      const listed = await stores.reconciliation.listDue({ now, limit: 10 });
+      expect(listed).toHaveLength(1);
+      expect(peekNames).toHaveLength(0);
+      expect(listNames.length).toBeGreaterThan(0);
+    } finally {
+      ns.close();
+    }
+  });
+
   it("PERF-5: non-boolean peek occupied still full-lists (fail-closed)", async () => {
     const prefix = uniqueTablePrefix("pk5o");
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });

@@ -10,7 +10,7 @@
    - If `input.cost` is provided, sort by ascending cost, then gateway id, then rule index.
    - Otherwise keep original rule-array order.
 3. Pick the first remaining candidate (**deterministic**).
-4. If none: use select-time `fallback` if configured and usable **and** no amount-range / capability / complementary currency-country-method honesty-block applies; else throw `NoRouteMatchError` (fail-closed). Complementary amount-split rules (Stripe ≤X + PayPal ≥X+ε plus a fallback) and complementary currency / country / method partitions (USD→stripe + EUR→adyen plus a fallback) always honesty-block that fallback after one bucket is excluded — there is no post-attempt recovery through `fallback`. See [selection.md](./selection.md).
+4. If none: use select-time `fallback` if configured and usable **and** no amount-range / capability / complementary currency-country-method-tenant honesty-block / currency-mismatch honesty-block applies; else throw `NoRouteMatchError` (fail-closed). Complementary amount-split rules (Stripe ≤X + PayPal ≥X+ε plus a fallback) and complementary currency / country / method / tenant partitions (USD→stripe + EUR→adyen, or acme→stripe + globex→adyen, plus a fallback) always honesty-block that fallback after one bucket is excluded — there is no post-attempt recovery through `fallback`. `input.currency` disagreeing with Money / `amountCurrency` is also fail-closed. See [selection.md](./selection.md).
 
 **First matching rule wins** when cost/preference are not used. Rule array order is significant.
 
@@ -18,7 +18,7 @@
 
 | Criterion | Match when specified |
 | --- | --- |
-| `currency` | Case-insensitive equality after trim |
+| `currency` | Case-insensitive equality after trim vs `input.currency`; Money / `amountCurrency` must also agree when set |
 | `country` | Case-insensitive equality after trim |
 | `paymentMethod` | Case-insensitive equality after trim |
 | `amountMin` / `amountMax` | Inclusive range via `toMinorUnits` bigint in `amountCurrency` |

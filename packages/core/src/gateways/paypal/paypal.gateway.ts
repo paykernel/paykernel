@@ -21,6 +21,7 @@ import {
 import type { PayPalWebhookPayload, WebhookEvent, } from "../../types/webhook.types";
 import {
   attachPaymentEvent,
+  hashWebhookPayload,
   paymentFromWebhookEvent,
   PAYMENT_EVENT_SCHEMA_VERSION,
 } from "../../types/payment-event";
@@ -623,18 +624,15 @@ export class PayPalGateway extends BaseGateway {
           };
         }
 
-        // PayPal API defaults final_capture to false. SDK product defaults:
+        // PayPal API defaults final_capture to false. SDK product defaults
+        // apply only to authorization captures (Orders sale capture does not send it):
         // - full capture (no amount): true (capture remaining balance and close auth)
         // - partial (amount set): false unless paypalFinalCapture === true
-        let requestFinalCapture = true;
         if (isAuthorizationCapture) {
-          if (p.amount !== undefined) {
-            requestFinalCapture = p.paypalFinalCapture === true;
-            body.final_capture = requestFinalCapture;
-          } else {
-            requestFinalCapture = p.paypalFinalCapture ?? true;
-            body.final_capture = requestFinalCapture;
-          }
+          body.final_capture =
+            p.amount !== undefined
+              ? p.paypalFinalCapture === true
+              : (p.paypalFinalCapture ?? true);
         }
 
         const response = await this.fetchWithAccessToken(
@@ -677,19 +675,17 @@ export class PayPalGateway extends BaseGateway {
           ? this.mapResourceStatus(capture.status)
           : this.mapStatus(data.status);
 
-        // Non-final auth captures must not look fully settled (isPaidOutcome false).
-        // Prefer response final_capture when PayPal echoes it; else request intent.
+        // NEW-PAYPAL-7: paid only when response final_capture === true.
+        // Same rule as GET / webhook. Do not fall back to request intent —
+        // sale/order captures never send final_capture; a request-true fallback
+        // fulfills on capture then looks open on poll.
         const responseFinalCapture =
           typeof capture.final_capture === "boolean"
             ? capture.final_capture
             : typeof data.final_capture === "boolean"
               ? data.final_capture
               : undefined;
-        const isFinalCapture =
-          responseFinalCapture !== undefined
-            ? responseFinalCapture
-            : requestFinalCapture;
-        if (status === "paid" && isFinalCapture === false) {
+        if (status === "paid" && responseFinalCapture !== true) {
           status = "partially_captured";
         }
 
@@ -704,7 +700,7 @@ export class PayPalGateway extends BaseGateway {
           );
         } else if (status === "partially_captured") {
           this.logger.warn(
-            "[PayPal] Capture is non-final (final_capture=false); do not fulfill remaining auth — status is partially_captured, not paid",
+            "[PayPal] Capture is non-final (final_capture is not true); do not fulfill remaining auth — status is partially_captured, not paid",
           );
         }
 
@@ -1195,6 +1191,10 @@ export class PayPalGateway extends BaseGateway {
    *
    * Dual-writes Phase 7 PaymentEvent. Note: `PAYMENT.CAPTURE.COMPLETED` maps to
    * stable `capture.completed` (not `payment.succeeded`) — see webhook-events.md.
+   *
+   * NEW-PERF-1: `payloadHash` is a compact identity
+   * `{ id, type, create_time, resource }` (resource.id), not the full raw tree.
+   * Inbox claim must use `event.payloadHash`; re-hashing `rawPayload` will not match.
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
     const raw = this.validateWebhookPayload(this.coerceWebhookPayload(payload));
@@ -1340,7 +1340,15 @@ export class PayPalGateway extends BaseGateway {
       event.currency = webhookAmount.currency_code.toUpperCase();
     }
 
-    const attached = attachPaymentEvent(event, { computePayloadHash: true });
+    const attached = attachPaymentEvent(event);
+    // PERF-6 / NEW-PERF-1: inbox keys PayPal events by `event.id`. Hash a
+    // compact identity instead of redact+stringify the full resource tree.
+    attached.payloadHash = hashWebhookPayload({
+      id: raw.id,
+      type: raw.event_type,
+      create_time: raw.create_time,
+      resource: raw.resource.id,
+    });
     // Non-final / partial captures must not dual-write fulfillment-ready types.
     // Demote to payment.processing so type-only handlers match isPaidOutcome.
     // Incomplete refund_completed / CAPTURE.REFUNDED+partially_refunded must

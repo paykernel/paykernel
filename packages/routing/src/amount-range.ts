@@ -225,3 +225,36 @@ export function compareDecimalAmounts(
 function normalizeCurrency(code: string): string {
   return code.trim().toUpperCase();
 }
+
+/**
+ * Currency declared on the payment amount itself — Money.currency or
+ * {@link RoutingInput.amountCurrency}. Does **not** inherit
+ * {@link RoutingInput.currency} (inheritance cannot conflict).
+ */
+export function resolveDeclaredAmountCurrency(
+  input: RoutingInput,
+): string | undefined {
+  if (typeof input.amount === "object" && input.amount !== null) {
+    const currency = String(input.amount.currency).trim();
+    return currency.length > 0 ? currency : undefined;
+  }
+  if (input.amountCurrency !== undefined) {
+    const currency = String(input.amountCurrency).trim();
+    return currency.length > 0 ? currency : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * NEW-ROUTE-CCY-1: `input.currency` and the declared amount currency are
+ * both present and differ (case-insensitive after trim). Incomplete money
+ * (missing either side) is not a conflict.
+ */
+export function inputCurrenciesConflict(input: RoutingInput): boolean {
+  if (input.currency === undefined) return false;
+  const declared = input.currency.trim();
+  if (!declared) return false;
+  const amountCurrency = resolveDeclaredAmountCurrency(input);
+  if (amountCurrency === undefined) return false;
+  return normalizeCurrency(declared) !== normalizeCurrency(amountCurrency);
+}

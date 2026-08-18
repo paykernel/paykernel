@@ -403,12 +403,14 @@ async function listAndMergeFanOut<T extends { key: string }>(
  * Fan-out listDue/listRetryable across enumerable partitions; merge, dedupe by
  * key, stable sort, then truncate to limit.
  *
- * PERF-5: peek every enumerable isolate (no shared global index). Full list
- * (bounded expired-lease UPDATE + SELECT) runs only on shards that can
- * contribute to the global earliest-N: occupied shards whose earliest
- * sort key is not strictly after the current cutoff. Later occupied shards
- * are skipped. Peek treats expired claimed as occupied so crash recovery is
- * not skipped. A boolean / missing-earliest peek is fail-closed (must list).
+ * PERF-5: peek every enumerable isolate when there is more than one
+ * (no shared global occupancy index). A single isolate skips peek and lists
+ * directly. Full list (bounded expired-lease UPDATE + SELECT) runs only on
+ * shards that can contribute to the global earliest-N: occupied shards whose
+ * earliest sort key is not strictly after the current cutoff. Later occupied
+ * shards are skipped. Peek treats expired claimed as occupied so crash
+ * recovery is not skipped. A boolean / missing-earliest peek is fail-closed
+ * (must list).
  */
 async function fanOutListByKey<T extends { key: string }>(
   options: FanOutListOptions<T>,
@@ -420,6 +422,25 @@ async function fanOutListByKey<T extends { key: string }>(
   const peekInput = input.now !== undefined ? { now: input.now } : {};
   const perPartitionInput = { ...input, limit };
   const nsArgs = rpcTail(options.tableNamespace);
+
+  // PERF-5: a single enumerable isolate cannot lose earliest-N work — list it
+  // directly and skip the occupancy peek RPC (still fail-closed for N>1).
+  if (shardNames.length === 1) {
+    const merged: T[] = [];
+    mergeFanOutRows(
+      merged,
+      await callStub<T[]>(
+        stubForShardName(namespace, shardNames[0]!),
+        method,
+        perPartitionInput,
+        ...nsArgs,
+      ),
+      new Set<string>(),
+      limit,
+      sortKey,
+    );
+    return merged.slice(0, limit);
+  }
 
   const occupancy = await Promise.all(
     shardNames.map((shardName) => {

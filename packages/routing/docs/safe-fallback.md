@@ -225,7 +225,7 @@ if (eligibility.allowed) {
 - Merges `attemptedGateways` into exclusions (plus `input.excludeGateways`)
 - Reuses pure `router.select` with exclusions — still **select-only**
 - Throws if the only available gateway was already attempted
-- **NEW-ROUTE-1:** amount-range / capability / complementary currency-country-method honesty `NoRouteMatchError` is **not** rewritten to `no_alternate_gateway`. The honesty `reason` (and message) is preserved on `UnsafeFallbackDeniedError`.
+- **NEW-ROUTE-1 / NEW-ROUTE-2 / NEW-ROUTE-CCY-1:** amount-range / capability / currency-mismatch / complementary currency-country-method-tenant honesty `NoRouteMatchError` is **not** rewritten to `no_alternate_gateway`. The honesty `reason` (and message) is preserved on `UnsafeFallbackDeniedError`.
 - **ROUTE-3:** expert-override eligibility must come from `evaluateFallback` (object identity brand). Forged `{ allowed: true, expertOverride: true, reason: "expert_override:…" }` objects are rejected — the reason prefix alone is not sufficient.
 
 ## App responsibility

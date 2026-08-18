@@ -19,6 +19,7 @@ import type { PayPalConfig } from '../../types/config.types';
 import type { CreatePaymentParams } from '../../types/payment.types';
 import {
     assertNoSecretsInEnvelope,
+    hashWebhookPayload,
     toPersistedPaymentEventEnvelope,
 } from '../../types/payment-event';
 import type { HookContext } from '../../hooks/hooks.types';
@@ -2097,11 +2098,70 @@ describe('PayPalGateway', () => {
             expect(event.provider?.eventType).toBe('PAYMENT.CAPTURE.COMPLETED');
             expect(event.provider?.occurredAt).toBe('2024-06-15T14:30:00.000Z');
             expect(event.payloadHash).toBeDefined();
+            // NEW-PERF-1: compact identity, not the full capture tree.
+            expect(event.payloadHash).toBe(
+                hashWebhookPayload({
+                    id: 'WH-phase7-capture',
+                    type: 'PAYMENT.CAPTURE.COMPLETED',
+                    create_time: '2024-06-15T14:30:00Z',
+                    resource: 'capture-phase7',
+                }),
+            );
+            expect(event.payloadHash).not.toBe(hashWebhookPayload(event.rawPayload));
 
             const envelope = toPersistedPaymentEventEnvelope(event.event!, {
                 payloadHash: event.payloadHash,
             });
             assertNoSecretsInEnvelope(envelope);
+        });
+
+        it('payloadHash is compact identity not full raw tree (NEW-PERF-1)', () => {
+            const identity = {
+                id: 'WH-hash-compact',
+                event_type: 'PAYMENT.CAPTURE.COMPLETED',
+                create_time: '2024-06-15T14:30:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'capture-hash-compact',
+                    status: 'COMPLETED',
+                    final_capture: true,
+                    amount: {
+                        currency_code: 'USD',
+                        value: '1.00',
+                    },
+                },
+            };
+            const bloated = {
+                ...identity,
+                resource: {
+                    ...identity.resource,
+                    custom_id: 'internal_hash_bloat',
+                    seller_receivable_breakdown: {
+                        gross_amount: { currency_code: 'USD', value: '1.00' },
+                        net_amount: { currency_code: 'USD', value: '0.70' },
+                        paypal_fee: { currency_code: 'USD', value: '0.30' },
+                    },
+                },
+            };
+
+            const compactEvent = gateway.parseWebhookEvent(identity);
+            const bloatedEvent = gateway.parseWebhookEvent(bloated);
+            const expected = hashWebhookPayload({
+                id: identity.id,
+                type: identity.event_type,
+                create_time: identity.create_time,
+                resource: identity.resource.id,
+            });
+
+            expect(compactEvent.payloadHash).toBe(expected);
+            expect(bloatedEvent.payloadHash).toBe(expected);
+            // Inbox claim must use event.payloadHash; re-hashing rawPayload is a different digest.
+            expect(compactEvent.payloadHash).not.toBe(
+                hashWebhookPayload(compactEvent.rawPayload),
+            );
+            expect(bloatedEvent.payloadHash).not.toBe(
+                hashWebhookPayload(bloatedEvent.rawPayload),
+            );
         });
 
         it('Phase 7 dual-write: AUTHORIZATION.PARTIALLY_CAPTURED → payment.processing (not capture.completed)', () => {
@@ -3213,16 +3273,90 @@ describe('PayPalGateway', () => {
             expect(result.gatewayId).toBe('CAPTURE-XYZ');
             expect(result.orderId).toBe('ORDER-789');
             expect(result.captureId).toBe('CAPTURE-XYZ');
-            expect(result.status).toBe('paid');
+            // NEW-PAYPAL-7: omitted final_capture is not paid (same as GET / webhook).
+            expect(result.status).toBe('partially_captured');
+            expect(result.status).not.toBe('paid');
             expect(result.amount).toBe(150);
             // PAYPAL-1: currency published with major-unit amount
             expect(result.currency).toBe('USD');
             expect((result.rawResponse as any).captureId).toBe('CAPTURE-XYZ');
             expect((result.rawResponse as any).orderId).toBe('ORDER-789');
-            expect(result.outcome).toBe('succeeded');
+            expect(result.outcome).toBe('requires_action');
+            expect(result.outcome).not.toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
             expect(result.references?.providerObjectId).toBe('CAPTURE-XYZ');
             expect(result.references?.relatedIds?.captureId).toBe('CAPTURE-XYZ');
             expect(result.references?.relatedIds?.orderId).toBe('ORDER-789');
+        });
+
+        it('order capture HTTP 200 COMPLETED without final_capture is not paid (NEW-PAYPAL-7)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-OMITTED-FINAL',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAPTURE-OMITTED-FINAL',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.capturePayment({
+                gatewayPaymentId: 'ORDER-OMITTED-FINAL',
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.captureId).toBe('CAPTURE-OMITTED-FINAL');
+            expect(result.gatewayId).toBe('CAPTURE-OMITTED-FINAL');
+            expect(result.status).toBe('partially_captured');
+            expect(result.status).not.toBe('paid');
+            expect(result.outcome).toBe('requires_action');
+            expect(result.outcome).not.toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('order capture HTTP 200 COMPLETED with final_capture true is paid', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-FINAL',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAPTURE-FINAL',
+                                    status: 'COMPLETED',
+                                    final_capture: true,
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.capturePayment({
+                gatewayPaymentId: 'ORDER-FINAL',
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.captureId).toBe('CAPTURE-FINAL');
+            expect(result.status).toBe('paid');
+            expect(result.outcome).toBe('succeeded');
+            expect(isPaidOutcome(result)).toBe(true);
         });
 
         it('should return success true with pending status for pending captures and warn', async () => {

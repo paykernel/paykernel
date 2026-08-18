@@ -207,6 +207,7 @@ const result = await client.createPayment({
 | **Failed Attempts** | Moyasar can return HTTP 201 with `status: 'failed'` (or `abandoned`); this SDK returns `success: false` and `status: 'failed'` for those payment objects |
 | **Create 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** declined/`failed`. Create is unfenced — the SDK returns `outcome: 'indeterminate'` + `reconciliationRequired` so callers reconcile via `given_id` / `getPayment` instead of minting a new idempotency key |
 | **Refund 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** a completed refund. `refundPayment` requires an observed id before mapping; missing id is `outcome: 'indeterminate'` and the mutation fence stays `unknown` (never `completed` with `gatewayRefundId: undefined`). Resolve via `getPayment` before retrying — a new key can double-refund |
+| **Mutation 2xx invalid JSON** | HTTP 200 with an unreadable body after create/capture/refund/void/OTP is **not** a clean `GatewayApiError`. The SDK returns `outcome: 'indeterminate'` and keeps the mutation fence `unknown` (same key will not POST again). GET / non-mutating 2xx invalid JSON stays `GatewayApiError`. Reconcile via `getPayment` |
 | **`success` vs status** | `success: true` only means the payment did not map to `failed` (provider `failed`/`abandoned`, or an **unmapped** status). An `initiated` payment returns `success: true` with `status: 'pending'`. **Fulfill only when `status` is `paid`** (or `authorized` for intentional auth-only holds). Complete 3DS/OTP first when required |
 | **AFT (account funding)** | Optional `recipient` and `sender` on create are Moyasar Account Funding Transaction (AFT) fields. They require AFT-enabled account capability from Moyasar; omit them for ordinary payments |
 | **Callback / 3DS return** | After the customer returns to `callback_url`, **never trust query-string status alone**. Always `getPayment` (or a verified webhook), then verify `amount` and `currency` against your order. Prefer webhooks as the source of truth |
@@ -516,7 +517,7 @@ app.post('/webhooks/moyasar', async (req) => {
 });
 ```
 
-Moyasar currently documents failed payment webhooks as `payment_faild`; the SDK normalizes that typo to `payment_failed` in the returned event. The original event type remains on the source object only if you keep your own copy of the request body — `event.rawPayload` is a shallow clone of the parsed payload **with `secret_token` removed** so the webhook secret is not re-exposed after verification.
+Moyasar currently documents failed payment webhooks as `payment_faild`; the SDK normalizes that typo to `payment_failed` in the returned event. The original event type remains on the source object only if you keep your own copy of the request body — `event.rawPayload` is a shallow clone of the parsed payload **with `secret_token` removed** so the webhook secret is not re-exposed after verification. `event.payloadHash` is a compact identity digest (`id`, `type`, `created_at`, nested `data.id`) — not a hash of the full payment tree.
 
 When the webhook envelope includes a boolean `live` field, the SDK sets
 `event.livemode` to that value so you can distinguish test vs production events.

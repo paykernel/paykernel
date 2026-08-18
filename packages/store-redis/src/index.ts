@@ -84,6 +84,7 @@ export {
 export {
   REDIS_SCRIPT_REGISTRY,
   parseTaggedResult,
+  parseTaggedResultList,
   parseIdempotencyRecord,
   parseWebhookRecord,
   parseReconciliationRecord,

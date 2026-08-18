@@ -11,7 +11,7 @@ Unspecified fields are **wildcards**. When a criterion is set on a rule, it must
 
 | Field | Type | Role |
 | --- | --- | --- |
-| `currency` | `string?` | Payment currency (matched case-insensitively after trim) |
+| `currency` | `string?` | Payment currency (matched case-insensitively after trim). Must agree with Money / `amountCurrency` when both are set |
 | `country` | `string?` | Country / market code (CI after trim) |
 | `paymentMethod` | `string?` | Method id (e.g. `mada`, `card`) (CI after trim) |
 | `amount` | `{ amount: string; currency: string } \| string?` | Money for range checks — **string decimals**, not floats |
@@ -49,7 +49,7 @@ const input: RoutingInput = {
 
 | Field | Match when specified |
 | --- | --- |
-| `currency` | Case-insensitive equality after trim vs `input.currency` |
+| `currency` | Case-insensitive equality after trim vs `input.currency` (and vs Money / `amountCurrency` when those are set) |
 | `country` | Case-insensitive equality after trim vs `input.country` |
 | `paymentMethod` | Case-insensitive equality after trim vs `input.paymentMethod` |
 | `amountMin` / `amountMax` | Inclusive major-unit decimal range in `amountCurrency` |
@@ -100,7 +100,8 @@ Amount comparisons **never** use floating-point `Number` equality for money.
 | Rule currency ≠ input currency | No match (no silent accept) |
 | Invalid / unparseable decimal | No match (matcher fails closed; no float coercion) |
 | Complementary amount-split + `fallback` (e.g. Stripe ≤99.99 + PayPal ≥100) | Each amount matches one rule. After excluding one bucket, the other rule’s range honesty-blocks select-time fallback (`NoRouteMatchError`). Fail-closed — see [selection.md](./selection.md#select-time-fallback-not-post-attempt). |
-| Complementary currency / country / method + `fallback` (e.g. USD→stripe + EUR→adyen) | Each value matches one rule. After excluding the matching bucket, complementary partitions honesty-block unconstrained fallback (`NoRouteMatchError`, not stripe). Unmatched values (GBP) may still use fallback. |
+| Complementary currency / country / method / tenant + `fallback` (e.g. USD→stripe + EUR→adyen, or acme→stripe + globex→adyen) | Each value matches one rule. After excluding the matching bucket, complementary partitions honesty-block unconstrained fallback (`NoRouteMatchError`, not stripe). Unmatched values (GBP / unknown tenant) may still use fallback. |
+| `input.currency` ≠ Money / `amountCurrency` (both present) | No match. Select throws `NoRouteMatchError` (`currency_mismatch_honesty`). Fallback is not used. |
 
 Helpers exported for advanced use / tests: `amountInRange`, `resolveInputAmount`, `compareDecimalAmounts`.
 

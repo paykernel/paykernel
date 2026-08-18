@@ -504,6 +504,66 @@ describe("trySelectFallbackGateway", () => {
     }
   });
 
+  it("NEW-ROUTE-CCY-1: currency mismatch honesty is not rewritten to no_alternate_gateway", () => {
+    const routed = createPaymentRouter({
+      rules: [route({ currency: "USD" }).to("stripe")],
+      fallback: "paypal",
+    });
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    try {
+      trySelectFallbackGateway(
+        routed,
+        {
+          currency: "USD",
+          amount: { amount: "10.00", currency: "EUR" },
+        },
+        eligibility,
+        { attemptedGateways: ["stripe"] },
+      );
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "currency_mismatch_honesty",
+      );
+      expect((err as UnsafeFallbackDeniedError).reason).not.toBe(
+        "no_alternate_gateway",
+      );
+    }
+  });
+
+  it("NEW-ROUTE-2: complementary tenant honesty is not rewritten to no_alternate_gateway", () => {
+    const partitioned = createPaymentRouter({
+      rules: [
+        route({ tenant: "acme" }).to("stripe"),
+        route({ tenant: "globex" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    try {
+      trySelectFallbackGateway(
+        partitioned,
+        { tenant: "globex" },
+        eligibility,
+        { attemptedGateways: ["adyen"] },
+      );
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "complementary_tenant_honesty",
+      );
+      expect((err as UnsafeFallbackDeniedError).reason).not.toBe(
+        "no_alternate_gateway",
+      );
+    }
+  });
+
   it("NEW-ROUTE-1: complementary currency + fallback does not silently pick fallback", () => {
     const partitioned = createPaymentRouter({
       rules: [

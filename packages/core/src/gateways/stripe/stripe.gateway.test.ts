@@ -1,6 +1,6 @@
 // file: packages/payments/src/gateways/stripe/stripe.gateway.test.ts
 
-import { describe, it, expect, beforeEach, mock, spyOn } from "bun:test";
+import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { StripeGateway } from "./stripe.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
 import type { StripeConfig } from "../../types/config.types";
@@ -4150,6 +4150,129 @@ describe("StripeGateway", () => {
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("500");
     });
 
+    it("NEW-STRIPE-REFUND-0: succeeded refund + empty list does not publish totalRefunded 0", async () => {
+      globalThis.fetch = mock(async (url) => {
+        const href = String(url);
+        if (href.includes("/refunds?")) {
+          return createMockResponse(createStripeRefundList([]));
+        }
+        return createMockResponse({
+          id: "re_empty_list",
+          status: "succeeded",
+          amount: 500,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_ref_empty_list",
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.outcome).toBe("succeeded");
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.totalRefunded).not.toBe(0);
+    });
+
+    it("NEW-STRIPE-REFUND-0: pending-only refund list does not publish totalRefunded 0", async () => {
+      globalThis.fetch = mock(async (url) => {
+        const href = String(url);
+        if (href.includes("/refunds?")) {
+          return createMockResponse(
+            createStripeRefundList([
+              {
+                id: "re_pending_only",
+                status: "pending",
+                amount: 500,
+                currency: "usd",
+              },
+              {
+                id: "re_action_only",
+                status: "requires_action",
+                amount: 200,
+                currency: "usd",
+              },
+            ]),
+          );
+        }
+        return createMockResponse({
+          id: "re_pending_only",
+          status: "succeeded",
+          amount: 500,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_ref_pending_only",
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.outcome).toBe("succeeded");
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.totalRefunded).not.toBe(0);
+    });
+
+    it("NEW-STRIPE-REFUND-0: empty list falls back to charge.amount_refunded when proven > 0", async () => {
+      globalThis.fetch = mock(async (url) => {
+        const href = String(url);
+        if (href.includes("/refunds?")) {
+          return createMockResponse(createStripeRefundList([]));
+        }
+        return createMockResponse({
+          id: "re_empty_recover",
+          status: "succeeded",
+          amount: 500,
+          currency: "usd",
+          charge: {
+            id: "ch_empty_recover",
+            amount_refunded: 700,
+            currency: "usd",
+          },
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_ref_empty_recover",
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.totalRefunded).toBe(7);
+      expect(result.totalRefunded).not.toBe(0);
+    });
+
+    it("NEW-STRIPE-REFUND-0: list error + charge.amount_refunded 0 omits totalRefunded", async () => {
+      globalThis.fetch = mock(async (url) => {
+        const href = String(url);
+        if (href.includes("/refunds?")) {
+          return createMockResponse(
+            { error: { message: "refund list failed", type: "api_error" } },
+            false,
+            400,
+          );
+        }
+        return createMockResponse({
+          id: "re_list_err_zero",
+          status: "succeeded",
+          amount: 500,
+          currency: "usd",
+          charge: {
+            id: "ch_list_err_zero",
+            amount_refunded: 0,
+            currency: "usd",
+          },
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await gateway.refundPayment({
+        gatewayPaymentId: "pi_ref_list_err_zero",
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.totalRefunded).toBeUndefined();
+      expect(result.totalRefunded).not.toBe(0);
+    });
+
     it("NEW-STRIPE-3: empty HTTP 200 on refund is indeterminate, not pending/success", async () => {
       globalThis.fetch = mock(async () =>
         createMockResponse(""),
@@ -5021,6 +5144,51 @@ describe("StripeGateway", () => {
       expect(result.paymentIntentId).toBe("pi_from_session");
       expect(result.amount).toBe(10);
       expect(result.currency).toBe("usd");
+    });
+
+    it("NEW-STRIPE-0: missing amount_total is omitted, not major 0", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_missing_amount",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/c/session",
+          status: "open",
+          payment_status: "unpaid",
+          currency: "usd",
+          payment_intent: { id: "pi_missing_amount" },
+          metadata: {},
+        }),
+      ) as unknown as typeof fetch;
+
+      const omitted = await gateway.getCheckoutSession({
+        sessionId: "cs_missing_amount",
+      });
+
+      expect(omitted.currency).toBe("usd");
+      expect(omitted.amount).toBeUndefined();
+      expect(omitted.amount).not.toBe(0);
+
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_null_amount",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/c/session",
+          status: "open",
+          payment_status: "unpaid",
+          amount_total: null,
+          currency: "usd",
+          payment_intent: { id: "pi_null_amount" },
+          metadata: {},
+        }),
+      ) as unknown as typeof fetch;
+
+      const nulled = await gateway.getCheckoutSession({
+        sessionId: "cs_null_amount",
+      });
+
+      expect(nulled.currency).toBe("usd");
+      expect(nulled.amount).toBeUndefined();
+      expect(nulled.amount).not.toBe(0);
     });
 
     it("NEW-STRIPE-CKO-200: HTTP 200 {} on getCheckoutSession is not success:true", async () => {

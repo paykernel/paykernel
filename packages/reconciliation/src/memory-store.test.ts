@@ -105,6 +105,101 @@ describe("createMemoryReconciliationStore", () => {
     ).rejects.toMatchObject({ name: "StoreLeaseLostError" });
   });
 
+  it("NEW-STORE-5: complete after expiry does not wipe then lease_lost", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "rec_complete_wipe",
+      subjectId: "pay_1",
+      reason: "x",
+      dueAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const first = await store.claim({
+      key: "rec_complete_wipe",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.complete({
+        key: "rec_complete_wipe",
+        leaseToken: first.leaseToken,
+      }),
+    ).rejects.toMatchObject({ name: "StoreLeaseLostError" });
+    await store.fail({
+      key: "rec_complete_wipe",
+      leaseToken: first.leaseToken,
+      error: "recorded_after_failed_complete",
+    });
+    expect((await store.get("rec_complete_wipe"))?.status).toBe("failed");
+  });
+
+  it("NEW-STORE-5: renew after expiry does not wipe then lease_lost", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "rec_renew_wipe",
+      subjectId: "pay_1",
+      reason: "x",
+      dueAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const first = await store.claim({
+      key: "rec_renew_wipe",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    const r = await store.renew({
+      key: "rec_renew_wipe",
+      leaseToken: first.leaseToken,
+      leaseMs: 5_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("lease_lost");
+    await store.fail({
+      key: "rec_renew_wipe",
+      leaseToken: first.leaseToken,
+      error: "renew_expiry_recorded",
+    });
+    expect((await store.get("rec_renew_wipe"))?.status).toBe("failed");
+  });
+
+  it("NEW-STORE-5: markManualReview after expiry fails closed without wipe", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "rec_review_exp",
+      subjectId: "pay_1",
+      reason: "x",
+      dueAt: new Date(clock.nowMs()).toISOString(),
+    });
+    const first = await store.claim({
+      key: "rec_review_exp",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.markManualReview({
+        key: "rec_review_exp",
+        leaseToken: first.leaseToken,
+        note: "hang_review",
+      }),
+    ).rejects.toMatchObject({ name: "StoreLeaseLostError" });
+    await store.fail({
+      key: "rec_review_exp",
+      leaseToken: first.leaseToken,
+      error: "recorded_after_failed_review",
+    });
+    expect((await store.get("rec_review_exp"))?.status).toBe("failed");
+  });
+
   it("direct reclaim of expired claimed does not burn attempts", async () => {
     const clock = createFakeClock();
     const store = createMemoryReconciliationStore({ clock });

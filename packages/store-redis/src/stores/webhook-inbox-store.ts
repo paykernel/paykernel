@@ -36,6 +36,7 @@ import {
 } from "../limits";
 import {
   parseTaggedResult,
+  parseTaggedResultList,
   parseWebhookRecord,
   splitRecordAndToken,
   WEBHOOK_CLAIM_LUA,
@@ -43,13 +44,14 @@ import {
   WEBHOOK_DELETE_IF_EXPIRED_LUA,
   WEBHOOK_FAIL_LUA,
   WEBHOOK_GET_LUA,
+  WEBHOOK_LIST_GET_LUA,
   WEBHOOK_PACK_LEN,
   WEBHOOK_RENEW_LUA,
 } from "../scripts";
 import type { RedisStoreOptions } from "../types";
 import {
   canonicalizeIsoZ,
-  loadListedRecords,
+  keepListedRecords,
   msFromIso,
   newLeaseToken,
   normalizeScan,
@@ -252,10 +254,8 @@ export function createRedisWebhookInboxStore(
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // PERF-1 / PERF-4: ZSET scored at available_ms / lease_expires_ms (claim +
-        // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
-        // ZRANGE members in one Promise.all wave (N keyed Lua GETs).
-        // NEW-STORE-1: GET_LUA ZREMs the member when the hash is missing so
-        // LIMIT windows cannot fill with dead keys.
+        // REDIS-1 renew). SCAN is off the poll path. One list-GET EVAL loads
+        // the ZRANGE page (soft-release + NEW-STORE-1 ghost ZREM).
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           indexKey,
           "-inf",
@@ -267,9 +267,23 @@ export function createRedisWebhookInboxStore(
         const keys = Array.isArray(members)
           ? members.map((m) => String(m))
           : [];
-        return loadListedRecords(
-          keys,
-          (k) => runGet(k, nowMs, nowIso),
+        if (keys.length === 0) return [];
+        const raw = await ctx.eval.eval(
+          WEBHOOK_LIST_GET_LUA,
+          [indexKey, ...keys.map((k) => rk(k))],
+          [nowMs, nowIso, ...keys],
+        );
+        const records = parseTaggedResultList(raw).map((tagged) => {
+          if (tagged.tag === "missing") return undefined;
+          if (tagged.tag !== "ok") {
+            throw new StoreCorruptedRecordError(
+              `listRetryable: unexpected script tag ${tagged.tag}`,
+            );
+          }
+          return parseWebhookRecord(tagged.fields);
+        });
+        return keepListedRecords(
+          records,
           (rec) => rec.status === "pending",
           limit,
         );

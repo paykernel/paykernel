@@ -975,11 +975,13 @@ describe("mapProviderEventTypeToStable tables", () => {
   });
 
   it("CORE-6-EXT: stable payment.succeeded rematches auth/approved/partial/refunded", () => {
+    // NEW-CORE-11: authorized rematch matches handleWebhook
+    // rematchSucceededTypeFromDomainStatus (not processing).
     expect(
       mapProviderEventTypeToStable("stripe", "payment.succeeded", {
         status: "authorized",
       }),
-    ).toBe("payment.processing");
+    ).toBe("payment.authorized");
     expect(
       mapProviderEventTypeToStable("paypal", "payment.succeeded", {
         status: "approved",
@@ -1024,11 +1026,12 @@ describe("mapProviderEventTypeToStable tables", () => {
         status: "partially_captured",
       }),
     ).toBe("payment.processing");
+    // NEW-CORE-11: rematchRefundCompletedTypeFromDomainStatus → refund.pending.
     expect(
       mapProviderEventTypeToStable("stripe", "refund.completed", {
         status: "processing",
       }),
-    ).toBe("payment.processing");
+    ).toBe("refund.pending");
     // Proven full capture / refund stay settlement-ready.
     expect(
       mapProviderEventTypeToStable("moyasar", "capture.completed", {
@@ -1040,6 +1043,207 @@ describe("mapProviderEventTypeToStable tables", () => {
         status: "refunded",
       }),
     ).toBe("refund.completed");
+  });
+
+  it("NEW-CORE-11: payment_intent.succeeded rematches refunded/failed/cancelled/authorized", () => {
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "partially_refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "reversed",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment_intent.succeeded", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
+    expect(
+      mapProviderEventTypeToStable(
+        "stripe",
+        "checkout.session.async_payment_succeeded",
+        { status: "refunded" },
+      ),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable(
+        "stripe",
+        "checkout.session.async_payment_succeeded",
+        { status: "failed" },
+      ),
+    ).toBe("payment.failed");
+  });
+
+  it("NEW-CORE-11: PAYMENT.CAPTURE.COMPLETED rematches open/failed/cancelled money", () => {
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "partially_captured",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "processing",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "reversed",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
+    expect(
+      mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED", {
+        status: "paid",
+      }),
+    ).toBe("capture.completed");
+  });
+
+  it("NEW-CORE-11: moyasar catalog rematches cancelled/failed/refunded/authorized", () => {
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_paid", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_paid", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_paid", {
+        status: "reversed",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_paid", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_captured", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_captured", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_captured", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_captured", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_refunded", {
+        status: "failed",
+      }),
+    ).toBe("refund.pending");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "payment_refunded", {
+        status: "processing",
+      }),
+    ).toBe("refund.pending");
+  });
+
+  it("NEW-CORE-11: already-stable settlement rematches cancelled/reversed/failed/refunded/authorized", () => {
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("stripe", "payment.succeeded", {
+        status: "reversed",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("paypal", "capture.completed", {
+        status: "failed",
+      }),
+    ).toBe("payment.failed");
+    expect(
+      mapProviderEventTypeToStable("paypal", "capture.completed", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("moyasar", "capture.completed", {
+        status: "refunded",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "capture.completed", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "failed",
+      }),
+    ).toBe("refund.pending");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "cancelled",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "reversed",
+      }),
+    ).toBe("payment.cancelled");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "authorized",
+      }),
+    ).toBe("payment.authorized");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "refund_completed",
+      }),
+    ).toBe("refund.pending");
   });
 });
 

@@ -16,6 +16,7 @@ import {
   RECON_DELETE_IF_EXPIRED_LUA,
   RECON_FAIL_LUA,
   RECON_GET_LUA,
+  RECON_LIST_GET_LUA,
   RECON_MARK_MANUAL_REVIEW_LUA,
   RECON_RENEW_LUA,
   RECON_SCHEDULE_LUA,
@@ -26,6 +27,7 @@ import {
   WEBHOOK_DELETE_IF_EXPIRED_LUA,
   WEBHOOK_FAIL_LUA,
   WEBHOOK_GET_LUA,
+  WEBHOOK_LIST_GET_LUA,
   WEBHOOK_RENEW_LUA,
 } from "./webhook-inbox.lua";
 
@@ -44,6 +46,7 @@ export {
   WEBHOOK_COMPLETE_LUA,
   WEBHOOK_FAIL_LUA,
   WEBHOOK_GET_LUA,
+  WEBHOOK_LIST_GET_LUA,
   WEBHOOK_DELETE_IF_EXPIRED_LUA,
 } from "./webhook-inbox.lua";
 
@@ -55,11 +58,13 @@ export {
   RECON_FAIL_LUA,
   RECON_MARK_MANUAL_REVIEW_LUA,
   RECON_GET_LUA,
+  RECON_LIST_GET_LUA,
   RECON_DELETE_IF_EXPIRED_LUA,
 } from "./reconciliation.lua";
 
 export {
   parseTaggedResult,
+  parseTaggedResultList,
   parseIdempotencyRecord,
   parseWebhookRecord,
   parseReconciliationRecord,
@@ -85,6 +90,7 @@ export const REDIS_SCRIPT_REGISTRY = {
     complete: WEBHOOK_COMPLETE_LUA,
     fail: WEBHOOK_FAIL_LUA,
     get: WEBHOOK_GET_LUA,
+    listGet: WEBHOOK_LIST_GET_LUA,
     deleteIfExpired: WEBHOOK_DELETE_IF_EXPIRED_LUA,
   },
   reconciliation: {
@@ -95,6 +101,7 @@ export const REDIS_SCRIPT_REGISTRY = {
     fail: RECON_FAIL_LUA,
     markManualReview: RECON_MARK_MANUAL_REVIEW_LUA,
     get: RECON_GET_LUA,
+    listGet: RECON_LIST_GET_LUA,
     deleteIfExpired: RECON_DELETE_IF_EXPIRED_LUA,
   },
 } as const;

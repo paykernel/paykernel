@@ -4,6 +4,7 @@ import {
   parseIdempotencyRecord,
   parseReconciliationRecord,
   parseTaggedResult,
+  parseTaggedResultList,
   parseWebhookRecord,
   splitRecordAndToken,
   WEBHOOK_PACK_LEN,
@@ -31,6 +32,19 @@ describe("parseTaggedResult", () => {
 
   it("throws on empty", () => {
     expect(() => parseTaggedResult(null)).toThrow();
+  });
+});
+
+describe("parseTaggedResultList", () => {
+  it("parses nested tagged rows", () => {
+    const rows = parseTaggedResultList([
+      ["missing"],
+      ["ok", "j1", "scheduled"],
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.tag).toBe("missing");
+    expect(rows[1]!.tag).toBe("ok");
+    expect(rows[1]!.fields[0]).toBe("j1");
   });
 });
 

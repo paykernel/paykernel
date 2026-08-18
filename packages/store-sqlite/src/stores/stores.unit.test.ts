@@ -923,6 +923,44 @@ describe("NEW-PERF-8 deleteExpired default limit", () => {
     });
     expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
   });
+
+  it("NEW-PERF-9: idempotency omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    function recordingExecutor() {
+      const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+      const executor: SqliteExecutor & { calls: typeof calls } = {
+        calls,
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return [];
+        },
+        run(sql, params = []) {
+          calls.push({ sql, params });
+          return { changes: 0 };
+        },
+        transaction<T>(fn: () => T) {
+          return fn();
+        },
+      };
+      return executor;
+    }
+
+    const idempExec = recordingExecutor();
+    await createSqliteIdempotencyStore({ executor: idempExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const idempDel = idempExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(idempDel).toBeDefined();
+    expect(idempDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(idempDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = recordingExecutor();
+    await createSqliteIdempotencyStore({ executor: explicit }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
+  });
 });
 
 describe("serializeResultJson honesty (STORES-3)", () => {

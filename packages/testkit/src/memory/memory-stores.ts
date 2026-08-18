@@ -329,15 +329,16 @@ export function createMemoryIdempotencyStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) return { ok: false, reason: "not_found" };
-      const rec = expireIfNeeded(input.key, existing);
-      if (rec.status !== "reserved") return { ok: false, reason: "wrong_status" };
-      if (rec.leaseToken !== input.leaseToken || !isLeaseActive(rec, clock)) {
+      // Token-first: do not expireIfNeeded before the fence. Expired complete/renew
+      // must fail closed without clearing the token (A4 hang can still park).
+      if (existing.status !== "reserved") return { ok: false, reason: "wrong_status" };
+      if (existing.leaseToken !== input.leaseToken || !isLeaseActive(existing, clock)) {
         return { ok: false, reason: "lease_lost" };
       }
-      const generation = rec.generation + 1;
+      const generation = existing.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const updated: IdempotencyRecord = {
-        ...rec,
+        ...existing,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
         generation,
@@ -351,15 +352,14 @@ export function createMemoryIdempotencyStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("complete: key not found");
-      const rec = expireIfNeeded(input.key, existing);
-      if (rec.status !== "reserved" || rec.leaseToken !== input.leaseToken) {
+      if (existing.status !== "reserved" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("complete: lease token rejected");
       }
-      if (!isLeaseActive(rec, clock)) {
+      if (!isLeaseActive(existing, clock)) {
         throw new StoreLeaseLostError("complete: lease expired");
       }
       const updated: IdempotencyRecord = {
-        ...rec,
+        ...existing,
         status: "completed",
         result: input.result,
         leaseToken: undefined,
@@ -374,12 +374,13 @@ export function createMemoryIdempotencyStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("markIndeterminate: key not found");
-      const rec = expireIfNeeded(input.key, existing);
-      if (rec.status !== "reserved" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-4: do not expireIfNeeded before the token fence.
+      // A4 hang parking must succeed on expired-but-unreclaimed reserved + token.
+      if (existing.status !== "reserved" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("markIndeterminate: lease token rejected");
       }
       const updated: IdempotencyRecord = {
-        ...rec,
+        ...existing,
         status: "indeterminate",
         leaseToken: undefined,
         leaseOwner: undefined,
@@ -387,15 +388,15 @@ export function createMemoryIdempotencyStore(
         updatedAt: iso(clock),
         // TESTKIT-2: never store free-form `reason` (may carry PII/tokens).
         // Status alone fences reserve; keep prior result if any.
-        result: rec.result,
+        result: existing.result,
       };
       entries.set(input.key, updated);
     },
 
     async get(key: IdempotencyKey): Promise<IdempotencyRecord | undefined> {
-      const existing = entries.get(key);
-      if (!existing) return undefined;
-      return expireIfNeeded(key, existing);
+      // NEW-STORE-4: get is read-only. Soft-expire would clear the token and
+      // turn a later A4 markIndeterminate into lease_lost (free key).
+      return entries.get(key);
     },
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
@@ -569,15 +570,19 @@ export function createMemoryWebhookInboxStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) return { ok: false, reason: "not_found" };
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed") return { ok: false, reason: "wrong_status" };
-      if (rec.leaseToken !== input.leaseToken || !isLeaseActive(rec, clock)) {
+      // NEW-STORE-3: do not soft-release before the token fence. Fail closed
+      // without restore-then-lose (durable complete/renew is a conditional
+      // UPDATE — 0 rows, no wipe). get/listRetryable still soft-release.
+      if (existing.status !== "claimed") {
+        return { ok: false, reason: "wrong_status" };
+      }
+      if (existing.leaseToken !== input.leaseToken || !isLeaseActive(existing, clock)) {
         return { ok: false, reason: "lease_lost" };
       }
-      const generation = rec.generation + 1;
+      const generation = existing.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const updated: WebhookInboxRecord = {
-        ...rec,
+        ...existing,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
         generation,
@@ -591,15 +596,16 @@ export function createMemoryWebhookInboxStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("complete: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-3: token check on the claimed row first. Expiry / mismatch
+      // fails closed without wiping the lease (no restore-then-lease_lost).
+      if (existing.status !== "claimed" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("complete: lease token rejected");
       }
-      if (!isLeaseActive(rec, clock)) {
+      if (!isLeaseActive(existing, clock)) {
         throw new StoreLeaseLostError("complete: lease expired");
       }
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: "completed",
         leaseToken: undefined,
         leaseOwner: undefined,
@@ -870,15 +876,15 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) return { ok: false, reason: "not_found" };
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed") return { ok: false, reason: "wrong_status" };
-      if (rec.leaseToken !== input.leaseToken || !isLeaseActive(rec, clock)) {
+      // NEW-STORE-5: token-first. Do not soft-release before the fence.
+      if (existing.status !== "claimed") return { ok: false, reason: "wrong_status" };
+      if (existing.leaseToken !== input.leaseToken || !isLeaseActive(existing, clock)) {
         return { ok: false, reason: "lease_lost" };
       }
-      const generation = rec.generation + 1;
+      const generation = existing.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const updated: ReconciliationRecord = {
-        ...rec,
+        ...existing,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
         generation,
@@ -892,15 +898,15 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("complete: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-5: token-first. Expiry fails closed without wiping the lease.
+      if (existing.status !== "claimed" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("complete: lease token rejected");
       }
-      if (!isLeaseActive(rec, clock)) {
+      if (!isLeaseActive(existing, clock)) {
         throw new StoreLeaseLostError("complete: lease expired");
       }
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: "completed",
         leaseToken: undefined,
         leaseOwner: undefined,
@@ -913,13 +919,18 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("fail: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-5 / RECON-LEASE-1: accept fail with matching token even after
+      // lease expiry. Soft-release-first would clear the token + restore
+      // attempts, making maxAttempts a no-op for hang/timeout handlers.
+      if (
+        existing.status !== "claimed" ||
+        existing.leaseToken !== input.leaseToken
+      ) {
         throw new StoreLeaseLostError("fail: lease token rejected");
       }
       if (input.retryAt !== undefined) {
         entries.set(input.key, {
-          ...rec,
+          ...existing,
           status: "scheduled",
           dueAt: input.retryAt,
           lastError: input.error,
@@ -931,7 +942,7 @@ export function createMemoryReconciliationStore(
         return;
       }
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: "failed",
         lastError: input.error,
         leaseToken: undefined,
@@ -945,12 +956,16 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("markManualReview: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-5: token-first. Dual contract requires an unexpired lease
+      // (complete/renew parity). Do not wipe before the fence.
+      if (existing.status !== "claimed" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("markManualReview: lease token rejected");
       }
+      if (!isLeaseActive(existing, clock)) {
+        throw new StoreLeaseLostError("markManualReview: lease expired");
+      }
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: "manual_review",
         lastError: input.note,
         leaseToken: undefined,

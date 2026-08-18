@@ -39,11 +39,13 @@ import { DEFAULT_DELETE_EXPIRED_LIMIT, enforceMaxSanitizedError } from "../limit
 import {
   parseReconciliationRecord,
   parseTaggedResult,
+  parseTaggedResultList,
   RECON_CLAIM_LUA,
   RECON_COMPLETE_LUA,
   RECON_DELETE_IF_EXPIRED_LUA,
   RECON_FAIL_LUA,
   RECON_GET_LUA,
+  RECON_LIST_GET_LUA,
   RECON_MARK_MANUAL_REVIEW_LUA,
   RECON_PACK_LEN,
   RECON_RENEW_LUA,
@@ -53,7 +55,7 @@ import {
 import type { RedisStoreOptions } from "../types";
 import {
   canonicalizeIsoZ,
-  loadListedRecords,
+  keepListedRecords,
   msFromIso,
   newLeaseToken,
   normalizeScan,
@@ -299,11 +301,8 @@ export function createRedisReconciliationStore(
             : clockNowIso(ctx.clock);
         const limit = input.limit ?? 100;
         // PERF-1 / PERF-4: ZSET scored at due_ms / lease_expires_ms (claim +
-        // REDIS-1 renew). SCAN is off the poll path. loadListedRecords batches
-        // ZRANGE members in one Promise.all wave (N keyed Lua GETs; a multi-key
-        // GET Lua still walks N hashes and is not cheaper enough to add).
-        // NEW-STORE-1: GET_LUA ZREMs the member when the hash is missing so
-        // LIMIT windows cannot fill with dead keys.
+        // REDIS-1 renew). SCAN is off the poll path. One list-GET EVAL loads
+        // the ZRANGE page (soft-release + NEW-STORE-1 ghost ZREM).
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",
@@ -315,9 +314,23 @@ export function createRedisReconciliationStore(
         const keys = Array.isArray(members)
           ? members.map((m) => String(m))
           : [];
-        return loadListedRecords(
-          keys,
-          (k) => runGet(k, nowMs, nowIso),
+        if (keys.length === 0) return [];
+        const raw = await ctx.eval.eval(
+          RECON_LIST_GET_LUA,
+          [dueIndex, ...keys.map((k) => rk(k))],
+          [nowMs, nowIso, ...keys],
+        );
+        const records = parseTaggedResultList(raw).map((tagged) => {
+          if (tagged.tag === "missing") return undefined;
+          if (tagged.tag !== "ok") {
+            throw new StoreCorruptedRecordError(
+              `listDue: unexpected script tag ${tagged.tag}`,
+            );
+          }
+          return parseReconciliationRecord(tagged.fields);
+        });
+        return keepListedRecords(
+          records,
           (rec) => rec.status === "scheduled",
           limit,
         );

@@ -267,15 +267,15 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) return { ok: false, reason: "not_found" };
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed") return { ok: false, reason: "wrong_status" };
-      if (rec.leaseToken !== input.leaseToken || !isLeaseActive(rec, clock)) {
+      // NEW-STORE-5: token-first. Do not soft-release before the fence.
+      if (existing.status !== "claimed") return { ok: false, reason: "wrong_status" };
+      if (existing.leaseToken !== input.leaseToken || !isLeaseActive(existing, clock)) {
         return { ok: false, reason: "lease_lost" };
       }
-      const generation = rec.generation + 1;
+      const generation = existing.generation + 1;
       const leaseToken = newLeaseToken(clock, generation);
       const updated: ReconciliationRecord = {
-        ...rec,
+        ...existing,
         leaseToken,
         leaseExpiresAt: new Date(clock.nowMs() + input.leaseMs).toISOString(),
         generation,
@@ -289,15 +289,16 @@ export function createMemoryReconciliationStore(
       maybeCrash();
       const existing = entries.get(input.key);
       if (!existing) throw new StoreLeaseLostError("complete: key not found");
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-5: token check on the claimed row first. Expiry / mismatch
+      // fails closed without wiping the lease (no restore-then-lease_lost).
+      if (existing.status !== "claimed" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("complete: lease token rejected");
       }
-      if (!isLeaseActive(rec, clock)) {
+      if (!isLeaseActive(existing, clock)) {
         throw new StoreLeaseLostError("complete: lease expired");
       }
       entries.set(input.key, {
-        ...rec,
+        ...existing,
         status: "completed",
         leaseToken: undefined,
         leaseOwner: undefined,
@@ -351,12 +352,16 @@ export function createMemoryReconciliationStore(
       if (!existing) {
         throw new StoreLeaseLostError("markManualReview: key not found");
       }
-      const rec = releaseExpiredLease(input.key, existing);
-      if (rec.status !== "claimed" || rec.leaseToken !== input.leaseToken) {
+      // NEW-STORE-5: token-first. Dual contract requires an unexpired lease
+      // (complete/renew parity). Do not wipe before the fence.
+      if (existing.status !== "claimed" || existing.leaseToken !== input.leaseToken) {
         throw new StoreLeaseLostError("markManualReview: lease token rejected");
       }
+      if (!isLeaseActive(existing, clock)) {
+        throw new StoreLeaseLostError("markManualReview: lease expired");
+      }
       const updated: ReconciliationRecord = {
-        ...rec,
+        ...existing,
         status: "manual_review",
         leaseToken: undefined,
         leaseOwner: undefined,

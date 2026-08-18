@@ -29,23 +29,40 @@ const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 6;
 
 /**
- * Residual secret-shaped leaves that core `redact()` does not match
- * (OBS-2): Stripe Checkout `cs_live_` / `cs_test_`, Paymob-style `csk_`,
- * and PaymentIntent `pi_…_secret_…` client secrets. Applied even on
+ * Residual secret-shaped leaves that core `redact()` may not match
+ * (OBS-2 / NEW-OBS-3): Stripe Checkout `cs_live_` / `cs_test_`, Paymob-style
+ * `csk_`, PaymentIntent / SetupIntent `pi|seti_…_secret_…` client secrets,
+ * and PayPal `A21AA…` / long `A21…` access tokens. Applied even on
  * allow-listed span keys (`internalReference`, `providerObjectId`).
  */
+const STRIPE_TYPED_CLIENT_SECRET =
+  String.raw`(?:pi|seti)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+`;
+const PAYPAL_ACCESS_TOKEN =
+  String.raw`(?:A21AA[A-Za-z0-9_-]{16,}|A21[A-Za-z0-9._-]{40,})`;
+
 const CLIENT_SECRET_VALUE =
   /^(?:cs_(?:live|test)_|csk_(?:live|test)_)/i;
-const PI_CLIENT_SECRET_VALUE = /^pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+$/i;
+const PI_CLIENT_SECRET_VALUE = new RegExp(
+  `^${STRIPE_TYPED_CLIENT_SECRET}$`,
+  "i",
+);
+const PAYPAL_ACCESS_TOKEN_VALUE = new RegExp(
+  `^${PAYPAL_ACCESS_TOKEN}$`,
+  "i",
+);
 
-/** Embedded credentials in free-form span status messages (OBS-1). */
-const EMBEDDED_SECRET_IN_MESSAGE =
-  /(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/gi;
+/** Embedded credentials in free-form span status messages (OBS-1 / NEW-OBS-3). */
+const EMBEDDED_SECRET_IN_MESSAGE = new RegExp(
+  String.raw`(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|${STRIPE_TYPED_CLIENT_SECRET}|${PAYPAL_ACCESS_TOKEN}`,
+  "gi",
+);
 
 /** Entire message is a credential — drop it. Do not use core `redact()` for this:
  * that helper treats any string *containing* a secret substring as fully redacted. */
-const WHOLE_STRING_SECRET =
-  /^(?:(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+)$/i;
+const WHOLE_STRING_SECRET = new RegExp(
+  String.raw`^(?:(?:sk|rk|pk|cs|csk)_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|${STRIPE_TYPED_CLIENT_SECRET}|${PAYPAL_ACCESS_TOKEN})$`,
+  "i",
+);
 
 /** Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes). */
 const EMBEDDED_PAN_IN_MESSAGE = /\d[\d\s-]{11,21}\d/g;
@@ -126,7 +143,9 @@ function isClientSecretShapedValue(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length === 0) return false;
   return (
-    CLIENT_SECRET_VALUE.test(trimmed) || PI_CLIENT_SECRET_VALUE.test(trimmed)
+    CLIENT_SECRET_VALUE.test(trimmed) ||
+    PI_CLIENT_SECRET_VALUE.test(trimmed) ||
+    PAYPAL_ACCESS_TOKEN_VALUE.test(trimmed)
   );
 }
 
@@ -150,8 +169,9 @@ function redactResidualSecretLeaves(value: unknown, depth = 0): unknown {
  * Scrub a structured telemetry bag with core `redact()`, then defense-in-depth
  * restore for operational boolean keys (e.g. `authorized: false`) if ever
  * over-redacted. Secret-shaped `authorized` leaves stay `[REDACTED]`.
- * Residual `cs_live_` / client-secret values are scrubbed even on allow-listed
- * keys (OBS-2). Prefer {@link createRedactingTelemetrySink} for end-to-end wrap.
+ * Residual `cs_live_` / `seti_…_secret_…` / PayPal `A21AA…` values are scrubbed
+ * even on allow-listed keys (OBS-2 / NEW-OBS-3). Prefer
+ * {@link createRedactingTelemetrySink} for end-to-end wrap.
  */
 export function redactTelemetryData(
   data: Record<string, unknown>,
@@ -166,8 +186,8 @@ export function redactTelemetryData(
 /**
  * Sanitize a span `end()` status message before it reaches OTEL `setStatus`
  * (OBS-1 / NEW-OBS-1). Whole-string secrets and opaque PANs are dropped;
- * embedded `sk_live_` / `cs_live_` / Bearer / PI client-secret / 13–19 digit
- * PAN fragments are replaced with `[REDACTED]`.
+ * embedded `sk_live_` / `cs_live_` / Bearer / PI/SetupIntent client-secret /
+ * PayPal `A21AA…` / 13–19 digit PAN fragments are replaced with `[REDACTED]`.
  */
 export function sanitizeSpanStatusMessage(
   message: string | undefined,

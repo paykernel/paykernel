@@ -30,6 +30,29 @@ describe("ruleMatches", () => {
     expect(ruleMatches(rule, {})).toBe(false);
   });
 
+  it("NEW-ROUTE-CCY-1: USD rule does not match EUR Money amount", () => {
+    const rule = route({ currency: "USD" }).to("stripe");
+    expect(
+      ruleMatches(rule, {
+        currency: "USD",
+        amount: { amount: "10.00", currency: "EUR" },
+      }),
+    ).toBe(false);
+    expect(
+      ruleMatches(rule, {
+        currency: "USD",
+        amount: { amount: "10.00", currency: "USD" },
+      }),
+    ).toBe(true);
+    expect(
+      ruleMatches(rule, {
+        currency: "USD",
+        amount: "10.00",
+        amountCurrency: "EUR",
+      }),
+    ).toBe(false);
+  });
+
   it("country and paymentMethod match", () => {
     const rule = route({
       country: "SA",

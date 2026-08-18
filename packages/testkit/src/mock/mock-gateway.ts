@@ -154,7 +154,8 @@ function isCapturableMockStatus(status: PaymentStatus): boolean {
  * Different order / payment-method / source + same key → fingerprint_conflict
  * (NEW-TESTKIT-1). Token/source ids only — never PAN/CVC/dpan leaves.
  * Includes stripeCustomerId / paymobIntegrationId / paymobPaymentMethods
- * (NEW-TESTKIT-7).
+ * (NEW-TESTKIT-7) plus stripeSetupFutureUsage / paymobIframeId
+ * (NEW-TESTKIT-FP-1).
  */
 function createPaymentIdentityFields(
   params: CreatePaymentParams,
@@ -167,12 +168,18 @@ function createPaymentIdentityFields(
   if (params.stripeCustomerId !== undefined) {
     identity.stripeCustomerId = params.stripeCustomerId;
   }
+  if (params.stripeSetupFutureUsage !== undefined) {
+    identity.stripeSetupFutureUsage = params.stripeSetupFutureUsage;
+  }
   if (params.tokenId !== undefined) identity.tokenId = params.tokenId;
   if (params.paymobIntegrationId !== undefined) {
     identity.paymobIntegrationId = params.paymobIntegrationId;
   }
   if (params.paymobPaymentMethods !== undefined) {
     identity.paymobPaymentMethods = params.paymobPaymentMethods;
+  }
+  if (params.paymobIframeId !== undefined) {
+    identity.paymobIframeId = params.paymobIframeId;
   }
   if (params.moyasarSource !== undefined) {
     const source = params.moyasarSource;

@@ -12,16 +12,20 @@ export type NoRouteMatchReason =
   | "no_usable_fallback"
   | "amount_range_honesty"
   | "capability_honesty"
+  | "currency_mismatch_honesty"
   | "complementary_currency_honesty"
   | "complementary_country_honesty"
-  | "complementary_method_honesty";
+  | "complementary_method_honesty"
+  | "complementary_tenant_honesty";
 
 const SELECT_HONESTY_REASONS: ReadonlySet<string> = new Set([
   "amount_range_honesty",
   "capability_honesty",
+  "currency_mismatch_honesty",
   "complementary_currency_honesty",
   "complementary_country_honesty",
   "complementary_method_honesty",
+  "complementary_tenant_honesty",
 ]);
 
 /** True when select refused unconstrained fallback for an honesty bound. */

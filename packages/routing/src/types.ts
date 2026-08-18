@@ -12,16 +12,25 @@
  * select-time signals only — never used to auto-route after submission.
  */
 export type RoutingInput = {
+  /**
+   * Payment currency (matched case-insensitively after trim).
+   * When both this and the amount currency (Money.currency or
+   * {@link amountCurrency}) are present, they must agree — otherwise
+   * select fails closed (`currency_mismatch_honesty`).
+   */
   currency?: string;
   country?: string;
   paymentMethod?: string;
   /**
    * Money-shaped amount OR major-unit decimal string for range checks.
    * When a plain string, pair with {@link amountCurrency} or inherit {@link currency}.
+   * Currency on a Money object is published with the major-unit amount and
+   * must agree with {@link currency} when both are set.
    */
   amount?: { amount: string; currency: string } | string;
   /**
    * Currency for plain-string {@link amount}. When omitted, {@link currency} is used.
+   * When present, must agree with {@link currency} (NEW-ROUTE-CCY-1).
    */
   amountCurrency?: string;
   tenant?: string;

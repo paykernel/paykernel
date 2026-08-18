@@ -582,6 +582,32 @@ describe("redact", () => {
     expect(JSON.stringify(out)).not.toContain(piSecret);
   });
 
+  it("redacts SetupIntent client secrets and PayPal A21 tokens on allow-listed leaves (NEW-OBS-3)", () => {
+    const setiSecret = "seti_1MqLiJLkdIwHu7ix_secret_NbqtAIXdFSJwUCNa";
+    const paypalA21AA =
+      "A21AAFEpjF0wAHLmN8s7xKzExamplePayPalAccessTokenValueXYZ123456";
+    const paypalA21Alnum = "A21BCdefghijklmnopqrstuvwxyz0123456789ABCDEFGH";
+    const out = redact({
+      providerObjectId: setiSecret,
+      internalReference: paypalA21AA,
+      gatewayPaymentId: "seti_1MqLiJLkdIwHu7ix",
+      note: `oauth ${paypalA21Alnum}`,
+      shortPrefix: "A21AA",
+      amount: 10,
+    }) as Record<string, unknown>;
+
+    expect(out.providerObjectId).toBe("[REDACTED]");
+    expect(out.internalReference).toBe("[REDACTED]");
+    expect(out.gatewayPaymentId).toBe("seti_1MqLiJLkdIwHu7ix");
+    expect(out.note).toBe("[REDACTED]");
+    expect(out.shortPrefix).toBe("A21AA");
+    expect(out.amount).toBe(10);
+    expect(JSON.stringify(out)).not.toContain("_secret_");
+    expect(JSON.stringify(out)).not.toContain(setiSecret);
+    expect(JSON.stringify(out)).not.toContain("A21AAFEpj");
+    expect(JSON.stringify(out)).not.toContain(paypalA21Alnum);
+  });
+
   it("redacts embedded sk_live_ / PAN inside hookError strings (MONEY-3)", () => {
     const out = redact({
       hookError: "after hook threw: sk_live_51HxExampleSecretKeyValue",
@@ -816,6 +842,48 @@ describe("createRedactingLogger", () => {
 
     expect(calls[1]![0]).toBe("[REDACTED]");
     expect(calls[1]![0]).not.toContain("pi_");
+  });
+
+  it("sanitizes seti client secrets and PayPal A21 tokens in messages (NEW-OBS-3)", () => {
+    const calls: Array<[string, unknown?]> = [];
+    const sink: Logger = {
+      debug: () => {},
+      info: (m, c) => calls.push([m, c]),
+      warn: () => {},
+      error: () => {},
+    };
+    const logger = createRedactingLogger(sink);
+    const setiSecret = "seti_1MqLiJLkdIwHu7ix_secret_NbqtAIXdFSJwUCNa";
+    const paypalA21AA =
+      "A21AAFEpjF0wAHLmN8s7xKzExamplePayPalAccessTokenValueXYZ123456";
+
+    logger.info(`next_action ${setiSecret}`, {
+      providerObjectId: setiSecret,
+      gatewayPaymentId: "seti_1MqLiJLkdIwHu7ix",
+    });
+    logger.info(`oauth failed ${paypalA21AA}`, {
+      internalReference: paypalA21AA,
+      amount: 4,
+    });
+    logger.info(setiSecret);
+    logger.info(paypalA21AA);
+
+    expect(calls[0]![0]).toBe("next_action [REDACTED]");
+    expect(calls[0]![0]).not.toContain("_secret_");
+    expect(calls[0]![0]).not.toContain(setiSecret);
+    const setiCtx = calls[0]![1] as Record<string, unknown>;
+    expect(setiCtx.providerObjectId).toBe("[REDACTED]");
+    expect(setiCtx.gatewayPaymentId).toBe("seti_1MqLiJLkdIwHu7ix");
+
+    expect(calls[1]![0]).toBe("oauth failed [REDACTED]");
+    expect(calls[1]![0]).not.toContain("A21AAFEpj");
+    const tokenCtx = calls[1]![1] as Record<string, unknown>;
+    expect(tokenCtx.internalReference).toBe("[REDACTED]");
+    expect(tokenCtx.amount).toBe(4);
+    expect(JSON.stringify(tokenCtx)).not.toContain(paypalA21AA);
+
+    expect(calls[2]![0]).toBe("[REDACTED]");
+    expect(calls[3]![0]).toBe("[REDACTED]");
   });
 });
 

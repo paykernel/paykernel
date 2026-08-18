@@ -1575,6 +1575,177 @@ describe("WEBHOOKS-1 Paymob redirect then processed is not duplicate_completed",
     });
   });
 
+  it("NEW-WH-KEY-1: PaymentEvent payment.status paid then cancelled are not already_completed", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+    const occurredAt = "2026-01-01T00:00:00.000Z";
+
+    const paid = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_pe_paid",
+      event: {
+        schemaVersion: "1",
+        type: "payment.succeeded",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION",
+          occurredAt,
+          receivedAt: occurredAt,
+        },
+        payment: {
+          status: "paid",
+          references: { providerPaymentId: txnId },
+        },
+      },
+      handler: async () => {},
+    });
+    expect(paid).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION:123456789")).toBeUndefined();
+    expect(await store.get("paymob:TRANSACTION:123456789:paid")).toMatchObject({
+      status: "completed",
+    });
+
+    let cancelledRan = false;
+    const cancelled = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_pe_cancelled",
+      event: {
+        schemaVersion: "1",
+        type: "payment.cancelled",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION",
+          occurredAt,
+          receivedAt: occurredAt,
+        },
+        payment: {
+          status: "cancelled",
+          references: { providerPaymentId: txnId },
+        },
+      },
+      handler: async () => {
+        cancelledRan = true;
+      },
+    });
+
+    expect(cancelled).toEqual({ outcome: "processed" });
+    expect(cancelled.outcome).not.toBe("duplicate_completed");
+    expect(cancelledRan).toBe(true);
+    expect(await store.get("paymob:TRANSACTION:123456789:cancelled")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("NEW-WH-KEY-1: PersistedPaymentEventEnvelope nested payment.status qualifies TRANSACTION", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+    const paymentEvent = {
+      schemaVersion: "1" as const,
+      type: "payment.succeeded" as const,
+      provider: {
+        gateway: "paymob",
+        eventId: txnId,
+        eventType: "TRANSACTION",
+        occurredAt: "2026-01-01T00:00:00.000Z",
+        receivedAt: "2026-01-01T00:00:00.000Z",
+      },
+      payment: {
+        status: "paid",
+        references: { providerPaymentId: txnId },
+      },
+    };
+
+    const outcome = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_env_paid",
+      envelope: {
+        schemaVersion: "1",
+        event: paymentEvent,
+        payloadHash: "hash_env_paid",
+        storedAt: "2026-01-01T00:00:00.000Z",
+      },
+      handler: async () => {},
+    });
+    expect(outcome).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION:123456789")).toBeUndefined();
+    expect(await store.get("paymob:TRANSACTION:123456789:paid")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("NEW-WH-KEY-1: TRANSACTION_RESPONSE PaymentEvent ignores payment.status", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const redirect = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_pe_redirect_status",
+      event: {
+        schemaVersion: "1",
+        type: "payment.processing",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION_RESPONSE",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+        payment: {
+          status: "paid",
+          references: { providerPaymentId: txnId },
+        },
+      },
+      handler: async () => {},
+    });
+    expect(redirect).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION_RESPONSE:123456789:paid")).toBeUndefined();
+    expect(await store.get("paymob:TRANSACTION_RESPONSE:123456789")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("NEW-WH-KEY-1: PaymentEvent refund.status qualifies TRANSACTION", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const refunded = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_pe_refund",
+      event: {
+        schemaVersion: "1",
+        type: "refund.completed",
+        provider: {
+          gateway: "paymob",
+          eventId: txnId,
+          eventType: "TRANSACTION",
+          occurredAt: "2026-01-01T00:00:00.000Z",
+          receivedAt: "2026-01-01T00:00:00.000Z",
+        },
+        refund: {
+          status: "completed",
+          references: { providerPaymentId: txnId },
+        },
+      },
+      handler: async () => {},
+    });
+    expect(refunded).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION:123456789")).toBeUndefined();
+    expect(await store.get("paymob:TRANSACTION:123456789:completed")).toMatchObject({
+      status: "completed",
+    });
+  });
+
   it("NEW-WH-1: extractInboxNotificationClass ignores remapped payment.succeeded", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({ store, mode: "inline" });

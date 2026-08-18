@@ -37,6 +37,7 @@ import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { DoStoreOptions } from "../types";
 import {
+  DEFAULT_DELETE_EXPIRED_LIMIT,
   IDEMPOTENCY_SELECT_COLS,
   mapIdempotencyRow,
   newLeaseToken,
@@ -321,31 +322,22 @@ export function createDoIdempotencyStore(
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() => {
-        const limit = input.limit;
+        // NEW-PERF-9: omit limit must not unbounded-DELETE (webhook/recon NEW-PERF-8).
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         // P11-DEL-1: TEXT lexical updated_at compares require canonical Z before.
         const before = canonicalizeIsoTimestamp(input.before, "before");
         // A4: never delete indeterminate by default.
-        if (limit !== undefined) {
-          const rows = ctx.getExecutor().query<{ key: string }>(
-            `DELETE FROM ${table}
-             WHERE key IN (
-               SELECT key FROM ${table}
-               WHERE status IN ('completed', 'expired')
-                 AND updated_at <= ?
-               ORDER BY updated_at ASC
-               LIMIT ?
-             )
-             RETURNING key`,
-            [before, limit],
-          );
-          return { deleted: rows.length };
-        }
         const rows = ctx.getExecutor().query<{ key: string }>(
           `DELETE FROM ${table}
-           WHERE status IN ('completed', 'expired')
-             AND updated_at <= ?
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status IN ('completed', 'expired')
+               AND updated_at <= ?
+             ORDER BY updated_at ASC
+             LIMIT ?
+           )
            RETURNING key`,
-          [before],
+          [before, limit],
         );
         return { deleted: rows.length };
       });

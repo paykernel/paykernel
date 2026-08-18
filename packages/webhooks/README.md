@@ -55,8 +55,8 @@ const payloadHash = resolveInboxPayloadHash({
 const outcome = await engine.processVerified({
   gateway: "stripe",
   providerEventId: webhookEvent.id,
-  // Paymob: pass event so the inbox key includes TRANSACTION vs
-  // TRANSACTION_RESPONSE (same txn id on redirect + processed — WEBHOOKS-1).
+  // Paymob: pass PaymentEvent so class is provider.eventType and processed
+  // status is payment.status / refund.status (NEW-WH-KEY-1 / WEBHOOKS-1).
   payloadHash,
   event: webhookEvent.event ?? webhookEvent,
   // Optional sanitized dual-write envelope (never raw signatures / secrets):
@@ -267,8 +267,12 @@ Paymob on raw `event.id` and no-op the redirect — that combo ACK-suppresses
 later paid. Redirect stays `paymob:TRANSACTION_RESPONSE:{txnId}`. Processed
 `TRANSACTION` includes domain status when available
 (`paymob:TRANSACTION:{id}:{status}`) so a later same-id void/refund snapshot
-is not `already_completed`. Child refund/capture callbacks may still have
-**new** `obj.id`s. Do **not** complete fulfillment on Paymob
+is not `already_completed`. Recommended `event: webhookEvent.event`
+(PaymentEvent) has no top-level `status` — the engine reads `payment.status`,
+`refund.status`, legacy `status`, and those paths on nested envelope
+`event` (NEW-WH-KEY-1). Redirect still ignores status. Child
+refund/capture callbacks may still have **new** `obj.id`s. Do **not**
+complete fulfillment on Paymob
 `payment.processing` — wait for processed `TRANSACTION` + a settlement
 stable type.
 

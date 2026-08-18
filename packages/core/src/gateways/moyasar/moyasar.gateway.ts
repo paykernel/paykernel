@@ -115,8 +115,9 @@ function isMoyasarRetryableError(error: unknown): boolean {
  * True only when Moyasar is known to have **rejected** the mutation (definite
  * client error). Used by `runIdempotentMutation` to clear the idempotency fence.
  *
- * Fail-closed (MOYASAR-1 / NEW-MOYASAR-4XX): anything else — network, 5xx,
- * 408/409/425/429, **post-2xx** invalid JSON (`GatewayApiError` with status
+ * Fail-closed (MOYASAR-1 / NEW-MOYASAR-4XX / NEW-MOYASAR-JSON-1): anything
+ * else — network, 5xx, 408/409/425/429, **post-2xx** invalid JSON
+ * (`NetworkError` with `afterProviderSubmit`, not `GatewayApiError` status
  * 2xx), mapping/`MoneyAmountError` after a successful HTTP body, unexpected
  * throws — is treated as indeterminate so the reservation is kept (`unknown`)
  * and a caller retry cannot double-apply. Moyasar has no native mutation
@@ -1167,8 +1168,8 @@ export class MoyasarGateway extends BaseGateway {
    *
    * Dual-writes Phase 7 {@link import('../../types/payment-event').PaymentEvent}
    * on `event` / `stableType` / `provider` while keeping provider-native `type`.
-   * Hash via {@link hashWebhookPayload} **before** stripping `secret_token`
-   * (redacts in place). `rawPayload` omits the secret after hashing.
+   * Hash a compact identity (id/type/created_at/data.id) — not the full tree
+   * (NEW-PERF-1). `rawPayload` omits `secret_token` after verification.
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
     const raw = this.assertMoyasarWebhookPayload(payload);
@@ -1187,9 +1188,9 @@ export class MoyasarGateway extends BaseGateway {
       captured?: number;
     };
 
-    // Hash with secret_token present so digest matches
-    // hashWebhookPayload(redacted-with-key). Strip only after hashing.
-    const payloadHash = hashWebhookPayload(raw);
+    // PERF-1: inbox identity is envelope id/type/created_at + payment id.
+    // Do not hash the full payment/source tree (or secret_token).
+    const payloadHash = hashWebhookPayload(this.compactWebhookIdentity(raw));
     const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
 
     const eventType = this.normalizeWebhookEventType(raw.type);
@@ -1610,7 +1611,7 @@ export class MoyasarGateway extends BaseGateway {
    * `provider.unmapped`. Never throw — verified payloads must ACK.
    */
   private parseCardAuthWebhookEvent(raw: MoyasarWebhookPayload): WebhookEvent {
-    const payloadHash = hashWebhookPayload(raw);
+    const payloadHash = hashWebhookPayload(this.compactWebhookIdentity(raw));
     const { secret_token: _secretToken, ...rawWithoutSecret } = raw;
     const data = raw.data;
     const currency =
@@ -1670,6 +1671,24 @@ export class MoyasarGateway extends BaseGateway {
     }
 
     return payload as unknown as MoyasarWebhookPayload;
+  }
+
+  /**
+   * Compact webhook identity for `payloadHash` (NEW-PERF-1).
+   * Matches Stripe: hash id/type/created + nested object id, not the full tree.
+   */
+  private compactWebhookIdentity(raw: MoyasarWebhookPayload): {
+    id: string;
+    type: string;
+    created_at: string;
+    object: string;
+  } {
+    return {
+      id: raw.id,
+      type: raw.type,
+      created_at: raw.created_at,
+      object: raw.data.id,
+    };
   }
 
   private extractPaymentId(metadata: unknown): string | undefined {
@@ -1758,7 +1777,9 @@ export class MoyasarGateway extends BaseGateway {
 
       // Keep timeout armed until the body is consumed (P610-ABT-4).
       try {
-        const data = await this.parseJsonResponse(response);
+        const data = await this.parseJsonResponse(response, {
+          mutating: abortOptions.afterProviderSubmit === true,
+        });
         return { response, data };
       } catch (e) {
         if (isAbortError(e)) {
@@ -1771,13 +1792,30 @@ export class MoyasarGateway extends BaseGateway {
     }
   }
 
-  private async parseJsonResponse(response: Response): Promise<unknown> {
+  /**
+   * Parse the provider body. Mutating HTTP 2xx with unreadable JSON is
+   * post-submit unknown (NEW-MOYASAR-JSON-1): throw
+   * {@link NetworkError} `afterProviderSubmit` so `executeWithHooks` returns
+   * indeterminate and `runIdempotentMutation` keeps the fence `unknown`.
+   * GET / non-mutating 2xx stay {@link GatewayApiError}.
+   */
+  private async parseJsonResponse(
+    response: Response,
+    options?: { mutating?: boolean },
+  ): Promise<unknown> {
     try {
       return await response.json();
     } catch (e) {
       // Body-read abort must stay a timeout/caller abort, not invalid JSON.
       if (isAbortError(e)) {
         throw e;
+      }
+      if (options?.mutating === true && response.ok) {
+        throw new NetworkError(
+          "Moyasar API returned an invalid JSON response; gateway outcome is unknown — reconcile via getPayment",
+          { status: response.status, cause: e },
+          { afterProviderSubmit: true },
+        );
       }
       throw new GatewayApiError(
         "Moyasar API returned an invalid JSON response",

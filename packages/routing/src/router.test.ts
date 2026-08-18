@@ -523,6 +523,115 @@ describe("21.1 inputs affect matching", () => {
     ).toThrow(NoRouteMatchError);
   });
 
+  it("NEW-ROUTE-CCY-1: USD input.currency + EUR Money amount does not route", () => {
+    const router = createPaymentRouter({
+      rules: [route({ currency: "USD" }).to("stripe")],
+      fallback: "paypal",
+    });
+    expect(() =>
+      router.select({
+        currency: "USD",
+        amount: { amount: "10.00", currency: "EUR" },
+      }),
+    ).toThrow(NoRouteMatchError);
+    try {
+      router.select({
+        currency: "USD",
+        amount: { amount: "10.00", currency: "EUR" },
+      });
+      expect.unreachable("expected NoRouteMatchError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoRouteMatchError);
+      expect((err as NoRouteMatchError).reason).toBe(
+        "currency_mismatch_honesty",
+      );
+    }
+    // Same-currency Money still routes.
+    expect(
+      router.select({
+        currency: "USD",
+        amount: { amount: "10.00", currency: "USD" },
+      }).gateway,
+    ).toBe("stripe");
+    // String amount + disagreeing amountCurrency also fails closed.
+    expect(() =>
+      router.select({
+        currency: "USD",
+        amount: "10.00",
+        amountCurrency: "EUR",
+      }),
+    ).toThrow(NoRouteMatchError);
+    // Inherited string amount (no amountCurrency) is not a conflict.
+    expect(
+      router.select({ currency: "USD", amount: "10.00" }).gateway,
+    ).toBe("stripe");
+  });
+
+  it("NEW-ROUTE-2: complementary tenant partitions honesty-block fallback after exclude", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ tenant: "acme" }).to("stripe"),
+        route({ tenant: "globex" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    expect(router.select({ tenant: "globex" }).gateway).toBe("adyen");
+    expect(() =>
+      router.select({
+        tenant: "globex",
+        excludeGateways: ["adyen"],
+      }),
+    ).toThrow(NoRouteMatchError);
+    try {
+      router.select({
+        tenant: "globex",
+        excludeGateways: ["adyen"],
+      });
+      expect.unreachable("expected NoRouteMatchError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoRouteMatchError);
+      expect((err as NoRouteMatchError).reason).toBe(
+        "complementary_tenant_honesty",
+      );
+      expect((err as NoRouteMatchError).message).toMatch(
+        /complementary tenant/i,
+      );
+    }
+    // Unmatched tenant may still use select-time fallback.
+    const unmatched = router.select({ tenant: "other" });
+    expect(unmatched.gateway).toBe("stripe");
+    expect(unmatched.usedFallback).toBe(true);
+  });
+
+  it("NEW-ROUTE-2: complementary tenant + unhealthy matching bucket is honesty-blocked", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ tenant: "acme" }).to("stripe"),
+        route({ tenant: "globex" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({
+        tenant: "globex",
+        health: { adyen: false },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("NEW-ROUTE-2: single-tenant exclude may still use fallback (not complementary)", () => {
+    const router = createPaymentRouter({
+      rules: [route({ tenant: "acme" }).to("stripe")],
+      fallback: "paypal",
+    });
+    const d = router.select({
+      tenant: "acme",
+      excludeGateways: ["stripe"],
+    });
+    expect(d.gateway).toBe("paypal");
+    expect(d.usedFallback).toBe(true);
+  });
+
   it("NEW-ROUTE-1: single-currency exclude may still use fallback (not complementary)", () => {
     const router = createPaymentRouter({
       rules: [route({ currency: "USD" }).to("stripe")],

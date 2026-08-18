@@ -1091,6 +1091,25 @@ describe("deleteExpired before canonical (P11-DEL-1)", () => {
     });
     expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
   });
+
+  it("NEW-PERF-9: idempotency omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    const idempExec = createScriptedExecutor({ onQuery: () => [] });
+    await createPostgresIdempotencyStore({ executor: idempExec }).deleteExpired({
+      before: offsetBefore,
+    });
+    const idempDel = idempExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(idempDel).toBeDefined();
+    expect(idempDel!.sql).toMatch(/LIMIT\s+\$2/i);
+    expect(idempDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = createScriptedExecutor({ onQuery: () => [] });
+    await createPostgresIdempotencyStore({ executor: explicit }).deleteExpired({
+      before: offsetBefore,
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
+  });
 });
 
 describe("listRetryable now canonical (STORES-2)", () => {

@@ -10,6 +10,7 @@
 import {
   amountInRange,
   amountOutsideConfiguredRange,
+  inputCurrenciesConflict,
 } from "./amount-range";
 import { NoRouteMatchError, type NoRouteMatchReason } from "./errors";
 import {
@@ -33,7 +34,12 @@ import type {
 } from "./types";
 
 /** Categorical partitions that must not be silently bypassed by select-time fallback. */
-const PARTITION_FIELDS = ["currency", "country", "paymentMethod"] as const;
+const PARTITION_FIELDS = [
+  "currency",
+  "country",
+  "paymentMethod",
+  "tenant",
+] as const;
 type PartitionField = (typeof PARTITION_FIELDS)[number];
 
 const DEFAULT_HEALTH_THRESHOLD = 1;
@@ -100,6 +106,16 @@ function selectImpl(
   fallback: string | undefined,
   healthThreshold: number,
 ): RoutingDecision {
+  // NEW-ROUTE-CCY-1: conflicting input.currency vs Money / amountCurrency
+  // is incomplete money — fail closed before any rule or fallback match.
+  if (inputCurrenciesConflict(input)) {
+    throw new NoRouteMatchError(
+      "No routing rule matched: input.currency disagrees with amount currency (select-time fallback does not accept conflicting money currency)",
+      input,
+      "currency_mismatch_honesty",
+    );
+  }
+
   // ROUTE-1: excludeGateways compared case-insensitively (after trim).
   const exclude = new Set(
     (input.excludeGateways ?? [])
@@ -150,12 +166,13 @@ function selectImpl(
         "capability_honesty",
       );
     }
-    // NEW-ROUTE-1: complementary currency / country / method partitions —
-    // same honesty as hasAmountRangeOnlyReject. After exclude/unhealthy of
-    // the matching bucket, do not send the input to unconstrained fallback
-    // (e.g. USD→stripe + EUR→adyen, exclude adyen, EUR must not fall back
-    // to stripe). Unmatched values (no rule in that partition) may still
-    // use select-time fallback.
+    // NEW-ROUTE-1 / NEW-ROUTE-2: complementary currency / country / method /
+    // tenant partitions — same honesty as hasAmountRangeOnlyReject. After
+    // exclude/unhealthy of the matching bucket, do not send the input to
+    // unconstrained fallback (e.g. USD→stripe + EUR→adyen, exclude adyen,
+    // EUR must not fall back to stripe; acme→stripe + globex→adyen, exclude
+    // adyen, globex must not fall back to stripe). Unmatched values (no rule
+    // in that partition) may still use select-time fallback.
     const partitionHonesty = complementaryPartitionHonesty(input, rules);
     if (partitionHonesty !== undefined) {
       throw new NoRouteMatchError(
@@ -235,9 +252,10 @@ function hasRequiredCapabilitiesOnlyReject(
 }
 
 /**
- * NEW-ROUTE-1: do not use unconstrained select-time fallback when a
- * complementary currency / country / paymentMethod partition exists.
- * Exclude / health on the matching bucket are ignored (same as amount honesty).
+ * NEW-ROUTE-1 / NEW-ROUTE-2: do not use unconstrained select-time fallback
+ * when a complementary currency / country / paymentMethod / tenant partition
+ * exists. Exclude / health on the matching bucket are ignored (same as
+ * amount honesty).
  */
 function complementaryPartitionHonesty(
   input: RoutingInput,
@@ -267,12 +285,13 @@ function hasComplementaryPartitionOnlyReject(
   if (inputValue === undefined) return false;
 
   // Input must be inside a configured bucket of this field. Unmatched values
-  // (GBP when only USD/EUR exist) still use select-time fallback.
+  // (GBP when only USD/EUR exist; unknown tenant when only acme/globex exist)
+  // still use select-time fallback.
   const hasMatchingBucket = rules.some((rule) => {
     const value = specifiedPartitionValue(rule.match, field);
     return (
       value !== undefined &&
-      stringsEqualCi(value, inputValue) &&
+      partitionValuesEqual(field, value, inputValue) &&
       ruleMatches(rule, input)
     );
   });
@@ -283,7 +302,7 @@ function hasComplementaryPartitionOnlyReject(
   for (const rule of rules) {
     const ruleValue = specifiedPartitionValue(rule.match, field);
     if (ruleValue === undefined) continue;
-    if (stringsEqualCi(ruleValue, inputValue)) continue;
+    if (partitionValuesEqual(field, ruleValue, inputValue)) continue;
     if (ruleMatchesIgnoringPartitionField(rule, input, field)) {
       return true;
     }
@@ -293,7 +312,9 @@ function hasComplementaryPartitionOnlyReject(
   // (USD+US vs EUR+DE) — still do not unconstrained-fallback.
   return rules.some((rule) => {
     const value = specifiedPartitionValue(rule.match, field);
-    return value !== undefined && !stringsEqualCi(value, inputValue);
+    return (
+      value !== undefined && !partitionValuesEqual(field, value, inputValue)
+    );
   });
 }
 
@@ -303,8 +324,24 @@ function specifiedPartitionValue(
 ): string | undefined {
   const raw = match[field];
   if (raw === undefined) return undefined;
+  // Tenant matching is exact (no trim / CI). Empty string is still a bucket.
+  if (field === "tenant") {
+    return raw;
+  }
   const trimmed = raw.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Currency / country / method: CI after trim. Tenant: exact (same as match). */
+function partitionValuesEqual(
+  field: PartitionField,
+  a: string,
+  b: string,
+): boolean {
+  if (field === "tenant") {
+    return a === b;
+  }
+  return stringsEqualCi(a, b);
 }
 
 /** {@link ruleMatches} with `field` treated as a wildcard. */
@@ -326,6 +363,8 @@ function partitionHonestyReason(field: PartitionField): NoRouteMatchReason {
       return "complementary_country_honesty";
     case "paymentMethod":
       return "complementary_method_honesty";
+    case "tenant":
+      return "complementary_tenant_honesty";
   }
 }
 
@@ -337,6 +376,8 @@ function partitionHonestyMessage(field: PartitionField): string {
       return "No routing rule matched: complementary country partition exists (select-time fallback does not bypass country partitions)";
     case "paymentMethod":
       return "No routing rule matched: complementary payment-method partition exists (select-time fallback does not bypass payment-method partitions)";
+    case "tenant":
+      return "No routing rule matched: complementary tenant partition exists (select-time fallback does not bypass tenant partitions)";
   }
 }
 

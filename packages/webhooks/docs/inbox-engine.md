@@ -7,7 +7,7 @@ Full guide: **[webhook-inbox.md](./webhook-inbox.md)** · Crash matrix: **[crash
 ## Pipeline (10.1)
 
 1. Validate inputs (`gateway`, `providerEventId`, `payloadHash`).
-2. Derive key: `deriveWebhookEventKey(gateway, providerEventId, notificationClass?, status?)` → `gateway:providerEventId` (Paymob: `paymob:{TRANSACTION|TRANSACTION_RESPONSE}:{txnId}` when class is present — WEBHOOKS-1). Redirect stays `TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes domain status when available (`paymob:TRANSACTION:{txnId}:{status}`) so a later same-id void/refund snapshot is not `already_completed` (NEW-WEBHOOKS-2). Notification class is `provider.eventType` or known native HMAC classes only — not remapped `payment.succeeded` (NEW-WH-1). Do not complete on Paymob `payment.processing`.
+2. Derive key: `deriveWebhookEventKey(gateway, providerEventId, notificationClass?, status?)` → `gateway:providerEventId` (Paymob: `paymob:{TRANSACTION|TRANSACTION_RESPONSE}:{txnId}` when class is present — WEBHOOKS-1). Redirect stays `TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes domain status when available (`paymob:TRANSACTION:{txnId}:{status}`) so a later same-id void/refund snapshot is not `already_completed` (NEW-WEBHOOKS-2). Domain status is `status`, `payment.status`, `refund.status`, or those paths on nested `event` — PaymentEvent has no top-level `status` (NEW-WH-KEY-1). Notification class is `provider.eventType` or known native HMAC classes only — not remapped `payment.succeeded` (NEW-WH-1). Do not complete on Paymob `payment.processing`.
 3. Atomic `store.claim` (never get-then-set in the engine).
 4. Map claim kinds to outcomes (no handler on non-`acquired`).
 5. Mode branch (`inline` / `durable_retry` / `ackAfterClaim`).

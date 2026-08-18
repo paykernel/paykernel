@@ -3,6 +3,8 @@ import {
   amountInRange,
   amountOutsideConfiguredRange,
   compareDecimalAmounts,
+  inputCurrenciesConflict,
+  resolveDeclaredAmountCurrency,
   resolveInputAmount,
 } from "./amount-range";
 import type { RouteMatchCriteria, RoutingInput } from "./types";
@@ -39,6 +41,57 @@ describe("resolveInputAmount", () => {
     expect(resolveInputAmount({})).toBeNull();
     expect(resolveInputAmount({ amount: "10" })).toBeNull();
     expect(resolveInputAmount({ amountCurrency: "USD" })).toBeNull();
+  });
+});
+
+describe("NEW-ROUTE-CCY-1 input currency vs amount currency", () => {
+  it("resolves Money.currency or amountCurrency without inheriting input.currency", () => {
+    expect(
+      resolveDeclaredAmountCurrency({
+        currency: "USD",
+        amount: { amount: "10.00", currency: "EUR" },
+      }),
+    ).toBe("EUR");
+    expect(
+      resolveDeclaredAmountCurrency({
+        currency: "USD",
+        amount: "10.00",
+        amountCurrency: "EUR",
+      }),
+    ).toBe("EUR");
+    expect(
+      resolveDeclaredAmountCurrency({ currency: "USD", amount: "10.00" }),
+    ).toBeUndefined();
+  });
+
+  it("conflicts when input.currency and Money / amountCurrency both present and differ", () => {
+    expect(
+      inputCurrenciesConflict({
+        currency: "USD",
+        amount: { amount: "10.00", currency: "EUR" },
+      }),
+    ).toBe(true);
+    expect(
+      inputCurrenciesConflict({
+        currency: "USD",
+        amount: "10.00",
+        amountCurrency: "EUR",
+      }),
+    ).toBe(true);
+    expect(
+      inputCurrenciesConflict({
+        currency: "usd",
+        amount: { amount: "10.00", currency: "USD" },
+      }),
+    ).toBe(false);
+    expect(
+      inputCurrenciesConflict({ currency: "USD", amount: "10.00" }),
+    ).toBe(false);
+    expect(
+      inputCurrenciesConflict({
+        amount: { amount: "10.00", currency: "EUR" },
+      }),
+    ).toBe(false);
   });
 });
 

@@ -256,10 +256,12 @@ deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
   `event.id` and complete the documented redirect. Redirect stays
   `paymob:TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes
   domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a
-  later same-id void/refund snapshot is not `already_completed`. Child
-  refund/capture webhooks may still mint a **new** `obj.id`. Do **not**
-  complete fulfillment on Paymob `payment.processing` (redirect); wait for
-  processed `TRANSACTION`.
+  later same-id void/refund snapshot is not `already_completed`. Status is
+  `status`, `payment.status`, `refund.status`, or those paths on nested
+  `event` (PaymentEvent / PersistedPaymentEventEnvelope — NEW-WH-KEY-1).
+  Redirect still ignores status. Child refund/capture webhooks may still
+  mint a **new** `obj.id`. Do **not** complete fulfillment on Paymob
+  `payment.processing` (redirect); wait for processed `TRANSACTION`.
 
 ### Payload hash (one canonical source — WEBHOOKS-2)
 

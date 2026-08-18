@@ -432,18 +432,10 @@ return {'ok'}
 `.trim();
 
 /**
- * KEYS[1]=record KEYS[2]=dueIndex
- * ARGV: nowMs, nowIso, logicalKey
- * Soft-release expired claim → scheduled and re-index so listDue sees it.
- * Missing hash ZREMs ARGV logicalKey from the due index (NEW-STORE-1).
+ * Shared get-one body (soft-release + ghost ZREM). Used by single GET and
+ * PERF-4 list GET. rec/idx/nowMs/nowIso/listedKey are locals in the caller.
  */
-export const RECON_GET_LUA = `
-local rec = KEYS[1]
-local idx = KEYS[2]
-local nowMs = tonumber(ARGV[1])
-local nowIso = ARGV[2]
-local listedKey = ARGV[3] or ''
-
+const RECON_GET_ONE_LUA = `
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
   local m = {}
@@ -471,48 +463,81 @@ local function pack(m)
   }
 end
 
-if redis.call('EXISTS', rec) == 0 then
-  -- NEW-STORE-1: drop ghost ZSET members so listDue LIMIT windows
-  -- cannot fill with dead keys (hash gone, due member left).
-  if idx ~= nil and idx ~= '' and listedKey ~= '' then
-    redis.call('ZREM', idx, listedKey)
-  end
-  return {'missing'}
-end
-
-local m = hgetall_map(rec)
-if (m['status'] or '') == 'claimed' then
-  local exp = tonumber(m['lease_expires_ms'] or '0') or 0
-  local logicalKey = m['key'] or ''
-  if exp <= nowMs then
-    local dueMs = tonumber(m['due_ms'] or tostring(nowMs)) or nowMs
-    -- P1315-REDIS-1: restore unfinished claim attempt so crash reclaim does not
-    -- burn maxAttempts (parity with WEBHOOK_GET_LUA / memory soft-release).
-    local attempts = tonumber(m['attempts'] or '0') or 0
-    if attempts > 0 then
-      attempts = attempts - 1
+local function recon_get_one(rec, idx, nowMs, nowIso, listedKey)
+  if redis.call('EXISTS', rec) == 0 then
+    -- NEW-STORE-1: drop ghost ZSET members so listDue LIMIT windows
+    -- cannot fill with dead keys (hash gone, due member left).
+    if idx ~= nil and idx ~= '' and listedKey ~= '' then
+      redis.call('ZREM', idx, listedKey)
     end
-    redis.call('HSET', rec,
-      'status', 'scheduled',
-      'lease_owner', '',
-      'lease_token', '',
-      'lease_expires_at', '',
-      'lease_expires_ms', '0',
-      'attempts', tostring(attempts),
-      'updated_at', nowIso
-    )
-    if logicalKey ~= '' then
-      redis.call('ZADD', idx, dueMs, logicalKey)
-    end
-    m = hgetall_map(rec)
-  elseif logicalKey ~= '' then
-    -- Heal a stale due score (pre-REDIS-1 renew left the original expiry).
-    redis.call('ZADD', idx, exp, logicalKey)
+    return {'missing'}
   end
-end
 
-local p = pack(m)
-return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+  local m = hgetall_map(rec)
+  if (m['status'] or '') == 'claimed' then
+    local exp = tonumber(m['lease_expires_ms'] or '0') or 0
+    local logicalKey = m['key'] or ''
+    if exp <= nowMs then
+      local dueMs = tonumber(m['due_ms'] or tostring(nowMs)) or nowMs
+      -- P1315-REDIS-1: restore unfinished claim attempt so crash reclaim does not
+      -- burn maxAttempts (parity with WEBHOOK_GET_LUA / memory soft-release).
+      local attempts = tonumber(m['attempts'] or '0') or 0
+      if attempts > 0 then
+        attempts = attempts - 1
+      end
+      redis.call('HSET', rec,
+        'status', 'scheduled',
+        'lease_owner', '',
+        'lease_token', '',
+        'lease_expires_at', '',
+        'lease_expires_ms', '0',
+        'attempts', tostring(attempts),
+        'updated_at', nowIso
+      )
+      if logicalKey ~= '' then
+        redis.call('ZADD', idx, dueMs, logicalKey)
+      end
+      m = hgetall_map(rec)
+    elseif logicalKey ~= '' then
+      -- Heal a stale due score (pre-REDIS-1 renew left the original expiry).
+      redis.call('ZADD', idx, exp, logicalKey)
+    end
+  end
+
+  local p = pack(m)
+  return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+end
+`.trim();
+
+/**
+ * KEYS[1]=record KEYS[2]=dueIndex
+ * ARGV: nowMs, nowIso, logicalKey
+ * Soft-release expired claim → scheduled and re-index so listDue sees it.
+ * Missing hash ZREMs ARGV logicalKey from the due index (NEW-STORE-1).
+ */
+export const RECON_GET_LUA = `
+${RECON_GET_ONE_LUA}
+return recon_get_one(KEYS[1], KEYS[2], tonumber(ARGV[1]), ARGV[2], ARGV[3] or '')
+`.trim();
+
+/**
+ * PERF-4: one EVAL for a ZRANGE page.
+ * KEYS[1]=dueIndex KEYS[2..n+1]=record keys
+ * ARGV: nowMs, nowIso, logicalKey1..logicalKeyN
+ * Returns an array of tagged get results (same shape as RECON_GET_LUA each).
+ * Same-slot KEYS (hash-tag / standalone). Cluster without clusterKeys already
+ * CROSSSLOT on mutators — same constraint.
+ */
+export const RECON_LIST_GET_LUA = `
+${RECON_GET_ONE_LUA}
+local idx = KEYS[1]
+local nowMs = tonumber(ARGV[1])
+local nowIso = ARGV[2]
+local out = {}
+for i = 2, #KEYS do
+  out[i - 1] = recon_get_one(KEYS[i], idx, nowMs, nowIso, ARGV[i + 1] or '')
+end
+return out
 `.trim();
 
 /** KEYS[1]=record KEYS[2]=dueIndex ARGV: beforeIso, beforeMs, logicalKey */

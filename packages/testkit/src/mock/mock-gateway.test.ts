@@ -1872,4 +1872,45 @@ describe("mockGateway", () => {
     });
     expect(replay.gatewayId).toBe(a.gatewayId);
   });
+
+  it("same idempotencyKey with different setup_future_usage/iframe is fingerprint_conflict (NEW-TESTKIT-FP-1)", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      stripeSetupFutureUsage: "on_session",
+      paymobIframeId: 111,
+      idempotencyKey: "identity-fp-setup-iframe",
+    });
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeSetupFutureUsage: "off_session",
+        paymobIframeId: 111,
+        idempotencyKey: "identity-fp-setup-iframe",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeSetupFutureUsage: "on_session",
+        paymobIframeId: 222,
+        idempotencyKey: "identity-fp-setup-iframe",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeSetupFutureUsage: "on_session",
+        paymobIframeId: "111",
+        idempotencyKey: "identity-fp-setup-iframe",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    const replay = await g.createPayment({
+      ...baseCreate,
+      stripeSetupFutureUsage: "on_session",
+      paymobIframeId: 111,
+      idempotencyKey: "identity-fp-setup-iframe",
+    });
+    expect(replay.gatewayId).toBe(a.gatewayId);
+  });
 });

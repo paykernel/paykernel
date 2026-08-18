@@ -71,6 +71,18 @@ export function parseTaggedResult(raw: unknown): TaggedResult {
   return { tag, fields };
 }
 
+/**
+ * PERF-4 list GET: Lua returns an array of tagged rows (same shape as one GET).
+ */
+export function parseTaggedResultList(raw: unknown): TaggedResult[] {
+  if (!Array.isArray(raw)) {
+    throw new StoreCorruptedRecordError(
+      `unexpected list-get script result type: ${typeof raw}`,
+    );
+  }
+  return raw.map((row) => parseTaggedResult(row));
+}
+
 function emptyToUndefined(s: string): string | undefined {
   return s === "" ? undefined : s;
 }

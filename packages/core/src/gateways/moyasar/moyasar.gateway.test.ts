@@ -3,6 +3,7 @@ import { HooksManager } from "../../hooks/hooks.manager";
 import {
   AuthenticationError,
   CardDeclinedError,
+  GatewayApiError,
   InvalidRequestError,
   InvalidWebhookError,
   NetworkError,
@@ -1820,6 +1821,20 @@ describe("MoyasarGateway", () => {
       ).rejects.toBeInstanceOf(NetworkError);
     });
 
+    it("treats GET HTTP 200 invalid JSON as GatewayApiError, not afterProviderSubmit (NEW-MOYASAR-JSON-1)", async () => {
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(input), init });
+        return new Response("not-json{{{", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+
+      await expect(
+        createGateway().getPayment({ gatewayPaymentId: PAYMENT_ID }),
+      ).rejects.toBeInstanceOf(GatewayApiError);
+    });
+
     it("aborts requests that exceed the configured timeout", async () => {
       globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         fetchCalls.push({ url: String(input), init });
@@ -2441,6 +2456,8 @@ describe("MoyasarGateway", () => {
     it("demotes payment_paid dual-write when domain status is not paid-like (MOYASAR-3)", () => {
       // Envelope payment_paid maps to payment.succeeded, but provider status
       // authorized is not paid-like — dual-write must not settle from type alone.
+      // Catalog rematch (authorized domain) yields payment.authorized; local
+      // demote still covers residual settled arms (e.g. partially_captured).
       const event = createGateway().parseWebhookEvent({
         id: "wh_paid_auth_mismatch",
         type: "payment_paid",
@@ -2458,8 +2475,10 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("authorized");
       expect(event.type).toBe("payment_paid");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
+      expect(event.stableType).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.stableType).toBe("payment.authorized");
+      expect(event.event?.type).toBe("payment.authorized");
       expect(event.provider?.eventType).toBe("payment_paid");
     });
 
@@ -2574,7 +2593,7 @@ describe("MoyasarGateway", () => {
       expect(event.currency).toBe("SAR");
     });
 
-    it("hashes webhook via hashWebhookPayload with secret_token redacted in place (P610-MOY-3)", () => {
+    it("hashes webhook via compact identity, not the full tree (NEW-PERF-1)", () => {
       const payload = {
         id: "wh_hash",
         type: "payment_paid",
@@ -2588,14 +2607,18 @@ describe("MoyasarGateway", () => {
           captured: 10000,
         },
       };
-      const { secret_token: _secret, ...stripped } = payload;
-      const redactedWithKey = { ...payload, secret_token: "[REDACTED]" };
+      const compactIdentity = {
+        id: "wh_hash",
+        type: "payment_paid",
+        created_at: "2026-05-21T10:00:00Z",
+        object: PAYMENT_ID,
+      };
 
       const event = createGateway().parseWebhookEvent(payload);
 
-      expect(event.payloadHash).toBe(hashWebhookPayload(redactedWithKey));
-      expect(event.payloadHash).toBe(hashWebhookPayload(payload));
-      expect(event.payloadHash).not.toBe(hashWebhookPayload(stripped));
+      expect(event.payloadHash).toBe(hashWebhookPayload(compactIdentity));
+      expect(event.payloadHash).not.toBe(hashWebhookPayload(payload));
+      expect(event.payloadHash).not.toBe(hashWebhookPayload(event.rawPayload));
       expect(
         (event.rawPayload as Record<string, unknown>).secret_token,
       ).toBeUndefined();
@@ -3103,10 +3126,10 @@ describe("MoyasarGateway", () => {
       }
     });
 
-    it("keeps reservation after 2xx invalid JSON on refund (MOYASAR-1)", async () => {
-      // HTTP 2xx with unparseable body: mutation may already have applied.
-      // Fence must stay so a retry cannot double-refund.
-      // Full refund (no amount) — no preflight GET so the only call is the mutation.
+    it("treats refund HTTP 200 invalid JSON as indeterminate and keeps fence unknown (NEW-MOYASAR-JSON-1)", async () => {
+      // Mutating HTTP 2xx with unreadable JSON: POST may already have applied.
+      // executeWithHooks maps NetworkError.afterProviderSubmit → indeterminate.
+      // Fence stays unknown; same key must not POST again.
       const idempotencyStore = new InMemoryIdempotencyStore();
       const gateway = createGateway({ ...CONFIG, idempotencyStore });
       globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -3122,11 +3145,63 @@ describe("MoyasarGateway", () => {
         idempotencyKey: "refund-key-bad-json-2xx",
       };
 
-      await expect(gateway.refundPayment(params)).rejects.toBeTruthy();
-      // Indeterminate post-2xx parse failure → unknown fence, no second apply.
+      const first = await gateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+      expect(first.status).not.toBe("completed");
+      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("pending");
+      expect(first.outcome).not.toBe("succeeded");
+
+      const fence = await idempotencyStore.get(
+        `moyasar:refundPayment:${PAYMENT_ID}:refund-key-bad-json-2xx`,
+      );
+      expect(fence?.status).toBe("unknown");
+      expect(fence?.status).not.toBe("completed");
+      expect(fence?.result).toBeUndefined();
+
       await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
         InvalidRequestError,
       );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("treats capture HTTP 200 invalid JSON as indeterminate and keeps fence unknown (NEW-MOYASAR-JSON-1)", async () => {
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        fetchCalls.push({ url: String(input), init });
+        return new Response("not-json{{{", {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as typeof fetch;
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: "capture-key-bad-json-2xx",
+      };
+
+      const first = await gateway.capturePayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+      expect(first.status).not.toBe("paid");
+      expect(first.success).not.toBe(true);
+
+      const fence = await idempotencyStore.get(
+        `moyasar:capturePayment:${PAYMENT_ID}:capture-key-bad-json-2xx`,
+      );
+      expect(fence?.status).toBe("unknown");
+      expect(fence?.status).not.toBe("completed");
+      expect(fence?.result).toBeUndefined();
+
+      await expect(gateway.capturePayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      const capturePosts = fetchCalls.filter((c) =>
+        String(c.url).includes("/capture"),
+      );
+      expect(capturePosts).toHaveLength(1);
       expect(fetchCalls).toHaveLength(1);
     });
 

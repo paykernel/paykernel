@@ -164,22 +164,82 @@ describe("createMemoryIdempotencyStore", () => {
     });
     expect(r.kind).toBe("acquired");
     if (r.kind !== "acquired") return;
-    // Advance past lease expiry; row is still reserved until soft-release/reclaim.
+    // Advance past lease expiry; row is still reserved until reclaim.
     clock.advance(5_000);
     const before = new Date(clock.nowMs() + 1).toISOString();
     const cleaned = await store.deleteExpired({ before });
     expect(cleaned.deleted).toBe(0);
-    // Key still present (not wiped); get soft-releases to expired.
+    // NEW-STORE-4: get is read-only — does not mutate reserved → expired.
     const got = await store.get("reserved_old_lease");
     expect(got).toBeDefined();
-    expect(got?.status).toBe("expired");
-    // Terminal expired may now be cleaned.
+    expect(got?.status).toBe("reserved");
+    expect(got?.leaseToken).toBe(r.leaseToken);
     clock.advance(1);
     const cleaned2 = await store.deleteExpired({
       before: new Date(clock.nowMs() + 1).toISOString(),
     });
-    expect(cleaned2.deleted).toBe(1);
-    expect(await store.get("reserved_old_lease")).toBeUndefined();
+    expect(cleaned2.deleted).toBe(0);
+    expect((await store.get("reserved_old_lease"))?.status).toBe("reserved");
+  });
+
+  it("NEW-STORE-4: get after expiry is read-only; markIndeterminate still parks (A4)", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryIdempotencyStore({ clock });
+    const r = await store.reserve({
+      key: "a4_hang",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    clock.advance(1_001);
+    const peeked = await store.get("a4_hang");
+    expect(peeked?.status).toBe("reserved");
+    expect(peeked?.leaseToken).toBe(r.leaseToken);
+    await store.markIndeterminate({
+      key: "a4_hang",
+      leaseToken: r.leaseToken,
+      reason: "network_timeout",
+    });
+    const parked = await store.get("a4_hang");
+    expect(parked?.status).toBe("indeterminate");
+    const blocked = await store.reserve({
+      key: "a4_hang",
+      fingerprint: "fp",
+      owner: "w2",
+      leaseMs: 5_000,
+    });
+    expect(blocked.kind).toBe("indeterminate");
+  });
+
+  it("NEW-STORE-4: complete after expiry fails closed without clearing the token", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryIdempotencyStore({ clock });
+    const r = await store.reserve({
+      key: "id_complete_exp",
+      fingerprint: "fp",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(r.kind).toBe("acquired");
+    if (r.kind !== "acquired") return;
+    clock.advance(1_001);
+    await expect(
+      store.complete({
+        key: "id_complete_exp",
+        leaseToken: r.leaseToken,
+        result: {},
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    const after = await store.get("id_complete_exp");
+    expect(after?.status).toBe("reserved");
+    expect(after?.leaseToken).toBe(r.leaseToken);
+    await store.markIndeterminate({
+      key: "id_complete_exp",
+      leaseToken: r.leaseToken,
+    });
+    expect((await store.get("id_complete_exp"))?.status).toBe("indeterminate");
   });
 
   it("indeterminate blocks reserve and is not deleted by deleteExpired (A4)", async () => {
@@ -540,6 +600,61 @@ describe("createMemoryWebhookInboxStore", () => {
     ).rejects.toBeInstanceOf(StoreLeaseLostError);
   });
 
+  it("NEW-STORE-3: complete after expiry does not wipe then lease_lost", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_complete_wipe",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.complete({ key: "e_complete_wipe", leaseToken: a.leaseToken }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    // Fail-closed without restore-then-lose: matching token can still fail().
+    await store.fail({
+      key: "e_complete_wipe",
+      leaseToken: a.leaseToken,
+      error: "recorded_after_expiry",
+    });
+    const rec = await store.get("e_complete_wipe");
+    expect(rec?.status).toBe("pending");
+    expect(rec?.lastError).toBe("recorded_after_expiry");
+  });
+
+  it("NEW-STORE-3: renew after expiry does not wipe then lease_lost", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_renew_wipe",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    clock.advance(2_000);
+    const r = await store.renew({
+      key: "e_renew_wipe",
+      leaseToken: a.leaseToken,
+      leaseMs: 5_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("lease_lost");
+    await store.fail({
+      key: "e_renew_wipe",
+      leaseToken: a.leaseToken,
+      error: "renew_expiry_recorded",
+    });
+    const rec = await store.get("e_renew_wipe");
+    expect(rec?.status).toBe("pending");
+    expect(rec?.lastError).toBe("renew_expiry_recorded");
+  });
+
   it("maxEntries skips active claimed and evicts terminal; refuses when all leased", async () => {
     const clock = createFakeClock();
     const store = createMemoryWebhookInboxStore({ clock, maxEntries: 2 });
@@ -779,6 +894,99 @@ describe("createMemoryReconciliationStore", () => {
     expect(second.kind).toBe("acquired");
     if (second.kind !== "acquired") return;
     expect(second.record.attempts).toBe(first.record.attempts);
+  });
+
+  it("NEW-STORE-5: fail after expiry records with matching token (no wipe-first)", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_fail_exp",
+      subjectId: "p",
+      reason: "hang",
+      dueAt: clock.nowIso(),
+    });
+    const first = await store.claim({
+      key: "r_fail_exp",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    expect(first.record.attempts).toBe(1);
+    clock.advance(2_000);
+    await store.fail({
+      key: "r_fail_exp",
+      leaseToken: first.leaseToken,
+      error: "handler overran lease",
+      retryAt: new Date(clock.nowMs() + 5_000).toISOString(),
+    });
+    const rec = await store.get("r_fail_exp");
+    expect(rec?.status).toBe("scheduled");
+    expect(rec?.attempts).toBe(1);
+    expect(rec?.lastError).toBe("handler overran lease");
+  });
+
+  it("NEW-STORE-5: complete after expiry fails closed; fail still records", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_complete_wipe",
+      subjectId: "p",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    const first = await store.claim({
+      key: "r_complete_wipe",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.complete({
+        key: "r_complete_wipe",
+        leaseToken: first.leaseToken,
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    await store.fail({
+      key: "r_complete_wipe",
+      leaseToken: first.leaseToken,
+      error: "recorded_after_failed_complete",
+    });
+    expect((await store.get("r_complete_wipe"))?.status).toBe("failed");
+  });
+
+  it("NEW-STORE-5: markManualReview after expiry fails closed without wipe", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_review_exp",
+      subjectId: "p",
+      reason: "x",
+      dueAt: clock.nowIso(),
+    });
+    const first = await store.claim({
+      key: "r_review_exp",
+      owner: "w1",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    await expect(
+      store.markManualReview({
+        key: "r_review_exp",
+        leaseToken: first.leaseToken,
+        note: "hang_review",
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+    await store.fail({
+      key: "r_review_exp",
+      leaseToken: first.leaseToken,
+      error: "recorded_after_failed_review",
+    });
+    expect((await store.get("r_review_exp"))?.status).toBe("failed");
   });
 
   it("schedule reopens terminal completed; claimed stays already_exists", async () => {

@@ -669,9 +669,12 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
  * (`payment.succeeded`). Only known native HMAC classes on `type` fields
  * (`TRANSACTION`, `TRANSACTION_RESPONSE`) are accepted. Processed TRANSACTION
  * keys include domain status when present (`paymob:TRANSACTION:{id}:{status}`)
- * so a later same-id void/refund snapshot is not `already_completed`. Redirect
- * stays `TRANSACTION_RESPONSE:{txnId}`. Do not complete fulfillment on Paymob
- * `payment.processing` (redirect).
+ * so a later same-id void/refund snapshot is not `already_completed`. Domain
+ * status is `status`, `payment.status`, `refund.status`, or those paths on
+ * nested `event` (PaymentEvent / PersistedPaymentEventEnvelope) — PaymentEvent
+ * has no top-level `status` (NEW-WH-KEY-1). Redirect stays
+ * `TRANSACTION_RESPONSE:{txnId}` (status ignored). Do not complete fulfillment
+ * on Paymob `payment.processing` (redirect).
  */
 const PAYMOB_NATIVE_INBOX_CLASSES = new Set([
   "TRANSACTION",
@@ -710,11 +713,40 @@ function extractInboxNotificationClass(value: unknown): string | undefined {
   return readKnownNativeInboxClass(rec.type);
 }
 
+function readTrimmedInboxStatus(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function readNestedEntityStatus(
+  rec: Record<string, unknown>,
+  key: "payment" | "refund",
+): string | undefined {
+  const nested = rec[key];
+  if (nested === null || typeof nested !== "object") return undefined;
+  return readTrimmedInboxStatus((nested as Record<string, unknown>).status);
+}
+
+/** Prefer legacy `status`, then PaymentEvent `payment.status` / `refund.status`. */
+function readInboxDomainStatusRecord(
+  rec: Record<string, unknown>,
+): string | undefined {
+  return (
+    readTrimmedInboxStatus(rec.status) ??
+    readNestedEntityStatus(rec, "payment") ??
+    readNestedEntityStatus(rec, "refund")
+  );
+}
+
 function extractInboxDomainStatus(value: unknown): string | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const rec = value as Record<string, unknown>;
-  if (typeof rec.status === "string" && rec.status.trim()) {
-    return rec.status.trim();
+  const fromSelf = readInboxDomainStatusRecord(rec);
+  if (fromSelf !== undefined) return fromSelf;
+  const nested = rec.event;
+  if (nested !== null && typeof nested === "object") {
+    return readInboxDomainStatusRecord(nested as Record<string, unknown>);
   }
   return undefined;
 }

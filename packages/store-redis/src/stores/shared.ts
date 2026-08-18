@@ -128,26 +128,17 @@ export function normalizeScan(raw: unknown): { cursor: string; keys: string[] } 
 }
 
 /**
- * PERF-4: load ZRANGE members in one Promise.all wave (not serial N+1 GET)
- * and keep list-eligible rows up to `limit`. SCAN stays off the poll path
- * (PERF-1). A multi-key GET Lua would still read every field of N hashes
- * inside Redis and is not cheaper enough to add.
- *
- * NEW-STORE-1: `undefined` from `load` is a missing hash. The loader
- * (GET_LUA) must ZREM that ZRANGE member atomically so LIMIT windows
- * cannot refill with dead keys on the next poll.
+ * PERF-4: keep list-eligible rows up to `limit`. Missing entries (`undefined`)
+ * are ghosts already ZREM'd inside list-GET Lua (NEW-STORE-1).
  */
-export async function loadListedRecords<T>(
-  keys: readonly string[],
-  load: (key: string) => Promise<T | undefined>,
+export function keepListedRecords<T>(
+  records: readonly (T | undefined)[],
   keep: (rec: T) => boolean,
   limit: number,
-): Promise<T[]> {
-  if (keys.length === 0 || limit <= 0) return [];
-  const records = await Promise.all(keys.map((key) => load(key)));
+): T[] {
+  if (records.length === 0 || limit <= 0) return [];
   const out: T[] = [];
   for (const rec of records) {
-    // Missing GET: ghost already dropped inside GET_LUA (NEW-STORE-1).
     if (rec === undefined) continue;
     if (keep(rec)) out.push(rec);
     if (out.length >= limit) break;

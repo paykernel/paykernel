@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **PERF-4:** `listDue` / `listRetryable` load a ZRANGE page with one list-GET EVAL (soft-release + NEW-STORE-1 ghost `ZREM`). `KEYS[1]` is the index; `KEYS[2..]` are record hashes. Cluster still requires `clusterKeys`.
 - **NEW-STORE-1:** `listDue` / `listRetryable` GET Lua `ZREM`s ghost ZSET members when the hash is missing so `LIMIT` windows cannot fill with dead keys.
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **N6 / markIndeterminate reason:** sanitize and cap `reason` via `enforceMaxSanitizedError` before JSON serialize (SQL adapter parity; length + secret-pattern hygiene).

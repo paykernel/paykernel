@@ -415,7 +415,7 @@ describe("webhook store mock port", () => {
     const { port, calls } = createMockPort((call) => {
       if (call.command === "ZRANGEBYSCORE") return ["e1"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
-        return ["ok", ...webhookPack({ status: "pending", attempts: "0" })];
+        return [["ok", ...webhookPack({ status: "pending", attempts: "0" })]];
       }
       return null;
     });
@@ -428,28 +428,26 @@ describe("webhook store mock port", () => {
 
   it("NEW-STORE-1: listRetryable missing GET skips ghost and passes logicalKey for ZREM", async () => {
     // Missing GET must drop the ZSET member so LIMIT windows cannot fill with
-    // dead keys. GET_LUA ZREMs atomically when EXISTS==0 using ARGV logicalKey.
-    // Mock EVAL cannot execute Lua; lock the list path: ghost omitted, and GET
-    // EVAL is passed the ZRANGE member so the script can ZREM it.
+    // dead keys. LIST_GET Lua ZREMs atomically when EXISTS==0 using ARGV logicalKey.
     const { port, calls } = createMockPort((call) => {
       if (call.command === "ZRANGEBYSCORE") return ["ghost", "e1"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
-        const args = call.args.map(String);
-        if (args.includes("ghost")) return ["missing"];
-        return ["ok", ...webhookPack({ key: "e1", status: "pending", attempts: "0" })];
+        return [
+          ["missing"],
+          ["ok", ...webhookPack({ key: "e1", status: "pending", attempts: "0" })],
+        ];
       }
       return null;
     });
     const store = createRedisWebhookInboxStore({ port });
     const listed = await store.listRetryable({ limit: 2 });
     expect(listed.map((r) => r.key)).toEqual(["e1"]);
-    const ghostEval = calls.find(
-      (c) =>
-        (c.command === "EVAL" || c.command === "EVALSHA") &&
-        c.args.map(String).includes("ghost"),
+    const listEval = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
     );
-    expect(ghostEval).toBeDefined();
-    expect(ghostEval!.args.map(String)).toContain("ghost");
+    expect(listEval).toBeDefined();
+    expect(listEval!.args.map(String)).toContain("ghost");
+    expect(listEval!.args.map(String)).toContain("e1");
   });
 
   it("P1315-REDIS-2: webhook claim EVAL ARGV includes leaseExpiresMs", async () => {
@@ -582,7 +580,7 @@ describe("reconciliation store mock port", () => {
           return ["acquired", ...reconPack({ status: "claimed", attempts: "1" }), "lt_1"];
         }
         if (phase === "list") {
-          return ["ok", ...reconPack({ status: "scheduled", attempts: "0" })];
+          return [["ok", ...reconPack({ status: "scheduled", attempts: "0" })]];
         }
         if (phase === "claim2") {
           return ["acquired", ...reconPack({ status: "claimed", attempts: "1" }), "lt_2"];
@@ -641,9 +639,10 @@ describe("reconciliation store mock port", () => {
     const { port, calls } = createMockPort((call) => {
       if (call.command === "ZRANGEBYSCORE") return ["j1", "j2"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
-        const key = String(call.args.find((a) => String(a).includes("j2")) ?? "j1");
-        const logical = key.endsWith("j2") ? "j2" : "j1";
-        return ["ok", ...reconPack({ key: logical, status: "scheduled", attempts: "0" })];
+        return [
+          ["ok", ...reconPack({ key: "j1", status: "scheduled", attempts: "0" })],
+          ["ok", ...reconPack({ key: "j2", status: "scheduled", attempts: "0" })],
+        ];
       }
       return null;
     });
@@ -653,30 +652,29 @@ describe("reconciliation store mock port", () => {
     expect(calls.some((c) => c.command === "ZRANGEBYSCORE")).toBe(true);
     expect(calls.some((c) => c.command === "SCAN")).toBe(false);
     const evals = calls.filter((c) => c.command === "EVAL" || c.command === "EVALSHA");
-    expect(evals.length).toBe(2);
+    expect(evals.length).toBe(1);
   });
 
   it("NEW-STORE-1: listDue missing GET skips ghost and passes logicalKey for ZREM", async () => {
-    // Same as webhook listRetryable: GET_LUA ZREMs when hash is missing.
     const { port, calls } = createMockPort((call) => {
       if (call.command === "ZRANGEBYSCORE") return ["ghost", "j1"];
       if (call.command === "EVAL" || call.command === "EVALSHA") {
-        const args = call.args.map(String);
-        if (args.includes("ghost")) return ["missing"];
-        return ["ok", ...reconPack({ key: "j1", status: "scheduled", attempts: "0" })];
+        return [
+          ["missing"],
+          ["ok", ...reconPack({ key: "j1", status: "scheduled", attempts: "0" })],
+        ];
       }
       return null;
     });
     const store = createRedisReconciliationStore({ port });
     const due = await store.listDue({ limit: 2 });
     expect(due.map((r) => r.key)).toEqual(["j1"]);
-    const ghostEval = calls.find(
-      (c) =>
-        (c.command === "EVAL" || c.command === "EVALSHA") &&
-        c.args.map(String).includes("ghost"),
+    const listEval = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
     );
-    expect(ghostEval).toBeDefined();
-    expect(ghostEval!.args.map(String)).toContain("ghost");
+    expect(listEval).toBeDefined();
+    expect(listEval!.args.map(String)).toContain("ghost");
+    expect(listEval!.args.map(String)).toContain("j1");
   });
 
   it("REDIS-1: renew EVAL includes due index key for ZSET rescore", async () => {
@@ -961,9 +959,9 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
       if (call.command === "EVAL" || call.command === "EVALSHA") {
         const joined = call.args.map(String).join(" ");
         if (joined.includes("whinbox")) {
-          return ["ok", ...webhookPack({ status: "pending" })];
+          return [["ok", ...webhookPack({ status: "pending" })]];
         }
-        return ["ok", ...reconPack({ status: "scheduled" })];
+        return [["ok", ...reconPack({ status: "scheduled" })]];
       }
       return null;
     });

@@ -50,6 +50,12 @@ describe("public API runtime surface", () => {
     expect(routing.isSelectHonestyReason("complementary_currency_honesty")).toBe(
       true,
     );
+    expect(routing.isSelectHonestyReason("currency_mismatch_honesty")).toBe(
+      true,
+    );
+    expect(routing.isSelectHonestyReason("complementary_tenant_honesty")).toBe(
+      true,
+    );
     expect(routing.isSelectHonestyReason("no_alternate_gateway")).toBe(false);
   });
 

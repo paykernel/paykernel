@@ -589,8 +589,9 @@ export function trySelectFallbackGateway(
     decision = router.select(selectInput);
   } catch (err) {
     if (err instanceof NoRouteMatchError) {
-      // NEW-ROUTE-1: do not rewrite amount / currency / partition honesty to
-      // no_alternate_gateway — preserve the honesty reason (and message).
+      // NEW-ROUTE-1 / NEW-ROUTE-2 / NEW-ROUTE-CCY-1: do not rewrite amount /
+      // currency-mismatch / partition honesty to no_alternate_gateway —
+      // preserve the honesty reason (and message).
       if (isSelectHonestyReason(err.reason)) {
         throw new UnsafeFallbackDeniedError(
           `Post-attempt fallback denied: ${err.message}`,

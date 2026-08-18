@@ -417,12 +417,18 @@ function toStripeAmount(
   return assertStripeMinorUnitAmount(stripeAmount, normalized, options);
 }
 
+function fromStripeAmount(amount: number, currency: string): number;
 function fromStripeAmount(
   amount: number | undefined | null,
   currency: string,
-): number {
+): number | undefined;
+function fromStripeAmount(
+  amount: number | undefined | null,
+  currency: string,
+): number | undefined {
+  // NEW-STRIPE-0: missing Stripe minors are unknown — never invent major 0.
   if (amount === undefined || amount === null) {
-    return 0;
+    return undefined;
   }
   const exponent = stripeCurrencyExponent(currency);
   const money = sharedFromMinorUnits(amount, currency, {
@@ -440,6 +446,26 @@ function fromStripeAmount(
 /** Finite Stripe minor-unit amount, or undefined when missing/non-finite. */
 function finiteStripeMinor(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Cumulative major-unit refunds from expanded `charge.amount_refunded`.
+ * Only a finite amount **greater than 0** is proven (NEW-STRIPE-REFUND-0).
+ */
+function provenTotalRefundedFromCharge(
+  charge: StripeRefund["charge"],
+  fallbackCurrency: string,
+): number | undefined {
+  if (typeof charge !== "object" || charge === null) {
+    return undefined;
+  }
+  const refundedMinor = finiteStripeMinor(charge.amount_refunded);
+  if (refundedMinor === undefined || refundedMinor <= 0) {
+    return undefined;
+  }
+  const currency =
+    stripeCurrencyCode(charge.currency, fallbackCurrency) ?? fallbackCurrency;
+  return fromStripeAmount(refundedMinor, currency);
 }
 
 /**
@@ -1404,18 +1430,30 @@ function toUrlEncoded(
 function rematchSucceededIntentRefundWebhookDualWrite(
   event: WebhookEvent,
 ): WebhookEvent {
+  // NEW-CORE-11 public mapper rematches refunded / partially_refunded on
+  // payment.succeeded catalog types to payment.processing (no refund entity).
+  // Stripe still dual-writes refund.completed when domain status is proven.
+  const incomingSucceeded =
+    event.stableType === "payment.succeeded" ||
+    event.stableType === "payment.processing";
+  const incomingEventType =
+    event.event?.type === "payment.succeeded" ||
+    event.event?.type === "payment.processing";
   if (
     !isStripePaidLikeWebhookType(event.type) ||
     (event.status !== "refunded" && event.status !== "partially_refunded") ||
-    event.stableType !== "payment.succeeded" ||
+    !incomingSucceeded ||
     !event.event ||
-    event.event.type !== "payment.succeeded" ||
+    !incomingEventType ||
     !event.provider
   ) {
     return event;
   }
 
-  const payment = event.event.payment ?? paymentFromWebhookEvent(event);
+  const payment =
+    ("payment" in event.event && event.event.payment
+      ? event.event.payment
+      : undefined) ?? paymentFromWebhookEvent(event);
   return {
     ...event,
     stableType: "refund.completed",
@@ -1454,7 +1492,10 @@ export function demoteIncompleteSettledWebhookDualWrite(
     return event;
   }
 
-  const payment = event.event.payment ?? paymentFromWebhookEvent(event);
+  const payment =
+    ("payment" in event.event && event.event.payment
+      ? event.event.payment
+      : undefined) ?? paymentFromWebhookEvent(event);
 
   return {
     ...event,
@@ -1811,7 +1852,8 @@ export class StripeGateway extends BaseGateway {
         }
 
         // Expand charge so amount_refunded can recover totalRefunded if the
-        // secondary refunds list fails (STRIPE-3).
+        // secondary refunds list fails, is empty, or is pending-only (STRIPE-3 /
+        // NEW-STRIPE-REFUND-0).
         body.expand = ["charge"];
         const response = await this.stripeRequest<StripeRefund>(
           "POST",
@@ -1848,23 +1890,15 @@ export class StripeGateway extends BaseGateway {
               callerSignal,
             );
           } catch {
-            // STRIPE-3: list failed — prefer charge.amount_refunded (cumulative
-            // on that charge) over inventing a single-refund "total".
-            const charge = response.charge;
-            if (
-              typeof charge === "object" &&
-              charge !== null &&
-              typeof charge.amount_refunded === "number" &&
-              Number.isFinite(charge.amount_refunded)
-            ) {
-              totalRefunded = fromStripeAmount(
-                charge.amount_refunded,
-                stripeCurrencyCode(charge.currency, refundCurrency) ??
-                  refundCurrency,
-              );
-            } else {
-              totalRefunded = undefined;
-            }
+            totalRefunded = undefined;
+          }
+          // NEW-STRIPE-REFUND-0: empty / pending-only list is unproven (not 0).
+          // Same charge.amount_refunded recovery as a thrown list — only > 0.
+          if (totalRefunded === undefined || totalRefunded <= 0) {
+            totalRefunded = provenTotalRefundedFromCharge(
+              response.charge,
+              refundCurrency,
+            );
           }
         }
 
@@ -2168,7 +2202,7 @@ export class StripeGateway extends BaseGateway {
           status: session.status,
           paymentStatus: session.payment_status,
           amount:
-            session.amount_total !== undefined && session.amount_total !== null && currency
+            currency !== undefined
               ? fromStripeAmount(session.amount_total, currency)
               : undefined,
           currency,
@@ -2870,7 +2904,7 @@ export class StripeGateway extends BaseGateway {
     paymentIntentId: string,
     fallbackCurrency: string,
     signal?: AbortSignal,
-  ): Promise<number> {
+  ): Promise<number | undefined> {
     let totalMinorAmount = 0;
     let currency = fallbackCurrency;
     let startingAfter: string | undefined;
@@ -2896,13 +2930,21 @@ export class StripeGateway extends BaseGateway {
         if (refund.status !== "succeeded") {
           continue;
         }
+        const amountMinor = finiteStripeMinor(refund.amount);
+        if (amountMinor === undefined) {
+          continue;
+        }
         currency = refund.currency ?? currency;
-        totalMinorAmount += refund.amount;
+        totalMinorAmount += amountMinor;
       }
 
       startingAfter = page.has_more ? page.data.at(-1)?.id : undefined;
     } while (startingAfter);
 
+    // NEW-STRIPE-REFUND-0: empty / pending-only is unproven — not major 0.
+    if (totalMinorAmount <= 0) {
+      return undefined;
+    }
     return fromStripeAmount(totalMinorAmount, currency);
   }
 
