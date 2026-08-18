@@ -43,6 +43,7 @@ export function createHonoCheckoutApp(kernel: CheckoutKernel): Hono {
     return checkoutJsonResponse(handlers.getOrder(c.req.param("orderId")));
   });
 
+  // Test hook only — unauthenticated. Do not deploy this route.
   app.post("/internal/provider-paid", async (c) => {
     try {
       const gatewayPaymentId = gatewayPaymentIdFromUnknown(await readRequestJson(c.req.raw));

@@ -6,6 +6,30 @@
 /** Default max length for sanitized error messages. */
 export const DEFAULT_SANITIZE_MAX_LENGTH = 512;
 
+/**
+ * Residual secret-shaped leaves (I11 / same set as observability redaction.ts):
+ * Stripe Checkout `cs_live_` / `cs_test_`, Paymob-style `csk_`, PI/SetupIntent
+ * `pi|seti_…_secret_…`, PayPal `A21AA…` / long `A21…` access tokens.
+ */
+const STRIPE_TYPED_CLIENT_SECRET =
+  String.raw`(?:pi|seti)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+`;
+const PAYPAL_ACCESS_TOKEN =
+  String.raw`(?:A21AA[A-Za-z0-9_-]{16,}|A21[A-Za-z0-9._-]{40,})`;
+
+/** Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes). */
+const EMBEDDED_PAN_IN_MESSAGE = /\d[\d\s-]{11,21}\d/g;
+
+function isPanDigitRun(value: string): boolean {
+  const digits = value.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
+
+function redactEmbeddedPans(message: string): string {
+  return message.replace(EMBEDDED_PAN_IN_MESSAGE, (run) =>
+    isPanDigitRun(run) ? "[REDACTED]" : run,
+  );
+}
+
 /** Patterns that look like secrets / credentials (replaced with [REDACTED]). */
 const SECRET_PATTERNS: RegExp[] = [
   /\bsk_live_[A-Za-z0-9]+/gi,
@@ -25,9 +49,22 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bpk_test_[A-Za-z0-9]+/gi,
   /\brk_live_[A-Za-z0-9]+/gi,
   /\brk_test_[A-Za-z0-9]+/gi,
+  /\bcs_(?:live|test)_[A-Za-z0-9_-]+/gi,
+  /\bcsk_(?:live|test)_[A-Za-z0-9_-]+/gi,
+  new RegExp(STRIPE_TYPED_CLIENT_SECRET, "gi"),
+  new RegExp(PAYPAL_ACCESS_TOKEN, "gi"),
   // JSON-ish secret values after common keys
   /"(?:secret_token|client_secret|api_key|apiKey|password|authorization|signature)"\s*:\s*"[^"]*"/gi,
 ];
+
+function applySecretPatterns(value: string): string {
+  let out = value;
+  for (const re of SECRET_PATTERNS) {
+    re.lastIndex = 0;
+    out = out.replace(re, "[REDACTED]");
+  }
+  return redactEmbeddedPans(out);
+}
 
 /** Known secret object keys redacted when stringifying plain objects. */
 const SECRET_OBJECT_KEYS = new Set([
@@ -77,12 +114,7 @@ function redactObjectForSanitize(value: unknown, depth = 0): unknown {
  * do not land unredacted. Non-secret opaque refs pass through unchanged.
  */
 export function redactOpaquePayloadRefString(value: string): string {
-  let out = value;
-  for (const re of SECRET_PATTERNS) {
-    re.lastIndex = 0;
-    out = out.replace(re, "[REDACTED]");
-  }
-  return out;
+  return applySecretPatterns(value);
 }
 
 /**
@@ -113,12 +145,7 @@ export function sanitizeWebhookError(
     }
   }
 
-  let out = message;
-  for (const re of SECRET_PATTERNS) {
-    // Reset lastIndex for global regexes reused across calls.
-    re.lastIndex = 0;
-    out = out.replace(re, "[REDACTED]");
-  }
+  let out = applySecretPatterns(message);
 
   // Collapse runs of whitespace
   out = out.replace(/\s+/g, " ").trim();

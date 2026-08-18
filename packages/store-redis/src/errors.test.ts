@@ -10,6 +10,7 @@ import {
   StoreInvalidSchemaError,
   withMappedErrors,
 } from "./errors";
+import { RedisKeyDesignError } from "./keys";
 
 describe("mapDriverError", () => {
   it("passes through StoreError", () => {
@@ -74,6 +75,15 @@ describe("mapDriverError", () => {
     const mapped = mapDriverError(new Error("weird"));
     expect(mapped).toBeInstanceOf(StoreError);
     expect(mapped.code).toBe("unavailable");
+  });
+
+  it("maps RedisKeyDesignError to non-retryable invalid schema (I4)", () => {
+    const mapped = mapDriverError(
+      new RedisKeyDesignError('logical key "due" is reserved for index keys'),
+    );
+    expect(mapped).toBeInstanceOf(StoreInvalidSchemaError);
+    expect(mapped.retryable).toBe(false);
+    expect(mapped.message).toMatch(/reserved/);
   });
 });
 

@@ -25,14 +25,14 @@ describe("mapInboxOutcome", () => {
       503,
     ],
     [
-      "scheduled_parked_maps_to_200",
+      "scheduled_parked_maps_to_503",
       { outcome: "scheduled_for_retry", reason: "parked" },
-      200,
+      503,
     ],
     [
-      "scheduled_handler_retry_maps_to_200",
+      "scheduled_handler_retry_maps_to_503",
       { outcome: "scheduled_for_retry", reason: "handler_retry" },
-      200,
+      503,
     ],
   ];
 

@@ -425,20 +425,26 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Capture/refund/void dedupe depends on a shared store. Warn when:
-   * - No store in serverless/edge (in-memory cache is per-isolate), or
-   * - Store is present but lacks atomic `reserve()` (TOCTOU get-then-set race).
-   * Mutations that receive an idempotencyKey still throw InvalidRequestError
-   * when reserve() is missing — the warn is an extra construction-time signal.
+   * Capture/refund/void **require** a store with atomic `reserve()` and an
+   * `idempotencyKey` (see {@link runIdempotentMutation}). Warn so a missing
+   * store is visible before the first mutation throws `InvalidRequestError`.
+   * Intention create still uses the process-local cache when unkeyed; warn
+   * extra in serverless/edge because that cache is per-isolate.
    */
   private warnIfIdempotencyStoreUnsafe(): void {
     const store = this.paymobConfig.idempotencyStore;
     if (!store) {
+      this.logger.warn(
+        "[Paymob] idempotencyStore is required for capture, refund, and void. " +
+          "Those mutations throw InvalidRequestError until paymob.idempotencyStore " +
+          "(with atomic reserve()) and idempotencyKey are provided — Paymob has no " +
+          "native mutation idempotency (double-refund / double-capture class).",
+      );
       if (this.isLikelyServerlessEnvironment()) {
         this.logger.warn(
           "[Paymob] No idempotencyStore configured in a serverless/edge environment. " +
             "The in-memory idempotency cache is per-isolate and wiped frequently, so it " +
-            "provides almost no protection against duplicate mutations. Configure " +
+            "provides almost no protection against duplicate createPayment keys. Configure " +
             "paymob.idempotencyStore with Redis, a database, or another shared store.",
         );
       }
@@ -448,9 +454,8 @@ export class PaymobGateway extends BaseGateway {
     if (!store.reserve) {
       this.logger.warn(
         "[Paymob] idempotencyStore does not implement atomic reserve(). " +
-          "Concurrent workers with the same key can both pass get-then-set and run " +
-          "the mutation twice. Provide a store with an atomic reserve() " +
-          "(Redis SET NX, SQL unique constraint, etc.).",
+          "Capture, refund, and void will throw until a store with atomic reserve() " +
+          "is provided (e.g. Redis SET NX or a SQL unique constraint).",
       );
     }
   }
@@ -809,7 +814,7 @@ export class PaymobGateway extends BaseGateway {
    */
   async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("capturePayment", params, async (p) => {
-      return this.executeIdempotent("capturePayment", p.idempotencyKey, p, async () => {
+      return this.runIdempotentMutation("capturePayment", p.idempotencyKey, p, async () => {
         this.assertPaymobTransactionId(p.gatewayPaymentId, "capturePayment");
         this.assertPostPayCredentials();
         const resolvedAmount = await this.resolveActionAmountCents(
@@ -944,7 +949,7 @@ export class PaymobGateway extends BaseGateway {
    */
   async voidPayment(params: VoidParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("voidPayment", params, async (p) => {
-      return this.executeIdempotent("voidPayment", p.idempotencyKey, p, async () => {
+      return this.runIdempotentMutation("voidPayment", p.idempotencyKey, p, async () => {
         this.assertPaymobTransactionId(p.gatewayPaymentId, "voidPayment");
         this.assertPostPayCredentials();
 
@@ -1032,7 +1037,7 @@ export class PaymobGateway extends BaseGateway {
    */
   async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
     return this.executeWithHooks("refundPayment", params, async (p) => {
-      return this.executeIdempotent("refundPayment", p.idempotencyKey, p, async () => {
+      return this.runIdempotentMutation("refundPayment", p.idempotencyKey, p, async () => {
         this.assertPaymobTransactionId(p.gatewayPaymentId, "refundPayment");
         this.assertPostPayCredentials();
         const resolvedAmount = await this.resolveActionAmountCents(
@@ -1291,9 +1296,9 @@ export class PaymobGateway extends BaseGateway {
     const raw = payload as PaymobWebhookPayload;
     const obj = normalized.obj;
     // HMAC does not cover is_captured / captured_amount / refunded_amount_cents.
-    // is_refund / is_void are HMAC aliases when current-state is absent; when
-    // current-state is present-and-false they are kept so child refund/void
-    // cannot fall through to paid (PAYMOB-1).
+    // is_refund / is_void are HMAC aliases only when current-state is absent.
+    // When is_refunded / is_voided is present (true or false), the action alias
+    // is unsigned and is dropped (I1-PAYMOB-UNSIGNED-ACTION).
     const statusSource = this.sanitizeWebhookTransactionForStatus(obj);
 
     const status = this.mapTransactionStatus(statusSource);
@@ -1449,11 +1454,12 @@ export class PaymobGateway extends BaseGateway {
    * refunded_amount_cents, is_refund, or is_void.
    *
    * is_refund / is_void are HMAC-covered as aliases when is_refunded /
-   * is_voided are absent (`readHmacField`). When the signed current-state flag
-   * is true, drop the action alias (current-state already classifies). When
-   * current-state is present-and-false, **keep** the action flag so a child
-   * refund/void (`is_refund` / `is_void` + success, often with HMAC
-   * `has_parent_transaction`) cannot fall through to paid (PAYMOB-1).
+   * is_voided are absent (`readHmacField`). If the signed current-state flag
+   * is present (true **or** false), drop the action alias — HMAC bound
+   * `is_refunded` / `is_voided`, not `is_refund` / `is_void`. Child refunds
+   * and voids on this path require signed `has_parent_transaction` plus a
+   * **signed** flag (current-state or HMAC-aliased action), never a forged
+   * alias next to `is_refunded: false` / `is_voided: false`.
    *
    * refunded_amount_cents is never HMAC-covered — always strip it on the webhook
    * path. Signed `is_refunded` / HMAC-aliased `is_refund` without a trusted
@@ -1473,12 +1479,12 @@ export class PaymobGateway extends BaseGateway {
     delete out.captured_amount;
     delete out.refunded_amount_cents;
 
-    // Drop action aliases only when signed current-state is true.
-    // Present-and-false current-state must not discard child refund/void flags.
-    if (out.is_refunded === true) {
+    // HMAC binds is_refunded ?? is_refund. If the current-state field is
+    // present (including false), the action alias is unsigned.
+    if (out.is_refunded !== undefined) {
       delete out.is_refund;
     }
-    if (out.is_voided === true) {
+    if (out.is_voided !== undefined) {
       delete out.is_void;
     }
 
@@ -2075,14 +2081,13 @@ export class PaymobGateway extends BaseGateway {
     is_captured?: boolean;
   }): PaymentStatus {
     if (data.pending) return "pending";
-    // HMAC has_parent_transaction marks child refund/void/capture txns.
-    // Combined with action flags so is_refund/is_void + success cannot look paid
-    // when is_refunded/is_voided are present-and-false (PAYMOB-1).
-    const childAction = data.has_parent_transaction === true && data.success === true;
+    // Webhook sanitize already dropped unsigned is_refund / is_void when
+    // current-state is present (I1). Remaining action flags are HMAC aliases
+    // or trusted inquiry/API fields. Child refunds/voids on the webhook path
+    // therefore see signed has_parent_transaction plus a signed flag only.
     if (
       data.is_voided === true ||
-      (data.success === true && data.is_void === true) ||
-      (childAction && data.is_void === true)
+      (data.success === true && data.is_void === true)
     ) {
       return "cancelled";
     }
@@ -2094,7 +2099,6 @@ export class PaymobGateway extends BaseGateway {
     if (
       data.is_refunded === true ||
       (data.success === true && data.is_refund === true) ||
-      (childAction && data.is_refund === true) ||
       (data.refunded_amount_cents !== undefined && data.refunded_amount_cents > 0)
     ) {
       const refundedAmountCents = data.refunded_amount_cents;
@@ -2976,6 +2980,47 @@ export class PaymobGateway extends BaseGateway {
       return init;
     }
     return { ...init, signal };
+  }
+
+  /**
+   * Guard capture/refund/void with store + atomic reserve() + key.
+   * Paymob has no native mutation idempotency — unguarded POSTs are a
+   * double-refund class. Create/get/webhook stay on {@link executeIdempotent}
+   * (create may run unkeyed).
+   */
+  private async runIdempotentMutation<R>(
+    operation: "capturePayment" | "refundPayment" | "voidPayment",
+    idempotencyKey: string | undefined,
+    params: unknown,
+    executor: () => Promise<R>,
+  ): Promise<R> {
+    const store = this.paymobConfig.idempotencyStore;
+    if (!store) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires paymob.idempotencyStore and idempotencyKey. ` +
+          "Capture, refund, and void have no native Paymob idempotency; unguarded " +
+          "retries or multi-worker races can double-apply the mutation. Configure " +
+          "idempotencyStore (with atomic reserve()) and pass idempotencyKey.",
+        [{ path: ["idempotencyKey"] }],
+      );
+    }
+    if (!idempotencyKey) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires idempotencyKey when idempotencyStore is configured. ` +
+          "Pass a stable idempotencyKey so caller retries are deduped.",
+        [{ path: ["idempotencyKey"] }],
+      );
+    }
+    if (!store.reserve) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires idempotencyStore.reserve() for atomic ` +
+          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
+          "get-then-set stores can double-apply refund/capture/void under concurrency.",
+        [{ path: ["idempotencyStore"] }],
+      );
+    }
+
+    return this.executeIdempotent(operation, idempotencyKey, params, executor);
   }
 
   private async executeIdempotent<R>(

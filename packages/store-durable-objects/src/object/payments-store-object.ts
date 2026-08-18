@@ -4,8 +4,10 @@
  * Production Workers wrap this with `extends DurableObject` and pass
  * `this.ctx.storage` as DoStorageLike. Unit tests pass mock DoStorageLike.
  *
- * Schema ensure is explicit via `ensureSchema()` — typically once in DO
- * constructor inside blockConcurrencyWhile (DO lifecycle, not npm import).
+ * Schema ensure is via `ensureSchema()` (typically once in the DO constructor
+ * inside blockConcurrencyWhile) and on each RPC via readyStores until that
+ * namespace cache is marked ready. Never on package import. Migrate errors
+ * fail closed — the RPC does not proceed.
  *
  * RPC methods are async-friendly wrappers over sync SQL claims so Worker
  * stubs can await them. Claims themselves use sync sql.exec / transactionSync.
@@ -183,17 +185,16 @@ export class PaymentsStoreObject {
   }
 
   /**
-   * Resolve stores for an RPC. When the Worker sent `tableNamespace`, apply it
-   * (constructor default is used when omitted) and ensure that prefix's schema.
+   * Resolve stores for an RPC. Apply Worker `tableNamespace` when sent
+   * (constructor default when omitted) and ensure that prefix's schema even
+   * when the Worker omitted the argument. Fail closed if migrate throws.
    */
   private async readyStores(
     tableNamespace?: SchemaNamespaceConfig,
   ): Promise<CachedNamespaceStores> {
     const ns = tableNamespace ?? this.namespace;
     const cached = this.getOrCreateStores(ns);
-    if (tableNamespace !== undefined) {
-      await this.ensureCachedSchema(cached, ns);
-    }
+    await this.ensureCachedSchema(cached, ns);
     return cached;
   }
 

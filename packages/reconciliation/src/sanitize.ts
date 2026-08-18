@@ -12,7 +12,11 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bsk_test_[A-Za-z0-9]+/gi,
   /\bwhsec_[A-Za-z0-9]+/gi,
   /\bBearer\s+[A-Za-z0-9._\-+/=]+/gi,
+  /\bBasic\s+[A-Za-z0-9._\-+/=]+/gi,
   /\bsecret_token\s*[:=]\s*\S+/gi,
+  /\bclient_secret\s*[:=]\s*\S+/gi,
+  /\bapi[_-]?key\s*[:=]\s*\S+/gi,
+  /\bpassword\s*[:=]\s*\S+/gi,
   /\bauthorization\s*[:=]\s*\S+/gi,
   /\bsignature\s*[:=]\s*\S+/gi,
   /\bx-signature\s*[:=]\s*\S+/gi,
@@ -21,17 +25,61 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bpk_test_[A-Za-z0-9]+/gi,
   /\brk_live_[A-Za-z0-9]+/gi,
   /\brk_test_[A-Za-z0-9]+/gi,
+  /\bcs_(?:live|test)_[A-Za-z0-9_-]+/gi,
+  /\bcsk_(?:live|test)_[A-Za-z0-9_-]+/gi,
+  /(?:pi|seti)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/gi,
+  /(?:A21AA[A-Za-z0-9_-]{16,}|A21[A-Za-z0-9._-]{40,})/gi,
+  // JSON-ish secret values after common keys
+  /"(?:secret_token|client_secret|api_key|apiKey|password|authorization|signature)"\s*:\s*"[^"]*"/gi,
 ];
+
+/** Known secret object keys redacted when stringifying plain objects. */
+const SECRET_OBJECT_KEYS = new Set([
+  "secret_token",
+  "client_secret",
+  "api_key",
+  "apiKey",
+  "password",
+  "authorization",
+  "signature",
+  "x-signature",
+  "stripe-signature",
+  "webhook_secret",
+  "webhookSecret",
+  "access_token",
+  "accessToken",
+  "refresh_token",
+  "refreshToken",
+]);
 
 export type SanitizeReconciliationErrorOptions = {
   /** Max message length (default 512). */
   maxLength?: number;
 };
 
+function redactObjectForSanitize(value: unknown, depth = 0): unknown {
+  if (depth > 6) return "[Truncated]";
+  if (value === null || value === undefined) return value;
+  if (typeof value !== "object") return value;
+  if (Array.isArray(value)) {
+    return value.map((v) => redactObjectForSanitize(v, depth + 1));
+  }
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (SECRET_OBJECT_KEYS.has(k) || /secret|password|token|signature/i.test(k)) {
+      out[k] = "[REDACTED]";
+    } else {
+      out[k] = redactObjectForSanitize(v, depth + 1);
+    }
+  }
+  return out;
+}
+
 /**
  * Produce a safe string for `lastError` / logs from an unknown throw.
  *
  * - Extracts Error.message when available
+ * - Redacts known secret keys on plain objects before stringify
  * - Strips common secret/signature patterns
  * - Truncates to maxLength
  */
@@ -49,7 +97,7 @@ export function sanitizeReconciliationError(
     message = "Unknown error";
   } else {
     try {
-      message = JSON.stringify(error);
+      message = JSON.stringify(redactObjectForSanitize(error));
     } catch {
       message = String(error);
     }
@@ -57,6 +105,8 @@ export function sanitizeReconciliationError(
 
   let out = message;
   for (const re of SECRET_PATTERNS) {
+    // Reset lastIndex for global regexes reused across calls.
+    re.lastIndex = 0;
     out = out.replace(re, "[REDACTED]");
   }
 

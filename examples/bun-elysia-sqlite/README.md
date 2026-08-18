@@ -14,7 +14,7 @@ Local SQLite is **single-host only**. This example uses the kernel’s in-memory
 - `POST /webhooks/stripe` — `await request.text()` with Elysia `parse: "none"`, then the kernel Stripe path (`handleWebhook('stripe', raw, sig)`). Do not use a JSON body parser here; Stripe HMAC needs the original bytes.
 - `POST /internal/reconcile`
 - `GET /orders/:id`
-- `POST /internal/provider-paid`
+- `POST /internal/provider-paid` — **test hook only**, unauthenticated; do not deploy. Injects a paid provider snapshot for local recon tests.
 - `GET /internal/create-count`
 
 Stripe signing fixtures live in the kernel. This package does not reimplement `mapInboxOutcome` or HMAC signing.
@@ -29,3 +29,5 @@ bun run start
 ```
 
 Tests drive the app with `app.handle(req)` through the shared `runCheckoutHttpScenarios('elysia', …)` suite.
+
+`bun run start` is local only. It exposes unauthenticated test hooks (`/internal/provider-paid`). Do not deploy this example as-is.

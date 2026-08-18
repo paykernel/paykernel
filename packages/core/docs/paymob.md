@@ -55,7 +55,8 @@ const client = new PaymentClient({
     // Optional: Request timeout in milliseconds (default: 30000)
     timeoutMs: 30000,
 
-    // Optional: shared idempotency store for multi-worker/serverless production
+    // Required for capture, refund, and void (atomic reserve() + idempotencyKey).
+    // Also recommended for createPayment across workers/serverless.
     // idempotencyStore: redisBackedPaymobIdempotencyStore,
   },
   defaultGateway: 'paymob',
@@ -103,7 +104,7 @@ Paymob auth/capture is primarily **integration-driven**: use a dedicated auth/ca
 
 If `capture: false` is used without `authIntegrationId` and without a per-request method override, the SDK rejects the request instead of silently creating a sale-integration payment.
 
-`idempotencyKey` is used as a fallback Paymob `special_reference` during payment creation and deduplicates repeated SDK calls within the same `PaymentClient`/gateway instance. Reusing the same key with different parameters is rejected. For production with multiple workers, serverless invocations, or deploy restarts, configure `idempotencyStore` with Redis, a database, or another process-wide store so completed results can be replayed across gateway instances. Implement the store's optional `reserve` method atomically, such as Redis `SET NX` or a database unique constraint, for full cross-worker duplicate-call protection. The SDK warns at construction when a store lacks atomic `reserve()`, and when no store is configured in a serverless/edge environment. If `idempotencyStore` is set but has no `reserve()`, keyed mutations throw `InvalidRequestError` instead of falling through to get-then-set.
+`idempotencyKey` is used as a fallback Paymob `special_reference` during payment creation and deduplicates repeated SDK calls within the same `PaymentClient`/gateway instance. Reusing the same key with different parameters is rejected. For production with multiple workers, serverless invocations, or deploy restarts, configure `idempotencyStore` with Redis, a database, or another process-wide store so completed results can be replayed across gateway instances. Implement the store's optional `reserve` method atomically, such as Redis `SET NX` or a database unique constraint, for full cross-worker duplicate-call protection. The SDK warns at construction when a store is missing or lacks atomic `reserve()`. **Capture, refund, and void throw `InvalidRequestError` unless `paymob.idempotencyStore` implements `reserve()` and the call includes `idempotencyKey`** — Paymob has no native mutation idempotency, so unguarded retries are a double-refund class. Create, get, and webhooks stay unfenced (create may still use the process-local cache when a key is provided).
 
 Paymob does not expose native idempotency keys for capture, refund, void, or Intention creation. If a network failure, caller abort after the mutating POST, Paymob 5xx **or 408 / 409 / 425 / 429** response, **or HTTP 200 with an empty/malformed body** (missing Intention `id` / checkout URL, missing/invalid `success`, missing refund id, non-boolean success that cannot be coerced, **legacy Egypt missing order id / payment token**) happens after the SDK sends one of those mutating requests, the SDK marks that `idempotencyKey` outcome as unknown and blocks automatic replay. A mutation HTTP 408 / 409 / 425 / 429 is **not** a definite reject — the SDK does not convert it into a retryable `RateLimitError` (or other 4xx) that clears the fence. After legacy Orders HTTP 200 + id, a Payment Keys 4xx also keeps the create fence so the same key cannot mint a second `/api/ecommerce/orders`. Reconcile via a verified Paymob callback, transaction inquiry, or the Paymob dashboard before issuing a new mutation. String `"true"`/`"false"` success values and string minor-unit money fields on mutation responses are coerced when present.
 
@@ -121,11 +122,11 @@ The process-local idempotency map (limit 1000) **never FIFO-evicts in-flight, un
 
 ## Capture Payment
 
-> ⚠️ **Multi-worker footgun:** Paymob has **no** native idempotency for capture /
-> refund / void. Without a shared `paymob.idempotencyStore` **and** a stable
-> `idempotencyKey` on each mutation, concurrent workers or network retries can
-> **double-capture / double-refund / double-void**. Process-local cache only
-> protects a single isolate. See [Idempotency notes](#create-payment) above and
+> ⚠️ **Fail-closed mutations:** Paymob has **no** native idempotency for capture /
+> refund / void. The SDK **refuses** those calls (`InvalidRequestError`, no POST)
+> unless you configure `paymob.idempotencyStore` with atomic `reserve()` **and**
+> pass a stable `idempotencyKey`. Process-local cache is not enough. See
+> [Idempotency notes](#create-payment) above and
 > [behavioral contracts](./behavioral-contracts.md#1-operations-safe-to-retry).
 
 ```typescript
@@ -133,7 +134,7 @@ const result = await client.capturePayment({
   gatewayPaymentId: '123456789', // Paymob transaction ID
   amount: 100,
   currency: 'SAR',
-  idempotencyKey: 'capture-order-123', // required for safe retries
+  idempotencyKey: 'capture-order-123', // required (store + reserve + key)
 }, 'paymob');
 ```
 
@@ -154,6 +155,7 @@ Use this to void a card transaction before settlement, usually on the same busin
 ```typescript
 const result = await client.voidPayment({
   gatewayPaymentId: '123456789',
+  idempotencyKey: 'void-order-123',
 }, 'paymob');
 ```
 
@@ -166,6 +168,7 @@ const result = await client.refundPayment({
   gatewayPaymentId: '123456789',
   amount: 50,
   currency: 'SAR',
+  idempotencyKey: 'refund-order-123',
   // reason is accepted by the SDK refund params type for cross-gateway consistency
   // but is ignored for Paymob (Paymob's refund API does not take a reason field).
 }, 'paymob');
@@ -226,7 +229,7 @@ Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paym
 - Refund domain webhooks omit `amount` when no trusted refunded total is available so dual-write consumers do not book order `amount_cents` as the refund amount.
 - Phase-7 `relatedIds.refundId` / `captureId` use the emitting transaction id (`gatewayPaymentId` / `obj.id`), never HMAC `order.id`. Parent order correlation is `references.parentId` / `relatedIds.orderId` only.
 - Amount-only refunds without a signed refund flag are ignored.
-- `is_refund` / `is_void` are HMAC aliases when the corresponding `is_refunded` / `is_voided` field is absent. When the signed current-state flag is **true**, the action alias is dropped. When current-state is **present-and-false**, the action flag is **kept** (with HMAC `has_parent_transaction`) so a child refund/void + success cannot fall through to `paid` / `payment.succeeded`.
+- `is_refund` / `is_void` are HMAC aliases **only** when the corresponding `is_refunded` / `is_voided` field is **absent**. If the signed current-state flag is present (true **or** false), the action alias is **ignored** — HMAC bound `is_refunded` / `is_voided`, so a forged `is_refund: true` next to signed `is_refunded: false` stays `paid` / not `refund_completed`. Child refunds and voids require signed `has_parent_transaction` plus a **signed** flag (current-state or HMAC-aliased action).
 - HMAC-covered `error_occured: true` maps to `failed` / `payment.failed`. Signed error + `success` must not look paid.
 - Inquiry (`getPayment`) and capture/refund API responses still use full amount fields from authenticated Paymob APIs and can map full/partial `refunded` / `partially_captured` when amounts are present.
 - **`getPayment` / inquiry fail-closed (PAYMOB-1):** `is_captured` (or signed `is_capture`) **without** a positive cumulative `captured_amount` maps to `processing` (not `paid` / not `isPaidOutcome`). Aligns with `capturePayment` / `mapCaptureStatus`. Prefer `isPaidOutcome(result)` after inquiry.

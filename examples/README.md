@@ -16,6 +16,7 @@ Kernel lives in [`checkout-kernel`](./checkout-kernel) (`@paykernel/example-chec
 - HTTP status codes live in the checkout kernel (`mapInboxOutcome`), **not** in `@paykernel/webhooks`.
 - Fulfillment runs only after an inbox claim, and only when the rematched event is `payment.succeeded` / `capture.completed` with `payment.status === "paid"`.
 - Never fulfill in `onWebhookVerified`. Never `createPayment` again after an indeterminate create — lookup + `decideReconciliationPolicy` only.
+- `POST /internal/provider-paid` is a **local test hook** (injects a paid provider snapshot). It is **unauthenticated** and **must not be deployed**.
 
 ## Public kernel helpers
 
@@ -49,7 +50,7 @@ Use `signStripeWebhook` / `signedStripePaidWebhook` from the kernel. Do not copy
 - `POST /webhooks/stripe` (raw body text + `stripe-signature`)
 - `POST /internal/reconcile`
 - `GET /orders/:id`
-- `POST /internal/provider-paid`
+- `POST /internal/provider-paid` — **test hook only**, unauthenticated; do not deploy
 - `GET /internal/create-count`
 
 ## Run

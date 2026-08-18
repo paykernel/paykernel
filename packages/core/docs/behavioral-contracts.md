@@ -22,7 +22,7 @@ Shared retry helper: `withRetry` in `src/utils/retry.ts` (default up to **3** at
 |------------------|---------|--------|--------|--------|
 | **GET / inquiry** (`getPayment`, status lookup, token refresh as applicable) | Auto-retry on network / 5xx / 429 | Auto-retry on network / 5xx / 429 / specific 409 in-progress conflict | Auto-retry on network / 5xx / 429 | Auto-retry GET/HEAD on `NetworkError` / `RateLimitError` |
 | **createPayment** | Auto-retry **only if** `idempotencyKey` set (`given_id`) | Always sends `PayPal-Request-Id` (caller key or generated UUID) → auto-retry enabled | **Not** auto-retried via `withRetry`; optional `idempotencyKey` + in-memory/store guard | Always sends `Idempotency-Key` (caller key or generated UUID) → auto-retry enabled |
-| **capture / refund / void** | **Never** auto-retried (`withRetry` not used). Guard via optional `idempotencyStore` + `idempotencyKey` for **caller** retries | Always sends `PayPal-Request-Id` (caller key or generated UUID) → auto-retry enabled | **Never** auto-retried. Guard via optional `idempotencyKey` (+ optional shared `idempotencyStore`) | Always sends `Idempotency-Key` (caller key or generated UUID) → auto-retry enabled |
+| **capture / refund / void** | **Never** auto-retried (`withRetry` not used). **Requires** `moyasar.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded) | Always sends `PayPal-Request-Id` (caller key or generated UUID) → auto-retry enabled | **Never** auto-retried. **Requires** `paymob.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded — I2) | Always sends `Idempotency-Key` (caller key or generated UUID) → auto-retry enabled |
 | **authorizePayment** (PayPal) | N/A | Same as mutations: request id always present → auto-retry | N/A | N/A |
 | **createCheckoutSession** (Stripe) | N/A | N/A | N/A | Same as Stripe mutations (idempotency key always present) |
 
@@ -33,10 +33,9 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 #### Moyasar
 
 - **createPayment:** retryable only when `idempotencyKey` is present (mapped to Moyasar `given_id`, which becomes the payment ID). Without a key, a single attempt only — a network blip after the HTTP send could otherwise create a second payment.
-- **getPayment:** always retryable on transient errors.
-- **capture / refund / void:** deliberately **not** wrapped in `withRetry`. Moyasar has **no native** mutation idempotency. Configure `moyasar.idempotencyStore` and pass `idempotencyKey` so **your** retries are safe (completed results cached; in-progress / unknown refuse a second apply; definite 4xx clear the reservation). See [moyasar.md — Idempotency](./moyasar.md#idempotency-for-refunds-captures-and-voids).
-- Without a store, an `idempotencyKey` on mutations is **ignored** (warn-logged) and the mutation runs unguarded.
-- **Multi-worker production:** shared `idempotencyStore` + key are **required** to avoid double-capture / double-refund / double-void across processes. In-memory store is single-process only; store is intentionally optional at the API layer but unsafe to omit under concurrency.
+- **getPayment:** always retryable on transient errors (GET still throws `NetworkError`; it is not remapped to an indeterminate result).
+- **capture / refund / void / confirmStcPayOtp:** deliberately **not** wrapped in `withRetry`. Moyasar has **no native** mutation idempotency. These methods **require** `moyasar.idempotencyStore` with atomic `reserve()` **and** a caller `idempotencyKey`. Missing store, missing key, or a store without `reserve()` throws `InvalidRequestError` — the mutation **never** runs unguarded. Completed results are cached; in-progress / unknown refuse a second apply; only definite 4xx (except 408/409/425/429) clear the reservation. See [moyasar.md — Idempotency](./moyasar.md#idempotency-for-refunds-captures-and-voids).
+- **Multi-worker production:** a shared store with atomic `reserve()` + key is **required** (fail-closed). `InMemoryIdempotencyStore` is single-process only.
 
 #### PayPal
 
@@ -47,9 +46,10 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 #### Paymob
 
 - Safe GETs / inquiries use `withRetry` with `isPaymobRetryableError`.
-- Mutations (create intention, capture, refund, void) are **not** auto-retried with `withRetry`. They go through an idempotency guard when `idempotencyKey` is provided (process-local cache by default; optional shared `paymob.idempotencyStore`).
+- **createPayment:** not auto-retried with `withRetry`. Optional `idempotencyKey` + process-local cache (or shared `paymob.idempotencyStore`) — create may still run unkeyed.
+- **capture / refund / void:** not auto-retried. These methods **require** `paymob.idempotencyStore` with atomic `reserve()` **and** a caller `idempotencyKey`. Missing store, missing key, or a store without `reserve()` throws `InvalidRequestError` **before** the mutation POST (I2 — never unguarded).
 - After a network / indeterminate 5xx-style failure on a keyed mutation, the key is marked **unknown** and further automatic replay with that key is blocked until you reconcile. See [paymob.md](./paymob.md).
-- **Multi-worker / serverless:** configure a shared `paymob.idempotencyStore` and pass `idempotencyKey` on every capture/refund/void. Without both, concurrent workers can double-mutate; the SDK does not hard-require the store (product-optional) but production multi-worker without it is a known footgun.
+- **Multi-worker / serverless:** a shared store with atomic `reserve()` + key is **required** for capture/refund/void (fail-closed). `InMemoryIdempotencyStore` is single-process only.
 
 #### Stripe
 
@@ -59,13 +59,14 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 
 ### Uncertain timeouts must not be treated as “payment failed”
 
-When the SDK times out or loses the connection **after** a request may have been accepted by the provider:
+When the SDK times out or loses the connection **after** a mutating POST may have been accepted by the provider (`NetworkError.afterProviderSubmit === true` on create / capture / refund / void / authorize / confirmStcPayOtp):
 
-1. The SDK throws **`NetworkError`** (code `NETWORK_ERROR`, HTTP status 503 on the error class). It does **not** invent a successful `GatewayPaymentResult` with `status: 'failed'`, and it does **not** claim the provider rejected the charge.
-2. **Auto-retry** only continues when the operation is classified retry-safe (GET, or mutation with idempotency as above). If retries are exhausted (or the mutation is non-retryable, e.g. Moyasar/Paymob capture without store semantics), the **`NetworkError` is rethrown**.
-3. **Integrator contract:** treat timeout / `NetworkError` as **indeterminate** for money mutations unless you reconcile (GET payment, webhook, dashboard). Do **not** mark the order paid **or** mark the payment “failed at provider” solely because the SDK threw. Prefer reconciling before a new mutation without idempotency protection.
+1. `BaseGateway.executeWithHooks` **does not rethrow** that `NetworkError` as a failed-create. It returns **`outcome: 'indeterminate'`** + **`reconciliationRequired: true`** (`applyIndeterminatePaymentOutcome` / `applyIndeterminateRefundOutcome`). It does **not** invent `status: 'failed'` and does **not** claim the provider rejected the charge.
+2. **GET / inquiry, preflight auth, and pre-submit transport failures** still throw **`NetworkError`** (`afterProviderSubmit` unset). Caller abort **before** submit throws `PaymentAbortedError`. Caller abort **after** a mutating POST is tagged `afterProviderSubmit: true` and follows the same indeterminate-result path (the fence is not cleared).
+3. **Auto-retry** (`withRetry`) only continues when the operation is classified retry-safe (GET, or mutation with provider-native idempotency as in the matrix). Moyasar/Paymob captures are not auto-retried. A post-submit timeout is **not** converted into a retryable thrown failure that would look like “create failed — try again.”
+4. **Integrator contract:** treat post-submit timeout / connection drop as **indeterminate**. Reconcile (`getPayment`, webhook, dashboard) before a new mutation. Do **not** mark the order paid **or** mark the payment “failed at provider.” Prefer `isIndeterminateOutcome(result)`.
 
-This is the current concrete behavior: timeouts surface as thrown transport errors, not as mapped terminal payment statuses.
+This is the current concrete behavior: after-submit ambiguity is a typed indeterminate result from `executeWithHooks`, not a thrown transport error callers can treat as failed-create.
 
 ---
 
@@ -276,20 +277,20 @@ Restored identity/money fields include (when present on the original result): `s
 
 | Situation | Current SDK surface | Integrator action |
 |-----------|---------------------|-------------------|
-| Request timeout (`AbortError` / configured `timeoutMs`) | Thrown as **`NetworkError`** | Reconcile before re-mutating without protection |
-| Connection failure / DNS / fetch failure | **`NetworkError`** | Same |
-| Provider 5xx after request may have applied | May surface as **`GatewayApiError`** or gateway-specific mapping; may be retried only if operation is retry-safe | If retries exhausted on a mutation, reconcile |
+| Timeout / connection drop **after** a mutating POST (`NetworkError.afterProviderSubmit`) | `executeWithHooks` returns **`outcome: 'indeterminate'`** + **`reconciliationRequired: true`** (does **not** throw) | Reconcile; do **not** treat as failed-create or replay unguarded |
+| Timeout / DNS / fetch failure **before** the provider may have accepted (GET, preflight, pre-submit) | Thrown as **`NetworkError`** (`afterProviderSubmit` unset) | Retry only if the operation is retry-safe |
+| Provider 5xx after a mutating request may have applied | Gateways tag `NetworkError.afterProviderSubmit`; `executeWithHooks` maps to the same indeterminate result | Reconcile; do not retry as a fresh failure |
 | Rate limit | **`RateLimitError`** (may include `retryAfterSeconds`) | Back off; retry only when safe |
 
-`NetworkError` is a subclass of `PaymentError` with code `NETWORK_ERROR` and statusCode `503`. It is an **error at the call boundary**, not a normalized payment with `status: 'failed'`.
+`NetworkError` is a subclass of `PaymentError` with code `NETWORK_ERROR` and statusCode `503`. On money mutations after submit it is an **internal** signal for `executeWithHooks`; callers of `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` receive the typed indeterminate arm, not a thrown “create failed.” GET and pre-submit failures remain thrown `NetworkError`.
 
-Phase 6 adds a first-class result arm: **`outcome: 'indeterminate'`** with **`reconciliationRequired: true`** on `GatewayPaymentResult` / `PaymentOperationResult` (see [operation-results.md](./operation-results.md)). Transport-level timeouts may still **throw** `NetworkError`; after-submit ambiguity should prefer the typed indeterminate arm when the gateway can return a result.
+See [operation-results.md](./operation-results.md) (P610-IND-1).
 
 ### Idempotency-store “unknown” (Moyasar / Paymob)
 
 When a keyed mutation fails with a **retryable/transient** error after the request may have mutated the provider:
 
-- **Moyasar** (`idempotencyStore` + `idempotencyKey`): store record status **`unknown`**; subsequent calls with the same key refuse rather than double-apply. Message class: `InvalidRequestError` indicating in progress / unknown outcome — resolve via `getPayment` (or dashboard) before retrying.
+- **Moyasar** (required `idempotencyStore.reserve` + `idempotencyKey`; throws before HTTP if missing): store record status **`unknown`**; subsequent calls with the same key refuse rather than double-apply. Message class: `InvalidRequestError` indicating in progress / unknown outcome — resolve via `getPayment` (or dashboard) before retrying. The post-submit `NetworkError` is then mapped by `executeWithHooks` to `outcome: 'indeterminate'` (the fence stays `unknown`, it is not cleared).
 - **Paymob** (`idempotencyKey`, optional store): marks outcome **unknown** and blocks automatic replay; reconcile via verified callback, transaction inquiry, or dashboard.
 
 Definite client/validation failures clear the reservation so a corrected retry is allowed.
@@ -319,7 +320,7 @@ Examples that return successfully from the SDK **without** meaning “safe to sh
 | **HTTP** | Gateways use **injected** `PaymentRuntime.fetch` / `GatewayContext.fetch` (defaults delegate to live `globalThis.fetch`). Timeouts via `AbortController` / `AbortSignal`. Node ≥ 18 and Bun ≥ 1.0. |
 | **Crypto** | **Portable pure HMAC-SHA256/SHA512, SHA-256/512, timing-safe compare, and encoding helpers** — no production dependency on `node:crypto` or `node:buffer`. UUID via Web Crypto / `getRandomValues`. Sync `verifyWebhook` remains available. |
 | **PaymentRuntime** | Optional `createPaymentClient({ runtime?: Partial<PaymentRuntime> })` and `createPaymentRuntime()` inject `fetch` / `crypto` / `clock` / `randomUUID`. **No secrets** on the runtime bag. |
-| **Persistence** | **No required database or Redis.** Optional injectable idempotency stores for Moyasar/Paymob. Lease-aware inbox/idempotency/reconciliation **store contracts** are defined in `@paykernel/store-contracts` (Phase 9) — not shipped as core engines. |
+| **Persistence** | **No required database or Redis.** Moyasar capture/refund/void/OTP **and** Paymob capture/refund/void **require** an injectable `idempotencyStore` with atomic `reserve()` plus `idempotencyKey`. Lease-aware inbox/idempotency/reconciliation **store contracts** are defined in `@paykernel/store-contracts` (Phase 9) — not shipped as core engines. |
 | **Default idempotency** | Core `InMemoryIdempotencyStore` and Paymob’s built-in cache are **process-local** (per isolate). Multi-worker / serverless / restarts need a **shared** store for mutation safety. Distinct from `@paykernel/store-contracts` lease-aware `IdempotencyStore` / `LeaseAwareIdempotencyStore` ([store-contracts README](../../store-contracts/README.md)). |
 | **Secrets** | Server-side only. Secret keys must not ship to browsers. Publishable keys are optional on config and are not used for money mutations or webhook verification in this package. |
 | **Amounts** | Public APIs accept `AmountInput` (`Money` preferred; plain major-unit `number` still allowed, deprecated). Response amount fields remain major-unit `number` in 0.x. |
@@ -334,8 +335,9 @@ Full Phase 8 guide: [runtime.md](./runtime.md).
 | Stripe | Yes (`Idempotency-Key`; auto-generated if omitted) | Not required |
 | PayPal | Yes (`PayPal-Request-Id`; auto-generated if omitted) | Not required |
 | Moyasar create | Yes via `given_id` when caller supplies UUID `idempotencyKey` | N/A for create |
-| Moyasar capture/refund/void | **No** | Optional `moyasar.idempotencyStore` (process-local if `InMemoryIdempotencyStore`) |
-| Paymob create/mutations | **No** native keys | Per-instance cache + optional `paymob.idempotencyStore` |
+| Moyasar capture/refund/void | **No** | **Required** `moyasar.idempotencyStore` with atomic `reserve()` + `idempotencyKey` (throws if missing; process-local if `InMemoryIdempotencyStore`) |
+| Paymob create | **No** native keys | Per-instance cache + optional `paymob.idempotencyStore` |
+| Paymob capture/refund/void | **No** native keys | **Required** `paymob.idempotencyStore` with atomic `reserve()` + `idempotencyKey` (throws if missing; process-local if `InMemoryIdempotencyStore`) |
 
 ---
 

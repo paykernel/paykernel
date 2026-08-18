@@ -300,22 +300,88 @@ export function runCheckoutHttpScenarios(
       }
     });
 
-    it("provider-side client timeout schedules recon and does not charge again", async () => {
+    it("provider-side client timeout keeps the order, schedules recon, and does not charge again", async () => {
       const kernel = await createCheckoutKernel({
         scriptCreate: [{ outcome: "provider_ok_client_timeout" }],
       });
       const app = createApp(kernel);
       try {
-        const created = await createOrder(app);
-        expect(created.gatewayPaymentId).toBeDefined();
+        const res = await postJson(app, "/payments", {});
+        expect(res.status).toBe(200);
+        const created = await readJson(res);
+        expect(created.outcome).toBe("indeterminate");
+        expect(created.reconciliationRequired).toBe(true);
+        expect(typeof created.orderId).toBe("string");
+        expect(created.gatewayPaymentId).toBeUndefined();
         expect(await getCreateCount(app)).toBe(1);
 
         const recon = await postJson(app, "/internal/reconcile");
         expect(recon.status).toBe(200);
         expect(await getCreateCount(app)).toBe(1);
-        const order = await getOrder(app, created.orderId);
-        expect(order.status).toBe("paid");
-        expect(order.fulfillCount).toBe(1);
+        const order = await getOrder(app, created.orderId as string);
+        expect(order.status).toBe("unpaid");
+        expect(order.fulfillCount).toBe(0);
+        expect(order.gatewayPaymentId).toBeUndefined();
+      } finally {
+        kernel.close();
+      }
+    });
+
+    it("create NetworkError keeps the order and does not leak err.message", async () => {
+      const kernel = await createCheckoutKernel({
+        scriptCreate: [{ outcome: "network_error", message: "do-not-leak-network-detail" }],
+      });
+      const app = createApp(kernel);
+      try {
+        const res = await postJson(app, "/payments", {});
+        expect(res.status).toBe(200);
+        const body = await readJson(res);
+        expect(body.outcome).toBe("indeterminate");
+        expect(body.reconciliationRequired).toBe(true);
+        expect(JSON.stringify(body)).not.toContain("do-not-leak-network-detail");
+        expect(await getCreateCount(app)).toBe(1);
+        const order = await getOrder(app, body.orderId as string);
+        expect(order.status).toBe("unpaid");
+        expect(order.gatewayPaymentId).toBeUndefined();
+      } finally {
+        kernel.close();
+      }
+    });
+
+    it("does not bind last provider-side success onto another order", async () => {
+      const kernel = await createCheckoutKernel({
+        scriptCreate: [
+          { outcome: "provider_ok_client_timeout" },
+          { outcome: "network_error" },
+        ],
+      });
+      const app = createApp(kernel);
+      try {
+        const firstRes = await postJson(app, "/payments", { orderId: "order_a" });
+        expect(firstRes.status).toBe(200);
+        const first = await readJson(firstRes);
+        expect(first.outcome).toBe("indeterminate");
+        expect(first.gatewayPaymentId).toBeUndefined();
+
+        const secondRes = await postJson(app, "/payments", { orderId: "order_b" });
+        expect(secondRes.status).toBe(200);
+        const second = await readJson(secondRes);
+        expect(second.outcome).toBe("indeterminate");
+        expect(second.gatewayPaymentId).toBeUndefined();
+        expect(JSON.stringify(second)).not.toContain("Network error (mock)");
+
+        const recon = await postJson(app, "/internal/reconcile");
+        expect(recon.status).toBe(200);
+        expect(await getCreateCount(app)).toBe(2);
+
+        const orderA = await getOrder(app, "order_a");
+        const orderB = await getOrder(app, "order_b");
+        expect(orderA.status).toBe("unpaid");
+        expect(orderA.fulfillCount).toBe(0);
+        expect(orderA.gatewayPaymentId).toBeUndefined();
+        expect(orderB.status).toBe("unpaid");
+        expect(orderB.fulfillCount).toBe(0);
+        expect(orderB.gatewayPaymentId).toBeUndefined();
       } finally {
         kernel.close();
       }

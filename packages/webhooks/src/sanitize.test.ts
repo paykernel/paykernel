@@ -101,3 +101,72 @@ describe("redactOpaquePayloadRefString (WEBHOOKS-6)", () => {
     expect(out).toContain("[REDACTED]");
   });
 });
+
+describe("I11 residual secret / PAN scrub (observability parity)", () => {
+  const paypalA21AA =
+    "A21AAFEpjF0wAHLmN8s7xKzExamplePayPalAccessTokenValueXYZ123456";
+
+  it.each([
+    {
+      name: "cs_live_",
+      input: "checkout cs_live_checkout_secret_abc leftover",
+      forbidden: ["cs_live_checkout_secret_abc", "cs_live_"],
+    },
+    {
+      name: "cs_test_",
+      input: "session cs_test_abc123XYZ leftover",
+      forbidden: ["cs_test_abc123XYZ"],
+    },
+    {
+      name: "csk_live_",
+      input: "paymob csk_live_abc123 leftover",
+      forbidden: ["csk_live_abc123"],
+    },
+    {
+      name: "pi_…_secret_",
+      input: "client_secret=pi_3N3xYZ_secret_abc123def leftover",
+      forbidden: ["pi_3N3xYZ_secret_abc123def"],
+    },
+    {
+      name: "seti_…_secret_",
+      input: "setup seti_1Abc_secret_xyz789 leftover",
+      forbidden: ["seti_1Abc_secret_xyz789"],
+    },
+    {
+      name: "PayPal A21AA",
+      input: `oauth failed ${paypalA21AA}`,
+      forbidden: [paypalA21AA, "A21AAFEpj"],
+    },
+    {
+      name: "PAN digit run",
+      input: "card 4111111111111111 charged",
+      forbidden: ["4111111111111111"],
+    },
+    {
+      name: "PAN with dashes",
+      input: "pan 4111-1111-1111-1111 used",
+      forbidden: ["4111-1111-1111-1111"],
+    },
+  ])("strips $name", ({ input, forbidden }) => {
+    const out = sanitizeWebhookError(input);
+    for (const secret of forbidden) {
+      expect(out).not.toContain(secret);
+    }
+    expect(out).toContain("[REDACTED]");
+  });
+
+  it("does not treat short A21AA as a PayPal token", () => {
+    expect(sanitizeWebhookError("id A21AA leftover")).toContain("A21AA");
+  });
+
+  it("redactOpaquePayloadRefString strips residual secrets and PAN", () => {
+    const out = redactOpaquePayloadRefString(
+      `cs_live_abc pi_1x_secret_yyy ${paypalA21AA} 4111111111111111`,
+    );
+    expect(out).not.toContain("cs_live_abc");
+    expect(out).not.toContain("pi_1x_secret_yyy");
+    expect(out).not.toContain(paypalA21AA);
+    expect(out).not.toContain("4111111111111111");
+    expect(out).toContain("[REDACTED]");
+  });
+});

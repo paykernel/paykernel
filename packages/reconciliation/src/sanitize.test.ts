@@ -48,4 +48,52 @@ describe("sanitizeReconciliationError", () => {
     expect(sanitizeReconciliationError(null)).toBe("Unknown error");
     expect(sanitizeReconciliationError(42)).toBe("42");
   });
+
+  it("redacts secret keys on plain object throws before stringify", () => {
+    const out = sanitizeReconciliationError({
+      code: "boom",
+      password: "hunter2",
+      api_key: "rk_live_should_not_persist",
+      client_secret: "cs_live_abc",
+      authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.payload",
+      nested: { password: "nested-secret", ok: true },
+    });
+    expect(out).not.toContain("hunter2");
+    expect(out).not.toContain("rk_live_should_not_persist");
+    expect(out).not.toContain("cs_live_abc");
+    expect(out).not.toContain("Bearer eyJ");
+    expect(out).not.toContain("nested-secret");
+    expect(out).toContain("[REDACTED]");
+    expect(out).toContain("boom");
+    expect(out).toContain("ok");
+  });
+
+  it.each([
+    {
+      name: "cs_live checkout session",
+      input: "failed cs_live_checkout_secret_abc leftover",
+      forbidden: ["cs_live_checkout_secret_abc"],
+    },
+    {
+      name: "api_key and client_secret assignments",
+      input: "api_key=pk_secret_value client_secret=cs_value rest",
+      forbidden: ["pk_secret_value", "cs_value"],
+    },
+    {
+      name: "password and authorization assignments",
+      input: "password=hunter2 authorization=tok_supersecret rest",
+      forbidden: ["hunter2", "tok_supersecret"],
+    },
+    {
+      name: "Basic auth credentials",
+      input: "Basic dXNlcjpwYXNz",
+      forbidden: ["dXNlcjpwYXNz"],
+    },
+  ])("strips $name", ({ input, forbidden }) => {
+    const out = sanitizeReconciliationError(input);
+    for (const secret of forbidden) {
+      expect(out).not.toContain(secret);
+    }
+    expect(out).toContain("[REDACTED]");
+  });
 });

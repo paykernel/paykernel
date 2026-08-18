@@ -18,6 +18,7 @@ describe("B3: ackAfterClaim must not burn handler attempt budget", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       maxAttempts: 3,
       defaultRetryAfterMs: 0,
       clock,

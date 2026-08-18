@@ -60,6 +60,7 @@ export function createElysiaCheckoutApp(kernel: CheckoutKernel): Elysia {
     checkoutJsonResponse(handlers.getOrder(params.orderId)),
   );
 
+  // Test hook only — unauthenticated. Do not deploy this route.
   app.post(
     "/internal/provider-paid",
     async ({ request }) => {

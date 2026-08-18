@@ -981,3 +981,79 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
     }
   });
 });
+
+describe("I4 reserved logical keys at store entrypoints", () => {
+  it("idempotency reserve/get reject retain without EVAL", async () => {
+    let evals = 0;
+    const { port } = createMockPort(() => {
+      evals += 1;
+      return ["ok"];
+    });
+    const store = createRedisIdempotencyStore({ port });
+    await expect(
+      store.reserve({
+        key: "retain",
+        fingerprint: "fp",
+        owner: "w",
+        leaseMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    await expect(store.get("retain")).rejects.toBeInstanceOf(
+      StoreInvalidSchemaError,
+    );
+    expect(evals).toBe(0);
+  });
+
+  it("webhook claim rejects retry without EVAL", async () => {
+    let evals = 0;
+    const { port } = createMockPort(() => {
+      evals += 1;
+      return ["ok"];
+    });
+    const store = createRedisWebhookInboxStore({ port });
+    await expect(
+      store.claim({
+        key: "retry",
+        payloadHash: "h",
+        owner: "w",
+        leaseMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    expect(evals).toBe(0);
+  });
+
+  it("reconciliation schedule rejects due without EVAL", async () => {
+    let evals = 0;
+    const { port } = createMockPort(() => {
+      evals += 1;
+      return ["ok"];
+    });
+    const store = createRedisReconciliationStore({ port });
+    await expect(
+      store.schedule({
+        key: "due",
+        subjectId: "sub",
+        reason: "check",
+        dueAt: "2026-01-01T00:00:00.000Z",
+      }),
+    ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+    expect(evals).toBe(0);
+  });
+
+  it("case-sensitive: Due / RETRY are not reserved", async () => {
+    const { port } = createMockPort((call) => {
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        return ["scheduled", ...reconPack({ key: "Due", status: "scheduled" })];
+      }
+      return null;
+    });
+    const store = createRedisReconciliationStore({ port });
+    const r = await store.schedule({
+      key: "Due",
+      subjectId: "sub",
+      reason: "check",
+      dueAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect(r.kind).toBe("scheduled");
+  });
+});

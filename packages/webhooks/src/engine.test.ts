@@ -450,6 +450,7 @@ describe("WEBHOOKS-6 opaque string envelope redaction", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     await engine.processVerified({
@@ -880,6 +881,64 @@ describe("lease renew (10.5)", () => {
     });
     expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
   });
+
+  it("I5: auto-renews lease while handler runs longer than leaseMs", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      defaultLeaseMs: 250,
+    });
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_i5_heartbeat",
+      payloadHash: "h",
+      leaseMs: 250,
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 600));
+      },
+    });
+    expect(outcome).toEqual({ outcome: "processed" });
+    expect((await store.get("stripe:evt_i5_heartbeat"))?.status).toBe(
+      "completed",
+    );
+  });
+
+  it("I5: heartbeat lease_lost stops treating the run as owner", async () => {
+    const inner = createMemoryWebhookInboxStore();
+    let renewCalls = 0;
+    let completeCalls = 0;
+    const store = {
+      ...inner,
+      async renew() {
+        renewCalls += 1;
+        return { ok: false as const, reason: "lease_lost" as const };
+      },
+      async complete(input: Parameters<typeof inner.complete>[0]) {
+        completeCalls += 1;
+        return inner.complete(input);
+      },
+    };
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      defaultLeaseMs: 90,
+    });
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_i5_lost",
+      payloadHash: "h",
+      leaseMs: 90,
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 280));
+      },
+    });
+    expect(renewCalls).toBeGreaterThan(0);
+    expect(completeCalls).toBe(0);
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    const rec = await inner.get("stripe:evt_i5_lost");
+    expect(rec?.status).not.toBe("completed");
+  });
 });
 
 describe("processWithVerifier", () => {
@@ -976,6 +1035,71 @@ describe("processWithVerifier", () => {
       handler: async () => {},
     });
     expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(store.size).toBe(0);
+  });
+
+  it("I10: InvalidRequestError missing webhookSecret is retryable, not forgery", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    for (const message of [
+      "paypal.webhookId is required for webhook verification",
+      "Stripe webhookSecret not configured",
+      "hmacSecret is missing; refusing webhooks",
+      "Webhook verification failed: webhookSecret not configured",
+    ]) {
+      const err = new Error(message);
+      err.name = "InvalidRequestError";
+      (err as Error & { code?: string; statusCode?: number }).code =
+        "INVALID_REQUEST";
+      (err as Error & { statusCode?: number }).statusCode = 400;
+      const o = await engine.processWithVerifier({
+        raw: {},
+        verifyAndNormalize: async () => {
+          throw err;
+        },
+        handler: async () => {},
+      });
+      expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    }
+    expect(store.size).toBe(0);
+  });
+
+  it("I10: InvalidWebhookError about missing hmacSecret is not forgery", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error(
+      "Webhook verification failed: hmacSecret not configured",
+    );
+    err.name = "InvalidWebhookError";
+    (err as Error & { code?: string; statusCode?: number }).code =
+      "INVALID_WEBHOOK";
+    (err as Error & { statusCode?: number }).statusCode = 403;
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(o.outcome).not.toBe("invalid_webhook");
+    expect(store.size).toBe(0);
+  });
+
+  it("I10: verify-false MAC mismatch stays forgery", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const err = new Error("Webhook verification failed");
+    err.name = "InvalidWebhookError";
+    (err as Error & { code?: string }).code = "INVALID_WEBHOOK";
+    const o = await engine.processWithVerifier({
+      raw: {},
+      verifyAndNormalize: async () => {
+        throw err;
+      },
+      handler: async () => {},
+    });
+    expect(o.outcome).toBe("invalid_webhook");
     expect(store.size).toBe(0);
   });
 
@@ -1390,6 +1514,7 @@ describe("P610-SNAP-1: durable_retry must not persist rawPayload", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
     const o = await engine.processVerified({
       gateway: "stripe",
@@ -1742,6 +1867,125 @@ describe("WEBHOOKS-1 Paymob redirect then processed is not duplicate_completed",
     expect(refunded).toEqual({ outcome: "processed" });
     expect(await store.get("paymob:TRANSACTION:123456789")).toBeUndefined();
     expect(await store.get("paymob:TRANSACTION:123456789:completed")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("I13: nested PaymentEvent refund.status wins over WebhookEvent.status paid", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+    const occurredAt = "2026-01-01T00:00:00.000Z";
+
+    const paid = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_wh_paid",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "paid",
+        event: {
+          schemaVersion: "1",
+          type: "payment.succeeded",
+          provider: {
+            gateway: "paymob",
+            eventId: txnId,
+            eventType: "TRANSACTION",
+            occurredAt,
+            receivedAt: occurredAt,
+          },
+          payment: {
+            status: "paid",
+            references: { providerPaymentId: txnId },
+          },
+        },
+      },
+      handler: async () => {},
+    });
+    expect(paid).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION:123456789:paid")).toMatchObject({
+      status: "completed",
+    });
+
+    let refundRan = false;
+    const refunded = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_wh_refund",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "paid",
+        event: {
+          schemaVersion: "1",
+          type: "refund.completed",
+          provider: {
+            gateway: "paymob",
+            eventId: txnId,
+            eventType: "TRANSACTION",
+            occurredAt,
+            receivedAt: occurredAt,
+          },
+          payment: {
+            status: "paid",
+            references: { providerPaymentId: txnId },
+          },
+          refund: {
+            status: "completed",
+            references: { providerPaymentId: txnId },
+          },
+        },
+      },
+      handler: async () => {
+        refundRan = true;
+      },
+    });
+
+    expect(refunded).toEqual({ outcome: "processed" });
+    expect(refunded.outcome).not.toBe("duplicate_completed");
+    expect(refundRan).toBe(true);
+    expect(await store.get("paymob:TRANSACTION:123456789:completed")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("I13: TRANSACTION_RESPONSE still ignores nested payment.status", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+    const redirect = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_i13_redirect",
+      event: {
+        id: txnId,
+        type: "TRANSACTION_RESPONSE",
+        gateway: "paymob",
+        status: "paid",
+        event: {
+          schemaVersion: "1",
+          type: "payment.processing",
+          provider: {
+            gateway: "paymob",
+            eventId: txnId,
+            eventType: "TRANSACTION_RESPONSE",
+            occurredAt: "2026-01-01T00:00:00.000Z",
+            receivedAt: "2026-01-01T00:00:00.000Z",
+          },
+          payment: {
+            status: "paid",
+            references: { providerPaymentId: txnId },
+          },
+        },
+      },
+      handler: async () => {},
+    });
+    expect(redirect).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:TRANSACTION_RESPONSE:123456789:paid")).toBeUndefined();
+    expect(await store.get("paymob:TRANSACTION_RESPONSE:123456789")).toMatchObject({
       status: "completed",
     });
   });

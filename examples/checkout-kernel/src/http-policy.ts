@@ -9,6 +9,9 @@ import type { WebhookProcessingOutcome } from "@paykernel/webhooks";
  * Map a framework-agnostic inbox outcome to an HTTP status.
  *
  * Exhaustive on {@link WebhookProcessingOutcome.outcome}.
+ * This example runs the inbox in `inline` mode and has no retry worker —
+ * never ACK 200 for `scheduled_for_retry` (`parked` / `handler_retry` /
+ * `not_available`).
  */
 export function mapInboxOutcome(outcome: WebhookProcessingOutcome): number {
   switch (outcome.outcome) {
@@ -24,6 +27,6 @@ export function mapInboxOutcome(outcome: WebhookProcessingOutcome): number {
     case "handler_failed":
       return outcome.retryable ? 500 : 200;
     case "scheduled_for_retry":
-      return outcome.reason === "not_available" ? 503 : 200;
+      return 503;
   }
 }

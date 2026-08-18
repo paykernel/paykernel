@@ -22,10 +22,12 @@ import type {
  *   `not_available` → `handler_failed { retryable: true }`).
  * - `durable_retry`: await handler by default; on retryable throw → store.fail with
  *   delay → `scheduled_for_retry` (`reason: "handler_retry"`). When
- *   `ackAfterClaim: true`, claim persists and returns `scheduled_for_retry`
- *   (`reason: "parked"`) without running the handler (worker via
- *   `processRetryable`) **only if** `store.fail({ restoreAttempt: true })`
- *   succeeds. The parking claim does **not** count toward `maxAttempts`.
+ *   `ackAfterClaim: true` **and** `workerGuaranteed: true`, claim persists and
+ *   returns `scheduled_for_retry` (`reason: "parked"`) without running the
+ *   handler (worker via `processRetryable`) **only if**
+ *   `store.fail({ restoreAttempt: true })` succeeds. The parking claim does
+ *   **not** count toward `maxAttempts`. `ackAfterClaim` without
+ *   `workerGuaranteed` refuses (constructor or retryable `handler_failed`).
  */
 export type WebhookProcessingMode = "inline" | "durable_retry";
 
@@ -38,7 +40,8 @@ export type WebhookProcessingMode = "inline" | "durable_retry";
  * ACK is unsafe when no worker will process the row:
  *
  * - `parked` — durable `ackAfterClaim` released work for `processRetryable`
- *   (safe 200 only when a worker is guaranteed). Emitted only after
+ *   (safe 200 only when a worker is guaranteed). Requires engine
+ *   `workerGuaranteed: true`. Emitted only after
  *   `store.fail({ restoreAttempt: true })` succeeds.
  * - `handler_retry` — handler threw retryable; `store.fail` recorded with backoff.
  * - `not_available` — durable claim backoff (`availableAt` still future); no handler ran.
@@ -188,8 +191,10 @@ export type ProcessVerifiedInput = {
   /**
    * Per-call override for durable_retry ack-after-claim (defaults to engine
    * option). When true, returns `scheduled_for_retry` (`reason: "parked"`) after
-   * durable claim without running the handler **only if**
-   * `store.fail({ restoreAttempt: true })` succeeds. Park `lease_lost` returns
+   * durable claim without running the handler **only if** engine
+   * `workerGuaranteed: true` **and** `store.fail({ restoreAttempt: true })`
+   * succeeds. Without `workerGuaranteed`, returns retryable `handler_failed`
+   * (never parked — hosts must not 200). Park `lease_lost` returns
    * `already_processing` or `handler_failed { retryable: true }` (never parked).
    * Parking claim does not consume `maxAttempts`.
    *
@@ -320,14 +325,21 @@ export type CreateWebhookInboxEngineOptions = {
   /**
    * durable_retry only: when true, `processVerified` returns
    * `scheduled_for_retry` (`reason: "parked"`) after successful claim without
-   * running the handler **only if** `store.fail({ restoreAttempt: true })`
-   * succeeds. Park `lease_lost` → `already_processing` or retryable
-   * `handler_failed`. Workers must call `processRetryable`.
-   * Default: false (run handler in-process).
-   * Parking does not consume handler attempt budget.
+   * running the handler **only if** {@link workerGuaranteed} is also `true`
+   * **and** `store.fail({ restoreAttempt: true })` succeeds. Constructor
+   * throws when `ackAfterClaim` is set without `workerGuaranteed`. Park
+   * `lease_lost` → `already_processing` or retryable `handler_failed`.
+   * Workers must call `processRetryable`. Default: false (run handler
+   * in-process). Parking does not consume handler attempt budget.
    * Requires a non-empty `envelope` on each parking `processVerified` call.
    */
   ackAfterClaim?: boolean;
+  /**
+   * Host guarantee that a `processRetryable` worker will run.
+   * Required to emit `scheduled_for_retry { reason: "parked" }` (HTTP 200).
+   * Without it, `ackAfterClaim` is refused so providers redeliver.
+   */
+  workerGuaranteed?: boolean;
   /** Injectable clock for lease expiry deltas / tests. Default: Date.now. */
   clock?: EngineClock;
   /** Override error sanitizer. Default: {@link import("./sanitize").sanitizeWebhookError}. */
@@ -346,7 +358,11 @@ export type WebhookInboxEngine = {
    * **Verify classification (WEBHOOKS-1 / WEBHOOKS-3 / WEBHOOKS-4):**
    * - `{ ok: false }` or verify-false `InvalidWebhookError` (signature /
    *   authenticity) → `invalid_webhook` (never claims). `{ ok: false }.reason`
-   *   is sanitized before return.
+   *   is sanitized before return. Verify-false MAC mismatch stays forgery.
+   * - Missing `webhookSecret` / `hmacSecret` / `webhookId` (InvalidRequestError
+   *   or InvalidWebhookError whose message names those fields) →
+   *   `handler_failed { retryable: true }` (I10 — never forgery; merchant
+   *   adds the secret and providers redeliver)
    * - Parse-stage `InvalidWebhookError` (Paymob/Moyasar payload shape,
    *   "parse failed"; always HTTP 403) → `handler_failed { retryable: true }`
    *   (not forgery, not permanent 4xx — WEBHOOKS-403)

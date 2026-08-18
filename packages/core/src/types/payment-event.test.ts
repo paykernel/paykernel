@@ -720,6 +720,14 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.succeeded");
     });
 
+    it("I3-PAYMOB-FLAGS-PENDING: flags success+pending, no status → payment.processing", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          flags: { success: true, pending: true },
+        }),
+      ).toBe("payment.processing");
+    });
+
     it("TRANSACTION failed → payment.failed", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {

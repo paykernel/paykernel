@@ -229,6 +229,30 @@ function isVerifyFailureMessage(message: string): boolean {
 }
 
 /**
+ * I10: missing merchant webhook config (webhookSecret / hmacSecret / webhookId).
+ * Never treat as forgery — the payload was not proven fake; 400 ACK would drop
+ * paid redeliveries until the merchant adds the secret.
+ */
+function isMissingWebhookConfigMessage(message: string): boolean {
+  return (
+    message.includes("webhooksecret") ||
+    message.includes("hmacsecret") ||
+    message.includes("webhookid") ||
+    message.includes("webhook secret") ||
+    message.includes("hmac secret") ||
+    message.includes("webhook_id") ||
+    message.includes("webhook-id")
+  );
+}
+
+function isMissingWebhookConfigError(err: unknown): boolean {
+  if (err === null || err === undefined || typeof err !== "object") return false;
+  const e = err as { message?: unknown };
+  const message = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  return message.length > 0 && isMissingWebhookConfigMessage(message);
+}
+
+/**
  * WEBHOOKS-1 / WEBHOOKS-3: forgery-class verify failures only.
  *
  * Reserved for explicit signature / authenticity failures — typically
@@ -258,6 +282,8 @@ function isForgeryClassVerifyError(err: unknown): boolean {
   if (!looksLikeWebhookInvalid) return false;
 
   if (isParseStageInvalidWebhookMessage(message)) return false;
+  // Missing merchant secret is config, not a MAC mismatch.
+  if (isMissingWebhookConfigMessage(message)) return false;
   return isVerifyFailureMessage(message);
 }
 
@@ -298,6 +324,9 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
   };
   if (e.retryable === false) return true;
   if (e.retryable === true) return false;
+  // I10: missing secret/webhookId is retryable config (5xx) so providers redeliver
+  // after the merchant adds the secret — never permanent 4xx, never forgery.
+  if (isMissingWebhookConfigError(err)) return false;
 
   const name = typeof e.name === "string" ? e.name.toLowerCase() : "";
   const code = typeof e.code === "string" ? e.code.toLowerCase() : "";
@@ -395,6 +424,8 @@ function isPermanentNonRetryableVerifyError(err: unknown): boolean {
 function classifyVerifyThrow(
   err: unknown,
 ): "forgery" | "permanent" | "retryable" {
+  // I10 first: missing webhookSecret / hmacSecret / webhookId is never forgery.
+  if (isMissingWebhookConfigError(err)) return "retryable";
   if (isForgeryClassVerifyError(err)) return "forgery";
   if (isPermanentNonRetryableVerifyError(err)) return "permanent";
   // Fail-open: InvalidRequestError (parse), RateLimitError, TypeError, etc.
@@ -670,9 +701,10 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
  * (`TRANSACTION`, `TRANSACTION_RESPONSE`) are accepted. Processed TRANSACTION
  * keys include domain status when present (`paymob:TRANSACTION:{id}:{status}`)
  * so a later same-id void/refund snapshot is not `already_completed`. Domain
- * status is `status`, `payment.status`, `refund.status`, or those paths on
- * nested `event` (PaymentEvent / PersistedPaymentEventEnvelope) — PaymentEvent
- * has no top-level `status` (NEW-WH-KEY-1). Redirect stays
+ * status is `refund.status` / `payment.status` from the PaymentEvent (or
+ * those paths on nested `event`) — not top-level WebhookEvent.status when
+ * a nested event/refund exists (I13). PaymentEvent has no top-level
+ * `status` (NEW-WH-KEY-1). Redirect stays
  * `TRANSACTION_RESPONSE:{txnId}` (status ignored). Do not complete fulfillment
  * on Paymob `payment.processing` (redirect).
  */
@@ -728,27 +760,47 @@ function readNestedEntityStatus(
   return readTrimmedInboxStatus((nested as Record<string, unknown>).status);
 }
 
-/** Prefer legacy `status`, then PaymentEvent `payment.status` / `refund.status`. */
-function readInboxDomainStatusRecord(
-  rec: Record<string, unknown>,
-): string | undefined {
-  return (
-    readTrimmedInboxStatus(rec.status) ??
-    readNestedEntityStatus(rec, "payment") ??
-    readNestedEntityStatus(rec, "refund")
-  );
-}
-
+/**
+ * When a nested PaymentEvent or refund/payment entity exists, do not let
+ * envelope `status: paid` qualify processed keys. Prefer entity status.
+ */
 function extractInboxDomainStatus(value: unknown): string | undefined {
   if (value === null || typeof value !== "object") return undefined;
   const rec = value as Record<string, unknown>;
-  const fromSelf = readInboxDomainStatusRecord(rec);
-  if (fromSelf !== undefined) return fromSelf;
-  const nested = rec.event;
-  if (nested !== null && typeof nested === "object") {
-    return readInboxDomainStatusRecord(nested as Record<string, unknown>);
+  const nestedRaw = rec.event;
+  const nested =
+    nestedRaw !== null && typeof nestedRaw === "object" && !Array.isArray(nestedRaw)
+      ? (nestedRaw as Record<string, unknown>)
+      : undefined;
+
+  const fromNestedRefund = nested
+    ? readNestedEntityStatus(nested, "refund")
+    : undefined;
+  const fromOwnRefund = readNestedEntityStatus(rec, "refund");
+  const fromNestedPayment = nested
+    ? readNestedEntityStatus(nested, "payment")
+    : undefined;
+  const fromOwnPayment = readNestedEntityStatus(rec, "payment");
+  const fromNestedStatus = nested
+    ? readTrimmedInboxStatus(nested.status)
+    : undefined;
+
+  const nestedOrEntityExists =
+    nested !== undefined ||
+    fromOwnRefund !== undefined ||
+    fromOwnPayment !== undefined;
+
+  if (nestedOrEntityExists) {
+    return (
+      fromNestedRefund ??
+      fromOwnRefund ??
+      fromNestedPayment ??
+      fromOwnPayment ??
+      fromNestedStatus
+    );
   }
-  return undefined;
+
+  return readTrimmedInboxStatus(rec.status);
 }
 
 function resolveHandlerEvent(
@@ -868,6 +920,7 @@ export function createWebhookInboxEngine(
     "defaultRetryAfterMs",
   );
   const engineAckAfterClaim = options.ackAfterClaim === true;
+  const workerGuaranteed = options.workerGuaranteed === true;
   const clock: EngineClock = options.clock ?? systemClock;
   const sanitize: SanitizeErrorFn =
     options.sanitizeError ?? ((err) => sanitizeWebhookError(err));
@@ -875,6 +928,11 @@ export function createWebhookInboxEngine(
   if (engineAckAfterClaim && mode !== "durable_retry") {
     throw new Error(
       'createWebhookInboxEngine: ackAfterClaim is only valid with mode "durable_retry"',
+    );
+  }
+  if (engineAckAfterClaim && !workerGuaranteed) {
+    throw new Error(
+      "createWebhookInboxEngine: ackAfterClaim requires workerGuaranteed: true (parked scheduled_for_retry is mapped to HTTP 200; without a processRetryable worker that ACK drops money-moving webhooks)",
     );
   }
 
@@ -901,25 +959,41 @@ export function createWebhookInboxEngine(
   }): Promise<WebhookProcessingOutcome> {
     let currentToken = args.leaseToken;
     let currentRecord = args.record;
+    let lostOwnership = false;
+    let heartbeatLostOwnership = false;
+    let renewTail: Promise<void> = Promise.resolve();
 
     const renew = async (leaseMs?: number): Promise<void> => {
-      // Prefer caller's ms, else this claim's leaseMs (not only engine default).
-      const ms = assertPositiveLeaseMs(
-        leaseMs ?? args.leaseMs,
-        leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
-      );
-      const result = await store.renew({
-        key: args.key,
-        leaseToken: currentToken,
-        leaseMs: ms,
-      });
-      if (!result.ok) {
-        throw new StoreLeaseLostError(
-          `renewLease failed: ${result.reason}`,
+      const run = async (): Promise<void> => {
+        if (lostOwnership) {
+          throw new StoreLeaseLostError("renewLease failed: lease_lost");
+        }
+        // Prefer caller's ms, else this claim's leaseMs (not only engine default).
+        const ms = assertPositiveLeaseMs(
+          leaseMs ?? args.leaseMs,
+          leaseMs !== undefined ? "leaseMs" : "defaultLeaseMs",
         );
-      }
-      currentToken = result.leaseToken;
-      currentRecord = result.record;
+        const result = await store.renew({
+          key: args.key,
+          leaseToken: currentToken,
+          leaseMs: ms,
+        });
+        if (!result.ok) {
+          lostOwnership = true;
+          throw new StoreLeaseLostError(
+            `renewLease failed: ${result.reason}`,
+          );
+        }
+        currentToken = result.leaseToken;
+        currentRecord = result.record;
+      };
+      // Serialize ctx.renew + heartbeat so a rotated token is not raced.
+      const next = renewTail.then(run, run);
+      renewTail = next.then(
+        () => undefined,
+        () => undefined,
+      );
+      return next;
     };
 
     const ctx: WebhookHandlerContext = {
@@ -937,9 +1011,32 @@ export function createWebhookInboxEngine(
       renew,
     };
 
+    // Default 30s leases expire during handler I/O; renew before expiry.
+    const heartbeatMs = Math.max(1, Math.floor(args.leaseMs / 3));
+    let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    const stopHeartbeat = (): void => {
+      if (heartbeatTimer !== undefined) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = undefined;
+      }
+    };
+    heartbeatTimer = setInterval(() => {
+      void renew().catch(() => {
+        lostOwnership = true;
+        heartbeatLostOwnership = true;
+        stopHeartbeat();
+      });
+    }, heartbeatMs);
+
     try {
       await args.handler(ctx);
     } catch (err) {
+      stopHeartbeat();
+      await renewTail;
+      // Heartbeat lease_lost: we are not owner — do not fail/complete (fence).
+      if (heartbeatLostOwnership) {
+        return outcomeHandlerFailed(true);
+      }
       // WEBHOOKS-2: do not skip store.fail on lease-lost-from-renew. Stores accept
       // fail with a matching token even after lease expiry so the handler attempt
       // counts toward maxAttempts (soft-release alone must not erase the budget).
@@ -1029,6 +1126,13 @@ export function createWebhookInboxEngine(
           timingFromRetryAfterMs(defaultRetryAfterMs, clock.nowMs()),
         );
       }
+      return outcomeHandlerFailed(true);
+    }
+
+    stopHeartbeat();
+    await renewTail;
+    // Heartbeat or swallowed renew lost the fence — do not complete as owner.
+    if (lostOwnership || heartbeatLostOwnership) {
       return outcomeHandlerFailed(true);
     }
 
@@ -1183,6 +1287,11 @@ export function createWebhookInboxEngine(
       return outcomeInvalidWebhook(
         "handler is required when running handler inline",
       );
+    }
+
+    // Parked ACK is HTTP 200. Without a worker guarantee, refuse so the PSP redelivers.
+    if (ackAfterClaim && !workerGuaranteed) {
+      return outcomeHandlerFailed(true);
     }
 
     const owner = input.owner ?? defaultOwner;
@@ -1464,9 +1573,22 @@ export function createWebhookInboxEngine(
     // if handlers average >=3s and a peer reclaims the tail. Claim the next
     // row only after the previous handler returns.
     for (const row of prepared) {
+      // List snapshot can go stale. Skip if the idle hash moved forward.
+      const latest = await store.get(row.rec.key);
+      if (
+        latest === undefined ||
+        latest.payloadHash !== row.payloadHash
+      ) {
+        items.push({
+          key: row.rec.key,
+          outcome: outcomeHandlerFailed(true),
+        });
+        continue;
+      }
+
       const claim = await store.claim({
         key: row.rec.key,
-        payloadHash: row.payloadHash,
+        payloadHash: latest.payloadHash,
         owner,
         leaseMs,
         ...(row.payloadRef !== undefined ? { payloadRef: row.payloadRef } : {}),

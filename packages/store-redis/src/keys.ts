@@ -15,6 +15,26 @@ export const DEFAULT_SCHEMA_VERSION = "v1";
 
 export type StoreSegment = "idemp" | "whinbox" | "recon";
 
+/**
+ * Exact logical keys that collide with index suffixes
+ * (`…:recon:due`, `…:whinbox:retry`, `…:{store}:retain`).
+ * Case-sensitive — `Due` / `RETRY` are not reserved.
+ */
+export const RESERVED_RECORD_LOGICAL_KEYS = ["due", "retry", "retain"] as const;
+
+export type ReservedRecordLogicalKey =
+  (typeof RESERVED_RECORD_LOGICAL_KEYS)[number];
+
+const RESERVED_RECORD_LOGICAL_KEY_SET: ReadonlySet<string> = new Set(
+  RESERVED_RECORD_LOGICAL_KEYS,
+);
+
+export function isReservedRecordLogicalKey(
+  logicalKey: string,
+): logicalKey is ReservedRecordLogicalKey {
+  return RESERVED_RECORD_LOGICAL_KEY_SET.has(logicalKey);
+}
+
 export type KeyOptions = {
   /** Key prefix (default `psdk`). */
   prefix?: string;
@@ -121,6 +141,11 @@ function assertLogicalKey(logicalKey: string): void {
   if (/\s/.test(logicalKey) || logicalKey.includes("\n")) {
     throw new RedisKeyDesignError("logical key must not contain whitespace or newlines");
   }
+  if (isReservedRecordLogicalKey(logicalKey)) {
+    throw new RedisKeyDesignError(
+      `logical key "${logicalKey}" is reserved for index keys (due, retry, retain)`,
+    );
+  }
 }
 
 /**
@@ -154,7 +179,7 @@ export function logicalKeyFromRecordKey(
   const logical = redisKey.slice(prefix.length);
   if (logical.length === 0) return undefined;
   // Index keys share the store segment but end with fixed names, not logical keys.
-  if (logical === "retry" || logical === "due" || logical === "retain") {
+  if (isReservedRecordLogicalKey(logical)) {
     return undefined;
   }
   return logical;

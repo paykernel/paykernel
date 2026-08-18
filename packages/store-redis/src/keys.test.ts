@@ -3,11 +3,14 @@ import {
   DEFAULT_KEY_PREFIX,
   DEFAULT_SCHEMA_VERSION,
   formatHashTag,
+  isReservedRecordLogicalKey,
   logicalKeyFromRecordKey,
   recordKey,
   reconciliationDueIndexKey,
+  RESERVED_RECORD_LOGICAL_KEYS,
   resolveKeyDesign,
   RedisKeyDesignError,
+  retentionIndexKey,
   webhookRetryIndexKey,
 } from "./keys";
 
@@ -71,6 +74,31 @@ describe("recordKey / indexes", () => {
   it("formatHashTag wraps body", () => {
     expect(formatHashTag("tenantA")).toBe("{tenantA}");
   });
+
+  it("rejects reserved logical keys that collide with index suffixes (I4)", () => {
+    const d = resolveKeyDesign();
+    expect(reconciliationDueIndexKey(d)).toBe("psdk:v1:recon:due");
+    expect(webhookRetryIndexKey(d)).toBe("psdk:v1:whinbox:retry");
+    expect(retentionIndexKey(d, "idemp")).toBe("psdk:v1:idemp:retain");
+
+    for (const reserved of RESERVED_RECORD_LOGICAL_KEYS) {
+      expect(isReservedRecordLogicalKey(reserved)).toBe(true);
+      expect(() => recordKey(d, "recon", reserved)).toThrow(RedisKeyDesignError);
+      expect(() => recordKey(d, "whinbox", reserved)).toThrow(RedisKeyDesignError);
+      expect(() => recordKey(d, "idemp", reserved)).toThrow(RedisKeyDesignError);
+    }
+
+    expect(() => recordKey(d, "recon", "due")).toThrow(/reserved/);
+    expect(() => recordKey(d, "whinbox", "retry")).toThrow(/reserved/);
+    expect(() => recordKey(d, "idemp", "retain")).toThrow(/reserved/);
+
+    // Case-sensitive exact: mixed/upper case must not collide with indexes.
+    expect(recordKey(d, "recon", "Due")).toBe("psdk:v1:recon:Due");
+    expect(recordKey(d, "whinbox", "RETRY")).toBe("psdk:v1:whinbox:RETRY");
+    expect(recordKey(d, "idemp", "Retain")).toBe("psdk:v1:idemp:Retain");
+    expect(recordKey(d, "recon", "job:due")).toBe("psdk:v1:recon:job:due");
+    expect(recordKey(d, "whinbox", "retry-1")).toBe("psdk:v1:whinbox:retry-1");
+  });
 });
 
 describe("logicalKeyFromRecordKey (REDIS-1)", () => {
@@ -100,6 +128,12 @@ describe("logicalKeyFromRecordKey (REDIS-1)", () => {
     expect(logicalKeyFromRecordKey(d, "whinbox", webhookRetryIndexKey(d))).toBe(
       undefined,
     );
+    expect(
+      logicalKeyFromRecordKey(d, "recon", reconciliationDueIndexKey(d)),
+    ).toBe(undefined);
+    expect(
+      logicalKeyFromRecordKey(d, "idemp", retentionIndexKey(d, "idemp")),
+    ).toBe(undefined);
     expect(
       logicalKeyFromRecordKey(d, "whinbox", recordKey(d, "recon", "x")),
     ).toBe(undefined);

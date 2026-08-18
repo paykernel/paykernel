@@ -60,21 +60,31 @@ export function bytesToHex(bytes: Uint8Array): string {
 }
 
 /**
+ * Decode one ASCII hex nibble. Returns -1 for non-hex (never uses parseInt).
+ */
+function hexNibble(code: number): number {
+  if (code >= 48 && code <= 57) return code - 48; // 0-9
+  if (code >= 97 && code <= 102) return code - 87; // a-f
+  if (code >= 65 && code <= 70) return code - 55; // A-F
+  return -1;
+}
+
+/**
  * Parse a hex string into bytes.
  * @throws {Error} if length is odd or characters are non-hex
  */
 export function hexToBytes(hex: string): Uint8Array {
-  const cleaned = hex.length % 2 === 0 ? hex : `0${hex}`;
-  if (cleaned.length % 2 !== 0) {
+  if (hex.length % 2 !== 0) {
     throw new Error("hexToBytes: invalid hex length");
   }
-  const out = new Uint8Array(cleaned.length / 2);
+  const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    const byte = Number.parseInt(cleaned.slice(i * 2, i * 2 + 2), 16);
-    if (Number.isNaN(byte)) {
+    const hi = hexNibble(hex.charCodeAt(i * 2));
+    const lo = hexNibble(hex.charCodeAt(i * 2 + 1));
+    if (hi < 0 || lo < 0) {
       throw new Error("hexToBytes: invalid hex character");
     }
-    out[i] = byte;
+    out[i] = (hi << 4) | lo;
   }
   return out;
 }

@@ -186,11 +186,12 @@ idle supersede yet:
 | --- | --- |
 | `inline` | Await handler under lease. Failure → `handler_failed { retryable }` (`fail` uses `retryAfterMs: 0`). **Never** emits `scheduled_for_retry`. |
 | `durable_retry` | Await handler by default; retryable failure → `store.fail` + `scheduled_for_retry`. |
-| `durable_retry` + `ackAfterClaim: true` | After durable claim, release to pending and return `scheduled_for_retry` **without** running the handler (parking claim free vs `maxAttempts`). Workers call `processRetryable`. |
+| `durable_retry` + `ackAfterClaim: true` | After durable claim, release to pending and return `scheduled_for_retry` **without** running the handler (parking claim free vs `maxAttempts`). **Requires `workerGuaranteed: true`** (I6) — without it the engine refuses parked (no 200 ACK with no worker). Workers call `processRetryable`. |
 
 Mode is fixed at `createWebhookInboxEngine` construction. Process methods never switch modes implicitly.
 `processRetryable` is valid **only** on `durable_retry` engines (throws on `inline`).
 `ackAfterClaim` is valid **only** with `durable_retry` (constructor throws otherwise).
+`ackAfterClaim` also requires `workerGuaranteed: true` (constructor throws if omitted on the engine; per-call park without it is retryable `handler_failed`, never parked).
 `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / call throws otherwise; default remains 30s).
 `processRetryable` **claims one row at a time** (NEW-WEBHOOKS-1): the next
 lease is acquired only after the previous handler returns. Do not assume

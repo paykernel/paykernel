@@ -68,6 +68,7 @@ export type CheckoutKernel = {
     rawBody: string,
     signature: string | null,
   ): Promise<CheckoutHttpResult>;
+  /** Test hook: inject a paid provider snapshot. Not a production API. */
   markProviderPaid(gatewayPaymentId: string): CheckoutHttpResult;
   reconcileDue(): Promise<CheckoutHttpResult>;
   close(): void;
@@ -200,48 +201,31 @@ export async function createCheckoutKernel(
   }
 
   async function snapshotForOrder(order: CheckoutOrderRecord): Promise<LookupOutcome> {
-    if (order.gatewayPaymentId !== undefined) {
-      const override = providerOverrides.get(order.gatewayPaymentId);
-      if (override) return { kind: "found", snapshots: [override] };
-      try {
-        const got = await client.getPayment(
-          { gatewayPaymentId: order.gatewayPaymentId },
-          order.gateway,
-        );
-        if (got.gatewayId) {
-          return {
-            kind: "found",
-            snapshots: [
-              buildProviderPaymentSnapshot({
-                gatewayPaymentId: got.gatewayId,
-                status: got.status,
-                amount: order.amount,
-                providerStatus: got.status,
-              }),
-            ],
-          };
-        }
-      } catch {
-        return { kind: "unavailable" };
+    const gatewayPaymentId = order.gatewayPaymentId;
+    // Never bind mock.getLastProviderSideSuccess() — that id may belong to another order.
+    if (gatewayPaymentId === undefined) {
+      return { kind: "unavailable" };
+    }
+    const override = providerOverrides.get(gatewayPaymentId);
+    if (override) return { kind: "found", snapshots: [override] };
+    try {
+      const got = await client.getPayment({ gatewayPaymentId }, order.gateway);
+      if (got.gatewayId) {
+        return {
+          kind: "found",
+          snapshots: [
+            buildProviderPaymentSnapshot({
+              gatewayPaymentId: got.gatewayId,
+              status: got.status,
+              amount: order.amount,
+              providerStatus: got.status,
+            }),
+          ],
+        };
       }
+    } catch {
+      return { kind: "unavailable" };
     }
-
-    const providerSide = mock.getLastProviderSideSuccess();
-    if (providerSide?.gatewayId) {
-      rememberGatewayPaymentId(order, providerSide.gatewayId);
-      return {
-        kind: "found",
-        snapshots: [
-          buildProviderPaymentSnapshot({
-            gatewayPaymentId: providerSide.gatewayId,
-            status: providerSide.status,
-            amount: order.amount,
-            providerStatus: providerSide.status,
-          }),
-        ],
-      };
-    }
-
     return { kind: "not_found" };
   }
 
@@ -399,14 +383,9 @@ export async function createCheckoutKernel(
     try {
       result = await client.createPayment(params);
     } catch (err) {
-      const providerSide = mock.getLastProviderSideSuccess();
-      const submitted =
-        err instanceof NetworkError &&
-        (err.afterProviderSubmit || providerSide !== undefined);
-      if (submitted) {
-        if (providerSide?.gatewayId) {
-          rememberGatewayPaymentId(order, providerSide.gatewayId);
-        }
+      // Tagged or not: NetworkError is uncertain — keep the order and schedule recon.
+      // Never attach getLastProviderSideSuccess() (may be another order). Never leak err.message.
+      if (err instanceof NetworkError) {
         await scheduleIndeterminate(order);
         return {
           status: 200,
@@ -418,8 +397,7 @@ export async function createCheckoutKernel(
         };
       }
       orders.delete(orderId);
-      const message = err instanceof Error ? err.message : String(err);
-      return jsonError(500, message);
+      return jsonError(500, "create_failed");
     }
 
     if (result.gatewayId) {
@@ -492,6 +470,7 @@ export async function createCheckoutKernel(
     };
   }
 
+  /** Test hook: inject a paid provider snapshot. Not a production API. */
   function markProviderPaid(gatewayPaymentId: string): CheckoutHttpResult {
     if (gatewayPaymentId.length === 0) {
       return jsonError(400, "gatewayPaymentId required");

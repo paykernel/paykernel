@@ -69,6 +69,7 @@ export function createCheckoutHandlers(kernel: CheckoutKernel): CheckoutHandlers
       return { status: 200, body: order };
     },
     providerPaid(input) {
+      // Test hook only — unauthenticated. Do not deploy this route.
       if (typeof input.gatewayPaymentId !== "string") {
         return { status: 400, body: { error: "gatewayPaymentId required" } };
       }
@@ -106,6 +107,7 @@ export async function dispatchCheckoutRequest(
     if (method === "GET" && path === "/internal/create-count") {
       return checkoutJsonResponse(handlers.createCount());
     }
+    // Test hook only — unauthenticated. Do not deploy this route.
     if (method === "POST" && path === "/internal/provider-paid") {
       const gatewayPaymentId = gatewayPaymentIdFromUnknown(await readRequestJson(req));
       return checkoutJsonResponse(

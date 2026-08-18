@@ -12,7 +12,7 @@ export type CheckoutOrder = {
 
 export type CheckoutOrderRecord = CheckoutOrder & {
   amount: Money;
-  gateway: string;
+  gateway: "mock" | "stripe";
   idempotencyKey: string;
 };
 

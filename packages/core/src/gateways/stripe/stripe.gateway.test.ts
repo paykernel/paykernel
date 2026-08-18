@@ -146,7 +146,7 @@ describe("StripeGateway", () => {
       expect(gateway.verifyWebhook(payload, signature)).toBe(true);
     });
 
-    it("should fail closed when webhook secret is missing", () => {
+    it("should throw InvalidRequestError when webhook secret is missing (I10)", () => {
       const insecureGateway = new StripeGateway(
         {
           secretKey: "sk_test_123",
@@ -154,12 +154,18 @@ describe("StripeGateway", () => {
         hooksManager,
       );
 
-      expect(
+      expect(() =>
         insecureGateway.verifyWebhook(
           JSON.stringify({ id: "evt_123" }),
           "t=1,v1=test",
         ),
-      ).toBe(false);
+      ).toThrow(InvalidRequestError);
+      expect(() =>
+        insecureGateway.verifyWebhook(
+          JSON.stringify({ id: "evt_123" }),
+          "t=1,v1=test",
+        ),
+      ).toThrow(/stripe\.webhookSecret is required for webhook verification/);
     });
 
     it("should accept any matching v1 signature in the header", () => {
@@ -228,6 +234,7 @@ describe("StripeGateway", () => {
             amount: 1000,
             amount_received: 1000,
             currency: "usd",
+            latest_charge: "ch_123",
             metadata: { paymentId: "internal_123" },
           },
         },
@@ -1841,45 +1848,59 @@ describe("StripeGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
-    it("NEW-STRIPE-2: payment_intent.succeeded with id-only latest_charge is processing not paid", () => {
-      const event = gateway.parseWebhookEvent({
-        id: "evt_pi_id_only_charge",
-        type: "payment_intent.succeeded",
-        created: 1623456789,
-        data: {
-          object: {
-            id: "pi_id_only_charge",
-            object: "payment_intent",
-            status: "succeeded",
-            amount: 10000,
-            amount_received: 10000,
-            currency: "usd",
-            latest_charge: { id: "ch_id_only" },
-            metadata: {},
-          },
-        },
-        livemode: false,
-      });
-
-      expect(event.status).toBe("processing");
-      expect(event.status).not.toBe("paid");
-      expect(event.stableType).toBe("payment.processing");
-      expect(event.event?.type).toBe("payment.processing");
-      expect(event.stableType).not.toBe("payment.succeeded");
-    });
-
-    it("STRIPE-2: payment_intent.succeeded with unexpanded latest_charge is processing not paid", () => {
-      const event = gateway.parseWebhookEvent({
+    it.each([
+      {
+        label: "string latest_charge",
         id: "evt_pi_unexpanded_charge",
+        pi: "pi_unexpanded_charge",
+        latest_charge: "ch_unexpanded_id" as const,
+      },
+      {
+        label: "id-only latest_charge object",
+        id: "evt_pi_id_only_charge",
+        pi: "pi_id_only_charge",
+        latest_charge: { id: "ch_id_only" },
+      },
+    ])(
+      "STRIPE-2: payment_intent.succeeded with $label + amount_received is paid",
+      ({ id, pi, latest_charge }) => {
+        const event = gateway.parseWebhookEvent({
+          id,
+          type: "payment_intent.succeeded",
+          created: 1623456789,
+          data: {
+            object: {
+              id: pi,
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              currency: "usd",
+              latest_charge,
+              metadata: {},
+            },
+          },
+          livemode: false,
+        });
+
+        expect(event.status).toBe("paid");
+        expect(event.amount).toBe(100);
+        expect(event.stableType).toBe("payment.succeeded");
+        expect(event.event?.type).toBe("payment.succeeded");
+      },
+    );
+
+    it("STRIPE-2: unexpanded latest_charge without amount_received stays processing", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_unexpanded_missing_received",
         type: "payment_intent.succeeded",
         created: 1623456789,
         data: {
           object: {
-            id: "pi_unexpanded_charge",
+            id: "pi_unexpanded_missing_received",
             object: "payment_intent",
             status: "succeeded",
             amount: 10000,
-            amount_received: 10000,
             currency: "usd",
             latest_charge: "ch_unexpanded_id",
             metadata: {},
@@ -1934,14 +1955,14 @@ describe("StripeGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
-    it("STRIPE-CHG-1: unexpanded latest_charge stays processing even when charges.data shows refunds", () => {
+    it("STRIPE-CHG-1: unexpanded latest_charge still uses observable charges.data refunds", () => {
       const event = gateway.parseWebhookEvent({
-        id: "evt_pi_unexpanded_ignores_charges_data",
+        id: "evt_pi_unexpanded_uses_charges_data",
         type: "payment_intent.succeeded",
         created: 1623456789,
         data: {
           object: {
-            id: "pi_unexpanded_ignores_charges_data",
+            id: "pi_unexpanded_uses_charges_data",
             object: "payment_intent",
             status: "succeeded",
             amount: 10000,
@@ -1965,10 +1986,9 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      expect(event.status).toBe("processing");
+      expect(event.status).toBe("refunded");
       expect(event.status).not.toBe("paid");
-      expect(event.status).not.toBe("refunded");
-      expect(event.stableType).toBe("payment.processing");
+      expect(event.stableType).toBe("refund.completed");
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 

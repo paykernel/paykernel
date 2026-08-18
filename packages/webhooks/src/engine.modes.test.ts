@@ -98,6 +98,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -128,6 +129,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -147,6 +149,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -176,6 +179,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -195,6 +199,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -238,6 +243,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store: wrapped,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -270,6 +276,35 @@ describe("modes: inline vs durable_retry (A6)", () => {
     ).toThrow(/ackAfterClaim/);
   });
 
+  it("I6: engine ackAfterClaim without workerGuaranteed throws at construction", () => {
+    const store = createMemoryWebhookInboxStore();
+    expect(() =>
+      createWebhookInboxEngine({
+        store,
+        mode: "durable_retry",
+        ackAfterClaim: true,
+      }),
+    ).toThrow(/workerGuaranteed/);
+  });
+
+  it("I6: per-call ackAfterClaim without workerGuaranteed is retryable, not parked", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+    });
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_i6_no_worker",
+      payloadHash: "h",
+      envelope: { id: "evt_i6_no_worker", type: "payment.succeeded" },
+      ackAfterClaim: true,
+    });
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(outcome.outcome).not.toBe("scheduled_for_retry");
+    expect(store.size).toBe(0);
+  });
+
   it("processRetryable re-drives durable pending rows", async () => {
     const clock = createTestClock();
     const store = createMemoryWebhookInboxStore({ clock });
@@ -277,6 +312,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
 
@@ -308,6 +344,7 @@ describe("modes: inline vs durable_retry (A6)", () => {
       store: inner,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
     await parker.processVerified({
@@ -508,6 +545,7 @@ describe("processRetryable default envelope unwrap", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
 
@@ -548,6 +586,7 @@ describe("processRetryable default envelope unwrap", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
 
@@ -579,6 +618,7 @@ describe("processRetryable default envelope unwrap", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
 
@@ -622,6 +662,7 @@ describe("processRetryable default envelope unwrap", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
       clock,
     });
 
@@ -651,6 +692,7 @@ describe("processRetryable default envelope unwrap", () => {
       store,
       mode: "durable_retry",
       ackAfterClaim: true,
+      workerGuaranteed: true,
     });
 
     const outcome = await engine.processVerified({
@@ -724,6 +766,80 @@ describe("processRetryable default envelope unwrap", () => {
       amount: 1000,
     });
     expect((seen as { secret_token?: string }).secret_token).toBe("[REDACTED]");
+  });
+});
+
+describe("I14 processRetryable must not supersede a newer idle hash", () => {
+  it("listed stale hash does not overwrite a newer idle payloadHash", async () => {
+    const clock = createTestClock();
+    const inner = createMemoryWebhookInboxStore({ clock });
+    const seed = await inner.claim({
+      key: "stripe:evt_i14",
+      payloadHash: "hash-a",
+      owner: "seed",
+      leaseMs: 30_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    if (seed.kind !== "acquired") throw new Error("expected acquired");
+    await inner.fail({
+      key: "stripe:evt_i14",
+      leaseToken: seed.leaseToken,
+      error: "park old",
+      retryAfterMs: 0,
+    });
+
+    const claimedHashes: string[] = [];
+    const store = {
+      ...inner,
+      async listRetryable(input: Parameters<typeof inner.listRetryable>[0]) {
+        const rows = await inner.listRetryable(input);
+        // After list snapshot (hash-a), a newer idle body supersedes to hash-b.
+        const newer = await inner.claim({
+          key: "stripe:evt_i14",
+          payloadHash: "hash-b",
+          owner: "newer",
+          leaseMs: 30_000,
+          payloadRef: JSON.stringify({ id: "new" }),
+        });
+        if (newer.kind === "acquired") {
+          await inner.fail({
+            key: "stripe:evt_i14",
+            leaseToken: newer.leaseToken,
+            error: "park newer",
+            retryAfterMs: 0,
+            restoreAttempt: true,
+          });
+        }
+        return rows;
+      },
+      async claim(input: Parameters<typeof inner.claim>[0]) {
+        claimedHashes.push(input.payloadHash);
+        return inner.claim(input);
+      },
+    };
+
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+    });
+    let runs = 0;
+    const result = await engine.processRetryable({
+      handler: async () => {
+        runs++;
+      },
+    });
+
+    expect(claimedHashes).not.toContain("hash-a");
+    expect(runs).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({
+      outcome: "handler_failed",
+      retryable: true,
+    });
+    const rec = await inner.get("stripe:evt_i14");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.status).toBe("pending");
   });
 });
 

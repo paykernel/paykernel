@@ -423,9 +423,10 @@ function mapPaymobCaptureSettle(
  * Map Paymob TRANSACTION flags/amounts to a stable type.
  *
  * Order aligns with `PaymobGateway.mapTransactionStatus`: normalized status
- * first, then amount-derived refunds, then flags. Never invent
- * `payment.succeeded` from uncertain outcomes. Partial capture is never
- * `payment.succeeded` (full paid only).
+ * first, then amount-derived refunds, then flags. Among flags, `pending`
+ * ranks before bare `success` (3DS success+pending is processing, not
+ * succeeded). Never invent `payment.succeeded` from uncertain outcomes.
+ * Partial capture is never `payment.succeeded` (full paid only).
  */
 function mapPaymobFromFlags(
   flags: NonNullable<ProviderEventMapContext["flags"]>,
@@ -484,11 +485,13 @@ function mapPaymobFromFlags(
   if (hasAmountCapture && flags.success === true) {
     return mapPaymobCaptureSettle(flags, amounts, status);
   }
-  if (flags.success === true) {
-    return "payment.succeeded";
-  }
+  // I3-PAYMOB-FLAGS-PENDING: pending first (mapTransactionStatus), before
+  // bare success — 3DS success+pending is processing, not succeeded.
   if (flags.pending === true) {
     return "payment.processing";
+  }
+  if (flags.success === true) {
+    return "payment.succeeded";
   }
   if (flags.success === false) {
     return "payment.failed";

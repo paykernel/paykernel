@@ -1023,12 +1023,11 @@ function stripeChargeSnapshotForRefundStatus(
   pi: StripeIntentRefundSource,
 ): StripeChargeSnapshot | undefined {
   const latest = pi.latest_charge;
-  if (typeof latest === "object" && latest !== null) {
-    return isObservableStripeChargeSnapshot(latest) ? latest : undefined;
+  if (isObservableStripeChargeSnapshot(latest)) {
+    return latest;
   }
-  if (isUnexpandedStripeChargeId(latest)) {
-    return undefined;
-  }
+  // Unexpanded `latest_charge` (string / id-only) is not a refund snapshot.
+  // Still honor an observable `charges.data[0]` when Stripe included it.
   const firstCharge = pi.charges?.data?.[0];
   return isObservableStripeChargeSnapshot(firstCharge)
     ? firstCharge
@@ -1701,7 +1700,6 @@ export class StripeGateway extends BaseGateway {
           response.status === "succeeded"
             ? this.succeededPaymentIntentWebhookStatus(
                 response as unknown as StripeWebhookPayload["data"]["object"],
-                { unexpandedCharge: "ignore" },
               )
             : undefined;
 
@@ -1779,7 +1777,6 @@ export class StripeGateway extends BaseGateway {
           response.status === "succeeded"
             ? this.succeededPaymentIntentWebhookStatus(
                 response as unknown as StripeWebhookPayload["data"]["object"],
-                { unexpandedCharge: "ignore" },
               )
             : this.mapStatus(response.status);
 
@@ -2423,6 +2420,8 @@ export class StripeGateway extends BaseGateway {
    * logger) rather than throwing. In frameworks that auto-parse JSON, configure
    * a raw-body parser for the webhook route (e.g. express.raw()).
    *
+   * @throws {InvalidRequestError} When `webhookSecret` is not configured
+   *   (operator config — not a signature forgery).
    * @see https://stripe.com/docs/webhooks/signatures
    */
   verifyWebhook(
@@ -2431,10 +2430,9 @@ export class StripeGateway extends BaseGateway {
     headers?: Record<string, string>,
   ): boolean {
     if (!this.stripeConfig.webhookSecret) {
-      this.logger.warn(
-        "[Stripe] Webhook verification failed: webhookSecret not configured",
+      throw new InvalidRequestError(
+        "stripe.webhookSecret is required for webhook verification",
       );
-      return false;
     }
 
     const sigHeader = signature || stripeHeader(headers, "stripe-signature");
@@ -3236,32 +3234,19 @@ export class StripeGateway extends BaseGateway {
 
   /**
    * Succeeded PaymentIntent status from money fields.
-   * - unexpanded `latest_charge` id → processing (refunds unobservable)
-   * - charge amount_refunded > 0 / refunded (expanded latest_charge, or
-   *   omitted latest_charge + charges.data[0]) → refunded / partially_refunded
+   * - observable refund snapshot (`latest_charge` object or `charges.data[0]`)
+   *   → refunded / partially_refunded
    * - settled (amount_received → amount_captured) < amount → partially_captured
    * - settled known and not partial → paid
-   * - settled missing → processing (fail closed; never claim full paid)
+   * - settled missing → processing (never invent paid)
    *
-   * Mutation responses (create/capture) pass `unexpandedCharge: "ignore"`:
-   * at submit time refunds have not happened and Stripe often returns the
-   * charge as an unexpanded id.
+   * Default Stripe PI webhooks send `latest_charge` as a `ch_…` string plus
+   * `amount_received`. The string is not refund proof; use settled money.
    */
   private succeededPaymentIntentWebhookStatus(
     object: StripeWebhookPayload["data"]["object"],
-    options?: { unexpandedCharge?: "processing" | "ignore" },
   ): PaymentStatus {
     const pi = object as any;
-    const unexpandedMode = options?.unexpandedCharge ?? "processing";
-    if (
-      unexpandedMode === "processing" &&
-      isUnobservableStripeChargeRef(pi.latest_charge)
-    ) {
-      // Thin-event hydration typically leaves latest_charge as a string id
-      // or id-only `{ id }`. Stripe keeps PI status succeeded after refunds
-      // — do not invent paid.
-      return "processing";
-    }
     const refundStatus = stripeSucceededIntentRefundStatus(pi);
     if (refundStatus !== undefined) {
       return refundStatus;

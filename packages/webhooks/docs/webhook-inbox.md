@@ -119,8 +119,8 @@ Pipeline detail (engine-internal after claim):
 2. `deriveWebhookEventKey` (Paymob includes notification class + processed domain status from `event` / `envelope` — WEBHOOKS-1 / NEW-WEBHOOKS-2).
 3. `store.claim({ key, payloadHash, owner, leaseMs, payloadRef? })`.
 4. Non-`acquired` → outcome without running the handler.
-5. Mode branch: `durable_retry` + `ackAfterClaim` → require `envelope`, park as `scheduled_for_retry { reason: "parked" }`; else require `handler`.
-6. Run handler under lease (`ctx.renew` rotates token).
+5. Mode branch: `durable_retry` + `ackAfterClaim` → require `envelope` **and** `workerGuaranteed: true`, park as `scheduled_for_retry { reason: "parked" }`; without `workerGuaranteed`, refuse with retryable `handler_failed` (never parked). Else require `handler`.
+6. Run handler under lease (`ctx.renew` rotates token; engine also auto-renews ~`leaseMs/3` while the handler runs — I5).
 7. Success → `store.complete` → `{ outcome: "processed" }`.
 8. Throw → sanitize → `store.fail` → `handler_failed` / `scheduled_for_retry { reason: "handler_retry" }`.
 9. `complete` loses lease after handler success → `{ outcome: "handler_failed", retryable: true }` (**not** `processed`).
@@ -170,6 +170,9 @@ const outcome = await engine.processWithVerifier({
   verifyAndNormalize: async (raw) => {
     // Let throws propagate. processWithVerifier classifies (WEBHOOKS-1/5/6):
     // - InvalidWebhookError (verify-false only) / ok:false → invalid_webhook (~400 forgery)
+    // - Missing webhookSecret / hmacSecret / webhookId (InvalidRequestError or
+    //   verify-false wrapped with those names) → handler_failed { retryable: true }
+    //   (~5xx; merchant config — NEVER forgery; provider redelivers after secret is set)
     // - InvalidRequestError / post-verify parse / parse-stage InvalidWebhookError
     //   (Paymob/Moyasar payload; always HTTP 403) → handler_failed { retryable: true }
     //   (~5xx; signature-valid paid events must redeliver — never permanent 400)
@@ -257,9 +260,12 @@ deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
   `paymob:TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes
   domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a
   later same-id void/refund snapshot is not `already_completed`. Status is
-  `status`, `payment.status`, `refund.status`, or those paths on nested
-  `event` (PaymentEvent / PersistedPaymentEventEnvelope — NEW-WH-KEY-1).
-  Redirect still ignores status. Child refund/capture webhooks may still
+  `refund.status` / `payment.status` from the PaymentEvent (or those paths
+  on nested `event` / envelope) — **not** top-level `WebhookEvent.status`
+  when a nested event/refund exists (I13; a paid WebhookEvent wrapping a
+  refund must not qualify `…:paid` and suppress the refund key). Lean
+  native snapshots without payment/refund entities still use `status`
+  (NEW-WH-KEY-1). Redirect still ignores status. Child refund/capture webhooks may still
   mint a **new** `obj.id`. Do **not** complete fulfillment on Paymob
   `payment.processing` (redirect); wait for processed `TRANSACTION`.
 
@@ -374,7 +380,7 @@ Mode is **required** on `createWebhookInboxEngine` and is **fixed for the life o
 | --- | --- |
 | `inline` | Await handler under lease. Retryable throw → `store.fail` with `retryAfterMs: 0` → `{ outcome: "handler_failed", retryable: true }`. Non-retryable / dead letter → `handler_failed { retryable: false }`. **Never** emits `scheduled_for_retry` (claim `not_available` → `handler_failed { retryable: true }`). |
 | `durable_retry` | Await handler by default. Retryable throw → `store.fail` with delay → `{ outcome: "scheduled_for_retry", reason: "handler_retry" }`. |
-| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `{ outcome: "scheduled_for_retry", reason: "parked" }` **without** running the handler. Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. **Requires a materializable envelope/event** (refuses with retryable `handler_failed` otherwise — WEBHOOKS-2). Park `lease_lost` is never `parked`. |
+| `durable_retry` + `ackAfterClaim: true` | After successful claim, release to pending (`retryAfterMs: 0`, `restoreAttempt: true`) and return `{ outcome: "scheduled_for_retry", reason: "parked" }` **without** running the handler. **Requires `workerGuaranteed: true`** on engine options (I6) — without it, constructor throws (engine-level `ackAfterClaim`) or `processVerified` returns retryable `handler_failed` (per-call park). Parking claim does **not** consume `maxAttempts`. Workers call `processRetryable`. **Requires a materializable envelope/event** (refuses with retryable `handler_failed` otherwise — WEBHOOKS-2). Park `lease_lost` is never `parked`. |
 
 ```typescript
 // Explicit — never omit mode
@@ -385,12 +391,14 @@ const durableEngine = createWebhookInboxEngine({
   mode: "durable_retry",
   maxAttempts: 5, // finite integer >= 1
   defaultRetryAfterMs: 5_000, // finite number >= 0
-  // Optional: ACK after durable claim; worker processes later
+  // Optional: ACK after durable claim; worker processes later.
+  // I6: workerGuaranteed is required — parked is the HTTP 200 path.
   ackAfterClaim: true,
+  workerGuaranteed: true,
 });
 ```
 
-`ackAfterClaim` is only valid with `mode: "durable_retry"` (constructor throws otherwise). Per-call `ackAfterClaim` on `processVerified` may override the engine default in durable mode only. Parking **requires** `envelope` so `payloadRef` is materializable by workers.
+`ackAfterClaim` is only valid with `mode: "durable_retry"` (constructor throws otherwise). **`workerGuaranteed: true` is required** to emit `scheduled_for_retry { reason: "parked" }` (I6). Constructor throws when engine-level `ackAfterClaim` is set without it. Per-call `ackAfterClaim` without `workerGuaranteed` returns retryable `handler_failed` (never parked — do not 200). Per-call `ackAfterClaim` on `processVerified` may override the engine default in durable mode only. Parking **requires** `envelope` so `payloadRef` is materializable by workers.
 
 ### Attempt budget and backoff
 
@@ -407,7 +415,7 @@ const durableEngine = createWebhookInboxEngine({
 
 #### `ackAfterClaim` + `fail(restoreAttempt)` lease_lost (P610-ACK-2)
 
-`scheduled_for_retry { reason: "parked" }` is returned **only if** `store.fail({ restoreAttempt: true })` succeeds. If that fail throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine returns `already_processing` (when lease expiry is still in the future) or `handler_failed { retryable: true }` — **never** parked. The row may still be `claimed` and the parking attempt may remain burned; adapters must 5xx so the provider redelivers. Prefer positive lease durations and NTP-aligned clocks across hosts.
+`scheduled_for_retry { reason: "parked" }` is returned **only if** `workerGuaranteed: true` **and** `store.fail({ restoreAttempt: true })` succeeds. Without `workerGuaranteed`, the engine **does not park** (constructor throw or retryable `handler_failed`) so hosts cannot map a parked outcome to HTTP 200 when no worker will run. If park fail throws `StoreLeaseLostError` (pathological lease/clock skew: lease already expired or reclaimed before park completes), the engine returns `already_processing` (when lease expiry is still in the future) or `handler_failed { retryable: true }` — **never** parked. The row may still be `claimed` and the parking attempt may remain burned; adapters must 5xx so the provider redelivers. Prefer positive lease durations and NTP-aligned clocks across hosts.
 
 ### `NonRetryableHandlerError`
 
@@ -423,8 +431,15 @@ const durableEngine = createWebhookInboxEngine({
 `store.claim` runs only after the previous handler returns (list is
 discovery; the lease is the fence). Defaults `limit=10` / `leaseMs=30s`
 are unsafe if N leases were held across serial handler I/O (handlers
-averaging ≥3s would let a peer reclaim the tail). Handlers that need
-more than `leaseMs` must call `ctx.renew`.
+averaging ≥3s would let a peer reclaim the tail). The engine auto-renews
+the active lease on ~`leaseMs/3` while a handler runs (I5); `ctx.renew`
+remains available. If a heartbeat renew is `lease_lost`, the run stops
+treating itself as owner (`handler_failed` retryable — no `complete`).
+
+**I14:** `processRetryable` re-reads each listed row immediately before
+`claim`. If the current `payloadHash` differs from the listed snapshot,
+the engine **skips** that row (retryable `handler_failed`) and does **not**
+claim with the stale hash — idle supersede must not run backwards.
 
 **Default event materialization:** when `payloadRef` parses as a core
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
@@ -477,13 +492,13 @@ type WebhookProcessingOutcome =
 | `processed` | Handler ran; inbox completed | 200 |
 | `duplicate_completed` | Already terminal success; handler not re-run | 200 |
 | `already_processing` | Another worker holds lease; optional `retryAfterMs` | 503 / 409 + Retry-After |
-| `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park; worker owns work; optional timing fields | **200 only if a worker runs `processRetryable`** |
+| `scheduled_for_retry` `reason: "parked"` | Durable `ackAfterClaim` park **with `workerGuaranteed: true`**; worker owns work; optional timing fields | **200 only if a worker runs `processRetryable`** (engine will not emit this without `workerGuaranteed`) |
 | `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded with backoff; includes `availableAt` / `retryAfterMs` when known | **200** if durable worker will re-drive; else **5xx** |
 | `scheduled_for_retry` `reason: "not_available"` | Claim backoff (`availableAt` still future); no handler ran; exposes `availableAt` / `retryAfterMs` | **5xx** (provider redelivery) unless a durable scheduler owns the row |
 | `handler_failed` `retryable: true` | Handler failed **or** verify infra/unknown/parse/`InvalidRequestError` throw (WEBHOOKS-1/5); may retry | 5xx (provider redelivery) |
 | `handler_failed` `retryable: false` | Dead letter / non-retryable / terminal store fail / permanent verify structure (WEBHOOKS-6) | 200 or 4xx per policy (do not infinite-retry forever) |
 | `payload_conflict` | Same key, different hash **while lease active only** (idle pending supersedes and reclaims — not permanent; WEBHOOKS-3/4) | 409 / 400 while lease held — not silent 200; redeliver after expiry with correct hash |
-| `invalid_webhook` | Bad input, `{ ok: false }` (reason sanitized), or verify-false `InvalidWebhookError` only (not parse / parse-stage 403 `InvalidWebhookError` / `InvalidRequestError` / missing durable snapshot — those are retryable `handler_failed`, WEBHOOKS-2/3 / WEBHOOKS-403) | 400 |
+| `invalid_webhook` | Bad input, `{ ok: false }` (reason sanitized), or verify-false `InvalidWebhookError` only (not parse / parse-stage 403 `InvalidWebhookError` / `InvalidRequestError` / missing `webhookSecret`/`hmacSecret`/`webhookId` / missing durable snapshot — those are retryable `handler_failed`, WEBHOOKS-2/3 / WEBHOOKS-403 / I10). Verify-false MAC mismatch stays forgery. | 400 |
 
 \*Examples only — providers differ (Stripe vs PayPal retry semantics). **The engine is HTTP-agnostic.**
 
@@ -525,6 +540,7 @@ function mapOutcomeToHttp(o: WebhookProcessingOutcome): { status: number } {
       // Discriminate reason — never blind-ACK 200 when no worker will process.
       switch (o.reason) {
         case "parked":
+          // Engine emits parked only when workerGuaranteed: true.
           // 200 only when processRetryable worker is guaranteed.
           return { status: 200 };
         case "handler_retry":
@@ -552,6 +568,9 @@ handler: async (ctx) => {
     await ctx.renew(30_000); // store.renew; rotates leaseToken + generation
   }
 },
+// I5: even without ctx.renew, the engine auto-renews ~leaseMs/3 while
+// runHandlerUnderLease awaits the handler. Heartbeat lease_lost →
+// handler_failed { retryable: true } (not processed).
 ```
 
 Also available on the engine:

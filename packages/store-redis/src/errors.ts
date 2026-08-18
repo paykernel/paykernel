@@ -14,6 +14,7 @@ import {
   StoreUnavailableError,
   type StoreErrorCode,
 } from "@paykernel/store-contracts";
+import { RedisKeyDesignError } from "./keys";
 
 const MAX_MESSAGE = 256;
 
@@ -52,6 +53,12 @@ function readMessage(err: unknown): string {
  */
 export function mapDriverError(err: unknown): StoreError {
   if (err instanceof StoreError) return err;
+
+  // Reserved / invalid keys are schema, not retryable driver failure (I4).
+  if (err instanceof RedisKeyDesignError) {
+    const msg = sanitizeMessage(readMessage(err), "Invalid Redis key design");
+    return new StoreInvalidSchemaError(msg, err);
+  }
 
   const code = readCode(err);
   const rawMsg = readMessage(err);

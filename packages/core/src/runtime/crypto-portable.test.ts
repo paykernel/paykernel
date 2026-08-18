@@ -66,11 +66,19 @@ describe("portable encoding", () => {
     }
   });
 
-  it("hexToBytes rejects invalid hex characters and pads odd length", () => {
-    expect([...hexToBytes("f")]).toEqual([0x0f]);
-    // parseInt stops at first invalid char for mixed strings; fully invalid fails.
+  it("hexToBytes rejects odd length and does not pad (abc != 0abc)", () => {
+    expect(() => hexToBytes("f")).toThrow(/invalid hex length/i);
+    expect(() => hexToBytes("abc")).toThrow(/invalid hex length/i);
+    // Padding would make "abc" decode as "0abc" → [0x0a, 0xbc]. It must not.
+    expect([...hexToBytes("0abc")]).toEqual([0x0a, 0xbc]);
+  });
+
+  it("hexToBytes rejects non-hex including parseInt-accepted 0g/ag", () => {
+    expect(() => hexToBytes("0g")).toThrow(/invalid hex character/i);
+    expect(() => hexToBytes("ag")).toThrow(/invalid hex character/i);
     expect(() => hexToBytes("zz")).toThrow(/invalid hex character/i);
     expect(() => hexToBytes("xy")).toThrow(/invalid hex character/i);
+    expect(() => hexToBytes("0G")).toThrow(/invalid hex character/i);
   });
 
   it("concatBytes joins parts", () => {
