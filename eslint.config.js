@@ -18,7 +18,11 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["packages/*/src/**/*.ts"],
+    files: [
+      "packages/*/src/**/*.ts",
+      "internal/*/src/**/*.ts",
+      "examples/*/src/**/*.ts",
+    ],
     languageOptions: {
       parserOptions: {
         // Lightweight parse (no project service) — keeps lint fast and avoids

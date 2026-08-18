@@ -353,6 +353,7 @@ Silent ACK of failed work is forbidden. Full matrix: [webhook-inbox.md](../packa
 ## Next
 
 - [docs home](./README.md)
+- [Runnable examples](../examples/README.md) — checkout kernel + Bun Hono/Elysia over single-host in-memory SQLite
 - [Adapter selection](./adapter-selection.md)
 - [Store contracts](../packages/store-contracts/docs/contracts.md)
 - Gateway notes: [Moyasar](../packages/core/docs/moyasar.md) · [PayPal](../packages/core/docs/paypal.md) · [Paymob](../packages/core/docs/paymob.md) · [Stripe](../packages/core/docs/stripe.md)
