@@ -36,6 +36,7 @@ export {
   createDoReconciliationStoreFromNamespace,
   ensureDoHashPartitionLayout,
 } from "./client";
+export type { ShardOccupancyHint } from "./occupancy";
 
 export {
   migrateDoAdapter,

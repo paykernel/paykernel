@@ -411,6 +411,131 @@ describe("21.1 inputs affect matching", () => {
     ).toThrow(NoRouteMatchError);
   });
 
+  it("NEW-ROUTE-1: complementary currency + exclude + fallback does not silently pick fallback", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "EUR" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    expect(router.select({ currency: "EUR" }).gateway).toBe("adyen");
+    // After excluding the matching EUR bucket, complementary USD still
+    // matches all non-currency criteria — fallback must not send EUR to
+    // the USD gateway (fail-closed NoRouteMatchError).
+    expect(() =>
+      router.select({
+        currency: "EUR",
+        excludeGateways: ["adyen"],
+      }),
+    ).toThrow(NoRouteMatchError);
+    try {
+      router.select({
+        currency: "EUR",
+        excludeGateways: ["adyen"],
+      });
+      expect.unreachable("expected NoRouteMatchError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(NoRouteMatchError);
+      expect((err as NoRouteMatchError).reason).toBe(
+        "complementary_currency_honesty",
+      );
+      expect((err as NoRouteMatchError).message).toMatch(
+        /complementary currency/i,
+      );
+    }
+  });
+
+  it("NEW-ROUTE-1: complementary currency + unhealthy matching bucket is honesty-blocked", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "EUR" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({
+        currency: "EUR",
+        health: { adyen: false },
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("NEW-ROUTE-1: complementary country / method partitions honesty-block fallback after exclude", () => {
+    const byCountry = createPaymentRouter({
+      rules: [
+        route({ country: "US" }).to("stripe"),
+        route({ country: "SA" }).to("moyasar"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      byCountry.select({
+        country: "SA",
+        excludeGateways: ["moyasar"],
+      }),
+    ).toThrow(NoRouteMatchError);
+
+    const byMethod = createPaymentRouter({
+      rules: [
+        route({ paymentMethod: "card" }).to("stripe"),
+        route({ paymentMethod: "mada" }).to("moyasar"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      byMethod.select({
+        paymentMethod: "mada",
+        excludeGateways: ["moyasar"],
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("NEW-ROUTE-1: unmatched currency still uses select-time fallback", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "EUR" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    // GBP is not in the complementary USD/EUR partition — fallback remains honest.
+    const d = router.select({ currency: "GBP" });
+    expect(d.gateway).toBe("stripe");
+    expect(d.usedFallback).toBe(true);
+  });
+
+  it("NEW-ROUTE-1: complementary currency still honesty-blocks when other criteria differ", () => {
+    const router = createPaymentRouter({
+      rules: [
+        route({ currency: "USD", country: "US" }).to("stripe"),
+        route({ currency: "EUR", country: "DE" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    expect(() =>
+      router.select({
+        currency: "EUR",
+        country: "DE",
+        excludeGateways: ["adyen"],
+      }),
+    ).toThrow(NoRouteMatchError);
+  });
+
+  it("NEW-ROUTE-1: single-currency exclude may still use fallback (not complementary)", () => {
+    const router = createPaymentRouter({
+      rules: [route({ currency: "USD" }).to("stripe")],
+      fallback: "paypal",
+    });
+    const d = router.select({
+      currency: "USD",
+      excludeGateways: ["stripe"],
+    });
+    expect(d.gateway).toBe("paypal");
+    expect(d.usedFallback).toBe(true);
+  });
+
   it("ROUTE-2: select-time fallback honors rule-level requiredCapabilities", () => {
     const router = createPaymentRouter({
       rules: [

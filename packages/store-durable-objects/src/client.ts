@@ -79,6 +79,9 @@ import { createDoReconciliationStore } from "./stores/reconciliation-store";
 import { DO_STORAGE_ADAPTER_MANIFEST } from "./manifest";
 import { PaymentsStoreObject } from "./object/payments-store-object";
 import { withMappedErrors } from "./errors";
+import type { ShardOccupancyHint } from "./occupancy";
+
+export type { ShardOccupancyHint } from "./occupancy";
 
 /** Worker-stub stores cannot offer multi-mutation atomicity across DO boundaries. */
 const WORKER_CLIENT_TX_UNSUPPORTED =
@@ -207,10 +210,15 @@ function requireDiscoveryShardNames(ctx: FanOutStoreContext): readonly string[] 
 
 type FanOutListOptions<T extends { key: string }> = FanOutStoreContext & {
   method: string;
-  /** Cheap occupancy RPC; full `method` runs only on shards that return true. */
+  /** Occupancy RPC; full `method` runs only on shards that can beat earliest-N. */
   peekMethod: string;
   input: { limit?: number; now?: string };
   sortKey: (row: T) => string;
+};
+
+type OccupiedShard = {
+  shardName: string;
+  hint: ShardOccupancyHint;
 };
 
 type PeekShardOptions = {
@@ -221,39 +229,186 @@ type PeekShardOptions = {
   tableNamespace?: SchemaNamespaceConfig;
 };
 
+function occupancyFromPeekPayload(payload: unknown): ShardOccupancyHint {
+  if (payload === false) return { occupied: false };
+  if (payload === true) return { occupied: true };
+  if (payload !== null && typeof payload === "object") {
+    const hint = payload as { occupied?: unknown; earliest?: unknown };
+    // Only an explicit `false` is empty. `1` / `"yes"` / missing must list.
+    if (hint.occupied === false) return { occupied: false };
+    const earliest =
+      typeof hint.earliest === "string" && hint.earliest.length > 0
+        ? hint.earliest
+        : undefined;
+    return earliest !== undefined ? { occupied: true, earliest } : { occupied: true };
+  }
+  // Unexpected peek result: fail-closed to occupied (unknown earliest).
+  return { occupied: true };
+}
+
 /**
  * Occupancy probe for PERF-5. Missing peek RPCs (rolling old Workers) fail
- * closed to "occupied" so discovery still runs the full list.
+ * closed to occupied + unknown earliest so discovery still full-lists.
  */
-async function peekShardOccupied(options: PeekShardOptions): Promise<boolean> {
+async function peekShardHint(
+  options: PeekShardOptions,
+): Promise<ShardOccupancyHint> {
   try {
-    return await callStub<boolean>(
+    const payload = await callStub<unknown>(
       stubForShardName(options.namespace, options.shardName),
       options.peekMethod,
       options.input,
       ...rpcTail(options.tableNamespace),
     );
+    return occupancyFromPeekPayload(payload);
   } catch (err) {
     if (
       err instanceof TypeError &&
       String(err.message).includes("missing RPC method")
     ) {
-      return true;
+      return { occupied: true };
     }
     throw err;
   }
+}
+
+function compareListedRows<T extends { key: string }>(
+  left: T,
+  right: T,
+  sortKey: (row: T) => string,
+): number {
+  const leftKey = sortKey(left);
+  const rightKey = sortKey(right);
+  if (leftKey < rightKey) return -1;
+  if (leftKey > rightKey) return 1;
+  if (left.key < right.key) return -1;
+  if (left.key > right.key) return 1;
+  return 0;
+}
+
+function compareOccupiedShards(left: OccupiedShard, right: OccupiedShard): number {
+  if (left.hint.earliest === undefined && right.hint.earliest === undefined) {
+    return left.shardName < right.shardName
+      ? -1
+      : left.shardName > right.shardName
+        ? 1
+        : 0;
+  }
+  if (left.hint.earliest === undefined) return -1;
+  if (right.hint.earliest === undefined) return 1;
+  if (left.hint.earliest !== right.hint.earliest) {
+    return left.hint.earliest < right.hint.earliest ? -1 : 1;
+  }
+  return left.shardName < right.shardName
+    ? -1
+    : left.shardName > right.shardName
+      ? 1
+      : 0;
+}
+
+function collectOccupiedShards(
+  shardNames: readonly string[],
+  hints: readonly ShardOccupancyHint[],
+): OccupiedShard[] {
+  const occupied: OccupiedShard[] = [];
+  for (let i = 0; i < shardNames.length; i++) {
+    // Missing slot is fail-closed occupied so a short peek array cannot hide work.
+    const hint = hints[i] ?? { occupied: true };
+    if (!hint.occupied) continue;
+    occupied.push({ shardName: shardNames[i]!, hint });
+  }
+  occupied.sort(compareOccupiedShards);
+  return occupied;
+}
+
+function mergeFanOutRows<T extends { key: string }>(
+  rows: T[],
+  incoming: T[],
+  seenKeys: Set<string>,
+  limit: number,
+  sortKey: (row: T) => string,
+): void {
+  for (const row of incoming) {
+    if (seenKeys.has(row.key)) continue;
+    seenKeys.add(row.key);
+    rows.push(row);
+  }
+  rows.sort((left, right) => compareListedRows(left, right, sortKey));
+  if (rows.length > limit) rows.length = limit;
+}
+
+function earliestNCutoff<T>(
+  merged: T[],
+  limit: number,
+  sortKey: (row: T) => string,
+): string | undefined {
+  if (merged.length < limit) return undefined;
+  return sortKey(merged[limit - 1]!);
+}
+
+function shardsForSecondWave(
+  remaining: OccupiedShard[],
+  cutoff: string | undefined,
+): OccupiedShard[] {
+  if (cutoff === undefined) return remaining;
+  return remaining.filter((shard) => {
+    const earliest = shard.hint.earliest;
+    return earliest !== undefined && earliest <= cutoff;
+  });
+}
+
+function firstWaveOccupiedShards(
+  occupied: OccupiedShard[],
+  limit: number,
+): OccupiedShard[] {
+  const unknownEarliest = occupied.filter(
+    (shard) => shard.hint.earliest === undefined,
+  );
+  const knownEarliest = occupied.filter(
+    (shard) => shard.hint.earliest !== undefined,
+  );
+  return [
+    ...unknownEarliest,
+    ...knownEarliest.slice(0, Math.min(limit, knownEarliest.length)),
+  ];
+}
+
+type ListAndMergeFanOutRequest<T extends { key: string }> = {
+  shards: OccupiedShard[];
+  listShard: (shardName: string) => Promise<T[]>;
+  merged: T[];
+  seenKeys: Set<string>;
+  limit: number;
+  sortKey: (row: T) => string;
+};
+
+async function listAndMergeFanOut<T extends { key: string }>(
+  request: ListAndMergeFanOutRequest<T>,
+): Promise<void> {
+  if (request.shards.length === 0) return;
+  mergeFanOutRows(
+    request.merged,
+    (
+      await Promise.all(
+        request.shards.map((shard) => request.listShard(shard.shardName)),
+      )
+    ).flat(),
+    request.seenKeys,
+    request.limit,
+    request.sortKey,
+  );
 }
 
 /**
  * Fan-out listDue/listRetryable across enumerable partitions; merge, dedupe by
  * key, stable sort, then truncate to limit.
  *
- * PERF-5: hash partitions have no global due/retry index, so a correct global
- * earliest-N still peeks every enumerable isolate. Full list (bounded
- * expired-lease UPDATE + SELECT) runs only on occupied shards. Peek treats
- * expired claimed as occupied so crash recovery is not skipped. Sequential
- * early-exit on the first non-empty list would miss earlier work on later
- * shards.
+ * PERF-5: peek every enumerable isolate (no shared global index). Full list
+ * (bounded expired-lease UPDATE + SELECT) runs only on shards that can
+ * contribute to the global earliest-N: occupied shards whose earliest
+ * sort key is not strictly after the current cutoff. Later occupied shards
+ * are skipped. Peek treats expired claimed as occupied so crash recovery is
+ * not skipped. A boolean / missing-earliest peek is fail-closed (must list).
  */
 async function fanOutListByKey<T extends { key: string }>(
   options: FanOutListOptions<T>,
@@ -264,55 +419,59 @@ async function fanOutListByKey<T extends { key: string }>(
   const limit = input.limit ?? DEFAULT_LIST_LIMIT;
   const peekInput = input.now !== undefined ? { now: input.now } : {};
   const perPartitionInput = { ...input, limit };
+  const nsArgs = rpcTail(options.tableNamespace);
 
   const occupancy = await Promise.all(
-    shardNames.map((name) => {
+    shardNames.map((shardName) => {
       const peek: PeekShardOptions = {
         namespace,
-        shardName: name,
+        shardName,
         peekMethod,
         input: peekInput,
       };
       if (options.tableNamespace !== undefined) {
         peek.tableNamespace = options.tableNamespace;
       }
-      return peekShardOccupied(peek);
+      return peekShardHint(peek);
     }),
   );
-  // Fail-closed: only an explicit `false` skips the shard. A void / unexpected
-  // peek result must not hide due work.
-  const occupiedNames = shardNames.filter((_, i) => occupancy[i] !== false);
-  if (occupiedNames.length === 0) return [];
 
-  const batches = await Promise.all(
-    occupiedNames.map((name) =>
-      callStub<T[]>(
-        stubForShardName(namespace, name),
-        method,
-        perPartitionInput,
-        ...rpcTail(options.tableNamespace),
-      ),
-    ),
-  );
+  const occupied = collectOccupiedShards(shardNames, occupancy);
+  if (occupied.length === 0) return [];
 
-  const seen = new Set<string>();
+  const listShard = (shardName: string) =>
+    callStub<T[]>(
+      stubForShardName(namespace, shardName),
+      method,
+      perPartitionInput,
+      ...nsArgs,
+    );
+
+  const firstWave = firstWaveOccupiedShards(occupied, limit);
+  const listedNames = new Set(firstWave.map((shard) => shard.shardName));
+  const seenKeys = new Set<string>();
   const merged: T[] = [];
-  for (const batch of batches) {
-    for (const row of batch) {
-      if (seen.has(row.key)) continue;
-      seen.add(row.key);
-      merged.push(row);
-    }
-  }
-
-  merged.sort((a, b) => {
-    const sa = sortKey(a);
-    const sb = sortKey(b);
-    if (sa < sb) return -1;
-    if (sa > sb) return 1;
-    if (a.key < b.key) return -1;
-    if (a.key > b.key) return 1;
-    return 0;
+  await listAndMergeFanOut({
+    shards: firstWave,
+    listShard,
+    merged,
+    seenKeys,
+    limit,
+    sortKey,
+  });
+  await listAndMergeFanOut({
+    shards: shardsForSecondWave(
+      occupied.filter(
+        (shard) =>
+          !listedNames.has(shard.shardName) && shard.hint.earliest !== undefined,
+      ),
+      earliestNCutoff(merged, limit, sortKey),
+    ),
+    listShard,
+    merged,
+    seenKeys,
+    limit,
+    sortKey,
   });
 
   return merged.slice(0, limit);
@@ -672,9 +831,9 @@ function createReconciliationClient(
  * Does **not** migrate schema. Does **not** default to one global DO.
  *
  * Under `kind: "hash"`, `listDue` / `listRetryable` peek every enumerable
- * partition then full-list only occupied shards (PERF-5). `deleteExpired`
- * still fans out. Under `kind: "key"`, those methods throw
- * {@link StoreUnsupportedFeatureError}.
+ * partition, then full-list only shards that can contribute to the global
+ * earliest-N (PERF-5). `deleteExpired` still fans out. Under `kind: "key"`,
+ * those methods throw {@link StoreUnsupportedFeatureError}.
  */
 export function createDoPaymentStores(
   options: DoClientStoreOptions,

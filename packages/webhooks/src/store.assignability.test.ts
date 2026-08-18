@@ -145,6 +145,66 @@ describe("WebhookInboxStore structural contract", () => {
     expect(typeof rec.availableAt).toBe("string");
   });
 
+  it("NEW-STORE-3: complete after expiry does not wipe then lease_lost", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "evt_complete_expiry",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    if (a.kind !== "acquired") throw new Error("expected acquired");
+
+    clock.advance(2_000);
+    await expect(
+      store.complete({
+        key: "evt_complete_expiry",
+        leaseToken: a.leaseToken,
+      }),
+    ).rejects.toBeInstanceOf(StoreLeaseLostError);
+
+    // Fail-closed without restore-then-lose: matching token can still fail().
+    await store.fail({
+      key: "evt_complete_expiry",
+      leaseToken: a.leaseToken,
+      error: "recorded_after_expiry",
+    });
+    const rec = await store.get("evt_complete_expiry");
+    expect(rec?.status).toBe("pending");
+    expect(rec?.lastError).toBe("recorded_after_expiry");
+  });
+
+  it("NEW-STORE-3: renew after expiry does not wipe then lease_lost", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "evt_renew_expiry",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    if (a.kind !== "acquired") throw new Error("expected acquired");
+
+    clock.advance(2_000);
+    const r = await store.renew({
+      key: "evt_renew_expiry",
+      leaseToken: a.leaseToken,
+      leaseMs: 5_000,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("lease_lost");
+
+    await store.fail({
+      key: "evt_renew_expiry",
+      leaseToken: a.leaseToken,
+      error: "renew_expiry_recorded",
+    });
+    const rec = await store.get("evt_renew_expiry");
+    expect(rec?.status).toBe("pending");
+    expect(rec?.lastError).toBe("renew_expiry_recorded");
+  });
+
   it("listRetryable soft-releases expired claimed rows (poll-only recovery)", async () => {
     const clock = createTestClock();
     const store = createMemoryWebhookInboxStore({ clock });

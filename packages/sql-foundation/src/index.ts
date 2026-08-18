@@ -201,6 +201,10 @@ export type {
 // bun:sqlite reference is intentionally NOT re-exported here so portable
 // consumers never pull `bun:sqlite`. The Bun SQLite reference lives only as a
 // test helper: `src/reference/bun-sqlite-store.test.ts` (used by claim-contention tests).
+// NEW-PKG-2: createMemoryRelationalStore is NON-PRODUCTION / NON-DISTRIBUTED.
+// migrate() applies real DDL into the in-memory executor; table presence is
+// only names CREATE TABLE registered. createExecutor always {ok:true} is not
+// a production-adjacent "migrate succeeded" signal.
 export {
   createMemoryRelationalStore,
   MEMORY_RELATIONAL_NON_PRODUCTION,

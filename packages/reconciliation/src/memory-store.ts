@@ -45,6 +45,10 @@ export type MemoryReconciliationStore = ReconciliationStore & {
 
 export type CreateMemoryReconciliationStoreOptions = {
   clock?: MemoryClock;
+  /**
+   * Test-only cap. Must not evict `claimed` rows with an active lease —
+   * skip those victims or refuse the new write (NEW-STORE-2).
+   */
   maxEntries?: number;
 };
 
@@ -121,9 +125,19 @@ export function createMemoryReconciliationStore(
     if (maxEntries === undefined) return;
     if (entries.has(newKey)) return;
     while (entries.size >= maxEntries) {
-      const oldest = entries.keys().next().value;
-      if (oldest === undefined) break;
-      entries.delete(oldest);
+      let victim: ReconciliationKey | undefined;
+      for (const [key, rec] of entries) {
+        // NEW-STORE-2: never FIFO-evict a live claimed lease.
+        if (rec.status === "claimed" && isLeaseActive(rec, clock)) continue;
+        victim = key;
+        break;
+      }
+      if (victim === undefined) {
+        throw new Error(
+          "memory store at capacity: refusing to evict claimed row with active lease",
+        );
+      }
+      entries.delete(victim);
     }
   }
 

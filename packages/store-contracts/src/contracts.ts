@@ -105,7 +105,9 @@ export type WithTransaction = {
 /**
  * Normalized store failure codes (roadmap §9.4).
  *
- * Extension: `payload_hash_conflict` for webhook inbox payload mismatch.
+ * Extension: `payload_hash_conflict` for webhook inbox payload mismatch
+ * **under an active lease**. Idle/expired non-terminal mismatch supersedes
+ * (WEBHOOKS-3 / NEW-SQL-1) and is not this error.
  */
 export type StoreErrorCode =
   | "unavailable"
@@ -214,6 +216,11 @@ export class StoreCorruptedRecordError extends StoreError {
   }
 }
 
+/**
+ * Same webhook key, different payload hash **while a lease is active**.
+ * Idle pending / expired claimed mismatch is not this error — adapters
+ * must supersede and store the caller hash (`decideWebhookClaim`, NEW-SQL-1).
+ */
 export class StorePayloadHashConflictError extends StoreError {
   constructor(message = "Payload hash conflict for existing key", cause?: unknown) {
     super("payload_hash_conflict", message, { retryable: false, cause });
@@ -556,10 +563,13 @@ export type ListRetryableInput = {
  * (unexpired). `fail` requires a matching token on `claimed` and **succeeds
  * after expiry** (WEBHOOKS-2). After lease reclaim, the old token MUST fail.
  *
- * Same event key: second claim with same payload hash while in-progress → in_progress;
- * completed → already_completed; different hash → payload_hash_conflict;
+ * Same event key: second claim with same payload hash while an **active lease**
+ * is held → in_progress; completed → already_completed;
+ * **active lease** + different hash → payload_hash_conflict (cannot supersede);
+ * idle/expired/pending (non-terminal) + different hash **supersedes** (`acquired`,
+ * stores the caller hash) — not `payload_hash_conflict` (NEW-SQL-1 / WEBHOOKS-3);
  * dead_letter/failed → duplicate_failed;
- * pending with `availableAt` in the future → `not_available` (no acquire, no attempt++);
+ * pending + same hash + `availableAt` in the future → `not_available` (no acquire, no attempt++);
  * expired lease may be re-acquired with a new fencing token (generation++).
  * Soft-release of expired claimed MUST restore one attempt (floor 0); direct
  * reclaim of expired claimed MUST NOT increment `attempts` (WEBHOOKS-1 — only
@@ -571,8 +581,11 @@ export interface WebhookInboxStore extends WithTransaction {
    * Increments `generation` and issues a new unguessable `leaseToken` on acquire.
    * Pending reclaim increments `attempts`; expired-`claimed` reclaim keeps
    * `attempts` unchanged (crash recovery).
-   * MUST NOT acquire a pending row whose `availableAt` is still in the future —
-   * return `{ kind: "not_available", ... }` instead (no attempt increment).
+   * MUST NOT acquire a pending row whose `availableAt` is still in the future
+   * **when the hash matches** — return `{ kind: "not_available", ... }` instead
+   * (no attempt increment). Idle/expired non-terminal **hash mismatch supersedes**
+   * even during backoff (WEBHOOKS-3). `payload_hash_conflict` only under an
+   * **active** lease (NEW-SQL-1).
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 

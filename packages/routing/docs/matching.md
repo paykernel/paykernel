@@ -10,7 +10,7 @@
    - If `input.cost` is provided, sort by ascending cost, then gateway id, then rule index.
    - Otherwise keep original rule-array order.
 3. Pick the first remaining candidate (**deterministic**).
-4. If none: use select-time `fallback` if configured and usable **and** no amount-range / capability honesty-block applies; else throw `NoRouteMatchError` (fail-closed). Complementary amount-split rules (Stripe ≤X + PayPal ≥X+ε plus a fallback) always honesty-block that fallback after one bucket is excluded — there is no post-attempt recovery through `fallback`. See [selection.md](./selection.md).
+4. If none: use select-time `fallback` if configured and usable **and** no amount-range / capability / complementary currency-country-method honesty-block applies; else throw `NoRouteMatchError` (fail-closed). Complementary amount-split rules (Stripe ≤X + PayPal ≥X+ε plus a fallback) and complementary currency / country / method partitions (USD→stripe + EUR→adyen plus a fallback) always honesty-block that fallback after one bucket is excluded — there is no post-attempt recovery through `fallback`. See [selection.md](./selection.md).
 
 **First matching rule wins** when cost/preference are not used. Rule array order is significant.
 

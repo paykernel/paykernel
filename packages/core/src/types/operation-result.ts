@@ -320,8 +320,10 @@ export function paymentFromGatewayResult(
  * - Bare pending/processing without action still → `requires_action` so callers
  *   never fulfill on non-terminal state.
  * - `success: false` (or omitted) + pending/processing/approved **or** a
- *   paid/authorized/partial/refunded snapshot → `indeterminate` (not `failed`):
- *   the mutation may have been accepted; do not forge a decline (CORE-INF-1).
+ *   paid/authorized/partial/refunded / incomplete-refund (`refund_completed` /
+ *   `refund_pending`) / `reversed` snapshot → `indeterminate` (not `failed`):
+ *   the mutation may have been accepted; do not forge a decline (CORE-INF-1 /
+ *   NEW-CORE-9).
  */
 export function inferOperationOutcome(
     result: GatewayPaymentResult,
@@ -381,7 +383,10 @@ export function inferOperationOutcome(
             result.status === "authorized" ||
             result.status === "partially_captured" ||
             result.status === "refunded" ||
-            result.status === "partially_refunded"
+            result.status === "partially_refunded" ||
+            result.status === "refund_completed" ||
+            result.status === "refund_pending" ||
+            result.status === "reversed"
         ) {
             return "indeterminate";
         }
@@ -440,6 +445,8 @@ function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean
  * — preserve that as operation success (not charge paid; {@link isPaidOutcome} false).
  * NEW-CORE-6: `declined` / `failed` must not persist on paid-like status —
  * demote to `succeeded` so fulfillment gates stay honest.
+ * NEW-CORE-10: `requires_action` + `status: failed` is a decline, not
+ * `success: true` (do not persist an action arm on a failed snapshot).
  */
 function coercePaymentOutcomeToGatewayStatus(
     outcome: PaymentOperationOutcome,
@@ -470,6 +477,11 @@ function coercePaymentOutcomeToGatewayStatus(
         return "succeeded";
     }
     if (outcome === "requires_action") {
+        // NEW-CORE-10: a failed snapshot is a decline, not customer action.
+        // `successFromOutcome(requires_action)` is true — do not persist that.
+        if (result.status === "failed") {
+            return "declined";
+        }
         // CORE-1: partial capture is open money — Paymob/Stripe demote to
         // requires_action; do not upgrade via settled-status coerce.
         if (
@@ -1069,9 +1081,11 @@ export function inferRefundOperationOutcome(
 }
 
 /**
- * CORE-2: keep Phase-6 outcome arms consistent with gateway refund status.
- * Explicit `outcome: succeeded` must not invent a completed refund when the
- * gateway still reports pending/failed (and the reverse for pending+completed).
+ * CORE-2 / NEW-CORE-9: keep Phase-6 outcome arms consistent with gateway
+ * refund status. Explicit `outcome: succeeded` must not invent a completed
+ * refund when the gateway still reports pending/failed (and the reverse for
+ * pending+completed). Explicit `failed` must not persist on `completed` —
+ * status wins (`succeeded`) so a settled refund is not a retryable fail.
  */
 function coerceRefundOutcomeToGatewayStatus(
     outcome: RefundOperationOutcome,
@@ -1086,6 +1100,9 @@ function coerceRefundOutcomeToGatewayStatus(
         if (gatewayStatus === "failed") return "failed";
         if (gatewayStatus === "completed") return "succeeded";
         return outcome;
+    }
+    if (outcome === "failed" && gatewayStatus === "completed") {
+        return "succeeded";
     }
     return outcome;
 }

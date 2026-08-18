@@ -174,11 +174,11 @@ export type ProcessDueResult = {
 const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
- * PERF-7 / claimDue: list is discovery only; claim is the fence. Issue listed
- * claims concurrently, then return acquired jobs in list order.
- *
- * `processDue` must **not** use this — serial handlers would hold N unexpired
- * leases (NEW-RECON-2 / same class as NEW-WEBHOOKS-1).
+ * PERF-7 / claimDue: list is discovery only; claim is the fence.
+ * Claim one listed row at a time so a slow store.claim cannot leave N
+ * unexpired leases sitting while later claims are still in flight
+ * (same class as NEW-RECON-2 / NEW-WEBHOOKS-1). `processDue` must not
+ * pre-claim the list at all — it claims immediately before each handler.
  */
 async function claimListedDue(
   store: ReconciliationStore,
@@ -186,17 +186,13 @@ async function claimListedDue(
   owner: string,
   leaseMs: number,
 ): Promise<ClaimedJob[]> {
-  const results = await Promise.all(
-    records.map((rec) =>
-      store.claim({
-        key: rec.key,
-        owner,
-        leaseMs,
-      }),
-    ),
-  );
   const claimed: ClaimedJob[] = [];
-  for (const result of results) {
+  for (const rec of records) {
+    const result = await store.claim({
+      key: rec.key,
+      owner,
+      leaseMs,
+    });
     if (result.kind === "acquired") {
       claimed.push({
         key: result.record.key,

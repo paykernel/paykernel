@@ -28,6 +28,7 @@ describe("public API runtime surface", () => {
       ["UnsafeFallbackDeniedError", routing.UnsafeFallbackDeniedError],
       ["isNoRouteMatchError", routing.isNoRouteMatchError],
       ["isUnsafeFallbackDeniedError", routing.isUnsafeFallbackDeniedError],
+      ["isSelectHonestyReason", routing.isSelectHonestyReason],
     ];
 
     for (const [name, value] of runtimeExports) {
@@ -44,7 +45,12 @@ describe("public API runtime surface", () => {
   it("NoRouteMatchError is constructible with code no_route_match", () => {
     const err = new routing.NoRouteMatchError("test", { currency: "USD" });
     expect(err.code).toBe("no_route_match");
+    expect(err.reason).toBe("no_usable_fallback");
     expect(routing.isNoRouteMatchError(err)).toBe(true);
+    expect(routing.isSelectHonestyReason("complementary_currency_honesty")).toBe(
+      true,
+    );
+    expect(routing.isSelectHonestyReason("no_alternate_gateway")).toBe(false);
   });
 
   it("UnsafeFallbackDeniedError is constructible", () => {

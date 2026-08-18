@@ -16,6 +16,7 @@ import {
   createPostgresReconciliationStore,
 } from "../index";
 import type { PostgresExecutor } from "../executor";
+import { DEFAULT_DELETE_EXPIRED_LIMIT } from "./shared";
 
 type Row = Record<string, unknown>;
 
@@ -1060,6 +1061,35 @@ describe("deleteExpired before canonical (P11-DEL-1)", () => {
     const del = executor.calls.find((c) => c.sql.includes("DELETE"));
     expect(del).toBeDefined();
     expect(del!.params[0]).toBe(canonicalBefore);
+  });
+
+  it("NEW-PERF-8: omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    expect(Number.isFinite(DEFAULT_DELETE_EXPIRED_LIMIT)).toBe(true);
+    const webhookExec = createScriptedExecutor({ onQuery: () => [] });
+    await createPostgresWebhookInboxStore({ executor: webhookExec }).deleteExpired({
+      before: offsetBefore,
+    });
+    const webhookDel = webhookExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(webhookDel).toBeDefined();
+    expect(webhookDel!.sql).toMatch(/LIMIT\s+\$2/i);
+    expect(webhookDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const reconExec = createScriptedExecutor({ onQuery: () => [] });
+    await createPostgresReconciliationStore({ executor: reconExec }).deleteExpired({
+      before: offsetBefore,
+    });
+    const reconDel = reconExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(reconDel).toBeDefined();
+    expect(reconDel!.sql).toMatch(/LIMIT\s+\$2/i);
+    expect(reconDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = createScriptedExecutor({ onQuery: () => [] });
+    await createPostgresReconciliationStore({ executor: explicit }).deleteExpired({
+      before: offsetBefore,
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
   });
 });
 

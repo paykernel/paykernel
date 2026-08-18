@@ -11,7 +11,7 @@ import {
   amountInRange,
   amountOutsideConfiguredRange,
 } from "./amount-range";
-import { NoRouteMatchError } from "./errors";
+import { NoRouteMatchError, type NoRouteMatchReason } from "./errors";
 import {
   costScore,
   gatewayHasCapabilities,
@@ -24,12 +24,17 @@ import {
 import type {
   CreatePaymentRouterOptions,
   PaymentRouter,
+  RouteMatchCriteria,
   RoutingDecision,
   RoutingDecisionReason,
   RoutingInput,
   RoutingRule,
   RoutingTelemetryAttributes,
 } from "./types";
+
+/** Categorical partitions that must not be silently bypassed by select-time fallback. */
+const PARTITION_FIELDS = ["currency", "country", "paymentMethod"] as const;
+type PartitionField = (typeof PARTITION_FIELDS)[number];
 
 const DEFAULT_HEALTH_THRESHOLD = 1;
 
@@ -123,6 +128,7 @@ function selectImpl(
       throw new NoRouteMatchError(
         "No routing rule matched: input amount is outside configured rule amount ranges (select-time fallback does not bypass amount bounds)",
         input,
+        "amount_range_honesty",
       );
     }
     // ROUTE-2 / P21-EXCLUDE-HONESTY: capability honesty — do not use
@@ -141,6 +147,21 @@ function selectImpl(
       throw new NoRouteMatchError(
         "No routing rule matched and fallback gateway lacks required capabilities from matching rules",
         input,
+        "capability_honesty",
+      );
+    }
+    // NEW-ROUTE-1: complementary currency / country / method partitions —
+    // same honesty as hasAmountRangeOnlyReject. After exclude/unhealthy of
+    // the matching bucket, do not send the input to unconstrained fallback
+    // (e.g. USD→stripe + EUR→adyen, exclude adyen, EUR must not fall back
+    // to stripe). Unmatched values (no rule in that partition) may still
+    // use select-time fallback.
+    const partitionHonesty = complementaryPartitionHonesty(input, rules);
+    if (partitionHonesty !== undefined) {
+      throw new NoRouteMatchError(
+        partitionHonesty.message,
+        input,
+        partitionHonesty.reason,
       );
     }
     return selectFallback(input, fallback, healthThreshold, exclude);
@@ -211,6 +232,112 @@ function hasRequiredCapabilitiesOnlyReject(
     }
   }
   return false;
+}
+
+/**
+ * NEW-ROUTE-1: do not use unconstrained select-time fallback when a
+ * complementary currency / country / paymentMethod partition exists.
+ * Exclude / health on the matching bucket are ignored (same as amount honesty).
+ */
+function complementaryPartitionHonesty(
+  input: RoutingInput,
+  rules: readonly RoutingRule[],
+): { reason: NoRouteMatchReason; message: string } | undefined {
+  for (const field of PARTITION_FIELDS) {
+    if (!hasComplementaryPartitionOnlyReject(input, rules, field)) continue;
+    return {
+      reason: partitionHonestyReason(field),
+      message: partitionHonestyMessage(field),
+    };
+  }
+  return undefined;
+}
+
+/**
+ * True when at least one rule matches all non-`field` criteria but fails that
+ * partition (same walk as {@link hasAmountRangeOnlyReject}), and a complementary
+ * rule owns the input's bucket (possibly excluded / unhealthy).
+ */
+function hasComplementaryPartitionOnlyReject(
+  input: RoutingInput,
+  rules: readonly RoutingRule[],
+  field: PartitionField,
+): boolean {
+  const inputValue = specifiedPartitionValue(input, field);
+  if (inputValue === undefined) return false;
+
+  // Input must be inside a configured bucket of this field. Unmatched values
+  // (GBP when only USD/EUR exist) still use select-time fallback.
+  const hasMatchingBucket = rules.some((rule) => {
+    const value = specifiedPartitionValue(rule.match, field);
+    return (
+      value !== undefined &&
+      stringsEqualCi(value, inputValue) &&
+      ruleMatches(rule, input)
+    );
+  });
+  if (!hasMatchingBucket) return false;
+
+  // Same honesty as hasAmountRangeOnlyReject: complementary rule matches
+  // everything except this partition field.
+  for (const rule of rules) {
+    const ruleValue = specifiedPartitionValue(rule.match, field);
+    if (ruleValue === undefined) continue;
+    if (stringsEqualCi(ruleValue, inputValue)) continue;
+    if (ruleMatchesIgnoringPartitionField(rule, input, field)) {
+      return true;
+    }
+  }
+
+  // Complementary value exists even when that rule fails other criteria
+  // (USD+US vs EUR+DE) — still do not unconstrained-fallback.
+  return rules.some((rule) => {
+    const value = specifiedPartitionValue(rule.match, field);
+    return value !== undefined && !stringsEqualCi(value, inputValue);
+  });
+}
+
+function specifiedPartitionValue(
+  match: Pick<RouteMatchCriteria, PartitionField>,
+  field: PartitionField,
+): string | undefined {
+  const raw = match[field];
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** {@link ruleMatches} with `field` treated as a wildcard. */
+function ruleMatchesIgnoringPartitionField(
+  rule: RoutingRule,
+  input: RoutingInput,
+  field: PartitionField,
+): boolean {
+  const rest: RouteMatchCriteria = { ...rule.match };
+  delete rest[field];
+  return ruleMatches({ match: rest, gateway: rule.gateway }, input);
+}
+
+function partitionHonestyReason(field: PartitionField): NoRouteMatchReason {
+  switch (field) {
+    case "currency":
+      return "complementary_currency_honesty";
+    case "country":
+      return "complementary_country_honesty";
+    case "paymentMethod":
+      return "complementary_method_honesty";
+  }
+}
+
+function partitionHonestyMessage(field: PartitionField): string {
+  switch (field) {
+    case "currency":
+      return "No routing rule matched: complementary currency partition exists (select-time fallback does not bypass currency partitions)";
+    case "country":
+      return "No routing rule matched: complementary country partition exists (select-time fallback does not bypass country partitions)";
+    case "paymentMethod":
+      return "No routing rule matched: complementary payment-method partition exists (select-time fallback does not bypass payment-method partitions)";
+  }
 }
 
 function pickCandidate(
@@ -299,6 +426,7 @@ function selectFallback(
         throw new NoRouteMatchError(
           "No routing rule matched and fallback gateway lacks required capabilities",
           input,
+          "capability_honesty",
         );
       }
     }

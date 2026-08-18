@@ -39,7 +39,7 @@ import {
   type ResolvedSchemaNamespace,
   type SchemaNamespaceConfig,
 } from "../schema/namespace";
-import { ALL_LOGICAL_TABLES, LOGICAL_TABLES } from "../schema/tables";
+import { LOGICAL_TABLES } from "../schema/tables";
 import { migrate, type SqlExecutor } from "../migrations/migrate";
 import { verifySchema } from "../migrations/verify";
 
@@ -100,14 +100,27 @@ export type MemoryRelationalStore = {
   /** Advance fake clock. */
   setNowMs(ms: number): void;
   nowMs(): number;
-  /** List physical table names (after "migrate"). */
+  /**
+   * Physical names registered by applied `CREATE TABLE` statements only.
+   * Empty until {@link MemoryRelationalStore.migrate} actually runs DDL
+   * (or a test feeds `CREATE TABLE` into {@link MemoryRelationalStore.createExecutor}).
+   */
   listTables(): string[];
-  /** Explicit migrate using internal fake executor. */
+  /**
+   * Apply foundation DDL through {@link MemoryRelationalStore.createExecutor}.
+   * Table presence is only names those `CREATE TABLE` statements registered —
+   * never an eager insert of every logical name after a no-op apply (NEW-PKG-2).
+   */
   migrate(dialect?: DialectId): Promise<{ applied: readonly number[]; currentVersion: number }>;
   verify(
     dialect?: DialectId,
   ): Promise<{ ok: boolean; missing: readonly string[]; version: number }>;
-  /** Fake executor for migrate/verify tests. */
+  /**
+   * NON-PRODUCTION in-memory executor. Always `{ ok: true }` after applying
+   * recognized statements (`CREATE TABLE` registers the physical name;
+   * `CREATE INDEX` is a no-op; migration INSERT records the ledger).
+   * Unrecognized SQL does **not** invent tables. Not a production adapter.
+   */
   createExecutor(): SqlExecutor;
 
   reserveIdempotency(input: {
@@ -227,6 +240,10 @@ export type MemoryRelationalStore = {
 /**
  * Create in-process relational reference store.
  * Does **not** auto-migrate; call `migrate()` explicitly.
+ *
+ * NON-PRODUCTION / NON-DISTRIBUTED. `migrate()` applies real foundation DDL
+ * into the in-memory executor; `listTables()` only reflects `CREATE TABLE`
+ * that actually ran. Do not treat this as a production-adjacent adapter.
  */
 export function createMemoryRelationalStore(
   options: MemoryRelationalOptions = {},
@@ -265,12 +282,19 @@ export function createMemoryRelationalStore(
           return { ok: true };
         }
         // INSERT into migrations
-        if (/INSERT INTO/i.test(s) && /version/i.test(s) && params && params.length >= 3) {
+        if (
+          /INSERT(?:\s+OR\s+IGNORE)?\s+INTO/i.test(s) &&
+          /version/i.test(s) &&
+          params &&
+          params.length >= 3
+        ) {
           const version = Number(params[0]);
           const name = String(params[1]);
           const appliedAt = String(params[2]);
           const checksum =
             params[3] !== undefined && params[3] !== null ? String(params[3]) : undefined;
+          // Ledger INSERT implies the migrations table was created; do not
+          // register domain tables here (NEW-PKG-2).
           tables.add(physical.storageMigrations);
           const row: { name: string; appliedAt: string; checksum?: string } = {
             name,
@@ -280,6 +304,8 @@ export function createMemoryRelationalStore(
           migrations.set(version, row);
           return { ok: true };
         }
+        // Always-ok is fine for this in-memory fake: unrecognized SQL is a
+        // no-op and must not invent logical tables (NEW-PKG-2).
         return { ok: true };
       },
       query<T = Record<string, unknown>>(sql: string) {
@@ -320,12 +346,10 @@ export function createMemoryRelationalStore(
     createExecutor,
 
     async migrate(dialect: DialectId = "sqlite") {
-      // Register expected tables eagerly via migrate path
       const exec = createExecutor();
       const result = await migrate(exec, { dialect, namespace });
-      for (const logical of ALL_LOGICAL_TABLES) {
-        tables.add(resolveUnqualifiedTableName(logical, namespace));
-      }
+      // NEW-PKG-2: do not tables.add every logical name. Presence comes only
+      // from CREATE TABLE (and the migrations-ledger INSERT) that actually ran.
       return {
         applied: result.applied,
         currentVersion: result.currentVersion,

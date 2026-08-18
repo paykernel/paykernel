@@ -157,13 +157,18 @@ type RematchedSucceededStableType =
   | "payment.failed"
   | "payment.cancelled";
 
+type RematchedRefundCompletedType =
+  | "refund.pending"
+  | RematchedSucceededStableType;
+
 /**
- * CORE-HW-1 / CORE-6-EXT / NEW-CORE-2 / NEW-CORE-3: a complete v1
- * `payment.succeeded` arm must not survive an open-money, failed, cancelled,
- * or refunded envelope. Stripe parse rematches checkout/PI refunds to
- * `refund.completed` first; this covers custom attaches. No refund entity
- * here — refunded rematch is `payment.processing`. Nested `event.payment`
- * is rebuilt from the envelope so `status` cannot stay `paid`.
+ * CORE-HW-1 / CORE-6-EXT / NEW-CORE-2 / NEW-CORE-3 / NEW-CORE-8: a complete v1
+ * `payment.succeeded` / `capture.completed` / `refund.completed` arm must not
+ * survive an open-money, failed, or cancelled envelope. Stripe parse rematches
+ * checkout/PI refunds to `refund.completed` first; this covers custom attaches.
+ * Refunded `payment.succeeded` rematch is `payment.processing` (no refund
+ * entity invented here). Nested `event.payment` is rebuilt from the envelope
+ * so `status` cannot stay `paid`.
  */
 function rematchSucceededTypeFromDomainStatus(
   status: string,
@@ -180,6 +185,35 @@ function rematchSucceededTypeFromDomainStatus(
       return "payment.authorized";
     case "failed":
       return "payment.failed";
+    case "cancelled":
+    case "reversed":
+      return "payment.cancelled";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * NEW-CORE-8: `refund.completed` + processing / pending / failed must not stay
+ * completed. Prefer `refund.pending` when the refund entity exists; otherwise
+ * `payment.processing`. Do not keep completed.
+ */
+function rematchRefundCompletedTypeFromDomainStatus(
+  status: string,
+): RematchedRefundCompletedType | undefined {
+  switch (status) {
+    case "pending":
+    case "processing":
+    case "failed":
+    case "refund_pending":
+    case "refund_failed":
+    case "refund_completed":
+      return "refund.pending";
+    case "partially_captured":
+    case "approved":
+      return "payment.processing";
+    case "authorized":
+      return "payment.authorized";
     case "cancelled":
     case "reversed":
       return "payment.cancelled";
@@ -215,6 +249,48 @@ function rematchedSucceededPaymentEvent(
   };
 }
 
+function rematchCompletedRefundDualWriteAgainstDomainStatus(
+  event: WebhookEvent,
+): WebhookEvent {
+  const pe = event.event;
+  if (pe === undefined || pe.type !== "refund.completed") {
+    return event;
+  }
+  const nextType = rematchRefundCompletedTypeFromDomainStatus(event.status);
+  if (nextType === undefined) {
+    return event;
+  }
+  const provider = event.provider ?? pe.provider;
+  if (provider === undefined) {
+    return event;
+  }
+  if (nextType === "refund.pending") {
+    return {
+      ...event,
+      stableType: "refund.pending",
+      provider,
+      event: {
+        schemaVersion: PAYMENT_EVENT_SCHEMA_VERSION,
+        type: "refund.pending",
+        refund: { ...pe.refund, status: "pending" },
+        provider,
+      },
+    };
+  }
+  const payment = paymentFromWebhookEvent(event);
+  return {
+    ...event,
+    stableType: nextType,
+    provider,
+    event: rematchedSucceededPaymentEvent(
+      nextType,
+      payment,
+      provider,
+      event.status,
+    ),
+  };
+}
+
 function rematchSucceededWebhookDualWriteAgainstDomainStatus(
   event: WebhookEvent,
 ): WebhookEvent {
@@ -222,16 +298,23 @@ function rematchSucceededWebhookDualWriteAgainstDomainStatus(
   if (pe === undefined) {
     return event;
   }
+  if (pe.type === "refund.completed") {
+    return rematchCompletedRefundDualWriteAgainstDomainStatus(event);
+  }
   const nextType = rematchSucceededTypeFromDomainStatus(event.status);
   if (nextType === undefined) {
     return event;
   }
   const nestedStatus =
     "payment" in pe && pe.payment !== undefined ? pe.payment.status : undefined;
-  const typeStillSucceeded = pe.type === "payment.succeeded";
+  const typeStillSettlementCompleted =
+    pe.type === "payment.succeeded" || pe.type === "capture.completed";
   // Stripe demote rematches type first and can leave nested `paid`.
   const nestedStatusLies = nestedStatus !== undefined && nestedStatus !== event.status;
-  if (!typeStillSucceeded && !(pe.type === nextType && nestedStatusLies)) {
+  if (
+    !typeStillSettlementCompleted &&
+    !(pe.type === nextType && nestedStatusLies)
+  ) {
     return event;
   }
   // NEW-CORE-2: rebuild from envelope status/money — do not keep nested `paid`.
@@ -900,18 +983,21 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     // gateway-specific mapContext + payloadHash). Rebuild when `event` is
     // missing or not a valid schemaVersion-1 PaymentEvent. Do not overwrite
     // richer valid dual-write. Always apply incomplete-money / incomplete-refund
-    // demotes after parse (CORE-HW-1 / P610-SAFE-1 / NEW-CORE-2 / NEW-CORE-3)
-    // — a complete v1 `payment.succeeded` arm must not skip rematch against
-    // processing / partial / authorized / approved / pending / failed /
-    // cancelled / reversed / refunded envelopes, and nested payment.status
-    // is rebuilt from the envelope.
+    // demotes after parse (CORE-HW-1 / P610-SAFE-1 / NEW-CORE-2 / NEW-CORE-3 /
+    // NEW-CORE-8) — a complete v1 `payment.succeeded` / `capture.completed` /
+    // `refund.completed` arm must not skip rematch against processing / partial /
+    // authorized / approved / pending / failed / cancelled / reversed / refunded
+    // envelopes, and nested payment.status is rebuilt from the envelope.
     const dualWrite = event.event;
     if (
       dualWrite === undefined ||
       !isPaymentEvent(dualWrite) ||
       dualWrite.schemaVersion !== PAYMENT_EVENT_SCHEMA_VERSION
     ) {
-      event = attachPaymentEvent(event, { computePayloadHash: true });
+      // PERF-6: do not re-hash a large Stripe body when parse already set payloadHash.
+      event = attachPaymentEvent(event, {
+        computePayloadHash: event.payloadHash === undefined,
+      });
     }
     event = rematchSucceededWebhookDualWriteAgainstDomainStatus(
       demoteIncompleteRefundWebhookDualWrite(

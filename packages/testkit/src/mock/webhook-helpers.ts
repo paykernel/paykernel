@@ -120,14 +120,97 @@ export function signMockWebhook(
   return { ...payload, signature };
 }
 
+/**
+ * Default domain status from a mock/provider-native event type (NEW-TESTKIT-8).
+ * `payment_failed` / `failed` must not inherit the paid default.
+ */
+function defaultWebhookStatusFromType(type: string): PaymentStatus {
+  const t = type.trim().toLowerCase();
+  if (
+    t === "failed" ||
+    t === "payment_failed" ||
+    t === "payment_faild" ||
+    t === "payment.failed" ||
+    t.includes("payment_failed") ||
+    t.includes("payment.failed") ||
+    t.endsWith(".failed")
+  ) {
+    return "failed";
+  }
+  if (
+    t === "authorized" ||
+    t === "payment_authorized" ||
+    t === "payment.authorized" ||
+    t.endsWith(".authorized")
+  ) {
+    return "authorized";
+  }
+  if (
+    t === "refunded" ||
+    t === "payment_refunded" ||
+    t === "refund.completed" ||
+    t.includes("refunded")
+  ) {
+    return t.includes("partial") ? "partially_refunded" : "refunded";
+  }
+  if (
+    t === "cancelled" ||
+    t === "canceled" ||
+    t === "payment_voided" ||
+    t === "payment.cancelled" ||
+    t.includes("void") ||
+    t.includes("cancel")
+  ) {
+    return "cancelled";
+  }
+  if (t === "pending" || t === "payment.pending" || t.endsWith(".pending")) {
+    return "pending";
+  }
+  if (
+    t === "processing" ||
+    t === "payment.processing" ||
+    t.endsWith(".processing")
+  ) {
+    return "processing";
+  }
+  if (
+    t === "partially_captured" ||
+    t === "payment.partially_captured" ||
+    (t.includes("partial") && t.includes("captur"))
+  ) {
+    return "partially_captured";
+  }
+  if (
+    t === "setup_completed" ||
+    t === "setup_intent.succeeded" ||
+    t === "payment_method.setup_completed"
+  ) {
+    return "setup_completed";
+  }
+  if (
+    t === "paid" ||
+    t === "payment_paid" ||
+    t === "payment.succeeded" ||
+    t === "payment_captured" ||
+    t === "capture.completed" ||
+    t.endsWith(".succeeded") ||
+    t.includes("payment_paid")
+  ) {
+    return "paid";
+  }
+  // Unknown type: do not invent settlement.
+  return "processing";
+}
+
 export function createMockWebhookPayload(
   overrides: Partial<MockWebhookPayload> = {},
 ): MockWebhookPayload {
+  const type = overrides.type ?? "payment_paid";
   const payload: MockWebhookPayload = {
     id: overrides.id ?? `evt_mock_${Math.random().toString(36).slice(2, 10)}`,
-    type: overrides.type ?? "payment_paid",
+    type,
     gatewayPaymentId: overrides.gatewayPaymentId ?? "pay_mock_1",
-    status: overrides.status ?? "paid",
+    status: overrides.status ?? defaultWebhookStatusFromType(type),
     createdAt: overrides.createdAt ?? new Date().toISOString(),
   };
   if (overrides.paymentId !== undefined) payload.paymentId = overrides.paymentId;
@@ -152,10 +235,11 @@ export function generateWebhookEvent(options: GenerateWebhookEventOptions = {}):
 } {
   const gateway = options.gateway ?? "mock";
   const secret = options.secret ?? DEFAULT_MOCK_WEBHOOK_SECRET;
+  const type = options.type ?? "payment_paid";
   const overrides: Partial<MockWebhookPayload> = {
-    type: options.type ?? "payment_paid",
+    type,
     gatewayPaymentId: options.gatewayPaymentId ?? "pay_mock_1",
-    status: options.status ?? "paid",
+    status: options.status ?? defaultWebhookStatusFromType(type),
   };
   if (options.id !== undefined) overrides.id = options.id;
   if (options.paymentId !== undefined) overrides.paymentId = options.paymentId;

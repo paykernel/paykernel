@@ -116,7 +116,7 @@ async function onStripeWebhook(
 Pipeline detail (engine-internal after claim):
 
 1. Validate `gateway`, `providerEventId`, `payloadHash` (empty → `invalid_webhook`).
-2. `deriveWebhookEventKey` (Paymob includes notification class from `event` / `envelope` — WEBHOOKS-1).
+2. `deriveWebhookEventKey` (Paymob includes notification class + processed domain status from `event` / `envelope` — WEBHOOKS-1 / NEW-WEBHOOKS-2).
 3. `store.claim({ key, payloadHash, owner, leaseMs, payloadRef? })`.
 4. Non-`acquired` → outcome without running the handler.
 5. Mode branch: `durable_retry` + `ackAfterClaim` → require `envelope`, park as `scheduled_for_retry { reason: "parked" }`; else require `handler`.
@@ -240,21 +240,26 @@ deriveWebhookEventKey("stripe", "evt_123"); // "stripe:evt_123"
 parseWebhookEventKey("stripe:evt_123");     // { gateway: "stripe", providerEventId: "evt_123" }
 deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
 // "paymob:TRANSACTION_RESPONSE:123456789"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
+// "paymob:TRANSACTION:123456789:paid"
 ```
 
 - Both parts must be non-empty after trim; otherwise `deriveWebhookEventKey` throws and `processVerified` returns `invalid_webhook`.
 - **Gateway must not contain `:`** (colon is the key separator). Rejecting colon-in-gateway prevents collisions such as `a:b`+`c` vs `a`+`b:c`. `providerEventId` may still contain colons.
 - Format: `{gateway}:{providerEventId}` (first colon splits for parse).
 - **Paymob (WEBHOOKS-1 / NEW-WEBHOOKS-2):** `processVerified` qualifies the
-  id with `event.type` / `provider.eventType` (`TRANSACTION` vs
-  `TRANSACTION_RESPONSE`). Redirect and processed share `WebhookEvent.id`;
-  they must not share an inbox key. Pass `event` (or a type-qualified
-  `providerEventId`) — do not inbox-dedupe Paymob on raw `event.id` and
-  complete the documented redirect. Processed `TRANSACTION` key is
-  `obj.id` (`paymob:TRANSACTION:{id}`). A later same-id snapshot is
-  `already_completed`. Child refund/capture webhooks mint a **new**
-  `obj.id` (new inbox row). Do **not** complete fulfillment on Paymob
-  `payment.processing` (redirect); wait for processed `TRANSACTION`.
+  id with `provider.eventType` or known native HMAC classes (`TRANSACTION`
+  vs `TRANSACTION_RESPONSE`) — not remapped domain types such as
+  `payment.succeeded` (NEW-WH-1). Redirect and processed share
+  `WebhookEvent.id`; they must not share an inbox key. Pass `event` (or a
+  type-qualified `providerEventId`) — do not inbox-dedupe Paymob on raw
+  `event.id` and complete the documented redirect. Redirect stays
+  `paymob:TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes
+  domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a
+  later same-id void/refund snapshot is not `already_completed`. Child
+  refund/capture webhooks may still mint a **new** `obj.id`. Do **not**
+  complete fulfillment on Paymob `payment.processing` (redirect); wait for
+  processed `TRANSACTION`.
 
 ### Payload hash (one canonical source — WEBHOOKS-2)
 

@@ -50,7 +50,9 @@ export {
   UnsafeFallbackDeniedError,
   isNoRouteMatchError,
   isUnsafeFallbackDeniedError,
+  isSelectHonestyReason,
 } from "./errors";
+export type { NoRouteMatchReason } from "./errors";
 
 // Types
 export type {

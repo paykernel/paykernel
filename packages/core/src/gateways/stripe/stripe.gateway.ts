@@ -25,6 +25,7 @@ import type {
 } from "../../types/webhook.types";
 import {
   attachPaymentEvent,
+  hashWebhookPayload,
   paymentFromWebhookEvent,
   PAYMENT_EVENT_SCHEMA_VERSION,
 } from "../../types/payment-event";
@@ -515,11 +516,52 @@ function stripeSubscriptionStatus(status: string): PaymentStatus {
   }
 }
 
-function stripeInvoiceStatus(eventType: string, status: string): PaymentStatus {
+type StripeInvoiceSnapshot = {
+  status?: unknown;
+  amount_paid?: unknown;
+  amount_due?: unknown;
+  amount_remaining?: unknown;
+  total?: unknown;
+  post_payment_credit_notes_amount?: unknown;
+};
+
+function stripeInvoiceHasCreditNoteRemainder(
+  invoice: StripeInvoiceSnapshot,
+): boolean {
+  const creditNotes = invoice.post_payment_credit_notes_amount;
+  return typeof creditNotes === "number" && Number.isFinite(creditNotes) && creditNotes > 0;
+}
+
+function stripeInvoiceStatus(
+  eventType: string,
+  invoice: StripeInvoiceSnapshot,
+): PaymentStatus {
+  const status = typeof invoice.status === "string" ? invoice.status : "";
+  // Object terminal state wins over event type (invoice.paid + void ≠ paid).
+  if (status === "void") {
+    return "cancelled";
+  }
+  if (status === "uncollectible") {
+    return "failed";
+  }
+
   switch (eventType) {
     case "invoice.paid":
-    case "invoice.payment_succeeded":
-      return "paid";
+    case "invoice.payment_succeeded": {
+      // Credit notes after collection: do not claim full paid (can overwrite
+      // refunded → paid on status-only persist). Missing amount_paid is not
+      // proven collection — processing, not paid.
+      if (stripeInvoiceHasCreditNoteRemainder(invoice)) {
+        return "processing";
+      }
+      if (
+        typeof invoice.amount_paid === "number" &&
+        Number.isFinite(invoice.amount_paid)
+      ) {
+        return "paid";
+      }
+      return "processing";
+    }
     case "invoice.payment_failed":
       return "failed";
     case "invoice.voided":
@@ -528,10 +570,7 @@ function stripeInvoiceStatus(eventType: string, status: string): PaymentStatus {
       return "failed";
     default:
       if (status === "paid") {
-        return "paid";
-      }
-      if (status === "void" || status === "uncollectible") {
-        return status === "void" ? "cancelled" : "failed";
+        return stripeInvoiceHasCreditNoteRemainder(invoice) ? "processing" : "paid";
       }
       return "pending";
   }
@@ -539,20 +578,21 @@ function stripeInvoiceStatus(eventType: string, status: string): PaymentStatus {
 
 function stripeInvoiceAmount(
   eventType: string,
-  invoice: Record<string, any>,
+  invoice: StripeInvoiceSnapshot,
 ): number | undefined {
   const firstNumber = (...values: unknown[]): number | undefined => {
-    return values.find((value): value is number => typeof value === "number");
+    return values.find(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value),
+    );
   };
 
   switch (eventType) {
     case "invoice.paid":
     case "invoice.payment_succeeded":
-      return firstNumber(
-        invoice.amount_paid,
-        invoice.total,
-        invoice.amount_due,
-      );
+      // Collected money only. Never fall through to amount_due / total
+      // (those are billed, not proven collected).
+      return firstNumber(invoice.amount_paid);
     case "invoice.payment_failed":
       return firstNumber(
         invoice.amount_due,
@@ -1872,6 +1912,13 @@ export class StripeGateway extends BaseGateway {
           "Stripe PaymentIntent response missing id",
           response,
         );
+        const nativeStatus = requireStripeMutationStatus(
+          response.status,
+          "Stripe PaymentIntent response missing status",
+          response,
+        );
+        const canceled =
+          nativeStatus === "canceled" || nativeStatus === "cancelled";
 
         // STRIPE-4: omit amount when currency is missing — never invent "usd".
         const currency = stripeCurrencyCode(response.currency);
@@ -1885,8 +1932,12 @@ export class StripeGateway extends BaseGateway {
               }
             : {}),
           omitRedirectUrl: true,
-          // Void completed successfully even when status is cancelled.
-          forceOutcome: "succeeded",
+          // Intentional void only: canceled/cancelled. Missing status is
+          // NetworkError afterProviderSubmit (indeterminate), not mapStatus
+          // undefined → failed + forceOutcome succeeded → declined.
+          ...(canceled
+            ? { status: "cancelled" as const, forceOutcome: "succeeded" as const }
+            : {}),
         });
       },
       VoidParamsSchema,
@@ -2142,7 +2193,7 @@ export class StripeGateway extends BaseGateway {
   async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<{
     success: boolean;
     sessionId: string;
-    url: string | null;
+    url?: string;
     rawResponse: unknown;
   }> {
     return this.executeWithHooks(
@@ -2254,11 +2305,14 @@ export class StripeGateway extends BaseGateway {
           "Stripe Checkout Session response missing id",
           response,
         );
+        const url = isNonEmptyStripeString(response.url)
+          ? response.url
+          : undefined;
 
         return {
           success: true,
           sessionId,
-          url: response.url,
+          ...(url !== undefined ? { url } : {}),
           rawResponse: response,
         };
       },
@@ -2669,7 +2723,7 @@ export class StripeGateway extends BaseGateway {
       case "invoice.created":
       case "invoice.finalized":
       case "invoice.updated":
-        status = stripeInvoiceStatus(raw.type, object.status);
+        status = stripeInvoiceStatus(raw.type, object);
         break;
       case "customer.subscription.created":
       case "customer.subscription.updated":
@@ -2681,6 +2735,11 @@ export class StripeGateway extends BaseGateway {
           raw.type === "customer.subscription.deleted"
             ? "cancelled"
             : stripeSubscriptionStatus(object.status);
+        break;
+      case "setup_intent.succeeded":
+        // Catalog dual-writes payment_method.setup_completed; do not leave
+        // non-PI objects on default pending (NEW-STRIPE-SETUP-1).
+        status = "setup_completed";
         break;
       // Subscription schedule events (for future subscription management)
       case "subscription_schedule.created":
@@ -2756,9 +2815,16 @@ export class StripeGateway extends BaseGateway {
       mapContext.mode = sessionMode;
     }
 
+    // PERF-6: inbox keys Stripe events by `event.id`. Hash a compact identity
+    // (id/type/created/object id) instead of redact+stringify the full PI/charge tree.
     const attached = attachPaymentEvent(legacy, {
-      computePayloadHash: true,
       mapContext,
+    });
+    attached.payloadHash = hashWebhookPayload({
+      id: raw.id,
+      type: raw.type,
+      created: raw.created,
+      object: object.id,
     });
     // Incomplete settled money (status processing) must not dual-write
     // payment.succeeded — type-only handlers would over-fulfill (STRIPE-1).

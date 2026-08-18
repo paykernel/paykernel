@@ -12,7 +12,11 @@
 
 import type { PaymentOperationOutcome } from "@paykernel/core";
 import { isIndeterminateOutcome } from "@paykernel/core";
-import { NoRouteMatchError, UnsafeFallbackDeniedError } from "./errors";
+import {
+  isSelectHonestyReason,
+  NoRouteMatchError,
+  UnsafeFallbackDeniedError,
+} from "./errors";
 import type { PaymentRouter } from "./types";
 import type {
   ExpertUnsafeFallbackOverride,
@@ -585,6 +589,17 @@ export function trySelectFallbackGateway(
     decision = router.select(selectInput);
   } catch (err) {
     if (err instanceof NoRouteMatchError) {
+      // NEW-ROUTE-1: do not rewrite amount / currency / partition honesty to
+      // no_alternate_gateway — preserve the honesty reason (and message).
+      if (isSelectHonestyReason(err.reason)) {
+        throw new UnsafeFallbackDeniedError(
+          `Post-attempt fallback denied: ${err.message}`,
+          {
+            submissionState: eligibility.submissionState,
+            reason: err.reason,
+          },
+        );
+      }
       throw new UnsafeFallbackDeniedError(
         "Post-attempt fallback denied: no alternate gateway available",
         {

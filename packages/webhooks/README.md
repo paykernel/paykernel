@@ -251,6 +251,8 @@ deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
 // "paymob:TRANSACTION_RESPONSE:123456789"
 deriveWebhookEventKey("paymob", "123456789", "TRANSACTION");
 // "paymob:TRANSACTION:123456789"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
+// "paymob:TRANSACTION:123456789:paid"
 ```
 
 Empty gateway or providerEventId throws / yields `invalid_webhook`.
@@ -258,14 +260,17 @@ Empty gateway or providerEventId throws / yields `invalid_webhook`.
 **Paymob (WEBHOOKS-1 / NEW-WEBHOOKS-2):** `WebhookEvent.id` is the
 transaction id on both redirect `TRANSACTION_RESPONSE` (`payment.processing`)
 and processed `TRANSACTION`. `processVerified` includes the notification
-class in the key when `event` / `envelope` carries `type` or
-`provider.eventType`. Do **not** inbox-dedupe Paymob on raw `event.id`
-and no-op the redirect — that combo ACK-suppresses later paid.
-Processed `TRANSACTION` inbox key is `obj.id` (`paymob:TRANSACTION:{id}`).
-A later same-id snapshot is `already_completed`. Child refund/capture
-callbacks have **new** `obj.id`s (new inbox keys). Do **not** complete
-fulfillment on Paymob `payment.processing` — wait for processed
-`TRANSACTION` + a settlement stable type.
+class in the key when `event` / `envelope` carries `provider.eventType` or a
+known native class (`TRANSACTION` / `TRANSACTION_RESPONSE`) — not remapped
+domain types such as `payment.succeeded` (NEW-WH-1). Do **not** inbox-dedupe
+Paymob on raw `event.id` and no-op the redirect — that combo ACK-suppresses
+later paid. Redirect stays `paymob:TRANSACTION_RESPONSE:{txnId}`. Processed
+`TRANSACTION` includes domain status when available
+(`paymob:TRANSACTION:{id}:{status}`) so a later same-id void/refund snapshot
+is not `already_completed`. Child refund/capture callbacks may still have
+**new** `obj.id`s. Do **not** complete fulfillment on Paymob
+`payment.processing` — wait for processed `TRANSACTION` + a settlement
+stable type.
 
 ## Store contract
 

@@ -28,7 +28,7 @@ Phase 11 provides **shared schemas and claim algorithms** without shipping a gen
 | Row codecs + shared validation (status enums, max error length, hash policy) | Public npm SQL product / general query builder                                      |
 | Versioned migrations + explicit `migrate()` / `verifySchema()`               | Core or webhooks depending on this package                                          |
 | Pure claim decision functions + dialect-tagged SQL templates                 | Pretending PostgreSQL === SQLite syntax                                             |
-| In-process memory-relational **reference** for unit/contention tests         | Replacing testkit memory stores as the Phase 9 conformance home                     |
+| In-process memory-relational **reference** for unit/contention tests (NON-PRODUCTION; `migrate()` only lists tables whose `CREATE TABLE` ran) | Replacing testkit memory stores as the Phase 9 conformance home; do not treat the always-ok executor as production-adjacent (NEW-PKG-2) |
 
 **Production relational consumers (present):** `packages/store-postgres` (Phase 12, multi-host PostgreSQL), `packages/store-sqlite` (Phase 14, **single-host** local SQLite), `packages/store-turso` (Phase 15, **multi-host remote** Turso/libSQL, dialect `sqlite`), `packages/store-d1` (Phase 16, **multi-host Workers D1**, dialect `sqlite`), and `packages/store-durable-objects` (Phase 17, **multi-host partitioned** SQLite-backed Durable Objects, dialect `sqlite`). Further relational adapters remain later phases. Redis (`adapter-redis`) is optional coordination and must **not** depend on this package.
 

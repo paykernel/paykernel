@@ -107,12 +107,13 @@ const SENSITIVE_EXACT_KEYS = new Set(["month", "year"]);
 const PAN_LIKE_STRING = /^[\d\s-]{13,23}$/;
 
 /**
- * Secret-shaped tokens (MONEY-3): API keys, webhook secrets, bearer tokens.
- * Matched as a substring so `hookError` strings like
- * `"after hook threw: sk_live_…"` cannot leak live credentials.
+ * Secret-shaped tokens (MONEY-3 / NEW-OBS-2): API keys, webhook secrets,
+ * bearer tokens, and Stripe PaymentIntent client secrets (`pi_…_secret_…`).
+ * Matched as a substring so `hookError` / log messages like
+ * `"after hook threw: sk_live_…"` or `"next_action pi_…_secret_…"` cannot leak.
  */
 const SECRET_SHAPED_STRING =
-  /(?:sk_(?:live|test)_|rk_(?:live|test)_|pk_(?:live|test)_|cs_(?:live|test)_|whsec_|Bearer\s+\S)/i;
+  /(?:sk_(?:live|test)_|rk_(?:live|test)_|pk_(?:live|test)_|cs_(?:live|test)_|whsec_|Bearer\s+\S|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+)/i;
 
 /**
  * Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes).
@@ -234,8 +235,8 @@ function isSensitiveKey(key: string): boolean {
  * Redacts:
  * - Keys matching {@link SENSITIVE_KEY_PATTERNS} (case-insensitive substring)
  * - Opaque string leaves that look like PANs (13–19 digits)
- * - Embedded `sk_live_` / `whsec_` / `Bearer` / PAN tokens inside otherwise
- *   non-sensitive strings (e.g. `hookError` messages)
+ * - Embedded `sk_live_` / `whsec_` / `Bearer` / `pi_…_secret_…` / PAN tokens
+ *   inside otherwise non-sensitive strings (e.g. `hookError` messages)
  */
 export function redact(value: unknown, depth = 0): unknown {
   if (depth > MAX_DEPTH) {
@@ -265,17 +266,42 @@ export function redact(value: unknown, depth = 0): unknown {
 }
 
 /**
- * Wrap a logger so every structured context is redacted before reaching the
- * sink. Gateways are given a redacting logger so individual call sites don't
- * have to remember to scrub fields.
+ * Replace secret-shaped tokens in a log message (NEW-OBS-2). Whole-string
+ * credentials become `[REDACTED]`; mixed operational text keeps non-secret
+ * fragments. Does not apply PAN matching — amounts/ids in messages stay visible.
+ */
+const SECRET_SHAPED_IN_MESSAGE =
+  /(?:sk_(?:live|test)_[A-Za-z0-9_-]+|rk_(?:live|test)_[A-Za-z0-9_-]+|pk_(?:live|test)_[A-Za-z0-9_-]+|cs_(?:live|test)_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9]+|Bearer\s+\S+|pi_[A-Za-z0-9]+_secret_[A-Za-z0-9]+)/gi;
+
+function sanitizeLogMessage(message: string): string {
+  if (typeof message !== "string" || message.length === 0) {
+    return message;
+  }
+  if (!SECRET_SHAPED_STRING.test(message)) {
+    return message;
+  }
+  SECRET_SHAPED_IN_MESSAGE.lastIndex = 0;
+  const scrubbed = message.replace(SECRET_SHAPED_IN_MESSAGE, REDACTED);
+  // Prefix-only / untokenized match: fail closed rather than leak.
+  if (scrubbed === message || SECRET_SHAPED_STRING.test(scrubbed)) {
+    return REDACTED;
+  }
+  return scrubbed;
+}
+
+/**
+ * Wrap a logger so every structured context **and** the message argument are
+ * redacted before reaching the sink. Gateways are given a redacting logger so
+ * individual call sites don't have to remember to scrub fields (NEW-OBS-2).
  */
 export function createRedactingLogger(logger: Logger): Logger {
   const wrap = (level: LogLevel) =>
     (message: string, context?: Record<string, unknown>): void => {
+      const safeMessage = sanitizeLogMessage(message);
       if (context === undefined) {
-        logger[level](message);
+        logger[level](safeMessage);
       } else {
-        logger[level](message, redact(context) as Record<string, unknown>);
+        logger[level](safeMessage, redact(context) as Record<string, unknown>);
       }
     };
 

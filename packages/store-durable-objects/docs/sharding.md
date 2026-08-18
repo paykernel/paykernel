@@ -70,7 +70,7 @@ const d = resolveDoDiscoveryPartitions({ kind: "hash", partitions: 16 });
 // d.kind === "partitions" → d.shardNames
 ```
 
-**PERF-5 cost:** hash partitions have no shared due/retry index, so a correct global earliest-N still **peeks** every enumerable isolate. Full `listDue` / `listRetryable` (bounded expired-lease UPDATE + SELECT) run only on shards that peek occupied. Peek is read-only and treats expired `claimed` as occupied so crash recovery is not skipped. Sequential early-exit on the first non-empty list would miss earlier work on later shards. Cost is **O(partitions)** cheap peek RPCs plus full list on occupied shards (and possible cold DO materialization), not O(partitions × limit) UPDATEs. Prefer a modest `partitions` count (16–64) and a bounded `limit`. `kind: "key"` hard-fails instead of silently missing work.
+**PERF-5 cost:** hash partitions have no shared due/retry index, so a correct global earliest-N still **peeks** every enumerable isolate (`{ occupied, earliest }`). Full `listDue` / `listRetryable` (bounded expired-lease UPDATE + SELECT) run only on shards that can contribute to the global earliest-N — occupied shards whose earliest sort key is not after the current cutoff. Later occupied shards are skipped. Peek is read-only and treats expired `claimed` as occupied so crash recovery is not skipped. A boolean / missing-earliest peek (rolling old Workers) is fail-closed to “must list”. Cost is **O(partitions)** cheap peek RPCs plus full list on the contributing prefix, not a full list on every occupied shard. Prefer a modest `partitions` count (16–64) and a bounded `limit`. `kind: "key"` hard-fails instead of silently missing work.
 
 ## API
 

@@ -577,6 +577,25 @@ describe("operation-result helpers", () => {
     ).toBe("indeterminate");
   });
 
+  it("NEW-CORE-9: success:false + refund_completed/refund_pending/reversed is indeterminate", () => {
+    const uncertain: Array<GatewayPaymentResult["status"]> = [
+      "refund_completed",
+      "refund_pending",
+      "reversed",
+    ];
+    for (const status of uncertain) {
+      const result = baseResult({ success: false, status });
+      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const op = mapGatewayResultToOperationResult(result);
+      expect(op.outcome).toBe("indeterminate");
+      if (op.outcome === "indeterminate") {
+        expect(op.reconciliationRequired).toBe(true);
+      }
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(isIndeterminateOutcome(result)).toBe(true);
+    }
+  });
+
   it("CORE-2: successful void (outcome succeeded + status cancelled) is not failed", () => {
     const voided = baseResult({
       success: true,
@@ -974,6 +993,43 @@ describe("operation-result helpers", () => {
     ).toBe("succeeded");
   });
 
+  it("NEW-CORE-10: requires_action + status failed is declined, not success:true", () => {
+    const applied = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_action_failed",
+        status: "failed",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "requires_action",
+    );
+    expect(applied.outcome).toBe("declined");
+    expect(applied.success).toBe(false);
+    expect(applied.status).toBe("failed");
+    expect(inferOperationOutcome(applied)).toBe("declined");
+    expect(isPaidOutcome(applied)).toBe(false);
+    expect(isRequiresActionOutcome(applied)).toBe(false);
+
+    expect(
+      inferOperationOutcome(
+        baseResult({
+          success: true,
+          status: "failed",
+          outcome: "requires_action",
+        }),
+      ),
+    ).toBe("declined");
+
+    const mapped = mapGatewayResultToOperationResult(
+      baseResult({
+        success: true,
+        status: "failed",
+        outcome: "requires_action",
+      }),
+    );
+    expect(mapped.outcome).toBe("declined");
+  });
+
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {
     const completed = applyOutcomeToGatewayRefundResult(
       {
@@ -1087,6 +1143,29 @@ describe("operation-result helpers", () => {
     expect(completed.success).toBe(true);
     expect(completed.status).toBe("completed");
     expect(inferRefundOperationOutcome(completed)).toBe(completed.outcome);
+
+    // NEW-CORE-9: failed + completed → succeeded (status wins; not retryable fail).
+    const failedOnCompleted = applyOutcomeToGatewayRefundResult(
+      {
+        gatewayRefundId: "re_failed_completed",
+        status: "completed",
+        rawResponse: {},
+      },
+      "failed",
+    );
+    expect(failedOnCompleted.outcome).toBe("succeeded");
+    expect(failedOnCompleted.success).toBe(true);
+    expect(failedOnCompleted.status).toBe("completed");
+    expect(inferRefundOperationOutcome(failedOnCompleted)).toBe("succeeded");
+    expect(
+      inferRefundOperationOutcome({
+        success: false,
+        status: "completed",
+        gatewayRefundId: "re_failed_outcome_completed",
+        rawResponse: {},
+        outcome: "failed",
+      }),
+    ).toBe("succeeded");
   });
 
   it("inferRefundOperationOutcome + map cover indeterminate and failed", () => {

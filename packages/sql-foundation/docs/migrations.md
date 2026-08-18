@@ -182,6 +182,11 @@ Does **not** apply migrations.
 | `import-no-migrate.test.ts`                | Import does not migrate            |
 | `migrate.test.ts`                          | Apply / idempotent re-run / ledger |
 | `namespace.test.ts` / `definitions.test.ts`| Prefix length + index-label uniqueness |
+| `reference/memory-relational-store.test.ts`| NEW-PKG-2: memory `migrate()` registers only `CREATE TABLE` that ran |
+
+### Memory-relational reference (NON-PRODUCTION)
+
+`createMemoryRelationalStore` is **NON-PRODUCTION / NON-DISTRIBUTED**. Its `createExecutor()` always returns `{ ok: true }` because it is an in-memory fake that **applies** recognized DDL (`CREATE TABLE` registers the physical name). `store.migrate()` must not invent logical tables after a no-op apply: table presence is only names those statements registered. Portable/`generic` dialect bodies are English intent, not executable `CREATE TABLE` — after `migrate("generic")` domain tables stay missing and `verify()` fails closed (NEW-PKG-2).
 
 Adapters should add multi-connection and real-driver migration tests in Phase 12+.
 

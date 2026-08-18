@@ -9,7 +9,7 @@ import {
 } from "./fallback";
 import { createPaymentRouter } from "./router";
 import { route } from "./route";
-import { UnsafeFallbackDeniedError } from "./errors";
+import { NoRouteMatchError, UnsafeFallbackDeniedError } from "./errors";
 import type { SubmissionState } from "./types";
 
 const UNSAFE: SubmissionState[] = [
@@ -416,6 +416,20 @@ describe("trySelectFallbackGateway", () => {
         { attemptedGateways: ["stripe", "paypal"] },
       ),
     ).toThrow(UnsafeFallbackDeniedError);
+    try {
+      trySelectFallbackGateway(
+        router,
+        { currency: "USD" },
+        eligibility,
+        { attemptedGateways: ["stripe", "paypal"] },
+      );
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "no_alternate_gateway",
+      );
+    }
   });
 
   it("forged eligibility.allowed is rejected without expertOverride", () => {
@@ -490,6 +504,48 @@ describe("trySelectFallbackGateway", () => {
     }
   });
 
+  it("NEW-ROUTE-1: complementary currency + fallback does not silently pick fallback", () => {
+    const partitioned = createPaymentRouter({
+      rules: [
+        route({ currency: "USD" }).to("stripe"),
+        route({ currency: "EUR" }).to("adyen"),
+      ],
+      fallback: "stripe",
+    });
+    const eligibility = evaluateFallback({
+      submissionState: "not_submitted",
+    });
+    expect(() =>
+      trySelectFallbackGateway(
+        partitioned,
+        { currency: "EUR" },
+        eligibility,
+        { attemptedGateways: ["adyen"] },
+      ),
+    ).toThrow(UnsafeFallbackDeniedError);
+    try {
+      trySelectFallbackGateway(
+        partitioned,
+        { currency: "EUR" },
+        eligibility,
+        { attemptedGateways: ["adyen"] },
+      );
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect(err).not.toBeInstanceOf(NoRouteMatchError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "complementary_currency_honesty",
+      );
+      expect((err as UnsafeFallbackDeniedError).reason).not.toBe(
+        "no_alternate_gateway",
+      );
+      expect((err as UnsafeFallbackDeniedError).message).toMatch(
+        /complementary currency/i,
+      );
+    }
+  });
+
   it("P21-EXCLUDE-HONESTY: attemptedGateways cannot send out-of-range amount to unconstrained fallback", () => {
     const ranged = createPaymentRouter({
       rules: [
@@ -531,6 +587,23 @@ describe("trySelectFallbackGateway", () => {
         eligibility,
       ),
     ).toThrow(UnsafeFallbackDeniedError);
+    try {
+      trySelectFallbackGateway(
+        ranged,
+        { amount: { amount: "50.00", currency: "USD" } },
+        eligibility,
+        { attemptedGateways: ["enterprise-psp"] },
+      );
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "amount_range_honesty",
+      );
+      expect((err as UnsafeFallbackDeniedError).reason).not.toBe(
+        "no_alternate_gateway",
+      );
+    }
   });
 
   it("P21-EXCLUDE-HONESTY: attemptedGateways cannot drop rule-level requiredCapabilities", () => {
@@ -572,6 +645,20 @@ describe("trySelectFallbackGateway", () => {
         eligibility,
       ),
     ).toThrow(UnsafeFallbackDeniedError);
+    try {
+      trySelectFallbackGateway(capped, input, eligibility, {
+        attemptedGateways: ["stripe"],
+      });
+      expect.unreachable("expected UnsafeFallbackDeniedError");
+    } catch (err) {
+      expect(err).toBeInstanceOf(UnsafeFallbackDeniedError);
+      expect((err as UnsafeFallbackDeniedError).reason).toBe(
+        "capability_honesty",
+      );
+      expect((err as UnsafeFallbackDeniedError).reason).not.toBe(
+        "no_alternate_gateway",
+      );
+    }
   });
 
   it("genuine evaluateFallback expertOverride still allows unsafe select", () => {

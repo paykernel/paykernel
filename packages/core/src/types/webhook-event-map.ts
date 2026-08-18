@@ -20,8 +20,10 @@
  *   browser-only (PAYMOB-AUTH-REDIR).
  * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
  *   `payment.processing`, not `payment.succeeded` **or** `capture.completed`
- *   (Paymob `is_capture` / flags / amounts and Stripe `payment_intent.succeeded`
- *   when context.status is partially_captured).
+ *   (Paymob `is_capture` / flags / amounts, Stripe `payment_intent.succeeded`,
+ *   Moyasar `payment_captured`, and already-stable `capture.completed` /
+ *   `refund.completed` when context.status is `partially_captured` /
+ *   `processing` — NEW-CORE-8).
  *
  * Cross-gateway: domain status `approved` (PayPal buyer pre-capture) is never
  * mapped to `payment.succeeded` on status-only fallbacks — use `payment.processing`.
@@ -270,11 +272,13 @@ export const MOYASAR_EVENT_TYPE_MAP: Readonly<
 
 function mapMoyasarEventType(
   providerEventType: string,
-  _context?: ProviderEventMapContext,
+  context?: ProviderEventMapContext,
 ): MappedStableEventType {
   const direct = MOYASAR_EVENT_TYPE_MAP[providerEventType];
   if (direct !== undefined) {
-    return direct;
+    // NEW-CORE-8: catalog `payment_captured` → capture.completed must not
+    // survive an open-money domain snapshot (partially_captured / processing).
+    return coerceStableSucceededToDomainStatus(direct, context);
   }
   // Unknown / free-form types stay unmapped. Do not status-fallback
   // (unknown + paid must not invent payment.succeeded).
@@ -588,21 +592,31 @@ function mapPaymobEventType(
 }
 
 /**
- * CORE-6 / CORE-6-EXT: an already-stable `payment.succeeded` must not survive
- * a failed / pending / processing / authorized / approved / partial / refunded
- * domain status. Type-only handlers must not fulfill. Prefer `payment.processing`
- * for auth / approved / partial / refunded rematch — this mapper has no refund
- * entity, so it must not invent `refund.completed`. Other stable names stay
- * idempotent.
+ * CORE-6 / CORE-6-EXT / NEW-CORE-8: settlement-ready stable names must not
+ * survive an open-money domain snapshot. Type-only handlers must not fulfill.
+ *
+ * - `payment.succeeded` rematches failed / pending / processing / authorized /
+ *   approved / partial / refunded (no refund entity here — do not invent
+ *   `refund.completed`).
+ * - `capture.completed` / `refund.completed` rematch `partially_captured` /
+ *   `processing` → `payment.processing` (open capture / incomplete settlement).
+ * Other stable names stay idempotent.
  */
 function coerceStableSucceededToDomainStatus(
-  type: StablePaymentEventType,
+  type: MappedStableEventType,
   context?: ProviderEventMapContext,
 ): MappedStableEventType {
+  const status = (context?.status ?? "").toLowerCase();
+  // NEW-CORE-8: v1 capture/refund completed arms over-settle open money.
+  if (
+    (type === "capture.completed" || type === "refund.completed") &&
+    (status === "partially_captured" || status === "processing")
+  ) {
+    return "payment.processing";
+  }
   if (type !== "payment.succeeded") {
     return type;
   }
-  const status = (context?.status ?? "").toLowerCase();
   if (status === "failed") {
     return "payment.failed";
   }
@@ -643,9 +657,8 @@ export function mapProviderEventTypeToStable(
   }
 
   // Already a stable name (e.g. dual-write consumers re-mapping) — accept as-is
-  // so mapping is idempotent, except `payment.succeeded` cannot survive a
-  // failed / pending / processing / authorized / approved / partial / refunded
-  // domain status (CORE-6 / CORE-6-EXT).
+  // so mapping is idempotent, except settlement-ready names cannot survive an
+  // open-money / failed domain status (CORE-6 / CORE-6-EXT / NEW-CORE-8).
   if (isStablePaymentEventType(providerEventType)) {
     return coerceStableSucceededToDomainStatus(providerEventType, context);
   }

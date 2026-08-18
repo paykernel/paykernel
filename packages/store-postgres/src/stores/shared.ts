@@ -31,6 +31,12 @@ import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
 import type { PostgresStoreOptions } from "../types";
 
+/**
+ * Bounded default for `deleteExpired` (NEW-PERF-8).
+ * Omit `limit` must not unbounded-DELETE. Callers may pass an explicit higher limit.
+ */
+export const DEFAULT_DELETE_EXPIRED_LIMIT = 1000;
+
 /** Unguessable opaque lease token (portable; not a 64-bit number). */
 export function newLeaseToken(): string {
   const bytes = new Uint8Array(16);

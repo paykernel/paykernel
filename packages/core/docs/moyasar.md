@@ -206,6 +206,7 @@ const result = await client.createPayment({
 | **Payment IDs** | Moyasar payment operation IDs are UUIDs; `getPayment`, `capturePayment`, `refundPayment`, and `voidPayment` reject non-UUID IDs before calling Moyasar |
 | **Failed Attempts** | Moyasar can return HTTP 201 with `status: 'failed'` (or `abandoned`); this SDK returns `success: false` and `status: 'failed'` for those payment objects |
 | **Create 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** declined/`failed`. Create is unfenced — the SDK returns `outcome: 'indeterminate'` + `reconciliationRequired` so callers reconcile via `given_id` / `getPayment` instead of minting a new idempotency key |
+| **Refund 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** a completed refund. `refundPayment` requires an observed id before mapping; missing id is `outcome: 'indeterminate'` and the mutation fence stays `unknown` (never `completed` with `gatewayRefundId: undefined`). Resolve via `getPayment` before retrying — a new key can double-refund |
 | **`success` vs status** | `success: true` only means the payment did not map to `failed` (provider `failed`/`abandoned`, or an **unmapped** status). An `initiated` payment returns `success: true` with `status: 'pending'`. **Fulfill only when `status` is `paid`** (or `authorized` for intentional auth-only holds). Complete 3DS/OTP first when required |
 | **AFT (account funding)** | Optional `recipient` and `sender` on create are Moyasar Account Funding Transaction (AFT) fields. They require AFT-enabled account capability from Moyasar; omit them for ordinary payments |
 | **Callback / 3DS return** | After the customer returns to `callback_url`, **never trust query-string status alone**. Always `getPayment` (or a verified webhook), then verify `amount` and `currency` against your order. Prefer webhooks as the source of truth |
@@ -574,9 +575,9 @@ The SDK does **not** auto-retry capture/refund/void/confirmStcPayOtp with
 `idempotencyStore` + `idempotencyKey` make **your** retries safe: completed
 results are cached,
 in-progress / unknown outcomes refuse a second attempt, and **only** definite
-4xx rejections (Moyasar refused the mutation; excluding 429) clear the
-reservation so a caller retry is allowed. Post-2xx invalid JSON, mapping
-errors after a successful HTTP response, network/5xx/429, and other
+4xx rejections (Moyasar refused the mutation; excluding 408/409/425/429) clear
+the reservation so a caller retry is allowed. Post-2xx invalid JSON, mapping
+errors after a successful HTTP response, network/5xx/408/409/425/429, and other
 indeterminate failures **keep** the fence as `unknown` — the mutation may
 already have applied server-side; resolve via `getPayment` before reusing the
 key. Stores without atomic `reserve()` are refused at mutation time (non-atomic
@@ -613,12 +614,12 @@ Behavior of the guard, keyed by `idempotencyKey + operation + paymentId`:
 - **Completed** for the key: the cached result is returned, no API call is made.
 - **In progress / outcome unknown** for the key: the call is refused rather than
   risking a duplicate mutation.
-- **Definite failure** (HTTP 4xx except 429 — Moyasar rejected the mutation):
-  the reservation is cleared so a retry is allowed.
-- **Indeterminate failure** (network/5xx/429, post-2xx invalid JSON or mapping
-  errors after HTTP success, unexpected throws): an `unknown` marker is kept so
-  the mutation is never silently re-applied — resolve it (e.g. via `getPayment`)
-  before retrying with the same key.
+- **Definite failure** (HTTP 4xx except 408/409/425/429 — Moyasar rejected the
+  mutation): the reservation is cleared so a retry is allowed.
+- **Indeterminate failure** (network/5xx/408/409/425/429, post-2xx invalid JSON
+  or mapping errors after HTTP success, unexpected throws): an `unknown` marker
+  is kept so the mutation is never silently re-applied — resolve it (e.g. via
+  `getPayment`) before retrying with the same key.
 
 For full cross-worker protection, implement the store's optional atomic
 `reserve` with Redis `SET NX`, a database unique constraint, or equivalent.

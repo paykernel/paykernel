@@ -82,7 +82,9 @@ const session = await stripe.createCheckoutSession({
     ],
 });
 
-// Redirect the customer to session.url
+// Redirect the customer to session.url when present.
+// `url` is omitted when Stripe returns null/empty after a successful create
+// (session id is still required). Do not invent a hosted Checkout URL.
 ```
 
 For a simple one-item payment, you can provide `amount` and `currency` instead of `lineItems`.
@@ -230,6 +232,7 @@ const session = await stripe.getCheckoutSession({
 
 Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must match Stripe's `cs_...` form. The gateway expands `payment_intent` so `paymentIntentId` is available when the session created one.
 `createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** `{ success: true }` — it throws `NetworkError` (create is tagged `afterProviderSubmit` so callers must reconcile, not retry as a fresh session).
+`createCheckoutSession` may still return `success: true` with a session id when Stripe omits `url` (`null` or empty). The field is **omitted** in that case — it is not a string URL and must not be treated as one. Hosted Checkout can create a session before a customer-facing URL exists (for example some embedded / custom flows).
 
 ### `getPayment` status and amount derivation
 
@@ -251,7 +254,7 @@ Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must matc
 
 Stripe mutations (`createPayment`, `capturePayment`, `refundPayment`, `voidPayment`, `createCheckoutSession`) always send an `Idempotency-Key`. When you **omit** `idempotencyKey` (leave the field undefined), the SDK generates a `crypto.randomUUID()` so in-process retries of transient network/5xx errors are safe against double-charges. **Do not pass an empty or whitespace-only key** — validation rejects those with `InvalidRequestError` / schema failure (STRIPE-6). Supply your own stable UUID when you need app-level crash/retry safety across processes (the auto-generated key is only known for the lifetime of that single call).
 
-HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true` (indeterminate — reconcile, do not treat as `failed` / `pending` / `success: true`). Create / capture / void also require a string PaymentIntent `id`; refunds require string `id` **and** `status`. A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
+HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true` (indeterminate — reconcile, do not treat as `failed` / `pending` / `success: true`). Create / capture / void require a string PaymentIntent `id` **and** `status`; refunds require string `id` **and** `status`. Missing `status` after HTTP 200 is the same indeterminate `NetworkError` (not `mapStatus(undefined)` → `failed` coerced to a clean decline). Void sets `forceOutcome: succeeded` only when native status is `canceled` / `cancelled` (intentional void). A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
 
 ## Checkout customer identity
 
@@ -308,7 +311,11 @@ For Checkout, Charge, Refund, Invoice, and Subscription webhook events, `gateway
 
 PaymentIntent resolution order on invoices: (1) default entry in `payments.data` → `payment.payment_intent` / `payment_intent`, (2) legacy top-level `payment_intent`. Subscription resolution: (1) `parent.subscription_details.subscription`, (2) top-level `subscription`. When no PaymentIntent is present on a money event, `gatewayPaymentId` falls back to the subscription id, then the invoice id. Non-money invoice events still prefer subscription over PaymentIntent for `gatewayPaymentId`.
 
-Subscription-related webhooks are normalized for common billing flows. `checkout.session.completed` in subscription mode prefers the `sub_...` ID over `payment_intent` when both are present, invoice payment success/failure events map to `paid` or `failed`, and subscription deletion maps to `cancelled`. Invoice metadata can also use `parent.subscription_details.metadata.paymentId` when the invoice itself does not carry `metadata.paymentId`.
+Subscription-related webhooks are normalized for common billing flows. `checkout.session.completed` in subscription mode prefers the `sub_...` ID over `payment_intent` when both are present, invoice payment success/failure events map as below, and subscription deletion maps to `cancelled`. Invoice metadata can also use `parent.subscription_details.metadata.paymentId` when the invoice itself does not carry `metadata.paymentId`.
+
+**Invoice status / amount (NEW-STRIPE-INV-1):** `invoice.paid` / `invoice.payment_succeeded` are **not** always domain `paid`. If `object.status` is `void` / `uncollectible`, domain status is `cancelled` / `failed`. If `post_payment_credit_notes_amount` is a finite value `> 0`, status is `processing` (do not claim full paid — credit-note remainder can overwrite refunded → paid on status-only persist). Paid events also require a finite `amount_paid` to map `paid`; otherwise `processing`. Dual-write stays `provider.unmapped`. **Amount** on those events uses **`amount_paid` only** — never `total` or `amount_due` as collected. `invoice.payment_failed` still maps `failed`; `invoice.voided` / `invoice.marked_uncollectible` stay `cancelled` / `failed`.
+
+`setup_intent.succeeded` maps domain status `setup_completed` (catalog dual-write is already `payment_method.setup_completed`). Other `setup_intent.*` events stay `pending`.
 
 Unhandled / unknown event types do **not** run non-`payment_intent` object statuses through the PaymentIntent status map (which fails closed as `failed` for unmapped PI states). Foreign statuses such as subscription/tax `active` on an unmapped event type normalize as `pending`.
 

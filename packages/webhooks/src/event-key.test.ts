@@ -70,6 +70,32 @@ describe("deriveWebhookEventKey", () => {
     ).toBe("stripe:evt_1");
     expect(deriveWebhookEventKey("paymob", "123456789")).toBe("paymob:123456789");
   });
+
+  it("NEW-WEBHOOKS-2: processed TRANSACTION keys with different status are distinct", () => {
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid"),
+    ).toBe("paymob:TRANSACTION:123456789:paid");
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "cancelled"),
+    ).toBe("paymob:TRANSACTION:123456789:cancelled");
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid"),
+    ).not.toBe(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "cancelled"),
+    );
+    expect(
+      deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE", "paid"),
+    ).toBe("paymob:TRANSACTION_RESPONSE:123456789");
+    expect(
+      deriveWebhookEventKey("paymob", "123456789:redirect", "TRANSACTION_RESPONSE", "paid"),
+    ).toBe("paymob:TRANSACTION_RESPONSE:123456789");
+    expect(
+      deriveWebhookEventKey("paymob", "TRANSACTION:123456789", "TRANSACTION", "paid"),
+    ).toBe("paymob:TRANSACTION:123456789:paid");
+    expect(
+      deriveWebhookEventKey("stripe", "evt_1", "payment_intent.succeeded", "paid"),
+    ).toBe("stripe:evt_1");
+  });
 });
 
 describe("parseWebhookEventKey", () => {

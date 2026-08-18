@@ -541,6 +541,146 @@ describe("do multi-partition discovery fan-out", () => {
     }
   });
 
+  it("PERF-5: full-list skips later occupied shards that cannot beat earliest-N", async () => {
+    const prefix = uniqueTablePrefix("pk5c");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const nowMs = clock.nowMs();
+    const early = new Date(nowMs).toISOString();
+    const late = new Date(nowMs + 3_600_000).toISOString();
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const partitions = 8;
+      const listNames: string[] = [];
+      const inner = ns.namespace;
+      function wrapStub(stub: DoStubLike, name: string): DoStubLike {
+        return new Proxy(stub, {
+          get(target, prop, recv) {
+            const value = Reflect.get(target, prop, recv);
+            if (typeof value !== "function") return value;
+            if (prop === "listDueReconciliation") {
+              return async (...args: unknown[]) => {
+                listNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            return value;
+          },
+        });
+      }
+      const wrapped: DoNamespaceLike = {
+        idFromName: (n) => inner.idFromName(n),
+        get: (id) => wrapStub(inner.get(id), id.toString()),
+        getByName: (name) => wrapStub(inner.getByName!(name), name),
+      };
+
+      const stores = createDoPaymentStores({
+        namespace: wrapped,
+        sharding: { kind: "hash", partitions },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+
+      const { keyA, keyB } = findCrossPartitionKeys(partitions);
+      const shardA = resolveDoShardName(
+        { kind: "hash", partitions },
+        { key: keyA },
+      );
+      const shardB = resolveDoShardName(
+        { kind: "hash", partitions },
+        { key: keyB },
+      );
+      await stores.reconciliation.schedule({
+        key: keyA,
+        subjectId: "pay_early",
+        reason: "timeout",
+        dueAt: early,
+      });
+      await stores.reconciliation.schedule({
+        key: keyB,
+        subjectId: "pay_late",
+        reason: "timeout",
+        dueAt: late,
+      });
+
+      const listed = await stores.reconciliation.listDue({
+        now: late,
+        limit: 1,
+      });
+      expect(listed).toHaveLength(1);
+      expect(listed[0]!.key).toBe(keyA);
+      expect(listNames).toContain(shardA);
+      expect(listNames).not.toContain(shardB);
+    } finally {
+      ns.close();
+    }
+  });
+
+  it("PERF-5: non-boolean peek occupied still full-lists (fail-closed)", async () => {
+    const prefix = uniqueTablePrefix("pk5o");
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const ns = createMockDoNamespace({
+      clock,
+      tableNamespace: { tablePrefix: prefix },
+    });
+    try {
+      const partitions = 8;
+      const listNames: string[] = [];
+      const inner = ns.namespace;
+      function wrapStub(stub: DoStubLike, name: string): DoStubLike {
+        return new Proxy(stub, {
+          get(target, prop, recv) {
+            const value = Reflect.get(target, prop, recv);
+            if (typeof value !== "function") return value;
+            if (prop === "peekDueReconciliation") {
+              return async () => ({ occupied: 1 });
+            }
+            if (prop === "listDueReconciliation") {
+              return async (...args: unknown[]) => {
+                listNames.push(name);
+                return (value as (...a: unknown[]) => unknown)(...args);
+              };
+            }
+            return value;
+          },
+        });
+      }
+      const wrapped: DoNamespaceLike = {
+        idFromName: (n) => inner.idFromName(n),
+        get: (id) => wrapStub(inner.get(id), id.toString()),
+        getByName: (name) => wrapStub(inner.getByName!(name), name),
+      };
+
+      const stores = createDoPaymentStores({
+        namespace: wrapped,
+        sharding: { kind: "hash", partitions },
+        clock,
+        tableNamespace: { tablePrefix: prefix },
+      });
+
+      const { keyA } = findCrossPartitionKeys(partitions);
+      const shardA = resolveDoShardName(
+        { kind: "hash", partitions },
+        { key: keyA },
+      );
+      await stores.reconciliation.schedule({
+        key: keyA,
+        subjectId: "pay_occupied",
+        reason: "timeout",
+        dueAt: now,
+      });
+
+      const listed = await stores.reconciliation.listDue({ now, limit: 10 });
+      expect(listed.map((row) => row.key)).toContain(keyA);
+      expect(listNames).toContain(shardA);
+    } finally {
+      ns.close();
+    }
+  });
+
   it("DO-1: changing hash partitions under same layout hard-throws (no empty re-route)", async () => {
     const prefix = uniqueTablePrefix("do1");
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });

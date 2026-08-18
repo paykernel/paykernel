@@ -859,6 +859,34 @@ describe("mockGateway", () => {
     expect(unknown.event.event?.type).toBe("provider.unmapped");
   });
 
+  it("defaults webhook status from type, not paid, for failed events (NEW-TESTKIT-8)", () => {
+    const failed = createMockWebhookPayload({ type: "payment_failed" });
+    expect(failed.type).toBe("payment_failed");
+    expect(failed.status).toBe("failed");
+    expect(failed.status).not.toBe("paid");
+
+    const alias = createMockWebhookPayload({ type: "failed" });
+    expect(alias.status).toBe("failed");
+
+    const stripeFailed = generateWebhookEvent({
+      type: "payment_intent.payment_failed",
+      gatewayPaymentId: "pi_fail",
+    });
+    expect(stripeFailed.raw.status).toBe("failed");
+    expect(stripeFailed.event.status).toBe("failed");
+    expect(stripeFailed.event.status).not.toBe("paid");
+
+    const paidDefault = createMockWebhookPayload({});
+    expect(paidDefault.type).toBe("payment_paid");
+    expect(paidDefault.status).toBe("paid");
+
+    const explicit = createMockWebhookPayload({
+      type: "payment_failed",
+      status: "processing",
+    });
+    expect(explicit.status).toBe("processing");
+  });
+
   it("history getter returns a frozen snapshot callers cannot mutate", async () => {
     const g = mockGateway();
     await g.createPayment(baseCreate);
@@ -1753,5 +1781,95 @@ describe("mockGateway", () => {
     });
     expect(paid.status).toBe("paid");
     expect(g.getPaymentState(paid.gatewayId)?.status).toBe("paid");
+  });
+
+  it("scripted/defaultOutcome succeeded + capture:false is authorized (NEW-TESTKIT-6)", async () => {
+    const scripted = mockGateway({
+      createPayment: [{ outcome: "succeeded" }],
+    });
+    const s = await scripted.createPayment({
+      ...baseCreate,
+      capture: false,
+    });
+    expect(s.status).toBe("authorized");
+    expect(s.status).not.toBe("paid");
+    expect(s.outcome).toBe("succeeded");
+    expect(s.capturedAmount).toBe(0);
+    expect(s.currency).toBe("USD");
+    expect(isPaidOutcome(s)).toBe(false);
+    const sState = scripted.getPaymentState(s.gatewayId)!;
+    expect(sState.status).toBe("authorized");
+    expect(sState.capturedAmount).toBe(0);
+    expect(sState.authorized).toBe(true);
+
+    const def = mockGateway({
+      defaultOutcome: { outcome: "succeeded" },
+    });
+    const d = await def.createPayment({
+      ...baseCreate,
+      capture: false,
+    });
+    expect(d.status).toBe("authorized");
+    expect(d.capturedAmount).toBe(0);
+    expect(d.currency).toBe("USD");
+    const dState = def.getPaymentState(d.gatewayId)!;
+    expect(dState.status).toBe("authorized");
+    expect(dState.capturedAmount).toBe(0);
+
+    const immediate = mockGateway({
+      createPayment: [{ outcome: "succeeded" }],
+    });
+    const paid = await immediate.createPayment({
+      ...baseCreate,
+      capture: true,
+    });
+    expect(paid.status).toBe("paid");
+    expect(immediate.getPaymentState(paid.gatewayId)?.capturedAmount).toBe(10);
+  });
+
+  it("same idempotencyKey with different stripeCustomer/paymob identity is fingerprint_conflict (NEW-TESTKIT-7)", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      stripeCustomerId: "cus_aaa",
+      paymobIntegrationId: 111,
+      paymobPaymentMethods: ["card"],
+      idempotencyKey: "identity-fp-7",
+    });
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeCustomerId: "cus_bbb",
+        paymobIntegrationId: 111,
+        paymobPaymentMethods: ["card"],
+        idempotencyKey: "identity-fp-7",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeCustomerId: "cus_aaa",
+        paymobIntegrationId: 222,
+        paymobPaymentMethods: ["card"],
+        idempotencyKey: "identity-fp-7",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        stripeCustomerId: "cus_aaa",
+        paymobIntegrationId: 111,
+        paymobPaymentMethods: ["wallet"],
+        idempotencyKey: "identity-fp-7",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    const replay = await g.createPayment({
+      ...baseCreate,
+      stripeCustomerId: "cus_aaa",
+      paymobIntegrationId: 111,
+      paymobPaymentMethods: ["card"],
+      idempotencyKey: "identity-fp-7",
+    });
+    expect(replay.gatewayId).toBe(a.gatewayId);
   });
 });

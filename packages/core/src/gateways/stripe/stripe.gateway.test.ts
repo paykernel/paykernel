@@ -7,6 +7,7 @@ import type { StripeConfig } from "../../types/config.types";
 import type { CreatePaymentParams } from "../../types/payment.types";
 import {
   assertNoSecretsInEnvelope,
+  hashWebhookPayload,
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { money } from "../../utils/money";
@@ -1512,6 +1513,125 @@ describe("StripeGateway", () => {
       expect(event.gatewayObjectId).toBe("in_payments_data");
     });
 
+    it("NEW-STRIPE-INV-1: invoice.paid with post-payment credit notes is not full paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_invoice_credit_notes",
+        type: "invoice.paid",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "in_credit_notes",
+            object: "invoice",
+            status: "paid",
+            amount_paid: 3000,
+            total: 3000,
+            amount_due: 0,
+            post_payment_credit_notes_amount: 500,
+            currency: "usd",
+            payment_intent: "pi_credit_notes",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(30);
+    });
+
+    it("NEW-STRIPE-INV-1: invoice.paid amount does not use amount_due as collected", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_invoice_due_only",
+        type: "invoice.paid",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "in_due_only",
+            object: "invoice",
+            status: "paid",
+            amount_due: 9900,
+            total: 9900,
+            currency: "usd",
+            payment_intent: "pi_due_only",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.amount).toBeUndefined();
+      expect(event.amount).not.toBe(99);
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+    });
+
+    it("NEW-STRIPE-INV-1: invoice.paid void/uncollectible object status is not paid", () => {
+      const voided = gateway.parseWebhookEvent({
+        id: "evt_invoice_paid_void",
+        type: "invoice.paid",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "in_paid_void",
+            object: "invoice",
+            status: "void",
+            amount_paid: 2000,
+            amount_due: 2000,
+            currency: "usd",
+            payment_intent: "pi_paid_void",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+      expect(voided.status).toBe("cancelled");
+      expect(voided.status).not.toBe("paid");
+
+      const uncollectible = gateway.parseWebhookEvent({
+        id: "evt_invoice_paid_uncollectible",
+        type: "invoice.payment_succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "in_paid_uncollectible",
+            object: "invoice",
+            status: "uncollectible",
+            amount_paid: 2000,
+            currency: "usd",
+            payment_intent: "pi_paid_uncollectible",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      } as any);
+      expect(uncollectible.status).toBe("failed");
+      expect(uncollectible.status).not.toBe("paid");
+    });
+
+    it("NEW-STRIPE-SETUP-1: setup_intent.succeeded status is setup_completed", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_seti_succeeded",
+        type: "setup_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "seti_ok",
+            object: "setup_intent",
+            status: "succeeded",
+            metadata: { paymentId: "setup_internal" },
+          },
+        },
+        livemode: false,
+      } as any);
+
+      expect(event.status).toBe("setup_completed");
+      expect(event.status).not.toBe("pending");
+      expect(event.stableType).toBe("payment_method.setup_completed");
+      expect(event.event?.type).toBe("payment_method.setup_completed");
+      expect(event.gatewayPaymentId).toBe("seti_ok");
+    });
+
     it("should prefer amount_received for succeeded PaymentIntent webhooks", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_pi_amount_received",
@@ -2112,6 +2232,15 @@ describe("StripeGateway", () => {
         new Date(1623456789 * 1000).toISOString(),
       );
       expect(event.payloadHash).toBeDefined();
+      expect(event.payloadHash).toBe(
+        hashWebhookPayload({
+          id: "evt_phase7_ok",
+          type: "payment_intent.succeeded",
+          created: 1623456789,
+          object: "pi_phase7",
+        }),
+      );
+      expect(event.payloadHash).not.toBe(hashWebhookPayload(event.rawPayload));
 
       const envelope = toPersistedPaymentEventEnvelope(event.event!, {
         payloadHash: event.payloadHash,
@@ -3072,6 +3201,29 @@ describe("StripeGateway", () => {
       expect(result.success).toBe(true);
       expect(result.status).toBe("cancelled");
     });
+
+    it("NEW-STRIPE-VOID-1: HTTP 200 {id} without status is not declined", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "pi_void_missing_status",
+          object: "payment_intent",
+          amount: 5000,
+          currency: "usd",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.voidPayment({
+        gatewayPaymentId: "pi_void_missing_status",
+      });
+
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.outcome).not.toBe("declined");
+      expect(result.outcome).not.toBe("succeeded");
+      expect(result.status).not.toBe("failed");
+      expect(result.status).not.toBe("cancelled");
+      expect(result.success).not.toBe(true);
+    });
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3149,6 +3301,30 @@ describe("StripeGateway", () => {
       expect(thrown).not.toEqual(
         expect.objectContaining({ success: true }),
       );
+    });
+
+    it("NEW-STRIPE-CKO-URL: createCheckoutSession null url is not a string url", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_no_url",
+          object: "checkout.session",
+          url: null,
+          status: "open",
+          payment_status: "unpaid",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+      });
+
+      expect(result.success).toBe(true);
+      expect(result.sessionId).toBe("cs_no_url");
+      expect(typeof result.url).not.toBe("string");
+      expect(result.url).toBeUndefined();
     });
 
     it("should accept Money amount input for simple createCheckoutSession", async () => {

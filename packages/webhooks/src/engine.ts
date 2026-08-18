@@ -661,20 +661,35 @@ function materializeEventFromPayloadRef(payloadRef: string): unknown {
  *   or durable snapshot) — same path as redrive.
  */
 /**
- * WEBHOOKS-1 / NEW-WEBHOOKS-2: notification class for Paymob inbox
+ * WEBHOOKS-1 / NEW-WEBHOOKS-2 / NEW-WH-1: notification class for Paymob inbox
  * qualification.
  *
  * Prefer `provider.eventType` (PaymentEvent native type: TRANSACTION vs
- * TRANSACTION_RESPONSE). Fall back to WebhookEvent.type / nested event.type.
- * Processed TRANSACTION inbox key is `paymob:TRANSACTION:{obj.id}` — later
- * same-id snapshots are `already_completed`. Child refunds have new ids.
- * Do not complete fulfillment on Paymob `payment.processing` (redirect).
+ * TRANSACTION_RESPONSE). Do **not** fall through to remapped domain types
+ * (`payment.succeeded`). Only known native HMAC classes on `type` fields
+ * (`TRANSACTION`, `TRANSACTION_RESPONSE`) are accepted. Processed TRANSACTION
+ * keys include domain status when present (`paymob:TRANSACTION:{id}:{status}`)
+ * so a later same-id void/refund snapshot is not `already_completed`. Redirect
+ * stays `TRANSACTION_RESPONSE:{txnId}`. Do not complete fulfillment on Paymob
+ * `payment.processing` (redirect).
  */
+const PAYMOB_NATIVE_INBOX_CLASSES = new Set([
+  "TRANSACTION",
+  "TRANSACTION_RESPONSE",
+]);
+
 function readProviderNativeEventType(provider: unknown): string | undefined {
   if (provider === null || typeof provider !== "object") return undefined;
   const eventType = (provider as { eventType?: unknown }).eventType;
   if (typeof eventType === "string" && eventType.trim()) return eventType.trim();
   return undefined;
+}
+
+function readKnownNativeInboxClass(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || !PAYMOB_NATIVE_INBOX_CLASSES.has(trimmed)) return undefined;
+  return trimmed;
 }
 
 function extractInboxNotificationClass(value: unknown): string | undefined {
@@ -688,12 +703,19 @@ function extractInboxNotificationClass(value: unknown): string | undefined {
     const nestedRec = nested as Record<string, unknown>;
     const fromNestedProvider = readProviderNativeEventType(nestedRec.provider);
     if (fromNestedProvider !== undefined) return fromNestedProvider;
-    if (typeof nestedRec.type === "string" && nestedRec.type.trim()) {
-      return nestedRec.type.trim();
-    }
+    const fromNestedNative = readKnownNativeInboxClass(nestedRec.type);
+    if (fromNestedNative !== undefined) return fromNestedNative;
   }
 
-  if (typeof rec.type === "string" && rec.type.trim()) return rec.type.trim();
+  return readKnownNativeInboxClass(rec.type);
+}
+
+function extractInboxDomainStatus(value: unknown): string | undefined {
+  if (value === null || typeof value !== "object") return undefined;
+  const rec = value as Record<string, unknown>;
+  if (typeof rec.status === "string" && rec.status.trim()) {
+    return rec.status.trim();
+  }
   return undefined;
 }
 
@@ -1100,10 +1122,18 @@ export function createWebhookInboxEngine(
     const notificationClass =
       extractInboxNotificationClass(input.event) ??
       extractInboxNotificationClass(input.envelope);
+    const domainStatus =
+      extractInboxDomainStatus(input.event) ??
+      extractInboxDomainStatus(input.envelope);
 
     let key: string;
     try {
-      key = deriveWebhookEventKey(gateway, providerEventId, notificationClass);
+      key = deriveWebhookEventKey(
+        gateway,
+        providerEventId,
+        notificationClass,
+        domainStatus,
+      );
     } catch (e) {
       return outcomeInvalidWebhook(
         e instanceof Error ? e.message : "invalid event key",

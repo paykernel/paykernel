@@ -266,6 +266,39 @@ describe("webhookEventToPaymentEvent", () => {
     expect(currencyOnly.currency).toBe("SAR");
   });
 
+  it("NEW-MONEY-3: omit non-finite amount even when currency is set", () => {
+    const nanAmount = paymentFromWebhookEvent(
+      baseWebhook({ amount: Number.NaN, currency: "usd" }),
+    );
+    expect(nanAmount.currency).toBe("USD");
+    expect(nanAmount.amount).toBeUndefined();
+
+    const infAmount = paymentFromWebhookEvent(
+      baseWebhook({ amount: Number.POSITIVE_INFINITY, currency: "SAR" }),
+    );
+    expect(infAmount.currency).toBe("SAR");
+    expect(infAmount.amount).toBeUndefined();
+
+    const negInf = paymentFromWebhookEvent(
+      baseWebhook({ amount: Number.NEGATIVE_INFINITY, currency: "EGP" }),
+    );
+    expect(negInf.currency).toBe("EGP");
+    expect(negInf.amount).toBeUndefined();
+
+    const viaEvent = webhookEventToPaymentEvent(
+      baseWebhook({
+        type: "payment_paid",
+        status: "paid",
+        amount: Number.NaN,
+        currency: "usd",
+      }),
+    );
+    expect(viaEvent.type).toBe("payment.succeeded");
+    if (viaEvent.type !== "payment.succeeded") throw new Error("narrow");
+    expect(viaEvent.payment.currency).toBe("USD");
+    expect(viaEvent.payment.amount).toBeUndefined();
+  });
+
   it("capture dual-write uses partially_completed for partials (CORE-4)", () => {
     // NEW-CORE-4: Paymob is_capture + partial is payment.processing, not
     // capture.completed (open money must not look fully captured).
@@ -290,8 +323,9 @@ describe("webhookEventToPaymentEvent", () => {
     expect(paymobPartial.payment.amount).toBe(5);
     expect(paymobPartial.payment.currency).toBe("EGP");
 
-    // Capture-domain arm that still arrives with a partial status must not
-    // claim entity completed (Moyasar payment_captured + partial snapshot).
+    // NEW-CORE-8: Moyasar payment_captured + open-money status rematches
+    // to payment.processing (not capture.completed). Type-only fulfillment
+    // must not treat a partial / still-processing capture as settled.
     const capturePartial = webhookEventToPaymentEvent(
       baseWebhook({
         type: "payment_captured",
@@ -301,11 +335,11 @@ describe("webhookEventToPaymentEvent", () => {
         currency: "EGP",
       }),
     );
-    expect(capturePartial.type).toBe("capture.completed");
-    if (capturePartial.type !== "capture.completed") throw new Error("narrow");
-    expect(capturePartial.capture.status).toBe("partially_completed");
-    expect(capturePartial.capture.amount).toBe(5);
-    expect(capturePartial.capture.currency).toBe("EGP");
+    expect(capturePartial.type).toBe("payment.processing");
+    if (capturePartial.type !== "payment.processing") throw new Error("narrow");
+    expect(capturePartial.payment.status).toBe("partially_captured");
+    expect(capturePartial.payment.amount).toBe(5);
+    expect(capturePartial.payment.currency).toBe("EGP");
 
     const full = webhookEventToPaymentEvent(
       baseWebhook({
@@ -357,6 +391,17 @@ describe("attachPaymentEvent dual-write", () => {
     expect(dual.payloadHash).toBe(
       hashWebhookPayload({ id: "x", secret_token: "shh", amount: 1 }),
     );
+  });
+
+  it("PERF-6: computePayloadHash does not overwrite an existing payloadHash", () => {
+    const dual = attachPaymentEvent(
+      baseWebhook({
+        rawPayload: { id: "x", amount: 1 },
+        payloadHash: "abc",
+      }),
+      { computePayloadHash: true },
+    );
+    expect(dual.payloadHash).toBe("abc");
   });
 });
 
@@ -531,6 +576,25 @@ describe("mapProviderEventTypeToStable tables", () => {
         expect(mapProviderEventTypeToStable("moyasar", native)).toBe(stable);
       });
     }
+
+    it("NEW-CORE-8: payment_captured + partially_captured/processing → payment.processing", () => {
+      expect(
+        mapProviderEventTypeToStable("moyasar", "payment_captured", {
+          status: "partially_captured",
+        }),
+      ).toBe("payment.processing");
+      expect(
+        mapProviderEventTypeToStable("moyasar", "payment_captured", {
+          status: "processing",
+        }),
+      ).toBe("payment.processing");
+      // Full paid capture stays capture-domain.
+      expect(
+        mapProviderEventTypeToStable("moyasar", "payment_captured", {
+          status: "paid",
+        }),
+      ).toBe("capture.completed");
+    });
 
     it("P610-MAP-1: unknown type stays provider.unmapped even when status is paid", () => {
       expect(
@@ -942,6 +1006,40 @@ describe("mapProviderEventTypeToStable tables", () => {
         status: "authorized",
       }),
     ).toBe("payment.authorized");
+  });
+
+  it("NEW-CORE-8: already-stable capture.completed / refund.completed rematch open money", () => {
+    expect(
+      mapProviderEventTypeToStable("moyasar", "capture.completed", {
+        status: "partially_captured",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("paypal", "capture.completed", {
+        status: "processing",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "partially_captured",
+      }),
+    ).toBe("payment.processing");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "processing",
+      }),
+    ).toBe("payment.processing");
+    // Proven full capture / refund stay settlement-ready.
+    expect(
+      mapProviderEventTypeToStable("moyasar", "capture.completed", {
+        status: "paid",
+      }),
+    ).toBe("capture.completed");
+    expect(
+      mapProviderEventTypeToStable("stripe", "refund.completed", {
+        status: "refunded",
+      }),
+    ).toBe("refund.completed");
   });
 });
 

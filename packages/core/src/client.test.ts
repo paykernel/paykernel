@@ -2388,6 +2388,7 @@ describe('PaymentClient PayPal webhooks', () => {
             resource: {
                 id: 'CAPTURE-123',
                 status: 'COMPLETED',
+                final_capture: true,
                 amount: {
                     currency_code: 'USD',
                     value: '10.00',
@@ -3001,6 +3002,115 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
                 ? event.event.payment?.status
                 : undefined,
         ).toBe('failed');
+    });
+
+    it('NEW-CORE-8: rematch capture.completed + partially_captured is not type-only completed', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_cap_partial',
+            type: 'payment_captured',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_cap',
+            status: 'partially_captured',
+            amount: 50,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '1',
+            stableType: 'capture.completed',
+            event: {
+                schemaVersion: '1',
+                type: 'capture.completed',
+                capture: {
+                    status: 'completed',
+                    amount: 50,
+                    currency: 'USD',
+                    references: { gatewayPaymentId: 'gw_cap' },
+                },
+                payment: {
+                    status: 'paid',
+                    amount: 50,
+                    currency: 'USD',
+                    references: { gatewayPaymentId: 'gw_cap' },
+                },
+                provider: {
+                    gateway: 'custom',
+                    eventId: 'evt_cap_partial',
+                    eventType: 'payment_captured',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            },
+            provider: {
+                gateway: 'custom',
+                eventId: 'evt_cap_partial',
+                eventType: 'payment_captured',
+                occurredAt: '2024-01-01T00:00:00.000Z',
+                receivedAt: '2024-01-01T00:00:00.000Z',
+            },
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.status).toBe('partially_captured');
+        expect(event.event?.type).toBe('payment.processing');
+        expect(event.stableType).toBe('payment.processing');
+        expect(event.event?.type).not.toBe('capture.completed');
+        expect(event.stableType).not.toBe('capture.completed');
+        expect(
+            event.event && 'payment' in event.event
+                ? event.event.payment?.status
+                : undefined,
+        ).toBe('partially_captured');
+    });
+
+    it('NEW-CORE-8: rematch refund.completed + processing is not type-only completed', async () => {
+        const client = createWebhookOnlyClient('custom', (payload) => ({
+            id: 'evt_ref_processing',
+            type: 'payment_refunded',
+            gateway: 'custom',
+            paymentId: 'pay_internal',
+            gatewayPaymentId: 'gw_ref',
+            status: 'processing',
+            amount: 25,
+            currency: 'USD',
+            timestamp: new Date('2024-01-01T00:00:00.000Z'),
+            rawPayload: payload,
+            schemaVersion: '1',
+            stableType: 'refund.completed',
+            event: {
+                schemaVersion: '1',
+                type: 'refund.completed',
+                refund: {
+                    status: 'completed',
+                    amount: 25,
+                    currency: 'USD',
+                    references: { gatewayPaymentId: 'gw_ref' },
+                },
+                provider: {
+                    gateway: 'custom',
+                    eventId: 'evt_ref_processing',
+                    eventType: 'payment_refunded',
+                    occurredAt: '2024-01-01T00:00:00.000Z',
+                    receivedAt: '2024-01-01T00:00:00.000Z',
+                },
+            },
+            provider: {
+                gateway: 'custom',
+                eventId: 'evt_ref_processing',
+                eventType: 'payment_refunded',
+                occurredAt: '2024-01-01T00:00:00.000Z',
+                receivedAt: '2024-01-01T00:00:00.000Z',
+            },
+        }));
+
+        const event = await client.handleWebhook('custom', { hello: true });
+
+        expect(event.status).toBe('processing');
+        expect(event.event?.type === 'refund.pending' || event.event?.type === 'payment.processing').toBe(true);
+        expect(event.stableType === 'refund.pending' || event.stableType === 'payment.processing').toBe(true);
+        expect(event.event?.type).not.toBe('refund.completed');
+        expect(event.stableType).not.toBe('refund.completed');
     });
 
     it('CORE-4: thin 3-field PaymentEvent is rebuilt and demoted', async () => {

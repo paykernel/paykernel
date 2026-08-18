@@ -38,7 +38,12 @@ import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-con
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { SqliteStoreOptions } from "../types";
-import { mapReconciliationRow, newLeaseToken, resolveStoreContext } from "./shared";
+import {
+  DEFAULT_DELETE_EXPIRED_LIMIT,
+  mapReconciliationRow,
+  newLeaseToken,
+  resolveStoreContext,
+} from "./shared";
 
 function claimMissToResult(
   kind: Exclude<ReturnType<typeof classifyReconciliationClaimMiss>, "claimable">,
@@ -389,27 +394,18 @@ export function createSqliteReconciliationStore(
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() => {
         const before = canonicalizeIsoTimestamp(input.before, "before");
-        const limit = input.limit;
-        const exec = ctx.getExecutor();
-        if (limit !== undefined) {
-          const result = exec.run(
-            `DELETE FROM ${table}
-             WHERE key IN (
-               SELECT key FROM ${table}
-               WHERE status IN ('completed', 'failed', 'manual_review')
-                 AND updated_at <= ?
-               ORDER BY updated_at ASC
-               LIMIT ?
-             )`,
-            [before, limit],
-          );
-          return { deleted: result.changes };
-        }
-        const result = exec.run(
+        // NEW-PERF-8: omit limit must not unbounded-DELETE (Redis default 1000).
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
+        const result = ctx.getExecutor().run(
           `DELETE FROM ${table}
-           WHERE status IN ('completed', 'failed', 'manual_review')
-             AND updated_at <= ?`,
-          [before],
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status IN ('completed', 'failed', 'manual_review')
+               AND updated_at <= ?
+             ORDER BY updated_at ASC
+             LIMIT ?
+           )`,
+          [before, limit],
         );
         return { deleted: result.changes };
       });

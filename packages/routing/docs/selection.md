@@ -120,7 +120,9 @@ Still applied at select-time fallback:
 
 **Amount-range honesty (ROUTE-1 / P21-EXCLUDE-HONESTY / P21-AMOUNT-RESOLVE):** if **any** rule matches all **non-amount** criteria but the input amount is **outside** that rule’s inclusive min/max (same currency), select-time fallback is **not** used — `NoRouteMatchError` is thrown. Honesty still considers rules whose gateway is **excluded** or **unhealthy** (including post-attempt `attemptedGateways` / `excludeGateways` / health maps) — unconstrained fallback must not send `$50` to a default after excluding an `amountMin=100` rule. Missing, unparseable, or invalid amounts (e.g. JPY `"10.50"`) against a range whose currency is present (or inherited: string `amount` uses `input.currency` when `amountCurrency` is omitted) are also honesty violations. Range bounds without `amountCurrency` remain honesty violations (misconfigured money bounds). Cross-currency with a **resolvable** different currency is not an amount-honesty violation (other criteria; fallback may still apply).
 
-**Complementary amount-split + fallback (ROUTE-1, fail-closed):** two (or more) rules that partition the same non-amount criteria by complementary ranges — e.g. Stripe `amountMax=99.99` and PayPal `amountMin=100` plus `fallback: "stripe"` — leave **no** honest select-time fallback after one bucket is excluded or unhealthy. `$150` matches PayPal; after `excludeGateways: ["paypal"]` (or `trySelectFallbackGateway` / `attemptedGateways`), Stripe’s complementary max still matches non-amount criteria and honesty-blocks unconstrained fallback. That is **intentional fail-closed**, not a missing recovery path: sending `$150` to a gateway you bounded at `$99.99` would lie about the money bound. `NoRouteMatchError` (`code: "no_route_match"`) is the documented outcome.
+**Complementary amount-split + fallback (ROUTE-1, fail-closed):** two (or more) rules that partition the same non-amount criteria by complementary ranges — e.g. Stripe `amountMax=99.99` and PayPal `amountMin=100` plus `fallback: "stripe"` — leave **no** honest select-time fallback after one bucket is excluded or unhealthy. `$150` matches PayPal; after `excludeGateways: ["paypal"]` (or `trySelectFallbackGateway` / `attemptedGateways`), Stripe’s complementary max still matches non-amount criteria and honesty-blocks unconstrained fallback. That is **intentional fail-closed**, not a missing recovery path: sending `$150` to a gateway you bounded at `$99.99` would lie about the money bound. `NoRouteMatchError` (`code: "no_route_match"`, `reason: "amount_range_honesty"`) is the documented outcome.
+
+**Complementary currency / country / method partitions (NEW-ROUTE-1, fail-closed):** same honesty as amount-range. Two (or more) rules that partition the same other criteria by **currency**, **country**, or **paymentMethod** — e.g. Stripe `currency: "USD"` and Adyen `currency: "EUR"` plus `fallback: "stripe"` — leave **no** honest select-time fallback after the matching bucket is excluded or unhealthy. EUR matches Adyen; after `excludeGateways: ["adyen"]`, Stripe’s complementary USD rule still matches all non-currency criteria and honesty-blocks unconstrained fallback. Sending EUR to the USD gateway would lie about the partition. `NoRouteMatchError` (`reason: "complementary_currency_honesty"` / `complementary_country_honesty` / `complementary_method_honesty`). An input that is **not** in any configured bucket (e.g. GBP when only USD/EUR rules exist) may still use select-time fallback.
 
 This is **not** post-attempt recovery. After a payment attempt, use [safe-fallback.md](./safe-fallback.md). If you need another gateway for amounts that already have a range rule, configure an overlapping / unbounded rule for that gateway, or pick the gateway explicitly in the app — do not expect `fallback` to bypass complementary splits.
 
@@ -154,10 +156,10 @@ type RoutingDecision = {
 
 | Error | Code | When |
 | --- | --- | --- |
-| `NoRouteMatchError` | `no_route_match` | No rule match and no usable select-time fallback |
-| `UnsafeFallbackDeniedError` | `unsafe_fallback_denied` | Post-attempt path denied / no alternate (not thrown by `select` itself) |
+| `NoRouteMatchError` | `no_route_match` | No rule match and no usable select-time fallback. `reason` distinguishes `no_usable_fallback` from amount / capability / complementary-partition honesty. |
+| `UnsafeFallbackDeniedError` | `unsafe_fallback_denied` | Post-attempt path denied / no alternate (not thrown by `select` itself). Honesty `NoRouteMatchError` keeps its `reason` (not rewritten to `no_alternate_gateway`). |
 
-Guards: `isNoRouteMatchError`, `isUnsafeFallbackDeniedError`.
+Guards: `isNoRouteMatchError`, `isUnsafeFallbackDeniedError`, `isSelectHonestyReason`.
 
 ## Compose example (full)
 

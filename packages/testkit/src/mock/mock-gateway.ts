@@ -153,6 +153,8 @@ function isCapturableMockStatus(status: PaymentStatus): boolean {
  * Identity fields that must participate in createPayment idempotency.
  * Different order / payment-method / source + same key → fingerprint_conflict
  * (NEW-TESTKIT-1). Token/source ids only — never PAN/CVC/dpan leaves.
+ * Includes stripeCustomerId / paymobIntegrationId / paymobPaymentMethods
+ * (NEW-TESTKIT-7).
  */
 function createPaymentIdentityFields(
   params: CreatePaymentParams,
@@ -162,7 +164,16 @@ function createPaymentIdentityFields(
   if (params.stripePaymentMethodId !== undefined) {
     identity.stripePaymentMethodId = params.stripePaymentMethodId;
   }
+  if (params.stripeCustomerId !== undefined) {
+    identity.stripeCustomerId = params.stripeCustomerId;
+  }
   if (params.tokenId !== undefined) identity.tokenId = params.tokenId;
+  if (params.paymobIntegrationId !== undefined) {
+    identity.paymobIntegrationId = params.paymobIntegrationId;
+  }
+  if (params.paymobPaymentMethods !== undefined) {
+    identity.paymobPaymentMethods = params.paymobPaymentMethods;
+  }
   if (params.moyasarSource !== undefined) {
     const source = params.moyasarSource;
     if (typeof source === "object" && source !== null) {
@@ -1028,11 +1039,25 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
           ),
           outcome,
         );
-      case "succeeded":
+      case "succeeded": {
+        // NEW-TESTKIT-6: do not force paid. Auth-only create fallback is
+        // authorized + capturedAmount 0; capture/void keep their fallback status.
+        const fb = fallback();
+        const succeeded: GatewayPaymentResult = { ...fb };
+        if (
+          succeeded.status === "authorized" &&
+          succeeded.capturedAmount === undefined
+        ) {
+          succeeded.capturedAmount = 0;
+          if (succeeded.currency === undefined && fb.currency !== undefined) {
+            succeeded.currency = fb.currency;
+          }
+        }
         return applyResultOverrides(
-          withPhase6Outcome({ ...fallback(), status: "paid" }, "succeeded"),
+          withPhase6Outcome(succeeded, "succeeded"),
           outcome,
         );
+      }
       case "authorized":
         return applyResultOverrides(
           withPhase6Outcome(
@@ -1330,8 +1355,18 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               () => {
                 const status: PaymentStatus =
                   !capture && capabilities.authorization ? "authorized" : "paid";
+                const base = defaultPaymentResult(
+                  id,
+                  status,
+                  major,
+                  name,
+                  currencyCode,
+                );
                 return {
-                  ...defaultPaymentResult(id, status, major, name, currencyCode),
+                  ...base,
+                  ...(status === "authorized"
+                    ? { capturedAmount: 0, currency: currencyCode }
+                    : {}),
                   rawResponse: {
                     mock: true,
                     amountMinor: minor,
@@ -1399,8 +1434,22 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 ? { ...withId, currency: currencyCode }
                 : withId;
 
-            if (finalResult.success || finalResult.status === "processing") {
-              ensurePaymentLedger(id, params, finalResult, { major, minor });
+            // NEW-TESTKIT-6: auth-only creates must publish capturedAmount 0
+            // (currency travels with the major-unit field).
+            const settledResult: GatewayPaymentResult =
+              !capture &&
+              capabilities.authorization &&
+              finalResult.status === "authorized" &&
+              finalResult.capturedAmount === undefined
+                ? {
+                    ...finalResult,
+                    capturedAmount: 0,
+                    currency: finalResult.currency ?? currencyCode,
+                  }
+                : finalResult;
+
+            if (settledResult.success || settledResult.status === "processing") {
+              ensurePaymentLedger(id, params, settledResult, { major, minor });
             } else {
               // Non-success terminal (e.g. failed): honest ledger — never leave paid hanging
               const key = finalResult.gatewayId || id;
@@ -1421,10 +1470,10 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             // indeterminate (success:false / reconciliationRequired). Skipping
             // that arm mints a second payment on same-key retry and trains a
             // false "safe retry after indeterminate".
-            if (idemKey && requestFingerprint && finalResult.gatewayId) {
-              cacheIdempotentResult(idemKey, requestFingerprint, finalResult);
+            if (idemKey && requestFingerprint && settledResult.gatewayId) {
+              cacheIdempotentResult(idemKey, requestFingerprint, settledResult);
             }
-            return finalResult;
+            return settledResult;
           } catch (err) {
             // Dual-timeout: cache already set in ledger callback; rethrow client error.
             // Plain timeout/network without provider success: no cache (indeterminate).

@@ -344,9 +344,23 @@ function isPaymobIndeterminateError(error: unknown): boolean {
 }
 
 /**
+ * HTTP statuses that are not a definite reject after a mutating POST.
+ * 408 / 409 / 425 / 429 and 5xx may have applied the money op (NEW-PAYMOB-4XX).
+ */
+function isPaymobIndeterminateMutationHttpStatus(status: number): boolean {
+  return (
+    status >= 500 ||
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429
+  );
+}
+
+/**
  * True when a mutation error must keep the idempotency fence.
- * 429 / RateLimitError after POST is not a definite reject — Paymob may have
- * applied the money op (NEW-PAYMOB-2). Moyasar excludes 429 the same way.
+ * 408 / 409 / 425 / 429 and RateLimitError after POST are not definite
+ * rejects — Paymob may have applied the money op (NEW-PAYMOB-2 / NEW-PAYMOB-4XX).
  */
 function shouldRetainPaymobMutationFence(error: unknown): boolean {
   if (isPaymobIndeterminateError(error) || error instanceof RateLimitError) {
@@ -354,7 +368,10 @@ function shouldRetainPaymobMutationFence(error: unknown): boolean {
   }
   if (error instanceof GatewayApiError) {
     const status = (error.rawError as { status?: number } | undefined)?.status;
-    return status === 429;
+    return (
+      typeof status === "number" &&
+      isPaymobIndeterminateMutationHttpStatus(status)
+    );
   }
   return false;
 }
@@ -733,12 +750,15 @@ export class PaymobGateway extends BaseGateway {
       await this.parseJson<PaymobPaymentKeyResponse>(paymentKeyResponse);
 
     if (!paymentKeyResponse.ok) {
+      // NEW-PAYMOB-4XX: Orders HTTP 200 + id already minted a Paymob order.
+      // Any Payment Keys 4xx (including 408 / 409 / 425) must keep the create
+      // fence — the same key cannot POST a second /api/ecommerce/orders.
       this.throwPaymobApiError(
         paymentKeyResponse,
         paymentKeyData,
         paymentKeyData.message ?? "Failed to generate Paymob payment key",
         "Payment Keys",
-        { unknownOnServerError: true },
+        { unknownOnServerError: true, unknownAfterObservedSideEffect: true },
       );
     }
     // PAYMOB-FENCE-3: HTTP 200 after the mutating Payment Keys POST may have
@@ -2746,11 +2766,21 @@ export class PaymobGateway extends BaseGateway {
     data: { message?: string; detail?: string } | unknown,
     message: string,
     operation: string,
-    options: { unknownOnServerError?: boolean } = {},
+    options: {
+      unknownOnServerError?: boolean;
+      unknownAfterObservedSideEffect?: boolean;
+    } = {},
   ): never {
-    // 5xx and 429 after a mutating POST are not definite rejects — Paymob may
-    // have applied the money op. Keep the fence (NEW-PAYMOB-2).
-    if (options.unknownOnServerError && (response.status >= 500 || response.status === 429)) {
+    // 5xx and 408 / 409 / 425 / 429 after a mutating POST are not definite
+    // rejects — Paymob may have applied the money op (NEW-PAYMOB-2 / 4XX).
+    // After an observed side effect (Orders 200 + id), any Payment Keys HTTP
+    // error must stay indeterminate so executeIdempotent does not delete the
+    // create fence and mint a second order.
+    if (
+      options.unknownAfterObservedSideEffect ||
+      (options.unknownOnServerError &&
+        isPaymobIndeterminateMutationHttpStatus(response.status))
+    ) {
       throw new PaymobIndeterminateGatewayError(operation, response.status, data);
     }
 
@@ -3046,9 +3076,10 @@ export class PaymobGateway extends BaseGateway {
       }, operation);
       return result;
     }).catch(async (error) => {
-      // Network/5xx/429/caller-abort after POST and HTTP-200 body validation
-      // failures all fence: Paymob may have applied the money op (PAYMOB-1,
-      // NEW-PAYMOB-2). RateLimitError after mapError must not clear the key.
+      // Network/5xx/408/409/425/429/caller-abort after POST and HTTP-200 body
+      // validation failures all fence: Paymob may have applied the money op
+      // (PAYMOB-1, NEW-PAYMOB-2, NEW-PAYMOB-4XX). RateLimitError after mapError
+      // must not clear the key.
       if (shouldRetainPaymobMutationFence(error)) {
         const unknownAt = this.clock.nowMs();
         this.idempotencyCache.set(cacheKey, {

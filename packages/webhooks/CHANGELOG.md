@@ -5,7 +5,9 @@
 ### Patch Changes
 
 - **NEW-WEBHOOKS-1:** `processRetryable` claims one listed row at a time (next `store.claim` after the previous handler returns). Parallel pre-claim of `limit` leases is unsafe with default `leaseMs=30s` when handlers average ≥3s (peer reclaim + this worker still handles).
-- **NEW-WEBHOOKS-2:** Document that processed Paymob `TRANSACTION` inbox key is `obj.id`; later same-id snapshots are `already_completed`; child refunds have new ids. Do not complete fulfillment on Paymob `payment.processing`.
+- **NEW-WEBHOOKS-2:** Processed Paymob `TRANSACTION` inbox keys include domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a later same-id void/refund snapshot is not `already_completed`. Redirect stays `TRANSACTION_RESPONSE:{txnId}`. Do not complete fulfillment on Paymob `payment.processing`.
+- **NEW-WH-1:** Inbox notification class uses `provider.eventType` or known native HMAC classes (`TRANSACTION` / `TRANSACTION_RESPONSE`) only — remapped `payment.succeeded` is not a second key.
+- **NEW-STORE-3:** Memory `complete` / `renew` do not soft-release expired leases before the token fence (fail closed without restore-then-lose).
 - **PERF-7 (superseded):** listed claims are no longer issued concurrently — NEW-WEBHOOKS-1 serial claim is the fence.
 - **Deep audit 2026-08-16:** Paymob inbox keys qualify redirect vs processed (`paymob:TRANSACTION_RESPONSE:{txnId}` vs `paymob:TRANSACTION:{txnId}`); `:redirect` suffix and class prefix collapse to one key. Missing durable snapshots and parse-stage `InvalidWebhookError` are retryable, not `invalid_webhook`. Inline claims persist `payloadRef` so `processRetryable` does not dead-letter paid rows.
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged; contract + memory + durable adapter (postgres/sqlite/d1/turso/redis/DO) parity + conformance so crash/deploy reclaim does not burn handler `maxAttempts`.

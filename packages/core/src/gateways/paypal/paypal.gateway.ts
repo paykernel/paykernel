@@ -89,7 +89,7 @@ type PayPalEmbeddedCapture = {
     currency_code: string;
     value: string;
   };
-  /** When false, capture is non-final (more may follow on the same auth). */
+  /** When not strictly true (omitted/undefined/false), capture is non-final. */
   final_capture?: boolean;
   create_time?: string;
   update_time?: string;
@@ -1479,13 +1479,13 @@ export class PayPalGateway extends BaseGateway {
     this.assertPaymentResource(data, `get ${resourceType}`);
 
     // Capture-resource GET must honor final_capture the same as capturePayment /
-    // order getPayment / webhooks. COMPLETED + final_capture:false is only a
-    // slice — partially_captured, never paid / isPaidOutcome.
+    // order getPayment / webhooks. PayPal API default is false; omitted/undefined
+    // is not final. COMPLETED is only a slice unless final_capture === true.
     let status = this.mapResourceStatus(data.status);
-    if (status === "paid" && data.final_capture === false) {
+    if (status === "paid" && data.final_capture !== true) {
       status = "partially_captured";
       this.logger.warn(
-        "[PayPal] Capture resource is non-final (final_capture=false); getPayment status is partially_captured, not paid",
+        "[PayPal] Capture resource is non-final (final_capture is not true); getPayment status is partially_captured, not paid",
       );
     }
 
@@ -1541,6 +1541,9 @@ export class PayPalGateway extends BaseGateway {
     const relatedIds = data.supplementary_data?.related_ids;
     const authMoney = this.parsePayPalMoney(data.amount, "get authorization");
 
+    // related_ids.capture_id is a single string with no sibling list.
+    // Multi-capture can point refunds at the wrong slice. Auth id is not
+    // refundable — omit captureId unless a single held capture is proven.
     return this.mapPayPalPaymentResult({
       gatewayId: data.id,
       authorizationId: data.id,
@@ -1551,9 +1554,6 @@ export class PayPalGateway extends BaseGateway {
       providerNativeStatus: data.status,
       ...(relatedIds?.order_id !== undefined
         ? { orderId: relatedIds.order_id }
-        : {}),
-      ...(relatedIds?.capture_id !== undefined
-        ? { captureId: relatedIds.capture_id }
         : {}),
     });
   }
@@ -2732,16 +2732,21 @@ export class PayPalGateway extends BaseGateway {
     const resourceMapped = raw.resource.status
       ? this.mapResourceStatus(raw.resource.status)
       : undefined;
-    // CAPTURE.REFUNDED without capture REFUNDED/PARTIALLY_REFUNDED is unproven
-    // completeness — fail-closed to partially_refunded (omit remaining).
-    // CAPTURE.REVERSED → reversed.
-    const effectiveStatus: PaymentStatus | undefined =
-      resourceMapped ??
-      (raw.event_type === "PAYMENT.CAPTURE.REFUNDED"
-        ? "partially_refunded"
+    const isCaptureRefundOrReverseEvent =
+      raw.event_type === "PAYMENT.CAPTURE.REFUNDED" ||
+      raw.event_type === "PAYMENT.CAPTURE.REVERSED";
+    // CAPTURE.REFUNDED / REVERSED must rewrite remaining-held even when the
+    // resource is this-op COMPLETED / order-shaped (maps to paid). Unproven
+    // completeness → fail-closed partially_refunded / reversed (omit face).
+    const effectiveStatus: PaymentStatus | undefined = isCaptureRefundOrReverseEvent
+      ? resourceMapped === "partially_refunded" ||
+        resourceMapped === "refunded" ||
+        resourceMapped === "reversed"
+        ? resourceMapped
         : raw.event_type === "PAYMENT.CAPTURE.REVERSED"
           ? "reversed"
-          : undefined);
+          : "partially_refunded"
+      : resourceMapped;
 
     if (
       effectiveStatus !== "partially_refunded" &&
@@ -3012,13 +3017,13 @@ export class PayPalGateway extends BaseGateway {
       return "processing";
     }
 
-    // Non-final capture: COMPLETED resource with final_capture=false is only a
-    // slice — partially_captured, not paid / isPaidOutcome.
+    // Non-final capture: PayPal API default for final_capture is false.
+    // Missing/undefined is not paid / isPaidOutcome.
     if (eventType === "PAYMENT.CAPTURE.COMPLETED") {
-      if (options?.finalCapture === false) {
-        return "partially_captured";
+      if (options?.finalCapture === true) {
+        return "paid";
       }
-      return "paid";
+      return "partially_captured";
     }
 
     const eventStatusMap: Record<string, PaymentStatus> = {
@@ -3105,7 +3110,7 @@ export class PayPalGateway extends BaseGateway {
 
     if (capture) {
       let capMapped = this.mapResourceStatus(capture.status);
-      if (capMapped === "paid" && capture.final_capture === false) {
+      if (capMapped === "paid" && capture.final_capture !== true) {
         capMapped = "partially_captured";
       }
       // Multi-capture: COMPLETED slices that sum to less than order/auth total
@@ -3239,7 +3244,7 @@ export class PayPalGateway extends BaseGateway {
 
   /**
    * True when successful capture amounts sum to less than the order/auth total.
-   * Missing comparable totals → false (do not demote without money evidence).
+   * Missing/unparsable order/auth total (or capture sum) is incomplete — not paid.
    */
   private isAggregateCapturePartial(
     order: PayPalOrderResponse,
@@ -3254,20 +3259,20 @@ export class PayPalGateway extends BaseGateway {
       "get payment aggregate",
     );
     if (capturedSum === undefined) {
-      return false;
+      return true;
     }
     const totalMoney =
       authorization?.amount ??
       order.purchase_units?.[0]?.amount ??
       order.amount;
     if (!totalMoney) {
-      return false;
+      return true;
     }
     try {
       const total = this.parseAmount(totalMoney, "get payment aggregate");
       return capturedSum.amount < total;
     } catch {
-      return false;
+      return true;
     }
   }
 

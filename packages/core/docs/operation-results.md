@@ -130,6 +130,7 @@ Bare inference (no explicit `outcome`):
 | `true` | `pending` / `processing` / `approved` | `requires_action` |
 | `false` | `pending` / `processing` / `approved` | `indeterminate` (not `failed`) |
 | `false` | `paid` / `authorized` / `partially_captured` / `refunded` / `partially_refunded` | `indeterminate` (not `failed`) |
+| `false` | `refund_completed` / `refund_pending` / `reversed` | `indeterminate` (not `failed`) |
 | `false` | `failed` | `declined` |
 | `false` | `cancelled` | `failed` |
 
@@ -277,6 +278,15 @@ against `status`. `outcome: 'succeeded'` with `status: 'failed'` becomes
 `'approved'` it becomes `requires_action`. Callers branching on
 `result.outcome === 'succeeded'` must not see a failed or still-pending payment
 as a successful operation.
+
+**NEW-CORE-10:** `outcome: 'requires_action'` with `status: 'failed'` is stored
+and inferred as **`declined`** (`success: false`). A failed snapshot is not
+customer action — do not persist `success: true` from the requires_action table.
+
+**NEW-CORE-9:** Payment infer treats `success: false` + `refund_completed` /
+`refund_pending` / `reversed` as **`indeterminate`** (not a retryable `failed`).
+Refund coerce: `outcome: 'failed'` + gateway `status: 'completed'` becomes
+**`succeeded`** (status wins — a settled refund is not a fresh-fail retry).
 
 **CORE-7:** Post-submit create / OTP / capture / refund / void timeouts return
 `outcome: 'indeterminate'` with `gatewayId` taken from params when present

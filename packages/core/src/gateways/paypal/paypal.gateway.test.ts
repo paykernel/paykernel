@@ -596,6 +596,7 @@ describe('PayPalGateway', () => {
                 resource: {
                     id: 'capture-abc123',
                     status: 'COMPLETED',
+                    final_capture: true,
                     amount: {
                         currency_code: 'USD',
                         value: '99.99',
@@ -734,6 +735,7 @@ describe('PayPalGateway', () => {
                                     {
                                         id: 'CAPTURE-LAST',
                                         status: 'COMPLETED',
+                                        final_capture: true,
                                         amount: {
                                             currency_code: 'USD',
                                             value: '60.00',
@@ -781,6 +783,7 @@ describe('PayPalGateway', () => {
                                     {
                                         id: 'CAPTURE-NEWER',
                                         status: 'COMPLETED',
+                                        final_capture: true,
                                         create_time: '2024-06-15T18:00:00Z',
                                         update_time: '2024-06-15T18:30:00Z',
                                         amount: {
@@ -962,6 +965,7 @@ describe('PayPalGateway', () => {
                                     {
                                         id: 'CAPTURE-HELD-B',
                                         status: 'COMPLETED',
+                                        final_capture: true,
                                         amount: {
                                             currency_code: 'USD',
                                             value: '50.00',
@@ -1184,6 +1188,94 @@ describe('PayPalGateway', () => {
             expect(isPaidOutcome({
                 success: true,
                 gatewayId: event.gatewayPaymentId ?? 'order-auth-only',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('ORDER.COMPLETED matching totals without final_capture is not paid (NEW-PAYPAL-3)', () => {
+            const payload = {
+                id: 'WH-order-completed-omitted-final',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-omitted-final',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '40.00',
+                            },
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-OMITTED-FINAL',
+                                        status: 'COMPLETED',
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('partially_captured');
+            expect(event.status).not.toBe('paid');
+            expect(event.stableType).toBe('payment.processing');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-omitted-final',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('ORDER.COMPLETED without order/auth totals is not paid (NEW-PAYPAL-6)', () => {
+            const payload = {
+                id: 'WH-order-completed-no-totals',
+                event_type: 'CHECKOUT.ORDER.COMPLETED',
+                create_time: '2024-06-15T16:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-no-totals',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            payments: {
+                                captures: [
+                                    {
+                                        id: 'CAPTURE-NO-TOTAL',
+                                        status: 'COMPLETED',
+                                        final_capture: true,
+                                        amount: {
+                                            currency_code: 'USD',
+                                            value: '40.00',
+                                        },
+                                    },
+                                ],
+                            },
+                        },
+                    ],
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('partially_captured');
+            expect(event.status).not.toBe('paid');
+            expect(event.stableType).toBe('payment.processing');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'order-no-totals',
                 status: event.status,
                 rawResponse: {},
             })).toBe(false);
@@ -1630,6 +1722,102 @@ describe('PayPalGateway', () => {
             expect(event.event?.type).toBe('refund.pending');
         });
 
+        it('CAPTURE.REFUNDED this-op COMPLETED with breakdown publishes remaining not face (NEW-PAYPAL-4)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-completed-breakdown',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-COMPLETED-THIS-OP',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                    seller_receivable_breakdown: {
+                        total_refunded_amount: {
+                            currency_code: 'USD',
+                            value: '30.00',
+                        },
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBe(70);
+            expect(event.amount).not.toBe(100);
+            expect(event.currency).toBe('USD');
+        });
+
+        it('CAPTURE.REFUNDED this-op COMPLETED without remaining-held omits face (NEW-PAYPAL-4)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-completed-face',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-COMPLETED-FACE',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '100.00',
+                    },
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBeUndefined();
+            expect(event.currency).toBeUndefined();
+        });
+
+        it('CAPTURE.REFUNDED order-shaped COMPLETED does not publish order face (NEW-PAYPAL-4)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-refunded-order-shaped',
+                event_type: 'PAYMENT.CAPTURE.REFUNDED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'checkout-order',
+                resource: {
+                    id: 'order-refunded-shaped',
+                    status: 'COMPLETED',
+                    purchase_units: [
+                        {
+                            amount: {
+                                currency_code: 'USD',
+                                value: '100.00',
+                            },
+                        },
+                    ],
+                },
+            });
+
+            expect(event.status).toBe('partially_refunded');
+            expect(event.amount).toBeUndefined();
+            expect(event.amount).not.toBe(100);
+        });
+
+        it('CAPTURE.REVERSED this-op COMPLETED publishes 0 remaining not face (NEW-PAYPAL-4)', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-capture-reversed-completed',
+                event_type: 'PAYMENT.CAPTURE.REVERSED',
+                create_time: '2024-06-15T17:00:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'CAPTURE-REVERSED-COMPLETED',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '88.00',
+                    },
+                },
+            });
+
+            expect(event.status).toBe('reversed');
+            expect(event.amount).toBe(0);
+            expect(event.amount).not.toBe(88);
+            expect(event.currency).toBe('USD');
+        });
+
         it('CAPTURE.REFUNDED fully refunded publishes 0 remaining not face (audit PAYPAL-2)', () => {
             const event = gateway.parseWebhookEvent({
                 id: 'WH-capture-fully-refunded',
@@ -1861,6 +2049,7 @@ describe('PayPalGateway', () => {
                 resource: {
                     id: 'capture-raw',
                     status: 'COMPLETED',
+                    final_capture: true,
                     amount: {
                         currency_code: 'USD',
                         value: '9.99',
@@ -1888,6 +2077,7 @@ describe('PayPalGateway', () => {
                 resource: {
                     id: 'capture-phase7',
                     status: 'COMPLETED',
+                    final_capture: true,
                     amount: {
                         currency_code: 'USD',
                         value: '99.99',
@@ -2002,6 +2192,36 @@ describe('PayPalGateway', () => {
 
             expect(event.status).toBe('paid');
             expect(event.stableType).toBe('capture.completed');
+        });
+
+        it('PAYMENT.CAPTURE.COMPLETED without final_capture is not paid (NEW-PAYPAL-3)', () => {
+            const payload = {
+                id: 'WH-capture-omitted-final',
+                event_type: 'PAYMENT.CAPTURE.COMPLETED',
+                create_time: '2024-06-15T14:30:00Z',
+                resource_type: 'capture',
+                resource: {
+                    id: 'capture-omitted-final',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '20.00',
+                    },
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.status).toBe('partially_captured');
+            expect(event.status).not.toBe('paid');
+            expect(event.stableType).toBe('payment.processing');
+            expect(event.stableType).not.toBe('capture.completed');
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId ?? 'capture-omitted-final',
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
         });
 
         it('Phase 7 dual-write: refund events → refund.*', () => {
@@ -4293,11 +4513,16 @@ describe('PayPalGateway', () => {
                 status: 'COMPLETED',
                 purchase_units: [
                     {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '200.00',
+                        },
                         payments: {
                             captures: [
                                 {
                                     id: 'CAP-001',
                                     status: 'COMPLETED',
+                                    final_capture: true,
                                     amount: {
                                         currency_code: 'USD',
                                         value: '200.00',
@@ -4354,11 +4579,16 @@ describe('PayPalGateway', () => {
                 status: 'COMPLETED',
                 purchase_units: [
                     {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '75.00',
+                        },
                         payments: {
                             captures: [
                                 {
                                     id: 'CAP-PAID-OUTCOME',
                                     status: 'COMPLETED',
+                                    final_capture: true,
                                     amount: {
                                         currency_code: 'USD',
                                         value: '75.00',
@@ -4475,6 +4705,7 @@ describe('PayPalGateway', () => {
                                 {
                                     id: 'CAP-NEW',
                                     status: 'COMPLETED',
+                                    final_capture: true,
                                     amount: {
                                         currency_code: 'USD',
                                         value: '60.00',
@@ -4680,6 +4911,41 @@ describe('PayPalGateway', () => {
             expect(isPaidOutcome(result)).toBe(false);
         });
 
+        it('getPayment matching totals without final_capture is not paid (NEW-PAYPAL-3)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-OMITTED-FINAL',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        amount: {
+                            currency_code: 'USD',
+                            value: '40.00',
+                        },
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-OMITTED-FINAL',
+                                    status: 'COMPLETED',
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-OMITTED-FINAL',
+            });
+
+            expect(result.status).toBe('partially_captured');
+            expect(result.status).not.toBe('paid');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
         it('should map multi-capture under order total to partially_captured', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'ORDER-UNDER-TOTAL',
@@ -4743,6 +5009,7 @@ describe('PayPalGateway', () => {
                 return createMockResponse({
                     id: 'CAP-LOOKUP-123',
                     status: 'COMPLETED',
+                    final_capture: true,
                     amount: {
                         currency_code: 'USD',
                         value: '44.00',
@@ -5076,6 +5343,54 @@ describe('PayPalGateway', () => {
             expect(isPaidOutcome(result)).toBe(false);
         });
 
+        it('getPayment by capture ID missing final_capture is not paid (NEW-PAYPAL-3)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (url.includes('/v2/checkout/orders/CAP-OMITTED-FINAL-GET')) {
+                    return createMockResponse(
+                        {
+                            name: 'RESOURCE_NOT_FOUND',
+                            message: 'Order not found',
+                        },
+                        false,
+                        404
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'CAP-OMITTED-FINAL-GET',
+                    status: 'COMPLETED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '20.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            order_id: 'ORDER-OPEN-AUTH-OMITTED',
+                            authorization_id: 'AUTH-OPEN-OMITTED',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'CAP-OMITTED-FINAL-GET',
+            });
+
+            expect(result.status).toBe('partially_captured');
+            expect(result.status).not.toBe('paid');
+            expect(result.outcome).toBe('requires_action');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
         it('getPayment by capture ID with final_capture false → partially_captured not paid (PAYPAL-1 audit)', async () => {
             // capturePayment returns gatewayId = capture.id; re-poll by that id must
             // not over-promote non-final COMPLETED captures to paid / isPaidOutcome.
@@ -5182,6 +5497,90 @@ describe('PayPalGateway', () => {
             expect(result.amount).toBe(55);
         });
 
+        it('authorization GET omits related_ids.capture_id when siblings cannot be proven (NEW-PAYPAL-5)', async () => {
+            globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+                const url = typeof input === 'string' ? input : (input as Request).url;
+
+                if (url.includes('oauth2/token')) {
+                    return createMockResponse({
+                        access_token: 'test_token',
+                        expires_in: 3600,
+                    });
+                }
+
+                if (
+                    url.includes('/v2/checkout/orders/AUTH-LOOKUP-CAPTURE-ID') ||
+                    url.includes('/v2/payments/captures/AUTH-LOOKUP-CAPTURE-ID')
+                ) {
+                    return createMockResponse(
+                        {
+                            name: 'RESOURCE_NOT_FOUND',
+                            message: 'Resource not found',
+                        },
+                        false,
+                        404
+                    );
+                }
+
+                return createMockResponse({
+                    id: 'AUTH-LOOKUP-CAPTURE-ID',
+                    status: 'CAPTURED',
+                    amount: {
+                        currency_code: 'USD',
+                        value: '55.00',
+                    },
+                    supplementary_data: {
+                        related_ids: {
+                            order_id: 'ORDER-FOR-AUTHORIZATION-CAP',
+                            capture_id: 'CAP-RELATED-UNPROVEN',
+                        },
+                    },
+                });
+            }) as unknown as typeof fetch;
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'AUTH-LOOKUP-CAPTURE-ID',
+            });
+
+            expect(result.gatewayId).toBe('AUTH-LOOKUP-CAPTURE-ID');
+            expect(result.authorizationId).toBe('AUTH-LOOKUP-CAPTURE-ID');
+            expect(result.orderId).toBe('ORDER-FOR-AUTHORIZATION-CAP');
+            expect(result.captureId).toBeUndefined();
+            expect(result.captureId).not.toBe('CAP-RELATED-UNPROVEN');
+        });
+
+        it('getPayment ORDER.COMPLETED without totals is not paid (NEW-PAYPAL-6)', async () => {
+            globalThis.fetch = createMockFetch({
+                id: 'ORDER-NO-TOTALS',
+                status: 'COMPLETED',
+                purchase_units: [
+                    {
+                        payments: {
+                            captures: [
+                                {
+                                    id: 'CAP-NO-TOTAL',
+                                    status: 'COMPLETED',
+                                    final_capture: true,
+                                    amount: {
+                                        currency_code: 'USD',
+                                        value: '40.00',
+                                    },
+                                },
+                            ],
+                        },
+                    },
+                ],
+            });
+
+            const result = await gateway.getPayment({
+                gatewayPaymentId: 'ORDER-NO-TOTALS',
+            });
+
+            expect(result.status).toBe('partially_captured');
+            expect(result.status).not.toBe('paid');
+            expect(isPaidOutcome(result)).toBe(false);
+        });
+
         it('bare COMPLETED order without captures is not isPaidOutcome (PAYPAL-1)', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'ORDER-BARE-COMPLETED',
@@ -5237,6 +5636,7 @@ describe('PayPalGateway', () => {
                     return createMockResponse({
                         id: 'CAP-STATUS-123',
                         status: 'COMPLETED',
+                        final_capture: true,
                         amount: {
                             currency_code: 'USD',
                             value: '12.00',

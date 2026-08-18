@@ -183,4 +183,70 @@ describe("createMemoryReconciliationStore", () => {
     });
     expect(again.kind).toBe("already_exists");
   });
+
+  it("NEW-STORE-2: maxEntries skips active claimed and evicts terminal; refuses when all leased", async () => {
+    const clock = createFakeClock();
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    const store = createMemoryReconciliationStore({ clock, maxEntries: 2 });
+    await store.schedule({
+      key: "r_keep",
+      subjectId: "p1",
+      reason: "x",
+      dueAt,
+    });
+    await store.schedule({
+      key: "r_done",
+      subjectId: "p2",
+      reason: "x",
+      dueAt,
+    });
+    const keep = await store.claim({
+      key: "r_keep",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(keep.kind).toBe("acquired");
+    const done = await store.claim({
+      key: "r_done",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(done.kind).toBe("acquired");
+    if (done.kind !== "acquired") return;
+    await store.complete({ key: "r_done", leaseToken: done.leaseToken });
+
+    await store.schedule({
+      key: "r_new",
+      subjectId: "p3",
+      reason: "x",
+      dueAt,
+    });
+    expect((await store.get("r_keep"))?.status).toBe("claimed");
+    expect(await store.get("r_done")).toBeUndefined();
+    expect((await store.get("r_new"))?.status).toBe("scheduled");
+
+    const full = createMemoryReconciliationStore({ clock, maxEntries: 1 });
+    await full.schedule({
+      key: "r_only",
+      subjectId: "p",
+      reason: "x",
+      dueAt,
+    });
+    const only = await full.claim({
+      key: "r_only",
+      owner: "w",
+      leaseMs: 5_000,
+    });
+    expect(only.kind).toBe("acquired");
+    await expect(
+      full.schedule({
+        key: "r_overflow",
+        subjectId: "p2",
+        reason: "x",
+        dueAt,
+      }),
+    ).rejects.toThrow(/active lease|capacity/i);
+    expect((await full.get("r_only"))?.status).toBe("claimed");
+    expect(await full.get("r_overflow")).toBeUndefined();
+  });
 });

@@ -16,6 +16,7 @@ import {
   createTursoStores,
 } from "../index";
 import type { TursoExecutor } from "../executor";
+import { DEFAULT_DELETE_EXPIRED_LIMIT } from "./shared";
 
 type Row = Record<string, unknown>;
 
@@ -334,6 +335,35 @@ describe("webhook / recon unit (fake executor)", () => {
       before,
     });
     expect(reconExec.calls.find((c) => c.sql.includes("DELETE"))?.params[0]).toBe(z);
+  });
+
+  it("NEW-PERF-8: omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    expect(Number.isFinite(DEFAULT_DELETE_EXPIRED_LIMIT)).toBe(true);
+    const webhookExec = createScriptedExecutor({ onQuery: () => [] });
+    await createTursoWebhookInboxStore({ executor: webhookExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const webhookDel = webhookExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(webhookDel).toBeDefined();
+    expect(webhookDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(webhookDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const reconExec = createScriptedExecutor({ onQuery: () => [] });
+    await createTursoReconciliationStore({ executor: reconExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const reconDel = reconExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(reconDel).toBeDefined();
+    expect(reconDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(reconDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = createScriptedExecutor({ onQuery: () => [] });
+    await createTursoReconciliationStore({ executor: explicit }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
   });
 });
 

@@ -28,10 +28,12 @@ import type {
   WebhookInboxStore,
 } from "@paykernel/store-contracts";
 import { StoreLeaseLostError, StoreUnavailableError } from "@paykernel/store-contracts";
+import type { ShardOccupancyHint } from "../occupancy";
 import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { DoStoreOptions } from "../types";
 import {
+  DEFAULT_DELETE_EXPIRED_LIMIT,
   WEBHOOK_SELECT_COLS,
   mapWebhookRow,
   newLeaseToken,
@@ -103,11 +105,11 @@ RETURNING ${WEBHOOK_SELECT_COLS}
 
 type DoWebhookInboxStore = WebhookInboxStore & {
   /**
-   * PERF-5: cheap occupancy probe. True when this shard has pending-available
+   * PERF-5: cheap occupancy probe. Occupied when this shard has pending-available
    * work **or** expired claimed rows (listRetryable will soft-release those).
-   * Read-only — does not mutate leases.
+   * `earliest` is MIN(available_at) of those rows. Read-only — does not mutate leases.
    */
-  peekRetryable(input: ListRetryableInput): Promise<boolean>;
+  peekRetryable(input: ListRetryableInput): Promise<ShardOccupancyHint>;
 };
 
 export function createDoWebhookInboxStore(
@@ -413,53 +415,47 @@ export function createDoWebhookInboxStore(
       });
     },
 
-    async peekRetryable(input: ListRetryableInput): Promise<boolean> {
+    async peekRetryable(input: ListRetryableInput) {
       return withMappedErrors(() => {
         const now =
           input.now !== undefined
             ? canonicalizeIsoTimestamp(input.now, "now")
             : clockNowIso(ctx.clock);
-        const rows = ctx.getExecutor().query<{ occupied: number }>(
-          `SELECT 1 AS occupied
+        const rows = ctx.getExecutor().query<{ earliest: string | null }>(
+          `SELECT MIN(available_at) AS earliest
            FROM ${table}
            WHERE (status = 'pending' AND available_at <= ?)
               OR (
                 status = 'claimed'
                 AND lease_expires_at IS NOT NULL
                 AND lease_expires_at <= ?
-              )
-           LIMIT 1`,
+              )`,
           [now, now],
         );
-        return rows.length > 0;
+        const earliest = rows[0]?.earliest;
+        if (typeof earliest !== "string" || earliest.length === 0) {
+          return { occupied: false };
+        }
+        return { occupied: true, earliest };
       });
     },
 
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(() => {
         const before = canonicalizeIsoTimestamp(input.before, "before");
-        const limit = input.limit;
-        if (limit !== undefined) {
-          const rows = ctx.getExecutor().query<{ key: string }>(
-            `DELETE FROM ${table}
-             WHERE key IN (
-               SELECT key FROM ${table}
-               WHERE status IN ('completed', 'dead_letter')
-                 AND updated_at <= ?
-               ORDER BY updated_at ASC
-               LIMIT ?
-             )
-             RETURNING key`,
-            [before, limit],
-          );
-          return { deleted: rows.length };
-        }
+        // NEW-PERF-8: omit limit must not unbounded-DELETE (Redis default 1000).
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         const rows = ctx.getExecutor().query<{ key: string }>(
           `DELETE FROM ${table}
-           WHERE status IN ('completed', 'dead_letter')
-             AND updated_at <= ?
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status IN ('completed', 'dead_letter')
+               AND updated_at <= ?
+             ORDER BY updated_at ASC
+             LIMIT ?
+           )
            RETURNING key`,
-          [before],
+          [before, limit],
         );
         return { deleted: rows.length };
       });

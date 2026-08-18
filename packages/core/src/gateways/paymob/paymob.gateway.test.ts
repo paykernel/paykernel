@@ -856,6 +856,37 @@ describe("PaymobGateway", () => {
       ]);
     });
 
+    it("keeps the create fence after legacy Orders 200 then Payment Keys 408 (NEW-PAYMOB-4XX)", async () => {
+      const legacyGateway = new PaymobGateway(PAYMOB_LEGACY_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 777 }),
+        jsonResponse({ message: "Request Timeout" }, 408),
+        jsonResponse({ token: "auth_token_retry" }),
+        jsonResponse({ id: 888 }),
+        jsonResponse({ token: "payment_key_second_order" }),
+      );
+      const params = {
+        ...VALID_CREATE_PARAMS,
+        currency: "EGP",
+        idempotencyKey: "legacy_orders_200_payment_keys_408",
+      };
+
+      const first = await legacyGateway.createPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+
+      await expect(legacyGateway.createPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://accept.paymob.com/api/auth/tokens",
+        "https://accept.paymob.com/api/ecommerce/orders",
+        "https://accept.paymob.com/api/acceptance/payment_keys",
+      ]);
+      expect(
+        fetchCalls.filter((call) => call.url.endsWith("/api/ecommerce/orders")),
+      ).toHaveLength(1);
+    });
+
     it("keeps the idempotency fence after legacy HTTP 200 missing order id (PAYMOB-FENCE-3)", async () => {
       const legacyGateway = new PaymobGateway(PAYMOB_LEGACY_CONFIG, hooksManager);
       mockFetchSequence(
@@ -1537,6 +1568,37 @@ describe("PaymobGateway", () => {
         "https://ksa.paymob.com/api/acceptance/transactions/123456789",
         "https://ksa.paymob.com/api/acceptance/void_refund/refund",
       ]);
+    });
+
+    it("keeps the idempotency fence after refund POST HTTP 408 (NEW-PAYMOB-4XX)", async () => {
+      const actionGateway = new PaymobGateway(PAYMOB_ACTION_CONFIG, hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ detail: "Request Timeout" }, 408),
+        jsonResponse({ token: "auth_token_retry" }),
+        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
+        jsonResponse({ id: 999, success: true, refunded_amount_cents: 5000, currency: "SAR" }),
+      );
+
+      const params = {
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "refund_408_after_post",
+      };
+
+      const first = await actionGateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      await expect(actionGateway.refundPayment(params)).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls.map((call) => call.url)).toEqual([
+        "https://ksa.paymob.com/api/auth/tokens",
+        "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        "https://ksa.paymob.com/api/acceptance/void_refund/refund",
+      ]);
+      expect(
+        fetchCalls.filter((call) => call.url.endsWith("/void_refund/refund")),
+      ).toHaveLength(1);
     });
 
     it("keeps idempotency keys blocked after Paymob 5xx responses on mutating calls", async () => {

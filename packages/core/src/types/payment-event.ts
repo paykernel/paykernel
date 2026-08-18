@@ -855,11 +855,12 @@ function referencesFromWebhookEvent(
 }
 
 /**
- * Money snapshot from webhook fields (CORE-3 / fail-closed).
+ * Money snapshot from webhook fields (CORE-3 / NEW-MONEY-3 / fail-closed).
  *
  * Mirrors {@link import("./operation-result").paymentFromGatewayResult}: major-unit
- * `amount` is published only when `currency` is a non-empty string. Currency alone
- * (no amount) is still copied when present. Naked major units without currency are
+ * `amount` is published only when `currency` is a non-empty string **and** the
+ * value is {@link Number.isFinite}. Currency alone (no amount) is still copied
+ * when present. Naked major units without currency, or NaN / ±Infinity, are
  * omitted rather than dual-written incomplete.
  */
 function moneyFieldsFromWebhook(event: WebhookEvent): {
@@ -873,7 +874,7 @@ function moneyFieldsFromWebhook(event: WebhookEvent): {
       : undefined;
   if (currency !== undefined) {
     out.currency = currency;
-    if (event.amount !== undefined) {
+    if (typeof event.amount === "number" && Number.isFinite(event.amount)) {
       out.amount = event.amount;
     }
   }
@@ -1180,7 +1181,8 @@ export function attachPaymentEvent(
 
   // Hash the gateway's parsed rawPayload object (not a raw HTTP body string).
   // Callers who re-hash a body string for inbox claim will not match this digest.
-  if (opts?.computePayloadHash === true) {
+  // Spread already copies event.payloadHash. Only hash when asked and absent.
+  if (opts?.computePayloadHash === true && event.payloadHash === undefined) {
     out.payloadHash = hashWebhookPayload(event.rawPayload);
   }
 

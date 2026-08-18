@@ -20,6 +20,7 @@ import type { DoExecutor } from "../sql-executor";
 import { createMockDoSql } from "../test-utils/mock-do-sql";
 import { createDoExecutor, migrateDoAdapter } from "../index";
 import { uniqueTablePrefix } from "../test-utils/do-env";
+import { DEFAULT_DELETE_EXPIRED_LIMIT } from "./shared";
 
 type Row = Record<string, unknown>;
 
@@ -295,6 +296,35 @@ describe("idempotency store unit (fake executor)", () => {
       before,
     });
     expect(reconExec.calls.find((c) => c.sql.includes("DELETE"))?.params[0]).toBe(z);
+  });
+
+  it("NEW-PERF-8: omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    expect(Number.isFinite(DEFAULT_DELETE_EXPIRED_LIMIT)).toBe(true);
+    const webhookExec = createScriptedExecutor({ onQuery: () => [] });
+    await createDoWebhookInboxStore({ executor: webhookExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const webhookDel = webhookExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(webhookDel).toBeDefined();
+    expect(webhookDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(webhookDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const reconExec = createScriptedExecutor({ onQuery: () => [] });
+    await createDoReconciliationStore({ executor: reconExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const reconDel = reconExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(reconDel).toBeDefined();
+    expect(reconDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(reconDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = createScriptedExecutor({ onQuery: () => [] });
+    await createDoReconciliationStore({ executor: explicit }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
   });
 });
 
@@ -823,10 +853,13 @@ describe("PERF-5 peek occupancy (fake executor)", () => {
   it("peekDue is a read-only SELECT (no lease UPDATE)", async () => {
     const now = "2026-01-01T00:00:00.000Z";
     const executor = createScriptedExecutor({
-      onQuery: () => [{ occupied: 1 }],
+      onQuery: () => [{ earliest: now }],
     });
     const store = createDoReconciliationStore({ executor });
-    expect(await store.peekDue({ now })).toBe(true);
+    expect(await store.peekDue({ now })).toEqual({
+      occupied: true,
+      earliest: now,
+    });
     expect(executor.calls.every((c) => !/UPDATE/i.test(c.sql))).toBe(true);
   });
 
@@ -836,7 +869,7 @@ describe("PERF-5 peek occupancy (fake executor)", () => {
       onQuery: () => [],
     });
     const store = createDoWebhookInboxStore({ executor });
-    expect(await store.peekRetryable({ now })).toBe(false);
+    expect(await store.peekRetryable({ now })).toEqual({ occupied: false });
     expect(executor.calls.every((c) => !/UPDATE/i.test(c.sql))).toBe(true);
   });
 });

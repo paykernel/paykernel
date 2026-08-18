@@ -115,11 +115,13 @@ function isMoyasarRetryableError(error: unknown): boolean {
  * True only when Moyasar is known to have **rejected** the mutation (definite
  * client error). Used by `runIdempotentMutation` to clear the idempotency fence.
  *
- * Fail-closed (MOYASAR-1): anything else — network, 5xx, 429, **post-2xx**
- * invalid JSON (`GatewayApiError` with status 2xx), mapping/`MoneyAmountError`
- * after a successful HTTP body, unexpected throws — is treated as indeterminate
- * so the reservation is kept (`unknown`) and a caller retry cannot double-apply.
- * Moyasar has no native mutation idempotency.
+ * Fail-closed (MOYASAR-1 / NEW-MOYASAR-4XX): anything else — network, 5xx,
+ * 408/409/425/429, **post-2xx** invalid JSON (`GatewayApiError` with status
+ * 2xx), mapping/`MoneyAmountError` after a successful HTTP body, unexpected
+ * throws — is treated as indeterminate so the reservation is kept (`unknown`)
+ * and a caller retry cannot double-apply. Moyasar has no native mutation
+ * idempotency. 408/409/425 are the same class as 429 (timeout / conflict /
+ * too early), not a definite reject.
  */
 function isMoyasarDefiniteMutationFailure(error: unknown): boolean {
   if (error instanceof GatewayApiError) {
@@ -128,6 +130,9 @@ function isMoyasarDefiniteMutationFailure(error: unknown): boolean {
       typeof status === "number" &&
       status >= 400 &&
       status < 500 &&
+      status !== 408 &&
+      status !== 409 &&
+      status !== 425 &&
       status !== 429
     );
   }
@@ -334,14 +339,14 @@ export class MoyasarGateway extends BaseGateway {
    * - Already completed for this key: returns the cached result (no API call).
    * - In progress / outcome unknown for this key: refuses, instead of risking
    *   a duplicate mutation.
-   * - Definite failure only (`GatewayApiError` with 4xx except 429 — Moyasar
-   *   rejected the mutation): clears the reservation so the caller can safely
-   *   retry.
+   * - Definite failure only (`GatewayApiError` with 4xx except 408/409/425/429
+   *   — Moyasar rejected the mutation): clears the reservation so the caller
+   *   can safely retry.
    * - Indeterminate failures keep an `unknown` marker (never silently re-apply):
-   *   network, 5xx, 429, **post-2xx parse/map failures** (invalid JSON or
-   *   mapping errors after HTTP may already have applied the mutation), and any
-   *   other non-definite throw. Resolve via `getPayment` before retrying with
-   *   the same key (MOYASAR-1).
+   *   network, 5xx, 408/409/425/429, **post-2xx parse/map failures** (invalid
+   *   JSON or mapping errors after HTTP may already have applied the mutation),
+   *   and any other non-definite throw. Resolve via `getPayment` before
+   *   retrying with the same key (MOYASAR-1 / NEW-MOYASAR-4XX).
    */
   private async runIdempotentMutation<R>(
     operation:
@@ -427,10 +432,11 @@ export class MoyasarGateway extends BaseGateway {
       );
       return result;
     } catch (error) {
-      // MOYASAR-1: only clear when Moyasar definitively rejected the mutation
-      // (4xx except 429). Post-2xx parse/map failures, network, 5xx, 429, and
-      // unexpected throws are indeterminate — keep the fence so a retry cannot
-      // double-apply a mutation that may already have succeeded server-side.
+      // MOYASAR-1 / NEW-MOYASAR-4XX: only clear when Moyasar definitively
+      // rejected the mutation (4xx except 408/409/425/429). Post-2xx parse/map
+      // failures, network, 5xx, 408/409/425/429, and unexpected throws are
+      // indeterminate — keep the fence so a retry cannot double-apply a
+      // mutation that may already have succeeded server-side.
       if (isMoyasarDefiniteMutationFailure(error)) {
         await this.safeStoreWrite(operation, () => store.delete(key));
       } else {
@@ -903,6 +909,11 @@ export class MoyasarGateway extends BaseGateway {
           )) as MoyasarPaymentResponse | MoyasarErrorResponse;
 
           const payment = data as MoyasarPaymentResponse;
+          // NEW-MOYASAR-REFUND-ID: HTTP 200 `{}` / missing id is post-submit
+          // unknown. Throw NetworkError.afterProviderSubmit so the fence stays
+          // `unknown` — never persist completed pending with undefined
+          // gatewayRefundId (a new key would double-refund).
+          this.assertObservedPaymentId(payment);
           const paymentStatus = this.resolvePaymentStatus(payment);
           const refundedMinor =
             typeof payment.refunded === "number" &&

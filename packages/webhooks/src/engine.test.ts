@@ -1475,7 +1475,7 @@ describe("WEBHOOKS-1 Paymob redirect then processed is not duplicate_completed",
     expect(processed).toEqual({ outcome: "processed" });
     expect(processed.outcome).not.toBe("duplicate_completed");
     expect(processedRan).toBe(true);
-    expect(await store.get("paymob:TRANSACTION:123456789")).toMatchObject({
+    expect(await store.get("paymob:TRANSACTION:123456789:paid")).toMatchObject({
       status: "completed",
     });
   });
@@ -1527,6 +1527,96 @@ describe("WEBHOOKS-1 Paymob redirect then processed is not duplicate_completed",
     expect(second).toEqual({ outcome: "processed" });
     expect(second.outcome).not.toBe("duplicate_completed");
     expect(paidRan).toBe(true);
+  });
+
+  it("NEW-WEBHOOKS-2: processed TRANSACTION keys with different status are not already_completed", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const paid = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_paid",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "paid",
+      },
+      handler: async () => {},
+    });
+    expect(paid).toEqual({ outcome: "processed" });
+
+    let voidRan = false;
+    const voided = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_void",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "cancelled",
+      },
+      handler: async () => {
+        voidRan = true;
+      },
+    });
+
+    expect(voided).toEqual({ outcome: "processed" });
+    expect(voided.outcome).not.toBe("duplicate_completed");
+    expect(voidRan).toBe(true);
+    expect(await store.get("paymob:TRANSACTION:123456789:paid")).toMatchObject({
+      status: "completed",
+    });
+    expect(await store.get("paymob:TRANSACTION:123456789:cancelled")).toMatchObject({
+      status: "completed",
+    });
+  });
+
+  it("NEW-WH-1: extractInboxNotificationClass ignores remapped payment.succeeded", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const engine = createWebhookInboxEngine({ store, mode: "inline" });
+    const txnId = "123456789";
+
+    const remapped = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_remapped",
+      event: {
+        id: txnId,
+        type: "payment.succeeded",
+        gateway: "paymob",
+        status: "paid",
+      },
+      handler: async () => {},
+    });
+    expect(remapped).toEqual({ outcome: "processed" });
+    expect(await store.get("paymob:payment.succeeded:123456789")).toBeUndefined();
+    expect(await store.get("paymob:payment.succeeded:123456789:paid")).toBeUndefined();
+    expect(await store.get("paymob:123456789")).toMatchObject({
+      status: "completed",
+    });
+
+    let nativeRan = false;
+    const native = await engine.processVerified({
+      gateway: "paymob",
+      providerEventId: txnId,
+      payloadHash: "hash_native",
+      event: {
+        id: txnId,
+        type: "TRANSACTION",
+        gateway: "paymob",
+        status: "paid",
+      },
+      handler: async () => {
+        nativeRan = true;
+      },
+    });
+    expect(native).toEqual({ outcome: "processed" });
+    expect(native.outcome).not.toBe("duplicate_completed");
+    expect(nativeRan).toBe(true);
   });
 });
 

@@ -192,13 +192,16 @@ See also [hooks.md](./hooks.md#webhook-path-client-level-not-executewithhooks).
 capturing inventory, or sending goods.** For Stripe / PayPal / Moyasar that
 key is `event.id`. **Paymob must not use raw `event.id` alone** — redirect
 `TRANSACTION_RESPONSE` and processed `TRANSACTION` share the same transaction
-id. Use `deriveWebhookEventKey('paymob', event.id, event.type)` (or
-`event.provider?.eventType`) so a no-op redirect cannot ACK-suppress the later
-paid snapshot (WEBHOOKS-1). Processed Paymob `TRANSACTION` inbox key is
-`obj.id` (`paymob:TRANSACTION:{id}`). A later same-id snapshot is
-`already_completed`. Child refund/capture callbacks have **new** `obj.id`s
-(new inbox keys). Do **not** complete fulfillment on Paymob
-`payment.processing` — wait for processed `TRANSACTION` (NEW-WEBHOOKS-2).
+id. Use `deriveWebhookEventKey('paymob', event.id, event.provider?.eventType ?? event.type, event.status)`
+so a no-op redirect cannot ACK-suppress the later paid snapshot (WEBHOOKS-1).
+Prefer `provider.eventType` or known native classes (`TRANSACTION` /
+`TRANSACTION_RESPONSE`) — not remapped `payment.succeeded`. Redirect stays
+`paymob:TRANSACTION_RESPONSE:{txnId}`. Processed `TRANSACTION` includes
+domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a later
+same-id void/refund snapshot is not `already_completed` (NEW-WEBHOOKS-2).
+Child refund/capture callbacks may still have **new** `obj.id`s. Do **not**
+complete fulfillment on Paymob `payment.processing` — wait for processed
+`TRANSACTION`.
 
 Providers redeliver the same event when your endpoint returns 5xx (including when
 `onWebhookVerified` throws). Without an idempotency check on the inbox key, a

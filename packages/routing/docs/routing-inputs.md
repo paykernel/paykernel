@@ -100,6 +100,7 @@ Amount comparisons **never** use floating-point `Number` equality for money.
 | Rule currency ≠ input currency | No match (no silent accept) |
 | Invalid / unparseable decimal | No match (matcher fails closed; no float coercion) |
 | Complementary amount-split + `fallback` (e.g. Stripe ≤99.99 + PayPal ≥100) | Each amount matches one rule. After excluding one bucket, the other rule’s range honesty-blocks select-time fallback (`NoRouteMatchError`). Fail-closed — see [selection.md](./selection.md#select-time-fallback-not-post-attempt). |
+| Complementary currency / country / method + `fallback` (e.g. USD→stripe + EUR→adyen) | Each value matches one rule. After excluding the matching bucket, complementary partitions honesty-block unconstrained fallback (`NoRouteMatchError`, not stripe). Unmatched values (GBP) may still use fallback. |
 
 Helpers exported for advanced use / tests: `amountInRange`, `resolveInputAmount`, `compareDecimalAmounts`.
 

@@ -565,6 +565,23 @@ describe("redact", () => {
     expect(out.amount).toBe(10);
   });
 
+  it("redacts Stripe PI client secrets on allow-listed leaves (NEW-OBS-2)", () => {
+    const piSecret = "pi_3N3xYZABC_secret_abc123def";
+    const out = redact({
+      providerObjectId: piSecret,
+      gatewayPaymentId: "pi_3N3xYZABC",
+      note: `next_action ${piSecret}`,
+      amount: 10,
+    }) as Record<string, unknown>;
+
+    expect(out.providerObjectId).toBe("[REDACTED]");
+    expect(out.gatewayPaymentId).toBe("pi_3N3xYZABC");
+    expect(out.note).toBe("[REDACTED]");
+    expect(out.amount).toBe(10);
+    expect(JSON.stringify(out)).not.toContain("_secret_");
+    expect(JSON.stringify(out)).not.toContain(piSecret);
+  });
+
   it("redacts embedded sk_live_ / PAN inside hookError strings (MONEY-3)", () => {
     const out = redact({
       hookError: "after hook threw: sk_live_51HxExampleSecretKeyValue",
@@ -768,6 +785,37 @@ describe("createRedactingLogger", () => {
     expect(calls[0]![0]).toBe("charging");
     expect((calls[0]![1] as any).amount).toBe(5);
     expect((calls[0]![1] as any).card).toBe("[REDACTED]");
+  });
+
+  it("sanitizes PI client secrets in the message and allow-listed context (NEW-OBS-2)", () => {
+    const calls: Array<[string, unknown?]> = [];
+    const sink: Logger = {
+      debug: () => {},
+      info: (m, c) => calls.push([m, c]),
+      warn: () => {},
+      error: () => {},
+    };
+    const logger = createRedactingLogger(sink);
+    const piSecret = "pi_3N3xYZABC_secret_abc123def";
+
+    logger.info(`next_action ${piSecret}`, {
+      providerObjectId: piSecret,
+      gatewayPaymentId: "pi_3N3xYZABC",
+      amount: 12,
+    });
+    logger.info(piSecret);
+
+    expect(calls[0]![0]).toBe("next_action [REDACTED]");
+    expect(calls[0]![0]).not.toContain("_secret_");
+    expect(calls[0]![0]).not.toContain(piSecret);
+    const ctx = calls[0]![1] as Record<string, unknown>;
+    expect(ctx.providerObjectId).toBe("[REDACTED]");
+    expect(ctx.gatewayPaymentId).toBe("pi_3N3xYZABC");
+    expect(ctx.amount).toBe(12);
+    expect(JSON.stringify(ctx)).not.toContain(piSecret);
+
+    expect(calls[1]![0]).toBe("[REDACTED]");
+    expect(calls[1]![0]).not.toContain("pi_");
   });
 });
 

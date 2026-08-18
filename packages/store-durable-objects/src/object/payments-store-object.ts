@@ -48,6 +48,7 @@ import type {
   WebhookInboxRecord,
 } from "@paykernel/store-contracts";
 import type { SchemaNamespaceConfig } from "@paykernel/sql-foundation";
+import type { ShardOccupancyHint } from "../occupancy";
 import type { DoStorageLike } from "../types";
 import type { StoreClock } from "../clock";
 import { createSystemClock } from "../clock";
@@ -349,7 +350,7 @@ export class PaymentsStoreObject {
   async peekRetryableWebhooks(
     input: ListRetryableInput,
     tableNamespace?: SchemaNamespaceConfig,
-  ): Promise<boolean> {
+  ): Promise<ShardOccupancyHint> {
     const s = await this.readyStores(tableNamespace);
     return s.webhookInbox.peekRetryable(input);
   }
@@ -431,7 +432,7 @@ export class PaymentsStoreObject {
   async peekDueReconciliation(
     input: ListDueInput,
     tableNamespace?: SchemaNamespaceConfig,
-  ): Promise<boolean> {
+  ): Promise<ShardOccupancyHint> {
     const s = await this.readyStores(tableNamespace);
     return s.reconciliation.peekDue(input);
   }

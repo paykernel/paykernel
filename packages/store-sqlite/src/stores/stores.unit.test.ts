@@ -24,6 +24,7 @@ import {
   openBunSqliteDatabase,
 } from "../drivers/bun";
 import type { SqliteExecutor } from "../executor";
+import { DEFAULT_DELETE_EXPIRED_LIMIT } from "./shared";
 
 describe("sqlite stores unit (bun:sqlite memory)", () => {
   let executor: SqliteExecutor;
@@ -871,6 +872,57 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(after?.lastError).toBe("handler_timeout");
   });
 
+});
+
+describe("NEW-PERF-8 deleteExpired default limit", () => {
+  it("webhook/recon omit limit binds finite LIMIT (not unbounded DELETE)", async () => {
+    expect(DEFAULT_DELETE_EXPIRED_LIMIT).toBe(1000);
+    expect(Number.isFinite(DEFAULT_DELETE_EXPIRED_LIMIT)).toBe(true);
+
+    function recordingExecutor() {
+      const calls: Array<{ sql: string; params: readonly unknown[] }> = [];
+      const executor: SqliteExecutor & { calls: typeof calls } = {
+        calls,
+        query(sql, params = []) {
+          calls.push({ sql, params });
+          return [];
+        },
+        run(sql, params = []) {
+          calls.push({ sql, params });
+          return { changes: 0 };
+        },
+        transaction<T>(fn: () => T) {
+          return fn();
+        },
+      };
+      return executor;
+    }
+
+    const webhookExec = recordingExecutor();
+    await createSqliteWebhookInboxStore({ executor: webhookExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const webhookDel = webhookExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(webhookDel).toBeDefined();
+    expect(webhookDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(webhookDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const reconExec = recordingExecutor();
+    await createSqliteReconciliationStore({ executor: reconExec }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+    });
+    const reconDel = reconExec.calls.find((c) => c.sql.includes("DELETE"));
+    expect(reconDel).toBeDefined();
+    expect(reconDel!.sql).toMatch(/LIMIT\s+\?/i);
+    expect(reconDel!.params[1]).toBe(DEFAULT_DELETE_EXPIRED_LIMIT);
+
+    const explicit = recordingExecutor();
+    await createSqliteReconciliationStore({ executor: explicit }).deleteExpired({
+      before: "2099-01-01T00:00:00.000Z",
+      limit: 5,
+    });
+    expect(explicit.calls.find((c) => c.sql.includes("DELETE"))?.params[1]).toBe(5);
+  });
 });
 
 describe("serializeResultJson honesty (STORES-3)", () => {

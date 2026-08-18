@@ -34,7 +34,9 @@ import {
  * - `indeterminate` → result with `outcome: 'indeterminate'`, `success: false`,
  *   status processing, `reconciliationRequired: true` (never a definitive decline)
  * - `requires_action` → `outcome: 'requires_action'`, `success: true`, pending + redirect
- * - `succeeded` → `outcome: 'succeeded'`, status paid (fulfill only when paid-like)
+ * - `succeeded` → `outcome: 'succeeded'`; create with `capture: false` +
+ *   authorization stays `authorized` + capturedAmount 0 (NEW-TESTKIT-6).
+ *   Immediate-capture create stays paid.
  * - `failed` → definitive failure (`outcome: 'failed'`, success:false, status failed)
  * - `declined` / `insufficient_funds` → typed card/funds errors (throw path)
  */

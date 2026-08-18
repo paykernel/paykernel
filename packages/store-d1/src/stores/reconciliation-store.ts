@@ -37,6 +37,7 @@ import { clockAddMsIso, clockNowIso } from "../clock";
 import { withMappedErrors, withMappedTransaction } from "../errors";
 import type { D1StoreOptions } from "../types";
 import {
+  DEFAULT_DELETE_EXPIRED_LIMIT,
   RECON_SELECT_COLS,
   mapReconciliationRow,
   newLeaseToken,
@@ -390,28 +391,19 @@ RETURNING key, status, generation`,
     async deleteExpired(input: CleanupInput): Promise<CleanupResult> {
       return withMappedErrors(async () => {
         const before = canonicalizeIsoTimestamp(input.before, "before");
-        const limit = input.limit;
-        if (limit !== undefined) {
-          const rows = await ctx.getExecutor().query<{ key: string }>(
-            `DELETE FROM ${table}
-             WHERE key IN (
-               SELECT key FROM ${table}
-               WHERE status IN ('completed', 'failed', 'manual_review')
-                 AND updated_at <= ?
-               ORDER BY updated_at ASC
-               LIMIT ?
-             )
-             RETURNING key`,
-            [before, limit],
-          );
-          return { deleted: rows.length };
-        }
+        // NEW-PERF-8: omit limit must not unbounded-DELETE (Redis default 1000).
+        const limit = input.limit ?? DEFAULT_DELETE_EXPIRED_LIMIT;
         const rows = await ctx.getExecutor().query<{ key: string }>(
           `DELETE FROM ${table}
-           WHERE status IN ('completed', 'failed', 'manual_review')
-             AND updated_at <= ?
+           WHERE key IN (
+             SELECT key FROM ${table}
+             WHERE status IN ('completed', 'failed', 'manual_review')
+               AND updated_at <= ?
+             ORDER BY updated_at ASC
+             LIMIT ?
+           )
            RETURNING key`,
-          [before],
+          [before, limit],
         );
         return { deleted: rows.length };
       });

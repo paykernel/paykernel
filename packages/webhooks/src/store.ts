@@ -316,12 +316,19 @@ export interface WebhookInboxStore extends WithTransaction {
   /**
    * Extend an active lease. **Requires active `leaseToken`.**
    * On success: rotates token, increments generation; pre-renew token is invalid.
+   *
+   * **NEW-STORE-3:** must not soft-release an expired lease before the token
+   * fence. Expired / mismatched renew fails closed without wiping the row.
    */
   renew(input: RenewWebhookLeaseInput): Promise<RenewWebhookLeaseResult>;
 
   /**
    * Mark event processing complete (terminal).
    * **Requires active `leaseToken`.** Stale/wrong/expired → {@link StoreLeaseLostError}.
+   *
+   * **NEW-STORE-3:** must not wipe an expired lease before the token check.
+   * Token match + unexpired lease records complete; otherwise fail closed
+   * without restore-then-lose (`fail` may still record after expiry).
    */
   complete(input: CompleteWebhookInput): Promise<void>;
 

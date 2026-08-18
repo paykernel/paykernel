@@ -2991,6 +2991,118 @@ describe("MoyasarGateway", () => {
       expect(fetchCalls).toHaveLength(2);
     });
 
+    it("treats refund HTTP 200 {} as indeterminate and does not complete the fence (NEW-MOYASAR-REFUND-ID)", async () => {
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      mockFetchJson({});
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: "refund-key-empty-2xx",
+      };
+
+      const first = await gateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+      expect(first.status).not.toBe("completed");
+      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("pending");
+      expect(first.outcome).not.toBe("succeeded");
+
+      const fence = await idempotencyStore.get(
+        `moyasar:refundPayment:${PAYMENT_ID}:refund-key-empty-2xx`,
+      );
+      expect(fence?.status).toBe("unknown");
+      expect(fence?.status).not.toBe("completed");
+      expect(fence?.result).toBeUndefined();
+
+      await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("treats refund HTTP 200 missing payment.id as indeterminate even when status is refunded (NEW-MOYASAR-REFUND-ID)", async () => {
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      mockFetchJson({
+        status: "refunded",
+        amount: 10000,
+        currency: "SAR",
+        refunded: 10000,
+      });
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: "refund-key-missing-id-2xx",
+      };
+
+      const first = await gateway.refundPayment(params);
+      expect(first.outcome).toBe("indeterminate");
+      expect(first.reconciliationRequired).toBe(true);
+      expect(first.status).not.toBe("completed");
+      expect(first.success).not.toBe(true);
+
+      const fence = await idempotencyStore.get(
+        `moyasar:refundPayment:${PAYMENT_ID}:refund-key-missing-id-2xx`,
+      );
+      expect(fence?.status).toBe("unknown");
+      expect(fence?.result).toBeUndefined();
+
+      await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("keeps the refund fence after HTTP 408 (NEW-MOYASAR-4XX)", async () => {
+      const idempotencyStore = new InMemoryIdempotencyStore();
+      const gateway = createGateway({ ...CONFIG, idempotencyStore });
+      mockFetchJson({ type: "api_error", message: "request timeout" }, 408);
+
+      const params = {
+        gatewayPaymentId: PAYMENT_ID,
+        idempotencyKey: "refund-key-408",
+      };
+
+      await expect(gateway.refundPayment(params)).rejects.toBeTruthy();
+
+      const fence = await idempotencyStore.get(
+        `moyasar:refundPayment:${PAYMENT_ID}:refund-key-408`,
+      );
+      expect(fence?.status).toBe("unknown");
+      expect(fence?.status).not.toBe("completed");
+
+      await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
+        InvalidRequestError,
+      );
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("keeps the refund fence after HTTP 409 and 425 (NEW-MOYASAR-4XX)", async () => {
+      for (const status of [409, 425] as const) {
+        fetchCalls = [];
+        const idempotencyStore = new InMemoryIdempotencyStore();
+        const gateway = createGateway({ ...CONFIG, idempotencyStore });
+        mockFetchJson({ type: "api_error", message: `http ${status}` }, status);
+        const key = `refund-key-${status}`;
+        const params = {
+          gatewayPaymentId: PAYMENT_ID,
+          idempotencyKey: key,
+        };
+
+        await expect(gateway.refundPayment(params)).rejects.toBeTruthy();
+        const fence = await idempotencyStore.get(
+          `moyasar:refundPayment:${PAYMENT_ID}:${key}`,
+        );
+        expect(fence?.status).toBe("unknown");
+        await expect(gateway.refundPayment(params)).rejects.toBeInstanceOf(
+          InvalidRequestError,
+        );
+        expect(fetchCalls).toHaveLength(1);
+      }
+    });
+
     it("keeps reservation after 2xx invalid JSON on refund (MOYASAR-1)", async () => {
       // HTTP 2xx with unparseable body: mutation may already have applied.
       // Fence must stay so a retry cannot double-refund.

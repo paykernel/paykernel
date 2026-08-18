@@ -4,7 +4,7 @@
 
 ### Patch
 
-- **PERF-5:** `listDue` / `listRetryable` peek every enumerable hash shard, then full-list only occupied shards (expired `claimed` counts as occupied). Required RPCs: `peekDueReconciliation`, `peekRetryableWebhooks`.
+- **PERF-5:** `listDue` / `listRetryable` peek every enumerable hash shard (now returning `{ occupied, earliest }`). Full list runs only on shards that can contribute to the global earliest-N; later occupied shards whose earliest is after the cutoff are skipped. Boolean peek (rolling old Workers) is fail-closed to “must list”. Expired `claimed` still counts as occupied.
 - **P17-RPC:** Worker wrappers must forward `bindHashPartitionLayout` (DO-1). `REQUIRED_DO_RPC_METHODS` lists the required stub surface; smoke Worker + wrangler sketch included.
 - **P17-ERR:** Reconstruct `StoreError` after a stub hop (`err.name` / `{ __pkStoreError, code }`) before `mapDriverError`. Cloned `StoreLeaseLostError` stays non-retryable (not `StoreUnavailableError`).
 - **P17-CLEAN:** Bounded `deleteExpired` uses a per-partition budget and rotating start so later hash partitions are not starved.

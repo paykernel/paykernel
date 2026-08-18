@@ -184,6 +184,18 @@ describe("sanitizeSpanStatusMessage (OBS-1)", () => {
     expect(sanitizeSpanStatusMessage("   ")).toBeUndefined();
   });
 
+  it("redacts Stripe PI client secrets in span status messages (NEW-OBS-2)", () => {
+    expect(sanitizeSpanStatusMessage("pi_3N3xYZ_secret_abc123def")).toBeUndefined();
+    expect(
+      sanitizeSpanStatusMessage("next_action pi_3N3xYZ_secret_abc123def"),
+    ).toBe("next_action [REDACTED]");
+    const scrubbed = sanitizeSpanStatusMessage(
+      "client_secret=pi_3N3xYZ_secret_abc123def",
+    );
+    expect(scrubbed).not.toContain("_secret_");
+    expect(scrubbed).not.toContain("abc123def");
+  });
+
   it("drops embedded PANs in span status messages (NEW-OBS-1)", () => {
     expect(sanitizeSpanStatusMessage("4242424242424242")).toBeUndefined();
     expect(sanitizeSpanStatusMessage("4111 1111 1111 1111")).toBeUndefined();
