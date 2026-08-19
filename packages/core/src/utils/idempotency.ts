@@ -334,9 +334,22 @@ function hashedFingerprintLeaf(value: unknown): string {
 }
 
 /**
+ * Money majors can be 13–19 digits (JPY 1e12). Value-level PAN hashing
+ * before {@link stableStringify} canonicalize would split number vs string
+ * vs trailing-zero bags of the same economic amount (C-R8-FINGERPRINT-MONEY-PAN).
+ */
+function isFingerprintMoneyAmountLeaf(
+  key: string,
+  parent: Record<string, unknown>,
+): boolean {
+  return key === "amount" && typeof parent.currency === "string";
+}
+
+/**
  * Logger {@link redact} is correct for logs (constant `[REDACTED]`) but wrong
  * for idempotency identity: two OTPs / billing bags would collide. Preserve
- * Date, hash sensitive leaves, and skip PAN-hashing allow-listed ids.
+ * Date, hash sensitive leaves, skip PAN-hashing allow-listed ids, and leave
+ * Money `amount` strings intact so money-canonicalization can still run.
  */
 function redactForFingerprint(value: unknown, depth = 0): unknown {
   if (depth > 6) {
@@ -355,8 +368,9 @@ function redactForFingerprint(value: unknown, depth = 0): unknown {
     return value.map((item) => redactForFingerprint(item, depth + 1));
   }
 
+  const record = value as Record<string, unknown>;
   const out: Record<string, unknown> = {};
-  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+  for (const [key, val] of Object.entries(record)) {
     if (key === "__proto__" || key === "constructor" || key === "prototype") {
       continue;
     }
@@ -366,8 +380,10 @@ function redactForFingerprint(value: unknown, depth = 0): unknown {
     }
     if (typeof val === "string" && isOpaqueSensitiveFingerprintString(val)) {
       // Allow-listed ids: 13–19 digit values are gateway ids, not PANs.
+      // Money amount leaves: let stringify collapse number / string / trailing-zero.
       out[key] =
-        isFingerprintIdentityKey(key) && isDigitRunId(val)
+        (isFingerprintIdentityKey(key) && isDigitRunId(val)) ||
+        isFingerprintMoneyAmountLeaf(key, record)
           ? val
           : hashedFingerprintLeaf(val);
       continue;

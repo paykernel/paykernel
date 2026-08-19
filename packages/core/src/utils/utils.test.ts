@@ -1337,6 +1337,28 @@ describe("fingerprintParams", () => {
     }
   });
 
+  it("C-R8-FINGERPRINT-MONEY-PAN: JPY 1e12 Money / string / number / trailing-zero share one SHA-256", () => {
+    const expected = fingerprintParams(money(1e12, "JPY"));
+    const variants = [
+      { amount: "1000000000000", currency: "JPY" },
+      { amount: 1_000_000_000_000, currency: "JPY" },
+      { amount: "1000000000000.0", currency: "JPY" },
+      { amount: money(1e12, "JPY"), currency: "JPY" },
+    ];
+    expect(expected).toMatch(/^[0-9a-f]{64}$/);
+    expect(expected).not.toContain("1000000000000");
+    for (const variant of variants) {
+      expect(fingerprintParams(variant)).toBe(expected);
+    }
+    expect(fingerprintParams({ amount: "1000000000001", currency: "JPY" })).not.toBe(
+      expected,
+    );
+    // Amount without sibling currency is not money — still PAN-hash the leaf.
+    expect(fingerprintParams({ amount: "1000000000000" })).not.toBe(
+      sha256Hex(stableStringifyParams({ amount: "1000000000000" })),
+    );
+  });
+
   it("strips AbortSignal so caller signals are not identity", () => {
     const amount = { amount: 10, currency: "USD", orderId: "ord_sig" };
     const withSignal = {
