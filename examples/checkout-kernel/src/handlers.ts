@@ -53,9 +53,9 @@ function testHookDisabled(): CheckoutHttpResult {
  * Shared route helpers so Hono/Elysia stay thin.
  * Webhook callers must pass the **raw** body text (do not JSON.parse first).
  *
- * `/internal/reconcile` and `/internal/provider-paid` are test hooks.
- * They are unauthenticated — do not deploy them. Pass `{ enableTestHooks: true }`
- * only in local tests.
+ * `/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count`
+ * are test hooks. They are unauthenticated — do not deploy them. Pass
+ * `{ enableTestHooks: true }` only in local tests.
  */
 export function createCheckoutHandlers(
   kernel: CheckoutKernel,
@@ -90,6 +90,8 @@ export function createCheckoutHandlers(
       return kernel.markProviderPaid(input.gatewayPaymentId);
     },
     createCount() {
+      // Test hook only — unauthenticated. Do not deploy this route.
+      if (!enableTestHooks) return testHookDisabled();
       return { status: 200, body: { count: kernel.createPaymentCount() } };
     },
   };
@@ -120,6 +122,7 @@ export async function dispatchCheckoutRequest(
     if (method === "POST" && path === "/internal/reconcile") {
       return checkoutJsonResponse(await handlers.reconcile());
     }
+    // Test hook only — unauthenticated. Do not deploy this route.
     if (method === "GET" && path === "/internal/create-count") {
       return checkoutJsonResponse(handlers.createCount());
     }

@@ -12,6 +12,10 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
 
     expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).toContain("payload_hash");
     expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).toContain("ifMatchPayloadHash");
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).toContain("ifMatchPresent");
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).not.toMatch(
+      /if ifMatchPayloadHash ~= ''/,
+    );
     expect(REDIS_SCRIPT_REGISTRY.webhookInbox.fail).toContain("dead_letter");
 
     expect(REDIS_SCRIPT_REGISTRY.reconciliation.schedule).toContain("scheduled");

@@ -18,6 +18,7 @@ import type {
 } from "@paykernel/store-contracts";
 import {
   StoreCorruptedRecordError,
+  StoreInvalidSchemaError,
   StoreLeaseLostError,
 } from "@paykernel/store-contracts";
 import {
@@ -69,6 +70,13 @@ export function createRedisWebhookInboxStore(
     return recordKey(ctx.keys, "whinbox", key);
   }
 
+  function requireNonEmptyHash(value: string, field: string): string {
+    if (value.length === 0) {
+      throw new StoreInvalidSchemaError(`${field} must be a non-empty string`);
+    }
+    return value;
+  }
+
   async function runGet(
     key: string,
     nowMs = clockNowMsString(ctx.clock),
@@ -93,6 +101,11 @@ export function createRedisWebhookInboxStore(
         const leaseToken = newLeaseToken();
         const payloadRef =
           enforceMaxString(input.payloadRef, MAX_PAYLOAD_REF_LENGTH) ?? "";
+        requireNonEmptyHash(input.payloadHash, "payloadHash");
+        const ifMatch = input.ifMatchPayloadHash;
+        if (ifMatch !== undefined) {
+          requireNonEmptyHash(ifMatch, "ifMatchPayloadHash");
+        }
         const raw = await ctx.eval.eval(
           WEBHOOK_CLAIM_LUA,
           [rk(input.key), indexKey],
@@ -106,7 +119,8 @@ export function createRedisWebhookInboxStore(
             clockAddMsString(ctx.clock, input.leaseMs),
             payloadRef,
             input.key,
-            input.ifMatchPayloadHash ?? "",
+            ifMatch ?? "",
+            ifMatch !== undefined ? "1" : "0",
           ],
         );
         const tagged = parseTaggedResult(raw);
@@ -245,14 +259,13 @@ export function createRedisWebhookInboxStore(
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
         // STORES-4: fail closed on invalid input.now — never NaN/"NaN" ZSET scores.
-        const nowMs =
-          input.now !== undefined
-            ? msFromIso(input.now)
-            : clockNowMsString(ctx.clock);
-        const nowIso =
-          input.now !== undefined
-            ? canonicalizeIsoZ(input.now)
-            : clockNowIso(ctx.clock);
+        // S20-LIST-NOW: wipe expired leases with the store clock that issued them.
+        // Caller now is the due/available filter only (ZRANGE). A host clock ahead
+        // of the issuer must not HSET-clear a still-valid lease_token.
+        const storeNowMs = clockNowMsString(ctx.clock);
+        const storeNowIso = clockNowIso(ctx.clock);
+        const listNowMs =
+          input.now !== undefined ? msFromIso(input.now) : storeNowMs;
         const limit = input.limit ?? 100;
         // PERF-1 / PERF-4: ZSET scored at available_ms / lease_expires_ms (claim +
         // REDIS-1 renew). SCAN is off the poll path. One list-GET EVAL loads
@@ -260,7 +273,7 @@ export function createRedisWebhookInboxStore(
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           indexKey,
           "-inf",
-          nowMs,
+          listNowMs,
           "LIMIT",
           "0",
           String(limit),
@@ -272,7 +285,7 @@ export function createRedisWebhookInboxStore(
         const raw = await ctx.eval.eval(
           WEBHOOK_LIST_GET_LUA,
           [indexKey, ...keys.map((k) => rk(k))],
-          [nowMs, nowIso, ...keys],
+          [storeNowMs, storeNowIso, ...keys],
         );
         const records = parseTaggedResultList(raw).map((tagged) => {
           if (tagged.tag === "missing") return undefined;

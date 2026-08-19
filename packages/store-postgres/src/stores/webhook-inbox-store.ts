@@ -277,12 +277,14 @@ export function createPostgresWebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
-        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
-        // Non-Z input.now written into available_at on soft-release would break ordering.
-        const now =
+        // S20-LIST-NOW: wipe expired leases only with the store clock that issued
+        // them. Caller now can be ahead of the issuer and must not clear a live
+        // token. Canonical caller now is the available_at filter only.
+        const storeNow = clockNowIso(ctx.clock);
+        const listNow =
           input.now !== undefined
             ? canonicalizeIsoTimestamp(input.now, "now")
-            : clockNowIso(ctx.clock);
+            : storeNow;
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0); next claim of pending
@@ -307,7 +309,7 @@ export function createPostgresWebhookInboxStore(
              ORDER BY lease_expires_at ASC
              LIMIT $2
            )`,
-          [now, limit],
+          [storeNow, limit],
         );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT key, status, payload_hash, payload_ref, gateway, provider_event_id,
@@ -319,7 +321,7 @@ export function createPostgresWebhookInboxStore(
              AND available_at <= $1
            ORDER BY available_at ASC
            LIMIT $2`,
-          [now, limit],
+          [listNow, limit],
         );
         return rows.map(mapWebhookRow);
       });

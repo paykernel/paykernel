@@ -314,8 +314,41 @@ describe("P610-INF: infer fail-closed money / no dual-write lie", () => {
       ),
     ).toBe("succeeded");
     expect(
+      inferOperationOutcome(
+        basePayment({ success: true, status: "setup_completed" }),
+      ),
+    ).toBe("succeeded");
+    expect(
+      isPaidOutcome(basePayment({ success: true, status: "setup_completed" })),
+    ).toBe(false);
+    expect(
       isPaidOutcome(basePayment({ success: true, status: "authorized" })),
     ).toBe(false);
+  });
+
+  it("S20-FAILED-DECLINED: bare status failed without decline is failed", () => {
+    const rows: Array<[Partial<GatewayPaymentResult>, "failed" | "declined"]> = [
+      [{ success: false, status: "failed", gatewayId: "pi_bare_fail" }, "failed"],
+      [
+        {
+          success: false,
+          status: "failed",
+          gatewayId: "pi_declined",
+          decline: { code: "card_declined", message: "nope" },
+        },
+        "declined",
+      ],
+    ];
+    for (const [patch, outcome] of rows) {
+      expect(inferOperationOutcome(basePayment(patch))).toBe(outcome);
+    }
+    const bare = basePayment({
+      success: false,
+      status: "failed",
+      gatewayId: "pi_bare_fail",
+    });
+    expect(mapGatewayResultToOperationResult(bare).outcome).toBe("failed");
+    expect(isPaidOutcome(bare)).toBe(false);
   });
 
   it("success:false + pending/processing/approved infers indeterminate", () => {

@@ -1262,7 +1262,7 @@ describe("fingerprintParams", () => {
     );
   });
 
-  it("redacts PII so card numbers are not stored and do not split identity", () => {
+  it("hashes card-number leaves so Visa vs Mastercard do not collide (S20-FINGERPRINT-REDACT)", () => {
     const withVisa = {
       amount: 10,
       currency: "USD",
@@ -1273,16 +1273,68 @@ describe("fingerprintParams", () => {
       currency: "USD",
       cardNumber: "5555555555554444",
     };
-    const redacted = {
-      amount: 10,
-      currency: "USD",
-      cardNumber: "[REDACTED]",
-    };
-    const fp = fingerprintParams(withVisa);
-    expect(fp).not.toContain("4111111111111111");
-    expect(fp).not.toBe(sha256Hex(stableStringifyParams(withVisa)));
-    expect(fp).toBe(sha256Hex(stableStringifyParams(redacted)));
-    expect(fp).toBe(fingerprintParams(withMc));
+    const fpVisa = fingerprintParams(withVisa);
+    const fpMc = fingerprintParams(withMc);
+
+    expect(fpVisa).toMatch(/^[0-9a-f]{64}$/);
+    expect(fpVisa).not.toBe(fpMc);
+    expect(fpVisa).not.toContain("4111111111111111");
+    expect(fpMc).not.toContain("5555555555554444");
+    // Raw PAN bags are not the stored identity (leaf is transformed).
+    expect(fpVisa).not.toBe(sha256Hex(stableStringifyParams(withVisa)));
+    expect(fpMc).not.toBe(sha256Hex(stableStringifyParams(withMc)));
+  });
+
+  it("does not collapse distinct billing / otp / gatewayPaymentId leaves (S20-FINGERPRINT-REDACT)", () => {
+    const idA = "1234567890123";
+    const idB = "9876543210987";
+    const pairs = [
+      [
+        {
+          paymobBillingData: {
+            email: "a@example.com",
+            firstName: "Ada",
+            lastName: "Lovelace",
+            phone: "0500000001",
+          },
+        },
+        {
+          paymobBillingData: {
+            email: "b@example.com",
+            firstName: "Grace",
+            lastName: "Hopper",
+            phone: "0500000002",
+          },
+        },
+      ],
+      [{ otpValue: "1111" }, { otpValue: "2222" }],
+      [{ gatewayPaymentId: idA }, { gatewayPaymentId: idB }],
+      [{ orderId: idA }, { orderId: idB }],
+      [{ paymentId: idA }, { paymentId: idB }],
+    ] as const;
+    for (const [left, right] of pairs) {
+      expect(fingerprintParams(left)).not.toBe(fingerprintParams(right));
+    }
+    // Allow-listed ids are not PAN-hashed; 13-digit values stay identity.
+    expect(fingerprintParams({ gatewayPaymentId: idA })).toBe(
+      sha256Hex(stableStringifyParams({ gatewayPaymentId: idA })),
+    );
+  });
+
+  it("still collides economically identical money while hashing PII (S20-FINGERPRINT-REDACT)", () => {
+    const collisions = [
+      [
+        { amount: "10.50", currency: "USD", email: "a@b.com" },
+        { amount: 10.5, currency: "usd", email: "a@b.com" },
+      ],
+      [
+        { amount: "10.500", currency: "USD" },
+        { amount: "10.50", currency: "USD" },
+      ],
+    ] as const;
+    for (const [left, right] of collisions) {
+      expect(fingerprintParams(left)).toBe(fingerprintParams(right));
+    }
   });
 
   it("strips AbortSignal so caller signals are not identity", () => {

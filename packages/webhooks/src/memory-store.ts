@@ -105,8 +105,8 @@ export function createMemoryWebhookInboxStore(
       // WEBHOOKS-1: crash/deploy reclaim must not burn the maxAttempts handler
       // budget. This claim never completed via fail/complete (handler outcome),
       // so restore the claim's attempt++ before exposing the row as pending.
-      // Soft-release is the only safe place: get/listRetryable may release
-      // before the next claim, so claim-time detection alone is insufficient.
+      // Soft-release only on listRetryable/claim (S20-MEM-GET-WIPE): get is
+      // read-only so a host clock cannot clear a still-valid issuer lease.
       const released: WebhookInboxRecord = {
         ...rec,
         status: "pending",
@@ -337,9 +337,8 @@ export function createMemoryWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      const existing = entries.get(key);
-      if (!existing) return undefined;
-      return releaseExpiredLease(key, existing);
+      // S20-MEM-GET-WIPE: get is read-only. Soft-release lives on list/claim.
+      return entries.get(key);
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {

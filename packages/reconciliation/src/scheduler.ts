@@ -52,12 +52,19 @@ export type ScheduleJobInput = {
 /**
  * Options for {@link ReconciliationScheduler.claimDue}.
  *
- * Claims are sequential (S19-CLAIM-DUE). Production workers should prefer
- * {@link ReconciliationScheduler.processDue}, which claims immediately before
- * each handler and auto-renews the lease.
+ * **Discovery / inspection only — not a production worker.** Claims are
+ * sequential (S19-CLAIM-DUE) but the helper still returns every acquired
+ * lease at once. Hosts must not do serial handler work on that array
+ * (S20-CLAIM-DUE-N: peer steal / `lease_lost` after the first job).
+ * Production workers use {@link ReconciliationScheduler.processDue} as
+ * the only poll loop.
  */
 export type ClaimDueOptions = {
-  /** listDue window and max jobs to claim (each claim is one-at-a-time). */
+  /**
+   * `listDue` window / max jobs to acquire for discovery.
+   * Each claim is one-at-a-time; all acquired leases are still returned
+   * together. Do not serial-work that array — use `processDue`.
+   */
   limit?: number;
   owner?: string;
   leaseMs?: number;
@@ -189,11 +196,13 @@ export type ProcessDueResult = {
 const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
- * S19-CLAIM-DUE / claimDue: list is discovery only; claim is the fence.
+ * S19-CLAIM-DUE / S20-CLAIM-DUE-N: list is discovery only; claim is the fence.
  * Claim listed rows **one-at-a-time**. `Promise.all` would hold N live
- * leases while a later claim is still in flight (and the caller typically
- * works the returned array serially). `processDue` must not pre-claim the
- * list at all — it claims immediately before each handler (NEW-RECON-2).
+ * leases while a later claim is still in flight.
+ *
+ * This helper still **returns** every acquired lease. It is not a production
+ * worker — hosts must not serial-work that array. `processDue` is the only
+ * production poll loop (claims immediately before each handler; NEW-RECON-2).
  */
 async function claimListedDue(
   store: ReconciliationStore,
@@ -250,14 +259,15 @@ function deriveSubjectId(target: ReconciliationTarget, key: string): string {
 export type ReconciliationScheduler = {
   schedule(input: ScheduleJobInput): Promise<ScheduleResult>;
   /**
-   * Claim due jobs: listDue then atomic claim each, **one-at-a-time**
+   * Discovery helper: `listDue` then atomic claim each, **one-at-a-time**
    * (S19-CLAIM-DUE — do not `Promise.all` N leases). Skips not_due /
    * in_progress / already_terminal / not_found.
    *
-   * Production workers should use {@link ReconciliationScheduler.processDue}:
-   * it claims immediately before each handler and auto-renews the lease.
-   * `claimDue` still returns every acquired lease at once; serial work on
-   * that array can expire later default-30s leases.
+   * **Not a production worker.** Still returns every acquired lease at once.
+   * Serial handler work on that array expires later default-30s leases and
+   * lets a peer steal them (`lease_lost` after the first job — S20-CLAIM-DUE-N).
+   * Production hosts must use {@link ReconciliationScheduler.processDue} as
+   * the only poll loop (claims immediately before each handler; auto-renews).
    */
   claimDue(options?: ClaimDueOptions): Promise<ClaimedJob[]>;
   complete(input: CompleteJobInput): Promise<void>;
@@ -271,9 +281,14 @@ export type ReconciliationScheduler = {
     options?: ListDeadLetterOptions,
   ): Promise<ReconciliationRecord[]>;
   /**
-   * Claim due and run handler; reschedule or markManualReview on failure.
-   * Claims one-at-a-time, auto-renews on `leaseMs/3` while the handler runs.
-   * Documents per-provider concurrency via maxInFlightByGateway.
+   * Production poll loop: claim due and run handler; reschedule or
+   * markManualReview on failure. Claims one-at-a-time, auto-renews on
+   * `leaseMs/3` while the handler runs. Documents per-provider concurrency
+   * via maxInFlightByGateway.
+   *
+   * This is the only production worker. Do not substitute
+   * {@link ReconciliationScheduler.claimDue} + a serial host loop
+   * (S20-CLAIM-DUE-N).
    */
   processDue(options: ProcessDueOptions): Promise<ProcessDueResult>;
   readonly store: ReconciliationStore;
@@ -684,6 +699,10 @@ function isForeignLeaseOwner(
  * S19-RECON-HB: auto-renew on `leaseMs/3` while the handler runs (webhook
  * `runHandlerUnderLease` parity). Heartbeat `lease_lost` does not complete
  * or fail as owner. Successful renew rotates `job.leaseToken`.
+ *
+ * S20-HEARTBEAT-RACE: `stopHeartbeat` sets `closed` *before* awaiting the
+ * tail so a tick already in the macrotask queue cannot `enqueueRenew` after
+ * stop and rotate the token while `complete` still uses the previous one.
  */
 async function runProcessDueHandlerUnderLease(args: {
   store: ReconciliationStore;
@@ -693,9 +712,14 @@ async function runProcessDueHandlerUnderLease(args: {
 }): Promise<{ disposition: ProcessDueDisposition; lostOwnership: boolean }> {
   let currentToken = args.job.leaseToken;
   let lostOwnership = false;
+  let closed = false;
   let renewTail: Promise<void> = Promise.resolve();
 
   const enqueueRenew = (): Promise<void> => {
+    // Closed is checked here (not only inside `run`) so we never chain a
+    // new renew onto `renewTail` after stop — `await renewTail` in `finally`
+    // would otherwise miss that extra link and return with a stale token.
+    if (closed || lostOwnership) return Promise.resolve();
     const run = async (): Promise<void> => {
       if (lostOwnership) return;
       try {
@@ -704,6 +728,7 @@ async function runProcessDueHandlerUnderLease(args: {
           leaseToken: currentToken,
           leaseMs: args.leaseMs,
         });
+        if (lostOwnership) return;
         if (!result.ok) {
           lostOwnership = true;
           return;
@@ -726,12 +751,14 @@ async function runProcessDueHandlerUnderLease(args: {
   const heartbeatMs = Math.max(1, Math.floor(args.leaseMs / 3));
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   const stopHeartbeat = (): void => {
+    closed = true;
     if (heartbeatTimer !== undefined) {
       clearInterval(heartbeatTimer);
       heartbeatTimer = undefined;
     }
   };
   heartbeatTimer = setInterval(() => {
+    if (closed) return;
     void enqueueRenew().then(() => {
       if (lostOwnership) stopHeartbeat();
     });

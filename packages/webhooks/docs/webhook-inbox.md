@@ -107,7 +107,8 @@ async function onStripeWebhook(
     ...(envelope !== undefined ? { envelope } : {}),
     handler: async (ctx) => {
       // Long work: await ctx.renew(30_000);
-      await fulfillOrder(ctx.event);
+      // Rematch paid + bind gatewayPaymentId — never envelope status alone.
+      await fulfillPaidOrder(ctx.event);
     },
   });
 }
@@ -153,8 +154,10 @@ const outcome = await engine.processVerified({
   }),
   event: event.event ?? event,
   handler: async (ctx) => {
-    // 3) Money / fulfillment side effects ONLY here (post-claim)
-    await fulfill(ctx.event);
+    // 3) Money / fulfillment ONLY here (post-claim). Rematch
+    // payment.succeeded|capture.completed AND payment.status === "paid";
+    // bind gatewayPaymentId. Never fulfill from onWebhookVerified.
+    await fulfillPaidOrder(ctx.event);
   },
 });
 ```
@@ -198,7 +201,7 @@ const outcome = await engine.processWithVerifier({
   },
   // Fulfill after claim (or park with ackAfterClaim + processRetryable).
   handler: async (ctx) => {
-    await fulfill(ctx.event);
+    await fulfillPaidOrder(ctx.event);
   },
 });
 // Signature forgery / ok:false → { outcome: "invalid_webhook" } — never claims
@@ -223,7 +226,7 @@ await engine.processVerified({
   }),
   event: normalized,
   handler: async (ctx) => {
-    await fulfill(ctx.event);
+    await fulfillPaidOrder(ctx.event);
   },
 });
 ```
@@ -407,7 +410,7 @@ const durableEngine = createWebhookInboxEngine({
 - The `ackAfterClaim` parking path calls `fail({ restoreAttempt: true })` so the parking claim is free.
 - **Crash reclaim:** soft-release of an expired `claimed` lease (via get/listRetryable) restores one attempt (floor 0) before the row is reclaimable. Deploy/process death after claim therefore does **not** burn the dead-letter budget.
 - **WEBHOOKS-2 (lease timeout / hang):** `store.fail` with a matching token succeeds even after lease expiry so handler hang/timeout still records an attempt. Soft-release alone must not make `maxAttempts` a no-op — poison/long handlers eventually dead-letter.
-- **WH-LIST-FAIL (at-least-once):** `listRetryable` / `get` soft-release of an expired claim **wipes the lease token**. A late `fail()` from the original worker then `lease_lost`. The engine best-effort re-claims + records fail when it can; if a concurrent poller already took the row, fail-after-handler still returns `handler_failed { retryable: true }` and **never `complete`s**. Handler already ran — treat as at-least-once (idempotent handlers required). Do not 200 that outcome.
+- **WH-LIST-FAIL (at-least-once):** `listRetryable` / `get` soft-release of an expired claim **wipes the lease token**. A late `fail()` from the original worker then `lease_lost`. The engine best-effort re-claims + records fail when it can; reclaim uses `ifMatchPayloadHash` of the body that ran so an idle WEBHOOKS-3 newer hash is not rewritten (`payload_hash_conflict` skips — S20-WH-FAIL-RECLAIM). If a concurrent poller already took the row, fail-after-handler still returns `handler_failed { retryable: true }` and **never `complete`s**. Handler already ran — treat as at-least-once (idempotent handlers required). Do not 200 that outcome.
 - `fail({ retryAfterMs })` sets `availableAt`. Key-addressed `claim` on a pending row with `availableAt > now` returns `{ kind: "not_available" }` (no attempt++). **durable_retry** maps that to `scheduled_for_retry { reason: "not_available" }`. **inline** maps it to `handler_failed { retryable: true }` (P610-ACK-1 — no worker path). Adapters should map these to **5xx** (provider redelivery) unless a durable scheduler owns the row — **never silent-ACK 200** when no worker will run (WEBHOOKS-3).
 - `listRetryable` only returns rows with `availableAt <= now` (same gate). Soft-release on list/get/claim restores unfinished claim attempts.
 - `defaultLeaseMs` / per-call `leaseMs` must be finite and **`> 0`** (constructor / process throws a clear config error otherwise). Default remains **30_000**.
@@ -433,8 +436,11 @@ discovery; the lease is the fence). Defaults `limit=10` / `leaseMs=30s`
 are unsafe if N leases were held across serial handler I/O (handlers
 averaging ≥3s would let a peer reclaim the tail). The engine auto-renews
 the active lease on ~`leaseMs/3` while a handler runs (I5); `ctx.renew`
-remains available. If a heartbeat renew is `lease_lost`, the run stops
-treating itself as owner (`handler_failed` retryable — no `complete`).
+remains available. `stopHeartbeat` sets a `closed` flag before awaiting
+the renew tail so a queued tick cannot rotate the token `complete`/`fail`
+will use (S20-HEARTBEAT-RACE). If a heartbeat renew is `lease_lost`, the
+run stops treating itself as owner (`handler_failed` retryable — no
+`complete`).
 
 **I14 / S19-WH-HASH-TOCTOU:** `processRetryable` re-reads each listed row
 before `claim`. If the current `payloadHash` differs from the listed
@@ -449,16 +455,18 @@ so idle hash mismatch still supersedes (WEBHOOKS-3).
 **Default event materialization:** when `payloadRef` parses as a core
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),
 `processRetryable` **auto-unwraps** `.event` so `ctx.event` is the nested
-PaymentEvent — recommended dual-write workers can `fulfill(ctx.event)` without
-a custom `resolveEvent`. Plain PaymentEvent JSON (or any non-envelope shape) is
-passed through unchanged. Override `resolveEvent` for custom stores.
+PaymentEvent — recommended dual-write workers can rematch paid + bind
+`gatewayPaymentId` without a custom `resolveEvent`. Plain PaymentEvent JSON
+(or any non-envelope shape) is passed through unchanged. Override
+`resolveEvent` for custom stores.
 
 ```typescript
 const result = await durableEngine.processRetryable({
   limit: 10,
   handler: async (ctx) => {
-    // With toPersistedPaymentEventEnvelope on claim, ctx.event is already PaymentEvent
-    await fulfill(ctx.event);
+    // With toPersistedPaymentEventEnvelope on claim, ctx.event is PaymentEvent.
+    // Rematch paid + bind gatewayPaymentId (see @paykernel/core webhooks.md).
+    await fulfillPaidOrder(ctx.event);
   },
   // Optional override for custom payloadRef layouts:
   // resolveEvent: (rec) => ({ gateway, providerEventId, payloadHash, event }),

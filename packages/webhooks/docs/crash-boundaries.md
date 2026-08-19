@@ -131,7 +131,7 @@ Lease expiry / process death while claimed is treated like abandon: another work
 - Concurrent delivery while lease live: `already_processing`.
 - After lease expiry + reclaim: handler runs again on the new lease → **at-least-once**.
 - If the original worker later wakes and calls `complete`/`fail` with a **stale** token: `StoreLeaseLostError` / engine maps complete-after-success loss to `handler_failed { retryable: true }` — never `processed` on lease_lost after handler success.
-- **WH-LIST-FAIL:** a concurrent `listRetryable` (or `get`) that already soft-released the expired claim wipes the token. The original worker's `fail()` then `lease_lost`. Engine: still `handler_failed { retryable: true }` (best-effort re-claim+fail when possible) — **do not `complete`**. At-least-once: the handler already ran; a poller may run it again.
+- **WH-LIST-FAIL:** a concurrent `listRetryable` (or `get`) that already soft-released the expired claim wipes the token. The original worker's `fail()` then `lease_lost`. Engine: still `handler_failed { retryable: true }` (best-effort re-claim+fail when possible, with `ifMatchPayloadHash` so a newer idle hash is not rewritten) — **do not `complete`**. At-least-once: the handler already ran; a poller may run it again.
 
 ### Idempotency
 

@@ -307,10 +307,15 @@ export function paymentFromGatewayResult(
  *   `requires_action` (never `succeeded`).
  * - Auth holds (`authorized` + API ok) → operation `succeeded`, but
  *   {@link isPaidOutcome} stays false until status is paid-like (`paid` only).
+ * - Successful setup (`setup_completed` + API ok) → operation `succeeded`;
+ *   {@link isPaidOutcome} stays false (no funds captured).
  * - Buyer approval (`approved`, e.g. PayPal pre-capture) → `requires_action`
  *   (never `succeeded`; not paid-like).
- * - Card/hard declines → `declined`; cancelled/voided without explicit
- *   `outcome: succeeded` → `failed`. Intentional voids dual-write
+ * - Card/hard declines (`decline` present or explicit `outcome: declined`) →
+ *   `declined`. Bare `status: failed` without a decline object is `failed`
+ *   (S20-FAILED-DECLINED — a 5xx-mapped snapshot is not a card decline).
+ *   Cancelled/voided without explicit `outcome: succeeded` → `failed`.
+ *   Intentional voids dual-write
  *   `outcome: succeeded` + `status: cancelled` (CORE-2) and map as succeeded
  *   (still not {@link isPaidOutcome}).
  * - Partial capture: gateways may set `outcome: requires_action` with status
@@ -368,8 +373,10 @@ export function inferOperationOutcome(
         if (result.status === "cancelled") {
             return "failed";
         }
+        // S20-FAILED-DECLINED: bare failed (no decline object) is failed.
+        // Decline objects are handled above; do not invent a card decline.
         if (result.status === "failed") {
-            return "declined";
+            return outcomeForFailedStatus(result);
         }
         // P610-INF-2 / CORE-INF-1: API-not-ok (or omitted success) with a
         // non-terminal, pre-capture, settled, or refunded snapshot is uncertain
@@ -413,7 +420,7 @@ export function inferOperationOutcome(
     }
 
     if (result.status === "failed") {
-        return "declined";
+        return outcomeForFailedStatus(result);
     }
 
     // cancelled / unknown — not a successful payment capture
@@ -423,6 +430,7 @@ export function inferOperationOutcome(
 /**
  * Statuses where API success implies operation outcome `succeeded`.
  * Outcome-only: `isPaidOutcome` remains `paid` exclusively.
+ * `setup_completed` is a successful vault/setup op — not paid-like.
  * `partially_captured` is open money — not settled-success.
  */
 function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean {
@@ -430,8 +438,20 @@ function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean
         status === "paid" ||
         status === "authorized" ||
         status === "refunded" ||
-        status === "partially_refunded"
+        status === "partially_refunded" ||
+        status === "setup_completed"
     );
+}
+
+/**
+ * S20-FAILED-DECLINED: `status: failed` is a card decline only when a
+ * {@link PaymentDecline} is present. Otherwise it is a generic failure
+ * (5xx-mapped snapshots must not look like hard declines).
+ */
+function outcomeForFailedStatus(
+    result: Pick<GatewayPaymentResult, "decline">,
+): "declined" | "failed" {
+    return result.decline !== undefined ? "declined" : "failed";
 }
 
 /**
@@ -445,8 +465,9 @@ function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean
  * — preserve that as operation success (not charge paid; {@link isPaidOutcome} false).
  * NEW-CORE-6: `declined` / `failed` must not persist on paid-like status —
  * demote to `succeeded` so fulfillment gates stay honest.
- * NEW-CORE-10: `requires_action` + `status: failed` is a decline, not
- * `success: true` (do not persist an action arm on a failed snapshot).
+ * NEW-CORE-10: `requires_action` + `status: failed` is not customer action
+ * (`successFromOutcome(requires_action)` is true — do not persist that).
+ * Map to `declined` only when a decline object is present; otherwise `failed`.
  */
 function coercePaymentOutcomeToGatewayStatus(
     outcome: PaymentOperationOutcome,
@@ -457,7 +478,7 @@ function coercePaymentOutcomeToGatewayStatus(
     }
     if (outcome === "succeeded") {
         if (result.decline !== undefined || result.status === "failed") {
-            return "declined";
+            return outcomeForFailedStatus(result);
         }
         // CORE-2: successful void is outcome succeeded + status cancelled.
         // Bare cancelled (no explicit outcome) still fails closed via infer.
@@ -477,10 +498,10 @@ function coercePaymentOutcomeToGatewayStatus(
         return "succeeded";
     }
     if (outcome === "requires_action") {
-        // NEW-CORE-10: a failed snapshot is a decline, not customer action.
+        // NEW-CORE-10: a failed snapshot is not customer action.
         // `successFromOutcome(requires_action)` is true — do not persist that.
         if (result.status === "failed") {
-            return "declined";
+            return outcomeForFailedStatus(result);
         }
         // CORE-1: partial capture is open money — Paymob/Stripe demote to
         // requires_action; do not upgrade via settled-status coerce.
@@ -491,7 +512,8 @@ function coercePaymentOutcomeToGatewayStatus(
             return "requires_action";
         }
         // Explicit requires_action must not under-fulfill fully settled money
-        // (paid / authorized / refunded / partially_refunded).
+        // or completed setup (paid / authorized / refunded / partially_refunded /
+        // setup_completed).
         if (result.success && isSettledSuccessStatus(result.status)) {
             return "succeeded";
         }

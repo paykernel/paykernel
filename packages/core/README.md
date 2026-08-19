@@ -196,8 +196,8 @@ Always use the gateway that created the payment for follow-up calls (`refundPaym
 ### Integrator caveats
 
 - **After-hooks cannot undo money.** Hooks that run after a successful create/capture/refund/void (`onAfter`, `afterCapture`, …) may throw or return `{ proceed: false }`, but the provider side effect already happened — the SDK **logs and still returns success** (no `PaymentAbortedError`, no reverse of the charge). Use before-hooks to abort, and reconcile in your app if an after-hook fails. Details: [hooks](./docs/hooks.md#after-hooks-cannot-abort-money-operations).
-- **Webhook handlers must be idempotent on `event.id`.** Providers retry deliveries. The SDK verifies and normalizes events; it does **not** dedupe by provider event id. Persist processed `event.id` (or equivalent) and no-op duplicates before fulfilling orders. Details: [webhooks](./docs/webhooks.md).
-- **Prefer Phase 7 `PaymentEvent` for new fulfillment.** `WebhookEvent.type` stays provider-native for 0.x; use `attachPaymentEvent` / `event.event` and switch on stable names (`payment.succeeded`, …). Persist via `toPersistedPaymentEventEnvelope` (never store `rawPayload` by default). Details: [webhook-events](./docs/webhook-events.md).
+- **Never fulfill in `onWebhookVerified`.** Claim via [`@paykernel/webhooks`](../webhooks/README.md) first. Fulfill only on rematched `payment.succeeded` | `capture.completed` **and** `payment.status === "paid"`, binding `gatewayPaymentId`. Homemade `alreadyProcessed(event.id)` in the verify hook is not a lease. Details: [webhooks](./docs/webhooks.md), [getting-started](../../docs/getting-started.md).
+- **Prefer Phase 7 `PaymentEvent` for new fulfillment.** `WebhookEvent.type` stays provider-native for 0.x; use `attachPaymentEvent` / `event.event` and switch on stable names (`payment.succeeded`, …) **plus** nested `payment.status === "paid"`. Persist via `toPersistedPaymentEventEnvelope` (never store `rawPayload` by default). Details: [webhook-events](./docs/webhook-events.md).
 - **Prefer `money("10.50", "SAR")` over float `number` amounts.** Shared helpers convert decimal strings to **bigint** minor units (never `amount * 100` float math). Plain `number` major units remain accepted in 0.x but are **deprecated** — pass clean decimals only (`10.5`, `99.99`), never `0.1 + 0.2`. See [Safe Money Model](./docs/money.md).
 
 ## Production checklist
@@ -211,7 +211,7 @@ Use this before going live. Gateway-specific details live under [docs/](./docs/)
 | **Raw body for webhooks**                              | Stripe and PayPal verification need the **unparsed** request body (string/Buffer). Do not `JSON.parse` first; prefer `client.handleWebhook(gateway, rawBody, signatureOrHeaders)`.                                                                                                 |
 | **Fulfill on paid outcome / `status`, not `success`**  | `success: true` means API call OK (can be pending / 3DS / approved). Prefer Phase 6 **`isPaidOutcome(result)`** or `outcome === 'succeeded'` with **`status === 'paid'`** only (`approved` / `authorized` are not paid-like). Never treat `indeterminate` as paid or as a definitive decline — reconcile. See [operation-results.md](./docs/operation-results.md). |
 | **Amounts / money model**                              | Prefer `money("10.50", "SAR")` (`AmountInput = number \| Money`). Conversion uses bigint minor units + ISO exponents (provider overrides stay explicit). Deprecated `number` inputs must be clean decimals — see [money.md](./docs/money.md).                                      |
-| **Idempotent webhook handlers**                        | Persist processed `event.id` (app-level — the SDK does not store it) before inventory/fulfillment.                                                                                                                                                                                 |
+| **Inbox claim, then rematch + bind**                   | `handleWebhook` verifies only. Claim via `@paykernel/webhooks`, then fulfill only on rematched `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`, binding `gatewayPaymentId`. Never fulfill in `onWebhookVerified`. See [getting-started](../../docs/getting-started.md). |
 | **Secret keys server-side only**                       | Never put `secretKey` / `clientSecret` / `whsec_…` / HMAC secrets in browser code.                                                                                                                                                                                                 |
 
 ## Keys: secret vs publishable
@@ -227,19 +227,86 @@ Prefer `client.handleWebhook('stripe', rawBody, signature)` — it verifies, par
 Stripe webhook parsing expects snapshot events with `data.object`; hydrate thin events before passing them to `parseWebhookEvent`. Checkout, invoice, and subscription webhooks normalize `gatewayPaymentId` to the related PaymentIntent, SetupIntent, or Subscription when Stripe includes one.
 
 ```typescript
+import {
+  createWebhookInboxEngine,
+  resolveInboxPayloadHash,
+} from "@paykernel/webhooks";
+
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare const engine: ReturnType<typeof createWebhookInboxEngine>;
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+declare function mapInboxOutcome(outcome: unknown): { received: true };
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+/** Bind webhook PI first. Metadata orderId must not fulfill a different stored PI. */
+function findOrderForEvent(
+  webhookEvent: { gatewayPaymentId?: string; paymentId?: string },
+  _event: unknown,
+): { kind: "ok"; order: Order } | { kind: "mismatch" } | { kind: "missing" } {
+  const webhookPi =
+    typeof webhookEvent.gatewayPaymentId === "string" &&
+    webhookEvent.gatewayPaymentId.length > 0
+      ? webhookEvent.gatewayPaymentId
+      : undefined;
+  if (webhookPi === undefined) return { kind: "missing" };
+  const byGw = findOrderByGatewayPaymentId(webhookPi);
+  if (byGw) return { kind: "ok", order: byGw };
+  const candidate = webhookEvent.paymentId
+    ? findOrderById(webhookEvent.paymentId)
+    : undefined;
+  if (!candidate) return { kind: "missing" };
+  if (candidate.gatewayPaymentId === undefined) {
+    candidate.gatewayPaymentId = webhookPi;
+    return { kind: "ok", order: candidate };
+  }
+  if (candidate.gatewayPaymentId === webhookPi) {
+    return { kind: "ok", order: candidate };
+  }
+  return { kind: "mismatch" };
+}
+
 // Example using Elysia / Fetch-style handlers
 app.post("/webhook/stripe", async ({ request }) => {
   const signature = request.headers.get("stripe-signature") ?? undefined;
   const rawBody = await request.text(); // raw body — do not JSON.parse first
 
-  const event = await client.handleWebhook("stripe", rawBody, signature);
-  // handleWebhook verifies only. Production: claim via @paykernel/webhooks inbox,
-  // then fulfill when event.status === "paid" (or isPaidOutcome on create/capture).
-  // Never if (result.success). Be idempotent on event.id.
-  if (event.status === "paid") {
-    // after inbox claim: fulfill from event.gatewayPaymentId
-  }
-  return { received: true };
+  const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+  // handleWebhook verifies only. Never fulfill here / never if (result.success)
+  // / never on event.status === "paid" alone (Paymob redirect can lie).
+  const outcome = await engine.processVerified({
+    gateway: "stripe",
+    providerEventId: webhookEvent.id,
+    payloadHash: resolveInboxPayloadHash({
+      eventPayloadHash: webhookEvent.payloadHash,
+      payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
+    }),
+    event: webhookEvent.event ?? webhookEvent,
+    handler: async (ctx) => {
+      if (!isPaidFulfillmentEvent(ctx.event)) return;
+      const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+        return;
+      }
+      const found = findOrderForEvent(webhookEvent, ctx.event);
+      if (found.kind === "mismatch") return;
+      if (found.kind === "missing") {
+        throw new Error("no local order for paid webhook");
+      }
+      await fulfillOrder(found.order, gatewayPaymentId);
+    },
+  });
+  // Map inbox outcome → HTTP. Never silent-ACK handler_failed retryable.
+  return mapInboxOutcome(outcome);
 });
 ```
 

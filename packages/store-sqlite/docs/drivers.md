@@ -12,7 +12,8 @@ Root entry `@paykernel/store-sqlite` exports factories that accept a narrow `Sql
   - `createBunSqliteStores` / `createBunSqliteExecutor`
   - `createBunSqliteIdempotencyStore` / webhook / reconciliation
   - `createInMemoryBunSqliteStores` (`createBunSqliteStoresInMemory` alias)
-  - `createInMemoryBunSqliteExecutor`, `openBunSqliteDatabase`
+  - `createInMemoryBunSqliteExecutor`, `openBunSqliteDatabase(path)` (path required; pass `":memory:"` explicitly — ephemeral / process-local)
+  - File-backed `open*Database` applies `PRAGMA busy_timeout` (default 5000 ms)
   - `applyRecommendedPragmas`, `migrateSqliteAdapter`
 
 ```ts

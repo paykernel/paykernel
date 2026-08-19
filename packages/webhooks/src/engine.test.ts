@@ -312,6 +312,74 @@ describe("WH-LIST-FAIL fail after listRetryable soft-release", () => {
     const rec = await store.get("stripe:evt_list_fail");
     expect(rec?.status).not.toBe("completed");
   });
+
+  it("S20-WH-FAIL-RECLAIM: get→reclaim race does not rewrite an idle newer hash", async () => {
+    const clock = createTestClock();
+    const inner = createMemoryWebhookInboxStore({ clock });
+    const reclaimClaims: Array<Parameters<typeof inner.claim>[0]> = [];
+    const store = {
+      ...inner,
+      async claim(input: Parameters<typeof inner.claim>[0]) {
+        const existing = await inner.get(input.key);
+        // After fail() lease_lost, bestEffort reclaims a pending hash-a row.
+        // Idle WEBHOOKS-3 processVerified has already moved the body to hash-b.
+        if (
+          existing?.status === "pending" &&
+          existing.payloadHash === "hash-a"
+        ) {
+          reclaimClaims.push(input);
+          const newer = await inner.claim({
+            key: input.key,
+            payloadHash: "hash-b",
+            owner: "newer-delivery",
+            leaseMs: 30_000,
+            payloadRef: JSON.stringify({ id: "new" }),
+          });
+          if (newer.kind === "acquired") {
+            await inner.fail({
+              key: input.key,
+              leaseToken: newer.leaseToken,
+              error: "park newer",
+              retryAfterMs: 0,
+              restoreAttempt: true,
+            });
+          }
+        }
+        return inner.claim(input);
+      },
+    };
+
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+      defaultLeaseMs: 1_000,
+      defaultRetryAfterMs: 0,
+    });
+
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_fail_reclaim",
+      payloadHash: "hash-a",
+      event: { id: "old" },
+      handler: async () => {
+        clock.advance(2_000);
+        const listed = await inner.listRetryable({ limit: 10 });
+        expect(listed).toHaveLength(1);
+        expect(listed[0]?.leaseToken).toBeUndefined();
+        throw new Error("handler failed after expiry");
+      },
+    });
+
+    expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
+    expect(reclaimClaims.length).toBeGreaterThan(0);
+    expect(reclaimClaims[0]?.ifMatchPayloadHash).toBe("hash-a");
+    const rec = await inner.get("stripe:evt_fail_reclaim");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.payloadRef).toBe(JSON.stringify({ id: "new" }));
+    expect(rec?.status).toBe("pending");
+    expect(rec?.status).not.toBe("dead_letter");
+  });
 });
 
 describe("WEBHOOKS-2 lease-timeout maxAttempts", () => {
@@ -938,6 +1006,46 @@ describe("lease renew (10.5)", () => {
     expect(outcome).toEqual({ outcome: "handler_failed", retryable: true });
     const rec = await inner.get("stripe:evt_i5_lost");
     expect(rec?.status).not.toBe("completed");
+  });
+
+  it("S20-HEARTBEAT-RACE: renew after stopHeartbeat does not rotate token used by complete", async () => {
+    const inner = createMemoryWebhookInboxStore();
+    let lateRenewSettled!: () => void;
+    const lateRenewDone = new Promise<void>((r) => {
+      lateRenewSettled = r;
+    });
+    let storeRenewCalls = 0;
+    const store = {
+      ...inner,
+      async renew(input: Parameters<typeof inner.renew>[0]) {
+        storeRenewCalls += 1;
+        return inner.renew(input);
+      },
+      async complete(input: Parameters<typeof inner.complete>[0]) {
+        // Window after stopHeartbeat + await renewTail: a queued tick
+        // must not rotate the token already snapshotted for complete.
+        await lateRenewDone;
+        return inner.complete(input);
+      },
+    };
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "inline",
+      defaultLeaseMs: 30_000,
+    });
+    const outcome = await engine.processVerified({
+      gateway: "stripe",
+      providerEventId: "evt_hb_race",
+      payloadHash: "h",
+      handler: async (ctx) => {
+        setTimeout(() => {
+          void ctx.renew(30_000).then(lateRenewSettled, lateRenewSettled);
+        }, 0);
+      },
+    });
+    expect(storeRenewCalls).toBe(0);
+    expect(outcome).toEqual({ outcome: "processed" });
+    expect((await inner.get("stripe:evt_hb_race"))?.status).toBe("completed");
   });
 });
 

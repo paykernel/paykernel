@@ -28,8 +28,9 @@
  *       return { proceed: true };
  *     },
  *     onWebhookVerified: async (event) => {
- *       // Verification only. Fulfill after @paykernel/webhooks inbox claim
- *       // when event.status === 'paid' — never if (result.success).
+ *       // Verification only — never fulfill here. After inbox claim, fulfill
+ *       // when event.event is payment.succeeded|capture.completed AND
+ *       // payment.status === 'paid', bound to gatewayPaymentId.
  *     },
  *   },
  * });

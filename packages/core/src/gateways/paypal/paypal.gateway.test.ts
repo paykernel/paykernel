@@ -122,6 +122,33 @@ function createMockFetch(
     return mockFn;
 }
 
+/**
+ * Real Response whose `text()` is the raw body (empty / HTML / non-JSON).
+ * `createMockResponse` always JSON.stringifies, which cannot represent S20-PAYPAL-JSON.
+ */
+function createMockRawResponse(body: string, status = 200): Response {
+    return new Response(body, { status });
+}
+
+function createMockRawFetch(
+    body: string,
+    apiStatus = 200,
+): typeof fetch {
+    const mockFn = mock(async (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : (input as Request).url;
+
+        if (url.includes('oauth2/token')) {
+            return createMockResponse({
+                access_token: 'test_token_' + Math.random(),
+                expires_in: 3600,
+            });
+        }
+
+        return createMockRawResponse(body, apiStatus);
+    }) as unknown as typeof fetch;
+    return mockFn;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test Suite
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2852,6 +2879,21 @@ describe('PayPalGateway', () => {
             expect(result.success).toBe(false);
         });
 
+        it('create HTTP 200 empty or non-JSON body is indeterminate, not invented {} (S20-PAYPAL-JSON)', async () => {
+            for (const body of ['', '<html>proxy failure</html>']) {
+                globalThis.fetch = createMockRawFetch(body);
+                const result = await gateway.createPayment({
+                    amount: 50,
+                    currency: 'USD',
+                    callbackUrl: 'https://example.com/callback',
+                });
+                expect(result.outcome).toBe('indeterminate');
+                expect(result.reconciliationRequired).toBe(true);
+                expect(result.success).toBe(false);
+                expect(result.status).not.toBe('failed');
+            }
+        });
+
         it('should create AUTHORIZE-intent orders when capture is false', async () => {
             let capturedBody: any = null;
 
@@ -4136,6 +4178,20 @@ describe('PayPalGateway', () => {
             expect(result.success).toBe(false);
         });
 
+        it('refund HTTP 200 empty or non-JSON body is indeterminate, not invented {} (S20-PAYPAL-JSON)', async () => {
+            for (const body of ['', '<html>proxy failure</html>']) {
+                globalThis.fetch = createMockRawFetch(body);
+                const result = await gateway.refundPayment({
+                    gatewayPaymentId: 'CAPTURE-123',
+                    idempotencyKey: 'test-idem-json',
+                });
+                expect(result.outcome).toBe('indeterminate');
+                expect(result.reconciliationRequired).toBe(true);
+                expect(result.success).toBe(false);
+                expect(result.status).not.toBe('failed');
+            }
+        });
+
         it('should map failed refund statuses to failed with success false', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'REFUND-FAILED',
@@ -4152,7 +4208,7 @@ describe('PayPalGateway', () => {
             expect(result.success).toBe(false);
         });
 
-        it('should fail-closed on unmapped refund statuses (not soft pending success)', async () => {
+        it('S20-PAYPAL-REFUND-UNKNOWN: HTTP 200 unknown refund status is pending, never failed', async () => {
             const warnings: string[] = [];
             const warnGateway = new PayPalGateway(
                 PAYPAL_TEST_CONFIG,
@@ -4170,11 +4226,14 @@ describe('PayPalGateway', () => {
                 idempotencyKey: 'test-idem',
             });
 
-            expect(result.status).toBe('failed');
-            expect(result.outcome).toBe('failed');
-            expect(result.success).toBe(false);
+            expect(result.status).toBe('pending');
+            expect(result.outcome).toBe('pending');
+            expect(result.success).toBe(true);
+            expect(result.status).not.toBe('failed');
+            expect(result.outcome).not.toBe('failed');
+            expect(result.totalRefunded).toBeUndefined();
             expect(warnings.some((message) =>
-                message.includes('Unmapped refund status') && message.includes('failed'),
+                message.includes('Unmapped refund status') && message.includes('pending'),
             )).toBe(true);
         });
 
@@ -4750,6 +4809,25 @@ describe('PayPalGateway', () => {
             expect(result.capturedAmount).toBe(200);
             expect(result.outcome).toBe('succeeded');
             expect(isPaidOutcome(result)).toBe(true);
+        });
+
+        it('GET HTTP 200 empty or non-JSON throws GatewayApiError without inventing {} (S20-PAYPAL-JSON)', async () => {
+            const cases = [
+                ['', /empty body/i],
+                ['<html>not json</html>', /invalid JSON/i],
+            ] as const;
+            for (const [body, message] of cases) {
+                globalThis.fetch = createMockRawFetch(body);
+                const error = await gateway.getPayment({
+                    gatewayPaymentId: 'ORDER-JSON',
+                }).then(
+                    () => undefined,
+                    (err: unknown) => err,
+                );
+                expect(error).toBeInstanceOf(GatewayApiError);
+                expect((error as Error).message).toMatch(message);
+                expect((error as Error).message).not.toMatch(/missing id/i);
+            }
         });
 
         it('APPROVED order (pre-capture) is not isPaidOutcome / not succeeded', async () => {

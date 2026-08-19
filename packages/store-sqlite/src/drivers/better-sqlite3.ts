@@ -19,7 +19,7 @@ import {
 } from "../index-stores";
 import type { SqliteStoreOptions, SqliteStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
-import { applyRecommendedPragmas } from "../pragmas";
+import { applyFileBackedBusyTimeout, applyRecommendedPragmas } from "../pragmas";
 import { createTransactionScope } from "../transaction-scope";
 
 /** Minimal better-sqlite3 Database surface (structural). */
@@ -155,13 +155,35 @@ export function createBetterSqlite3Stores(
 
 /**
  * Open a better-sqlite3 Database.
+ *
+ * `path` is required — pass `":memory:"` explicitly for ephemeral tests.
+ * `:memory:` is process-local only (lost on process restart) and does **not**
+ * satisfy `SQLITE_STORAGE_ADAPTER_MANIFEST.durability: "durable"`.
+ * File-backed opens apply `PRAGMA busy_timeout` (default 5000 ms).
  * Does not migrate.
  */
 export function openBetterSqlite3Database(
-  path: string = ":memory:",
-  options?: ConstructorParameters<typeof Database>[1],
+  path: string,
+  options?: ConstructorParameters<typeof Database>[1] & { busyTimeoutMs?: number },
 ): InstanceType<typeof Database> {
-  return new Database(path, options);
+  if (typeof path !== "string" || path.length === 0) {
+    throw new TypeError(
+      'openBetterSqlite3Database: path is required; pass ":memory:" explicitly for ephemeral process-local databases',
+    );
+  }
+  const busyTimeoutMs = options?.busyTimeoutMs;
+  let nativeOpts: ConstructorParameters<typeof Database>[1] | undefined = options;
+  if (options !== undefined && "busyTimeoutMs" in options) {
+    const { busyTimeoutMs: _ignored, ...rest } = options;
+    nativeOpts = rest as ConstructorParameters<typeof Database>[1];
+  }
+  const db = new Database(path, nativeOpts);
+  applyFileBackedBusyTimeout(
+    (sql) => db.exec(sql),
+    path,
+    busyTimeoutMs ?? 5_000,
+  );
+  return db;
 }
 
 /**

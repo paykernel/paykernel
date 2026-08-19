@@ -220,11 +220,30 @@ describe("WebhookInboxStore structural contract", () => {
     expect(await store.listRetryable({ limit: 10 })).toHaveLength(0);
 
     clock.advance(2_000);
+    const peeked = await store.get("evt_soft_release");
+    expect(peeked?.status).toBe("claimed");
+    expect(peeked?.leaseToken).toBe(a.leaseToken);
     const listed = await store.listRetryable({ limit: 10 });
     expect(listed.some((r) => r.key === "evt_soft_release")).toBe(true);
     expect(listed.find((r) => r.key === "evt_soft_release")?.status).toBe(
       "pending",
     );
+  });
+
+  it("S20-MEM-GET-WIPE: get() after expiry keeps lease_token", async () => {
+    const clock = createTestClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "evt_get_readonly",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    if (a.kind !== "acquired") throw new Error("expected acquired");
+    clock.advance(2_000);
+    const got = await store.get("evt_get_readonly");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(a.leaseToken);
   });
 
   it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {

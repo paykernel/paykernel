@@ -344,12 +344,14 @@ export function createD1WebhookInboxStore(
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
       return withMappedErrors(async () => {
-        // STORES-2 / SQL-2: TEXT lexical available_at compares require canonical Z now.
-        // Non-Z input.now written into available_at on soft-release would break ordering.
-        const now =
+        // S20-LIST-NOW: wipe expired leases only with the store clock that issued
+        // them. Caller now can be ahead of the issuer and must not clear a live
+        // token. Canonical caller now is the available_at filter only.
+        const storeNow = clockNowIso(ctx.clock);
+        const listNow =
           input.now !== undefined
             ? canonicalizeIsoTimestamp(input.now, "now")
-            : clockNowIso(ctx.clock);
+            : storeNow;
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processRetryable can drain them.
         // WEBHOOKS-1: restore unfinished claim attempt (floor 0).
@@ -375,7 +377,7 @@ export function createD1WebhookInboxStore(
                LIMIT ?
              )
            )`,
-          [now, now, now, limit],
+          [storeNow, storeNow, storeNow, limit],
         );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${WEBHOOK_SELECT_COLS}
@@ -384,7 +386,7 @@ export function createD1WebhookInboxStore(
              AND available_at <= ?
            ORDER BY available_at ASC
            LIMIT ?`,
-          [now, limit],
+          [listNow, limit],
         );
         return rows.map(mapWebhookRow);
       });

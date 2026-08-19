@@ -337,6 +337,54 @@ describe("operation-result helpers", () => {
     expect(isPaidLikePaymentStatus("paid")).toBe(true);
   });
 
+  it("S20-SETUP-INFER: setup_completed + success is succeeded, not paid", () => {
+    const extras: Array<Partial<GatewayPaymentResult>> = [
+      {},
+      { nextAction: { type: "redirect", url: "https://example.com/3ds" } },
+    ];
+    for (const extra of extras) {
+      const result = baseResult({
+        success: true,
+        status: "setup_completed",
+        ...extra,
+      });
+      expect(inferOperationOutcome(result)).toBe("succeeded");
+      expect(isPaidOutcome(result)).toBe(false);
+    }
+    expect(isPaidLikePaymentStatus("setup_completed")).toBe(false);
+    const op = mapGatewayResultToOperationResult(
+      baseResult({ success: true, status: "setup_completed" }),
+    );
+    expect(op.outcome).toBe("succeeded");
+    expect(isPaidOutcome(op)).toBe(false);
+  });
+
+  it("S20-FAILED-DECLINED: bare status failed without decline is failed", () => {
+    const rows: Array<[Partial<GatewayPaymentResult>, "failed" | "declined"]> = [
+      [{ success: false, status: "failed" }, "failed"],
+      [{ success: true, status: "failed" }, "failed"],
+      [
+        {
+          success: false,
+          status: "failed",
+          decline: { code: "card_declined", message: "nope" },
+        },
+        "declined",
+      ],
+      [{ success: false, status: "failed", outcome: "declined" }, "declined"],
+    ];
+    for (const [patch, outcome] of rows) {
+      expect(inferOperationOutcome(baseResult(patch))).toBe(outcome);
+    }
+    const mapped = mapGatewayResultToOperationResult(
+      baseResult({ success: false, status: "failed" }),
+    );
+    expect(mapped.outcome).toBe("failed");
+    if (mapped.outcome === "failed") {
+      expect(mapped.error.code).toBe("PAYMENT_FAILED");
+    }
+  });
+
   it("buyer pre-capture approved is not paid-like and not isPaidOutcome", () => {
     expect(isPaidLikePaymentStatus("approved")).toBe(false);
     expect(isPaidLikePaymentStatus("authorized")).toBe(false);
@@ -505,6 +553,11 @@ describe("operation-result helpers", () => {
         baseResult({ success: true, status: "partially_refunded" }),
       ),
     ).toBe("succeeded");
+    expect(
+      inferOperationOutcome(
+        baseResult({ success: true, status: "setup_completed" }),
+      ),
+    ).toBe("succeeded");
     // isPaidOutcome stays paid-only — auth/refund settled ops are not fulfillment.
     expect(
       isPaidOutcome(baseResult({ success: true, status: "authorized" })),
@@ -520,6 +573,9 @@ describe("operation-result helpers", () => {
     expect(isPaidOutcome(baseResult({ success: true, status: "paid" }))).toBe(
       true,
     );
+    expect(
+      isPaidOutcome(baseResult({ success: true, status: "setup_completed" })),
+    ).toBe(false);
   });
 
   it("P610-INF-2: success:false + pending/processing/approved is indeterminate, not failed", () => {
@@ -543,7 +599,7 @@ describe("operation-result helpers", () => {
     ).toBe("failed");
     expect(
       inferOperationOutcome(baseResult({ success: false, status: "failed" })),
-    ).toBe("declined");
+    ).toBe("failed");
   });
 
   it("CORE-INF-1: success:false + paid/authorized/partial/refunded is indeterminate, not failed", () => {
@@ -761,7 +817,7 @@ describe("operation-result helpers", () => {
     ).toBe("failed");
     expect(
       inferOperationOutcome(baseResult({ success: false, status: "failed" })),
-    ).toBe("declined");
+    ).toBe("failed");
     expect(
       inferOperationOutcome(
         baseResult({ success: false, status: "pending" }),
@@ -916,10 +972,24 @@ describe("operation-result helpers", () => {
       },
       "succeeded",
     );
-    expect(failed.outcome).toBe("declined");
+    expect(failed.outcome).toBe("failed");
     expect(failed.success).toBe(false);
     expect(failed.status).toBe("failed");
     expect(inferOperationOutcome(failed)).toBe(failed.outcome);
+
+    const declined = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_fail_decline",
+        status: "failed",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "succeeded",
+      { decline: { code: "card_declined", message: "nope" } },
+    );
+    expect(declined.outcome).toBe("declined");
+    expect(declined.success).toBe(false);
+    expect(inferOperationOutcome(declined)).toBe("declined");
 
     const pending = applyOutcomeToGatewayResult(
       {
@@ -993,7 +1063,7 @@ describe("operation-result helpers", () => {
     ).toBe("succeeded");
   });
 
-  it("NEW-CORE-10: requires_action + status failed is declined, not success:true", () => {
+  it("NEW-CORE-10: requires_action + status failed is not success:true", () => {
     const applied = applyOutcomeToGatewayResult(
       {
         gatewayId: "pi_action_failed",
@@ -1003,10 +1073,11 @@ describe("operation-result helpers", () => {
       },
       "requires_action",
     );
-    expect(applied.outcome).toBe("declined");
+    // S20-FAILED-DECLINED: no decline object → failed, not a card decline.
+    expect(applied.outcome).toBe("failed");
     expect(applied.success).toBe(false);
     expect(applied.status).toBe("failed");
-    expect(inferOperationOutcome(applied)).toBe("declined");
+    expect(inferOperationOutcome(applied)).toBe("failed");
     expect(isPaidOutcome(applied)).toBe(false);
     expect(isRequiresActionOutcome(applied)).toBe(false);
 
@@ -1018,7 +1089,7 @@ describe("operation-result helpers", () => {
           outcome: "requires_action",
         }),
       ),
-    ).toBe("declined");
+    ).toBe("failed");
 
     const mapped = mapGatewayResultToOperationResult(
       baseResult({
@@ -1027,7 +1098,21 @@ describe("operation-result helpers", () => {
         outcome: "requires_action",
       }),
     );
-    expect(mapped.outcome).toBe("declined");
+    expect(mapped.outcome).toBe("failed");
+
+    const withDecline = applyOutcomeToGatewayResult(
+      {
+        gatewayId: "pi_action_declined",
+        status: "failed",
+        rawResponse: {},
+        gateway: "stripe",
+      },
+      "requires_action",
+      { decline: { code: "card_declined", message: "nope" } },
+    );
+    expect(withDecline.outcome).toBe("declined");
+    expect(withDecline.success).toBe(false);
+    expect(inferOperationOutcome(withDecline)).toBe("declined");
   });
 
   it("applyOutcomeToGatewayRefundResult dual-writes success from outcome", () => {

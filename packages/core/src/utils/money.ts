@@ -266,6 +266,17 @@ function scaleToMinor(
     return sign * abs;
   }
 
+  const kept = fractionPart.slice(0, exponent);
+  // S20-TRAILING-ZERO: unused trailing zeros past exponent are not extra
+  // precision (`"10.500"` USD / `"100.00"` JPY). Non-zero remainder still rejects.
+  const rest = fractionPart.slice(exponent).replace(/0+$/, "");
+
+  if (rest.length === 0) {
+    const padded = kept.padEnd(exponent, "0");
+    const digits = (integerPart + padded).replace(/^0+(?=\d)/, "") || "0";
+    return sign * BigInt(digits);
+  }
+
   // Excess fractional digits beyond currency exponent.
   if (rounding === "reject") {
     throwInvalidAmount(
@@ -274,8 +285,6 @@ function scaleToMinor(
     );
   }
 
-  const kept = fractionPart.slice(0, exponent);
-  const rest = fractionPart.slice(exponent);
   const firstRestDigit = rest.charCodeAt(0) - 48; // '0' = 48
   const restHasNonZero = rest.slice(1).split("").some((d) => d !== "0");
   const anyRemainder = firstRestDigit !== 0 || restHasNonZero;

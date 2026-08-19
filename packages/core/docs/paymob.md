@@ -217,7 +217,7 @@ app.post('/webhooks/paymob', async (req) => {
 
 The SDK verifies transaction processed callbacks, saved-card token callbacks, and query-style transaction response callbacks with their separate Paymob HMAC field shapes.
 
-> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks always parse with `event.type === 'TRANSACTION_RESPONSE'` — Paymob's query `type` is **not** HMAC-bound, so the SDK forces this value and never trusts a client-supplied `type=TRANSACTION` (which would otherwise skip redirect demotion). Envelope **`event.status` is `processing`**, not `paid` (S19-PAYMOB-REDIR-STATUS), so handlers that fulfill on `event.status === 'paid'` cannot settle a browser-replayable GET. Phase 7 dual-write maps redirect success/paid/capture/auth signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
+> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks always parse with `event.type === 'TRANSACTION_RESPONSE'` — Paymob's query `type` is **not** HMAC-bound, so the SDK forces this value and never trusts a client-supplied `type=TRANSACTION` (which would otherwise skip redirect demotion). Envelope **`event.status` is `processing`**, never `paid` / `cancelled` / `failed` / `refund_completed` (S19-PAYMOB-REDIR-STATUS, S20-PAYMOB-REDIR-TERM), so handlers that fulfill, restock, or fail the order on those terminals cannot act from a browser-replayable GET. Parse-path dual-write follows envelope `processing` (not `payment.succeeded`, `payment.cancelled`, `payment.failed`, or `capture.completed`). Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
 >
 > **Inbox / `event.id` (WEBHOOKS-1):** redirect and processed notifications share Paymob's transaction id. The SDK sets redirect `event.id` to `<txnId>:redirect` and keeps processed `TRANSACTION` `event.id` as the raw `obj.id`. `gatewayPaymentId` stays the signed txn id on both. Dedupe on `event.id` (or `deriveWebhookEventKey`) so a handler return on the documented redirect cannot ACK-suppress the later paid processed callback.
 
@@ -255,12 +255,13 @@ Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paym
   inquiry `pending: true` or `success: false` without a positive `captured_amount`
   throws `InvalidRequestError` **before** the mutating POST. Refund still also
   refuses uncaptured authorizations (use void).
-- **Inquiry `success` missing is fail-closed:** transaction inquiry defaults
-  missing `success` to **false** (mutations require a boolean/`"true"`/`"false"`
-  success and treat other missing/invalid bodies after HTTP 200 as indeterminate).
-  Paid / authorized paths cannot invent success when Paymob omits the field;
-  status maps to non-paid (`failed` / declined outcome) unless amount/flag-derived
-  refund or void state applies.
+- **Inquiry `success` omitted is incomplete, not declined (S20-PAYMOB-SUCCESS-OMIT):**
+  identified transaction inquiry (`id` + money) with missing `success` maps
+  `processing` / `requires_action` — never `failed` / `declined`. Explicit
+  `success: false` still maps `failed`. Paid / authorized paths cannot invent
+  success when Paymob omits the field. Mutations still require a boolean /
+  `"true"` / `"false"` success and treat other missing/invalid bodies after
+  HTTP 200 as indeterminate.
 
 
 ## Supported Regions

@@ -1433,10 +1433,10 @@ export class PaymobGateway extends BaseGateway {
       payload.currency,
       statusSource.refunded_amount_cents,
     );
-    // S19-PAYMOB-REDIR-STATUS: browser-replayable GET must not publish paid /
-    // authorized. Dual-write already demotes TRANSACTION_RESPONSE settlement to
-    // payment.processing; envelope status must match so handlers that fulfill on
-    // event.status === "paid" cannot settle from redirect alone.
+    // S19-PAYMOB-REDIR-STATUS / S20-PAYMOB-REDIR-TERM: browser-replayable GET
+    // must not publish terminal envelope statuses (paid / authorized / cancelled /
+    // failed / refund_*). Dual-write follows envelope `processing` so restock /
+    // fail / fulfill handlers cannot act from redirect alone.
     const status = this.redirectEnvelopeStatus(mappedStatus);
 
     // PAYMOB-3: redirect `type` is not HMAC-bound. Always force TRANSACTION_RESPONSE
@@ -1788,10 +1788,10 @@ export class PaymobGateway extends BaseGateway {
         const transaction = this.normalizeApiTransactionResponse(data, "transaction inquiry");
         const moneyCurrency = this.resolveMoneyCurrency(transaction, "transaction inquiry");
         const status = this.mapTransactionStatus(transaction);
-        // Fail-closed: missing success on a real transaction (id / money present)
-        // must not look paid. Empty / invalid JSON is thrown as GatewayApiError
-        // (never mapped to declined). Mutations use requireMutationBoolean
-        // (indeterminate after HTTP 200).
+        // Identified inquiry (id + money) with omitted `success` is incomplete
+        // (`processing` / requires_action), not declined (S20-PAYMOB-SUCCESS-OMIT).
+        // Explicit `success: false` still maps failed. Empty / invalid JSON is
+        // GatewayApiError (S19-PAYMOB-JSON). Mutations use requireMutationBoolean.
         const successFlag =
           typeof transaction.success === "boolean" ? transaction.success : false;
         const outcome = this.mapPaymobOutcome(status, successFlag, {
@@ -2105,7 +2105,7 @@ export class PaymobGateway extends BaseGateway {
   /**
    * Map Paymob transaction response to unified PaymentStatus.
    * Order: pending → void → refund (flags or amounts) → capture amounts →
-   * incomplete capture action → auth-only → paid/failed.
+   * incomplete capture action → auth-only → paid / failed / omitted-success processing.
    * Capture amounts are evaluated before the is_auth early return so a partially captured
    * auth transaction maps to partially_captured, not authorized.
    *
@@ -2220,8 +2220,10 @@ export class PaymobGateway extends BaseGateway {
       return "authorized";
     }
 
-    if (data.success) return "paid";
-    return "failed";
+    if (data.success === true) return "paid";
+    if (data.success === false) return "failed";
+    // Identified snapshot without a boolean `success` is incomplete — not a decline.
+    return "processing";
   }
 
   private mapCaptureStatus(
@@ -2814,8 +2816,8 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Parse a Paymob JSON body. Must not swallow invalid JSON as `{}` —
-   * inquiry would then map missing success → failed/declined (S19-PAYMOB-JSON).
+   * Parse a Paymob JSON body. Must not swallow invalid JSON as `{}`
+   * (S19-PAYMOB-JSON).
    *
    * GET / non-mutating empty or non-JSON → {@link GatewayApiError}.
    * Mutating HTTP 200 empty or non-JSON → {@link PaymobIndeterminateResponseError}
@@ -3523,20 +3525,15 @@ export class PaymobGateway extends BaseGateway {
   }
 
   /**
-   * Redirect callbacks are browser-replayable GETs. Settlement-looking domain
-   * statuses must not appear on the envelope (S19-PAYMOB-REDIR-STATUS).
+   * Redirect callbacks are browser-replayable GETs. Terminal charge / refund
+   * domain statuses must not appear on the envelope (S19-PAYMOB-REDIR-STATUS,
+   * S20-PAYMOB-REDIR-TERM). In-flight `pending` / `processing` stay as mapped.
    */
   private redirectEnvelopeStatus(mapped: PaymentStatus): PaymentStatus {
-    if (
-      mapped === "paid" ||
-      mapped === "authorized" ||
-      mapped === "partially_captured" ||
-      mapped === "refunded" ||
-      mapped === "partially_refunded"
-    ) {
-      return "processing";
+    if (mapped === "pending" || mapped === "processing") {
+      return mapped;
     }
-    return mapped;
+    return "processing";
   }
 
   private recordOrUndefined(value: unknown): Record<string, unknown> | undefined {

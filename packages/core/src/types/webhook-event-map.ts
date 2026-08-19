@@ -14,10 +14,11 @@
  *
  * Paymob honesty:
  * - `TRANSACTION_RESPONSE` (browser/redirect) never dual-writes fulfillment-ready
- *   `payment.succeeded` / `capture.completed` **or** confirmed-auth
- *   `payment.authorized` — use `payment.processing` and wait for the processed
- *   `TRANSACTION` webhook (or inquiry). AUTH redirect (`is_auth` + success) is
- *   browser-only (PAYMOB-AUTH-REDIR).
+ *   `payment.succeeded` / `capture.completed`, confirmed-auth
+ *   `payment.authorized`, **or** terminal restock arms (`payment.cancelled` /
+ *   `payment.failed` / `refund.*`) — use `payment.processing` and wait for the
+ *   processed `TRANSACTION` webhook (or inquiry). AUTH redirect (`is_auth` +
+ *   success) is browser-only (PAYMOB-AUTH-REDIR / S20-PAYMOB-REDIR dual-write).
  * - `partially_captured` is not full settlement (`isPaidOutcome` excludes it) →
  *   `payment.processing`, not `payment.succeeded` **or** `capture.completed`
  *   (Paymob `is_capture` / flags / amounts, Stripe `payment_intent.succeeded`,
@@ -374,12 +375,20 @@ const PAYMOB_FULFILLMENT_READY_STABLE: ReadonlySet<MappedStableEventType> =
   new Set(["payment.succeeded", "capture.completed"]);
 
 /**
- * PAYMOB-AUTH-REDIR: browser/redirect callbacks also must not look like a
- * confirmed auth hold. Processed `TRANSACTION` still dual-writes
- * `payment.authorized` for `is_auth` + success.
+ * PAYMOB-AUTH-REDIR / S20-PAYMOB-REDIR dual-write: browser/redirect callbacks
+ * must not look like confirmed auth, settlement, cancel, fail, or refund.
+ * Processed `TRANSACTION` still dual-writes those arms from HMAC webhooks.
  */
 const PAYMOB_REDIRECT_DEMOTE_STABLE: ReadonlySet<MappedStableEventType> =
-  new Set([...PAYMOB_FULFILLMENT_READY_STABLE, "payment.authorized"]);
+  new Set([
+    ...PAYMOB_FULFILLMENT_READY_STABLE,
+    "payment.authorized",
+    "payment.cancelled",
+    "payment.failed",
+    "refund.completed",
+    "refund.pending",
+    "refund.failed",
+  ]);
 
 /**
  * True when amount fields show a partial capture (captured > 0 and < auth amount).
@@ -540,6 +549,11 @@ function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined
 /**
  * Resolve TRANSACTION / TRANSACTION_RESPONSE using flags, amounts, status.
  * Does not apply redirect demotion — caller handles TRANSACTION_RESPONSE.
+ *
+ * S20-PAYMOB-AMOUNT-REFUND: amount-only `refundedAmountCents` must not promote
+ * over a decisive `fromStatus` (paid / cancelled / failed / …). Use that arm
+ * only when status did not map. S19-MAP-REFUND-PENDING still holds because
+ * pending / refund.pending / refund.failed are defined `fromStatus` values.
  */
 function mapPaymobTransactionSignals(
   context?: ProviderEventMapContext,
@@ -552,24 +566,18 @@ function mapPaymobTransactionSignals(
     );
     if (fromFlags !== undefined) return fromFlags;
   }
-  // S19-MAP-REFUND-PENDING: pending-like / failed-refund status ranks above
-  // amount-only refund.completed when flags are absent.
   const fromStatus = mapPaymobStatusOnly(context?.status);
-  if (
-    fromStatus === "payment.processing" ||
-    fromStatus === "refund.pending" ||
-    fromStatus === "refund.failed"
-  ) {
+  if (fromStatus !== undefined) {
     return fromStatus;
   }
-  // Amount-only without decisive flags (pure mapper / incomplete context)
+  // Amount-only refund when status is absent (mirrors mapTransactionStatus).
   if (
     context?.amounts?.refundedAmountCents !== undefined &&
     context.amounts.refundedAmountCents > 0
   ) {
     return "refund.completed";
   }
-  return fromStatus;
+  return undefined;
 }
 
 function mapPaymobEventType(
@@ -595,10 +603,11 @@ function mapPaymobEventType(
       return "provider.unmapped";
     }
 
-    // Browser/redirect callbacks must never look fulfillment-ready or like a
-    // confirmed auth hold. Native type distinguishes them from processed
-    // TRANSACTION server webhooks — demote settlement / authorized arms so
-    // type-only handlers ignore redirects (PAYMOB-AUTH-REDIR).
+    // Browser/redirect callbacks must never look fulfillment-ready, like a
+    // confirmed auth hold, or like a restock/fail/refund arm. Native type
+    // distinguishes them from processed TRANSACTION server webhooks — demote
+    // settlement / authorized / cancelled / failed / refund.* so type-only
+    // handlers ignore replayable GETs (PAYMOB-AUTH-REDIR / S20 dual-write).
     if (isRedirectResponse && PAYMOB_REDIRECT_DEMOTE_STABLE.has(mapped)) {
       return "payment.processing";
     }

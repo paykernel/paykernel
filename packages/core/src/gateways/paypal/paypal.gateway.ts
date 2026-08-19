@@ -538,7 +538,9 @@ export class PayPalGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
-        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response, {
+          afterProviderSubmit: true,
+        });
 
         if (!response.ok) {
           throw this.createApiError(data, response.status, response.headers);
@@ -649,7 +651,9 @@ export class PayPalGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
-        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response, {
+          afterProviderSubmit: true,
+        });
 
         if (!response.ok) {
           throw this.createApiError(data, response.status, response.headers);
@@ -782,7 +786,9 @@ export class PayPalGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
-        const data = await this.parseJsonResponse<PayPalRefundResponse>(response);
+        const data = await this.parseJsonResponse<PayPalRefundResponse>(response, {
+          afterProviderSubmit: true,
+        });
 
         if (!response.ok) {
           // Refunds hit /v2/payments/captures/{id}/refund — order/auth IDs 404 here.
@@ -926,7 +932,9 @@ export class PayPalGateway extends BaseGateway {
         }
 
         // If not 204, try to parse the response for error details
-        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response, {
+          afterProviderSubmit: true,
+        });
 
         if (!response.ok) {
           throw this.createApiError(data, response.status, response.headers);
@@ -970,7 +978,9 @@ export class PayPalGateway extends BaseGateway {
           extractAbortSignal(p),
         );
 
-        const data = await this.parseJsonResponse<PayPalOrderResponse>(response);
+        const data = await this.parseJsonResponse<PayPalOrderResponse>(response, {
+          afterProviderSubmit: true,
+        });
 
         if (!response.ok) {
           throw this.createApiError(data, response.status, response.headers);
@@ -1914,20 +1924,53 @@ export class PayPalGateway extends BaseGateway {
       : undefined;
   }
 
-  private async parseJsonResponse<T>(response: Response): Promise<T> {
+  /**
+   * Parse a PayPal JSON body. Must not swallow empty / invalid JSON as `{}`
+   * (S20-PAYPAL-JSON): GET inquiry would then throw status-0 "missing id",
+   * and a caller could treat that as a clean miss.
+   *
+   * Mutating HTTP 2xx empty or non-JSON → {@link NetworkError}
+   * `afterProviderSubmit` (indeterminate; fence stays unknown).
+   * GET / non-mutating empty or non-JSON → {@link GatewayApiError}.
+   * Mutating non-2xx empty or non-JSON keeps the HTTP status so 4xx HTML
+   * still maps through {@link PayPalApiError} (e.g. InvalidRequestError).
+   */
+  private async parseJsonResponse<T>(
+    response: Response,
+    options?: { afterProviderSubmit?: boolean },
+  ): Promise<T> {
     const text = await response.text();
+    const trimmed = text.trim();
+    const failClosed = (detail: string, cause?: unknown): never => {
+      const raw = {
+        status: response.status,
+        body: text.slice(0, 200),
+        ...(cause !== undefined ? { cause } : {}),
+      };
+      if (options?.afterProviderSubmit === true && response.ok) {
+        throw this.createMalformedResponseError(detail, raw, {
+          afterProviderSubmit: true,
+        });
+      }
+      if (response.ok) {
+        throw this.createMalformedResponseError(detail, raw);
+      }
+      throw new PayPalApiError(
+        detail,
+        raw,
+        response.status,
+        this.parseRetryAfterSeconds(response.headers),
+      );
+    };
 
-    if (!text.trim()) {
-      return {} as T;
+    if (!trimmed) {
+      return failClosed("Invalid PayPal response: empty body");
     }
 
     try {
-      return JSON.parse(text) as T;
-    } catch {
-      return {
-        name: response.statusText || "PayPal API error",
-        message: text,
-      } as T;
+      return JSON.parse(trimmed) as T;
+    } catch (error) {
+      return failClosed("Invalid PayPal response: invalid JSON", error);
     }
   }
 
@@ -2998,11 +3041,13 @@ export class PayPalGateway extends BaseGateway {
 
     const mapped = statusMap[status];
     if (!mapped) {
-      // Fail-closed: unknown refund status must not look pending-success.
+      // HTTP 200 accepted the refund POST. Unknown provider status must not
+      // look failed — retrying with a new PayPal-Request-Id can refund twice
+      // (S20-PAYPAL-REFUND-UNKNOWN). Pending keeps the fence / waits on GET.
       this.logger.warn(
-        `[PayPal] Unmapped refund status: ${status} (mapped to failed)`,
+        `[PayPal] Unmapped refund status: ${status} (mapped to pending)`,
       );
-      return "failed";
+      return "pending";
     }
     return mapped;
   }

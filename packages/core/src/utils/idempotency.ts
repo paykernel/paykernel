@@ -194,9 +194,11 @@ export function stableStringifyParams(value: unknown): string {
  * Produce a stable fingerprint for arbitrary request params, with object keys
  * sorted so equivalent payloads hash identically regardless of key order.
  *
- * Persisted value is `sha256Hex(stableStringify(redact(stripAbortSignal(value))))`
- * (S19-FINGERPRINT) so stores never keep raw PII / billing payloads. AbortSignal
- * is omitted so live abort objects are not part of business-params identity.
+ * Persisted value is `sha256Hex(stableStringify(redactForFingerprint(stripAbortSignal(value))))`
+ * (S19-FINGERPRINT / S20-FINGERPRINT-REDACT) so stores never keep raw PII /
+ * billing payloads. Sensitive leaves are hashed (not constant `[REDACTED]`) so
+ * two OTPs / billing bags cannot collide. AbortSignal is omitted so live abort
+ * objects are not part of business-params identity.
  *
  * `undefined` and `null` are encoded distinctly so omitting a field (or an
  * explicit `undefined`) does not collide with an explicit `null`.
@@ -277,9 +279,64 @@ function stripAbortSignalsForFingerprint(value: unknown): unknown {
 }
 
 /**
- * {@link redact} walks Date as a plain object (`{}`), which would collide with
- * empty bags and drop the `__date__:` tag. Preserve Date (and recurse) while
- * still redacting sensitive keys / PAN-shaped leaves.
+ * Payment/ops identifier keys (logger allow-list). 13–19 digit values here are
+ * gateway ids, not PANs — do not hash them as card numbers (S20-FINGERPRINT-REDACT).
+ */
+const FINGERPRINT_IDENTITY_KEYS = new Set([
+  "gatewaypaymentid",
+  "orderid",
+  "paymentid",
+  "gatewayid",
+  "captureid",
+  "refundid",
+  "voidid",
+  "customerid",
+  "merchantid",
+  "sessionid",
+  "requestid",
+  "correlationid",
+  "traceid",
+  "spanid",
+  "idempotencykey",
+  "authorizationid",
+  "operationid",
+  "providerrequestid",
+  "providerobjectid",
+  "internalreference",
+  "inboxeventkey",
+  "eventkey",
+]);
+
+function isFingerprintIdentityKey(key: string): boolean {
+  return FINGERPRINT_IDENTITY_KEYS.has(key.toLowerCase());
+}
+
+function isDigitRunId(value: string): boolean {
+  const digits = value.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
+
+function isSensitiveFingerprintKey(key: string): boolean {
+  const probe = redact({ [key]: 0 }) as Record<string, unknown>;
+  return probe[key] === "[REDACTED]";
+}
+
+function isOpaqueSensitiveFingerprintString(value: string): boolean {
+  return redact(value) === "[REDACTED]";
+}
+
+/**
+ * Replace a sensitive leaf with a typed hash so PII is not in the digest
+ * plaintext, but distinct values still produce distinct fingerprints.
+ */
+function hashedFingerprintLeaf(value: unknown): string {
+  return `[REDACTED:${sha256Hex(stableStringify(value))}]`;
+}
+
+/**
+ * Logger {@link redact} is correct for logs (constant `[REDACTED]`) but wrong
+ * for idempotency identity: two OTPs / billing bags would collide. Preserve
+ * Date, hash sensitive leaves, and skip PAN-hashing allow-listed ids.
  */
 function redactForFingerprint(value: unknown, depth = 0): unknown {
   if (depth > 6) {
@@ -289,7 +346,10 @@ function redactForFingerprint(value: unknown, depth = 0): unknown {
     return value;
   }
   if (value === null || typeof value !== "object") {
-    return redact(value);
+    if (typeof value === "string" && isOpaqueSensitiveFingerprintString(value)) {
+      return hashedFingerprintLeaf(value);
+    }
+    return value;
   }
   if (Array.isArray(value)) {
     return value.map((item) => redactForFingerprint(item, depth + 1));
@@ -300,12 +360,19 @@ function redactForFingerprint(value: unknown, depth = 0): unknown {
     if (key === "__proto__" || key === "constructor" || key === "prototype") {
       continue;
     }
-    const probe = redact({ [key]: 0 }) as Record<string, unknown>;
-    if (probe[key] === "[REDACTED]") {
-      out[key] = "[REDACTED]";
-    } else {
-      out[key] = redactForFingerprint(val, depth + 1);
+    if (isSensitiveFingerprintKey(key)) {
+      out[key] = hashedFingerprintLeaf(val);
+      continue;
     }
+    if (typeof val === "string" && isOpaqueSensitiveFingerprintString(val)) {
+      // Allow-listed ids: 13–19 digit values are gateway ids, not PANs.
+      out[key] =
+        isFingerprintIdentityKey(key) && isDigitRunId(val)
+          ? val
+          : hashedFingerprintLeaf(val);
+      continue;
+    }
+    out[key] = redactForFingerprint(val, depth + 1);
   }
   return out;
 }

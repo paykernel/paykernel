@@ -318,7 +318,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Shipping preference** | Default `shipping_preference` is **`NO_SHIPPING`**. Optional `paypalShippingPreference`: `NO_SHIPPING` \| `GET_FROM_FILE`. **`SET_PROVIDED_ADDRESS` is rejected** until shipping-address params exist on create. |
 | **Field length limits** | Client-enforced: `description` ≤ 127, `orderId` (reference_id) ≤ 256, `metadata.paymentId` (custom_id) ≤ 127, refund `reason` (note_to_payer) ≤ 255. |
 | **Return / cancel URLs** | Create requires `returnUrl` or `callbackUrl`. Cancel is `cancelUrl ?? callbackUrl ?? returnUrl` — **returnUrl-only is OK** (both URLs use returnUrl). |
-| **Authorize / refund success** | Like capture: terminal **failed** statuses return **`success: false`** (refund cancelled and **unmapped** refund statuses map to failed — fail-closed). Pending/completed keep `success: true`. |
+| **Authorize / refund success** | Like capture: terminal **failed** statuses return **`success: false`**. Refund **CANCELLED** maps to failed. HTTP 200 with an **unmapped** refund status maps to **`pending`** (never `failed` — retrying with a new `PayPal-Request-Id` can refund twice). Pending/completed keep `success: true`. |
 | **Webhook raw body** | **Required for reliable verify**: pass the unparsed body (string / `Buffer` / `Uint8Array`) to `handleWebhook` / `verifyWebhookAsync`. The SDK embeds those **exact** JSON bytes as `webhook_event` (no re-serialization, no trim). Parsed objects are accepted but may fail signature verification. |
 | **Webhook sync path** | `verifyWebhook()` (sync) always throws `InvalidRequestError`. Use `verifyWebhookAsync` or `client.handleWebhook`. |
 | **Webhook transmission age** | Soft path: aged `paypal-transmission-time` still calls PayPal verify (warn). Unparseable or far-future (default skew window **72h**, optional `webhookMaxAgeMs`) rejected before verify. Dedupe with `event.id`. |
@@ -344,7 +344,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Idempotency** | **Prefer always setting** a stable UUID `idempotencyKey` on create. **capture / refund / void / authorize require** a caller `idempotencyKey` (throws `InvalidRequestError` before POST). `createPayment` may mint an ephemeral `PayPal-Request-Id` for in-process `withRetry` only and **warns** — crash retries mint a new key. Shared param validation rejects empty/whitespace-only keys; `getRequestId` **trims** empty/whitespace as omitted. Orders API: ≤108 chars; Payments v2: wider limit. |
 | **Token Caching** | Access tokens are cached and refreshed automatically |
 | **Retry Logic** | Transient errors (5xx, rate limits, network failures, and PayPal `PREVIOUS_REQUEST_IN_PROGRESS` 409 conflicts) retry with exponential backoff; `Retry-After` is honored when PayPal sends it. |
-| **Response validation** | PayPal success responses must include the expected order ID, approval link, capture ID, authorization ID, or refund ID. Missing fields throw a gateway error. |
+| **Response validation** | PayPal success responses must include the expected order ID, approval link, capture ID, authorization ID, or refund ID. Missing fields throw a gateway error. Empty or non-JSON bodies are **not** swallowed as `{}` (**S20-PAYPAL-JSON**): mutating HTTP 200 stays post-submit **indeterminate**; GET throws `GatewayApiError` (not status-0 “missing id” from an invented object). |
 
 ## PayPal Webhook Events
 

@@ -291,14 +291,12 @@ export function createRedisReconciliationStore(
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(async () => {
         // STORES-4: fail closed on invalid input.now — never NaN/"NaN" ZSET scores.
-        const nowMs =
-          input.now !== undefined
-            ? msFromIso(input.now)
-            : clockNowMsString(ctx.clock);
-        const nowIso =
-          input.now !== undefined
-            ? canonicalizeIsoZ(input.now)
-            : clockNowIso(ctx.clock);
+        // S20-LIST-NOW: wipe expired leases with the store clock that issued them.
+        // Caller now is the due filter only (ZRANGE).
+        const storeNowMs = clockNowMsString(ctx.clock);
+        const storeNowIso = clockNowIso(ctx.clock);
+        const listNowMs =
+          input.now !== undefined ? msFromIso(input.now) : storeNowMs;
         const limit = input.limit ?? 100;
         // PERF-1 / PERF-4: ZSET scored at due_ms / lease_expires_ms (claim +
         // REDIS-1 renew). SCAN is off the poll path. One list-GET EVAL loads
@@ -306,7 +304,7 @@ export function createRedisReconciliationStore(
         const members = await ctx.port.send("ZRANGEBYSCORE", [
           dueIndex,
           "-inf",
-          nowMs,
+          listNowMs,
           "LIMIT",
           "0",
           String(limit),
@@ -318,7 +316,7 @@ export function createRedisReconciliationStore(
         const raw = await ctx.eval.eval(
           RECON_LIST_GET_LUA,
           [dueIndex, ...keys.map((k) => rk(k))],
-          [nowMs, nowIso, ...keys],
+          [storeNowMs, storeNowIso, ...keys],
         );
         const records = parseTaggedResultList(raw).map((tagged) => {
           if (tagged.tag === "missing") return undefined;

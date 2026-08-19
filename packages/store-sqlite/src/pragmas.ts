@@ -26,6 +26,28 @@ export type RecommendedPragmaOptions = {
 };
 
 /**
+ * True for process-local ephemeral SQLite URIs (`:memory:` / `file::memory:`).
+ * File-backed paths are durable and should set busy_timeout.
+ */
+function isEphemeralSqlitePath(path: string): boolean {
+  return path === ":memory:" || path.startsWith("file::memory:");
+}
+
+/**
+ * `PRAGMA busy_timeout` on file-backed opens so concurrent writers wait.
+ * No-op for `:memory:` (ephemeral). Default 5000 ms.
+ */
+export function applyFileBackedBusyTimeout(
+  run: (sql: string) => void,
+  path: string,
+  busyTimeoutMs: number = 5_000,
+): void {
+  if (isEphemeralSqlitePath(path)) return;
+  if (!Number.isFinite(busyTimeoutMs) || busyTimeoutMs < 0) return;
+  run(`PRAGMA busy_timeout = ${Math.floor(busyTimeoutMs)}`);
+}
+
+/**
  * Apply recommended pragmas for single-host SQLite deployments.
  *
  * Recommendations (14.1 / 14.3 / 14.5):

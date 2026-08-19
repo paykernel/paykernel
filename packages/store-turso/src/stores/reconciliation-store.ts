@@ -343,11 +343,13 @@ RETURNING key, status, generation`,
 
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {
       return withMappedErrors(async () => {
-        // SQL-2: TEXT lexical due_at/lease compares require canonical Z now.
-        const now =
+        // S20-LIST-NOW: wipe expired leases only with the store clock that issued
+        // them. Caller now is the due_at filter only.
+        const storeNow = clockNowIso(ctx.clock);
+        const listNow =
           input.now !== undefined
             ? canonicalizeIsoTimestamp(input.now, "now")
-            : clockNowIso(ctx.clock);
+            : storeNow;
         const limit = input.limit ?? 100;
         // Soft-release abandoned expired claims so processDue/claimDue can
         // rediscover them after worker crash. STORES-1: restore unfinished claim
@@ -373,7 +375,7 @@ RETURNING key, status, generation`,
                LIMIT ?
              )
            )`,
-          [now, now, limit],
+          [storeNow, storeNow, limit],
         );
         const rows = await ctx.getExecutor().query<Record<string, unknown>>(
           `SELECT ${RECON_SELECT_COLS}
@@ -382,7 +384,7 @@ RETURNING key, status, generation`,
              AND due_at <= ?
            ORDER BY due_at ASC
            LIMIT ?`,
-          [now, limit],
+          [listNow, limit],
         );
         return rows.map(mapReconciliationRow);
       });

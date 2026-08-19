@@ -38,12 +38,16 @@ const client = new PaymentClient({
       await errorTracker.capture(error, { context: ctx });
     },
 
-    // Webhook processing
+    // Verification only — never fulfill or mutate order/payment status here.
+    // handleWebhook does not claim an inbox. Claim via @paykernel/webhooks,
+    // then fulfill only on rematched payment.succeeded | capture.completed
+    // with payment.status === "paid", binding gatewayPaymentId
+    // (see webhooks.md and examples/checkout-kernel).
     onWebhookVerified: async (event) => {
-      await orderService.updatePaymentStatus(
-        event.paymentId,
-        event.status
-      );
+      await metrics.increment("webhook.verified", {
+        gateway: event.gateway,
+        type: event.event?.type ?? event.type,
+      });
     },
   },
 });
@@ -175,7 +179,7 @@ not for “business rule said stop” before aborts or after-hook noise.
 | Payload arrives | `onWebhookReceived(gateway, payload)` — **untrusted** |
 | Verification fails | `onWebhookFailed(payload, error)` then rethrow |
 | Parse fails after successful verify | Throw (`InvalidWebhookError` / `InvalidRequestError`); **no** `onWebhookFailed` |
-| Verify + parse succeed | `onWebhookVerified(event)` — **trusted** |
+| Verify + parse succeed | `onWebhookVerified(event)` — **trusted authenticity; never fulfill** |
 
 #### Webhook hook throw matrix
 
@@ -186,12 +190,14 @@ not for “business rule said stop” before aborts or after-hook noise.
 | `onWebhookVerified` | **Rethrown** so HTTP handlers can return **5xx** and the provider retries | **Fail-fast**: previous runs; if it throws, next is **not** run |
 
 `onWebhookVerified` composition short-circuits on the first throw so a failed
-primary fulfillment handler cannot leave a secondary handler also fulfilling
-(which would double-charge or double-ship on a later provider retry).
+primary handler cannot leave a secondary handler also running (which would
+double-run side effects on a later provider retry).
 
-**Merchants MUST dedupe by `event.id` (or an equivalent provider event id)
-before fulfillment.** Providers retry on 5xx; without idempotent handlers you
-will process the same paid event more than once.
+**Never fulfill in `onWebhookVerified`.** Claim via
+[`@paykernel/webhooks`](../../webhooks/README.md) first. Fulfill only on
+rematched `payment.succeeded` | `capture.completed` **and**
+`payment.status === "paid"`, binding `gatewayPaymentId`. Providers retry on
+5xx; a homemade `alreadyProcessed` check in this hook is not an inbox lease.
 
 Webhook hooks cannot abort verification by returning a value; handle rejection
 by not fulfilling orders when verification fails (the SDK already throws).
@@ -209,7 +215,7 @@ When a second handler is registered for the same hook name:
   after-handler are **error-logged and isolated** so later handlers still run
   and earlier `modifiedResult` is kept. Success is always returned at the
   gateway layer.
-- **`onWebhookVerified`**: fail-fast on first throw (no double fulfillment).
+- **`onWebhookVerified`**: fail-fast on first throw (do not fulfill here).
 - **`onError` / `onWebhookReceived` / `onWebhookFailed`**: run both, then
   rethrow the first error (secondary isolation at the call site).
 

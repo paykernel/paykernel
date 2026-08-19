@@ -34,6 +34,9 @@ describe("createMemoryReconciliationStore", () => {
     expect(first.record.attempts).toBe(1);
 
     clock.advance(1_001);
+    const peeked = await store.get("rec_attempts");
+    expect(peeked?.status).toBe("claimed");
+    expect(peeked?.leaseToken).toBe(first.leaseToken);
     const due = await store.listDue({
       now: new Date(clock.nowMs()).toISOString(),
       limit: 10,
@@ -48,6 +51,29 @@ describe("createMemoryReconciliationStore", () => {
     expect(second.kind).toBe("acquired");
     if (second.kind !== "acquired") return;
     expect(second.record.attempts).toBe(first.record.attempts);
+  });
+
+  it("S20-MEM-GET-WIPE: get() after expiry keeps lease_token until listDue", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const dueAt = new Date(clock.nowMs()).toISOString();
+    await store.schedule({
+      key: "rec_get_wipe",
+      subjectId: "pay_1",
+      reason: "indeterminate",
+      dueAt,
+    });
+    const first = await store.claim({
+      key: "rec_get_wipe",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    clock.advance(2_000);
+    const got = await store.get("rec_get_wipe");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(first.leaseToken);
   });
 
   it("RECON-LEASE-1: fail after lease expiry records with matching token", async () => {

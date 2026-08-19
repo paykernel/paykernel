@@ -23,7 +23,7 @@ import {
 } from "../index-stores";
 import type { SqliteStoreOptions, SqliteStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
-import { applyRecommendedPragmas } from "../pragmas";
+import { applyFileBackedBusyTimeout, applyRecommendedPragmas } from "../pragmas";
 import { createTransactionScope } from "../transaction-scope";
 
 /** Minimal node:sqlite DatabaseSync surface (structural). */
@@ -125,16 +125,32 @@ export function createNodeSqliteStores(opts: NodeSqliteStoreOptions): SqliteStor
 
 /**
  * Open a node:sqlite DatabaseSync.
+ *
+ * `path` is required — pass `":memory:"` explicitly for ephemeral tests.
+ * `:memory:` is process-local only (lost on process restart) and does **not**
+ * satisfy `SQLITE_STORAGE_ADAPTER_MANIFEST.durability: "durable"`.
+ * File-backed opens apply `PRAGMA busy_timeout` (default 5000 ms).
  * Does not migrate.
  */
 export function openNodeSqliteDatabase(
-  path: string = ":memory:",
-  options?: { open?: boolean; readOnly?: boolean },
+  path: string,
+  options?: { open?: boolean; readOnly?: boolean; busyTimeoutMs?: number },
 ): DatabaseSync {
-  return new DatabaseSync(path, {
+  if (typeof path !== "string" || path.length === 0) {
+    throw new TypeError(
+      'openNodeSqliteDatabase: path is required; pass ":memory:" explicitly for ephemeral process-local databases',
+    );
+  }
+  const db = new DatabaseSync(path, {
     open: options?.open ?? true,
     ...(options?.readOnly !== undefined ? { readOnly: options.readOnly } : {}),
   } as ConstructorParameters<typeof DatabaseSync>[1]);
+  applyFileBackedBusyTimeout(
+    (sql) => db.exec(sql),
+    path,
+    options?.busyTimeoutMs ?? 5_000,
+  );
+  return db;
 }
 
 /**

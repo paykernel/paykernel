@@ -455,6 +455,31 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(listed.find((r) => r.key === "job-due-z")).toBeDefined();
   });
 
+  it("S20-LIST-NOW: listDue with caller now ahead does not wipe a live lease", async () => {
+    const issuerMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: issuerMs });
+    const store = createSqliteReconciliationStore({ executor, clock });
+    await store.schedule({
+      key: "job-list-ahead",
+      subjectId: "pay_ahead",
+      reason: "timeout",
+      dueAt: "2026-01-15T11:00:00.000Z",
+    });
+    const claimed = await store.claim({
+      key: "job-list-ahead",
+      owner: "issuer",
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    const workerNow = new Date(issuerMs + 35_000).toISOString();
+    const listed = await store.listDue({ now: workerNow });
+    expect(listed.find((r) => r.key === "job-list-ahead")).toBeUndefined();
+    const got = await store.get("job-list-ahead");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(claimed.leaseToken);
+  });
+
   it("RECON-LEASE-1: markManualReview after lease expiry with matching token records review", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteReconciliationStore({ executor, clock });
@@ -839,6 +864,26 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(row?.status).toBe("pending");
     // Soft-release must write canonical Z available_at (not the offset form).
     expect(row?.availableAt).toBe("2026-01-15T12:00:02.000Z");
+  });
+
+  it("S20-LIST-NOW: listRetryable with caller now ahead does not wipe a live lease", async () => {
+    const issuerMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: issuerMs });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const claimed = await store.claim({
+      key: "evt-list-ahead",
+      payloadHash: "h1",
+      owner: "issuer",
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    const workerNow = new Date(issuerMs + 35_000).toISOString();
+    const listed = await store.listRetryable({ now: workerNow });
+    expect(listed.find((r) => r.key === "evt-list-ahead")).toBeUndefined();
+    const got = await store.get("evt-list-ahead");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(claimed.leaseToken);
   });
 
   it("STORES-4: claim repairs non-canonical available_at and acquires", async () => {

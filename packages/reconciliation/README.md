@@ -75,9 +75,8 @@ await scheduler.schedule({
   reason: "indeterminate_create",
 });
 
-// Production worker: processDue claims immediately before each handler and
-// auto-renews on leaseMs/3. Do not claimDue({ limit: N }) then work the
-// array serially — that holds N 30s leases and a peer can steal later ones.
+// Production poll loop (the only one): processDue claims immediately before
+// each handler and auto-renews on leaseMs/3.
 await scheduler.processDue({
   limit: 10,
   handler: async (job) => {
@@ -115,6 +114,8 @@ await scheduler.processDue({
   },
 });
 ```
+
+**Production worker:** `processDue` is the only production poll loop. `claimDue` is discovery / test inspection: it claims sequentially but still **returns N live leases**. Do not `claimDue({ limit: N })` then serial-work that array — later default-30s leases expire while the first handler runs, and a peer can steal them (`lease_lost` after a successful lookup). Use `processDue`, which claims immediately before each handler and auto-renews on `leaseMs/3`.
 
 Inject any `ReconciliationStore` (testkit `createMemoryReconciliationStore` in tests; postgres/redis/sqlite/turso/d1/do adapters in production). Durable adapters must pass `runReconciliationStoreConformanceSuite` from `@paykernel/testkit`.
 

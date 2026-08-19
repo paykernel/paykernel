@@ -978,6 +978,30 @@ describe("reconciliation store unit", () => {
     expect(select!.params[0]).toBe(canonicalNow);
   });
 
+  it("S20-LIST-NOW: listDue wipes with store clock, filters with caller now", async () => {
+    const isolateMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: isolateMs });
+    const isolateNow = "2026-01-15T12:00:00.000Z";
+    const workerNow = "2026-01-15T12:00:35.000Z";
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ rowCount: 0 }),
+      onQuery: () => [],
+    });
+    const store = createPostgresReconciliationStore({ executor, clock });
+    await store.listDue({ now: workerNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(isolateNow);
+    expect(soft!.params).not.toContain(workerNow);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("due_at <=") && !/^\s*UPDATE/i.test(c.sql),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(workerNow);
+  });
+
   it("RECON-LEASE-1: fail after expiry uses token+claimed (no lease_expires_at >)", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();
@@ -1240,5 +1264,32 @@ describe("listRetryable now canonical (STORES-2)", () => {
     );
     expect(select).toBeDefined();
     expect(select!.params[0]).toBe(canonicalNow);
+  });
+
+  it("S20-LIST-NOW: listRetryable wipes with store clock, filters with caller now", async () => {
+    const isolateMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: isolateMs });
+    const isolateNow = "2026-01-15T12:00:00.000Z";
+    const workerNow = "2026-01-15T12:00:35.000Z";
+    const executor = createScriptedExecutor({
+      onExecute: () => ({ rowCount: 0 }),
+      onQuery: () => [],
+    });
+    const store = createPostgresWebhookInboxStore({ executor, clock });
+    await store.listRetryable({ now: workerNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(isolateNow);
+    expect(soft!.params).not.toContain(workerNow);
+    const select = executor.calls.find(
+      (c) =>
+        c.sql.includes("available_at <=") &&
+        c.sql.includes("pending") &&
+        !/^\s*UPDATE/i.test(c.sql),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(workerNow);
   });
 });

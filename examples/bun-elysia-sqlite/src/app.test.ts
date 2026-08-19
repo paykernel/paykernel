@@ -18,29 +18,34 @@ runCheckoutHttpScenarios("elysia", (kernel): CheckoutFetchApp => {
 });
 
 describe("elysia test-hook honesty", () => {
-  it("recon route comments say do not deploy", () => {
+  it("test-hook route comments say do not deploy", () => {
     const src = readFileSync(join(import.meta.dir, "app.ts"), "utf8");
-    let from = 0;
-    let found = false;
-    while (from < src.length) {
-      const idx = src.indexOf("/internal/reconcile", from);
-      if (idx < 0) break;
-      const window = src.slice(Math.max(0, idx - 220), idx + 220);
-      if (window.toLowerCase().includes("do not deploy")) {
-        found = true;
-        break;
+    for (const route of ["/internal/reconcile", "/internal/create-count"]) {
+      let from = 0;
+      let found = false;
+      while (from < src.length) {
+        const idx = src.indexOf(route, from);
+        if (idx < 0) break;
+        const window = src.slice(Math.max(0, idx - 220), idx + 220);
+        if (window.toLowerCase().includes("do not deploy")) {
+          found = true;
+          break;
+        }
+        from = idx + route.length;
       }
-      from = idx + "/internal/reconcile".length;
+      expect(found).toBe(true);
     }
-    expect(found).toBe(true);
   });
 
-  it("rejects /internal/reconcile without enableTestHooks", async () => {
+  it.each([
+    ["/internal/reconcile", "POST"],
+    ["/internal/create-count", "GET"],
+  ] as const)("rejects %s without enableTestHooks", async (path, method) => {
     const kernel = await createCheckoutKernel();
     try {
       const app = createElysiaCheckoutApp(kernel);
       const res = await app.handle(
-        new Request("http://checkout.test/internal/reconcile", { method: "POST" }),
+        new Request(`http://checkout.test${path}`, { method }),
       );
       expect(res.status).toBe(404);
     } finally {

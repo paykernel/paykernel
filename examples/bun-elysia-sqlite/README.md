@@ -15,7 +15,7 @@ Local SQLite is **single-host only**. This example uses the kernel’s in-memory
 - `POST /internal/reconcile` — **test hook only**, unauthenticated; do not deploy (`enableTestHooks`).
 - `GET /orders/:id`
 - `POST /internal/provider-paid` — **test hook only**, unauthenticated; do not deploy. Injects a paid provider snapshot for local recon tests.
-- `GET /internal/create-count`
+- `GET /internal/create-count` — **test hook only**, unauthenticated; do not deploy (`enableTestHooks`).
 
 Stripe signing fixtures live in the kernel. This package does not reimplement `mapInboxOutcome` or HMAC signing.
 

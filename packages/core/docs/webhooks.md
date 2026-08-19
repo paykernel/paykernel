@@ -27,10 +27,10 @@ app.post(
       req.body, // Buffer from express.raw()
       req.headers['stripe-signature'] as string,
     );
-    // Do NOT call isPaidOutcome(event) — that helper is for GatewayPaymentResult /
-    // PaymentOperationResult and is always false on a WebhookEvent (CORE-8).
-    // Prefer event.status === 'paid', isPaidLikePaymentStatus(event.status), or
-    // event.event?.type === 'payment.succeeded' (authorized is not paid).
+    // handleWebhook verifies only. Do NOT fulfill here, and do NOT call
+    // isPaidOutcome(event) (CORE-8 — that helper is for GatewayPaymentResult).
+    // Claim via @paykernel/webhooks, then rematch payment.succeeded |
+    // capture.completed AND payment.status === 'paid', binding gatewayPaymentId.
     res.json({ received: true });
   },
 );
@@ -43,6 +43,7 @@ app.post('/webhooks/stripe', async ({ request }) => {
   const signature = request.headers.get('stripe-signature') ?? undefined;
 
   const event = await client.handleWebhook('stripe', rawBody, signature);
+  // Verify only — claim + rematch before fulfillment (see inbox sample below).
   return { received: true };
 });
 ```
@@ -188,9 +189,14 @@ See also [hooks.md](./hooks.md#webhook-path-client-level-not-executewithhooks).
 
 ### Deduplicate before fulfillment
 
-**Merchants MUST dedupe by a stable inbox key before fulfilling orders,
-capturing inventory, or sending goods.** For Stripe / PayPal / Moyasar that
-key is `event.id`. **Paymob must not use raw `event.id` alone** — redirect
+**Never fulfill in `onWebhookVerified`.** That hook runs after verify/parse
+and **before** any inbox claim. A homemade `alreadyProcessed(event.id)` check
+there is not a lease: two workers can both pass it.
+
+**Merchants MUST claim via [`@paykernel/webhooks`](../../webhooks/README.md)
+(or an equivalent inbox) before fulfilling orders, capturing inventory, or
+sending goods.** For Stripe / PayPal / Moyasar the provider event id is
+`event.id`. **Paymob must not use raw `event.id` alone** — redirect
 `TRANSACTION_RESPONSE` and processed `TRANSACTION` share the same transaction
 id. Use `deriveWebhookEventKey('paymob', event.id, event.provider?.eventType ?? event.type, event.status)`
 so a no-op redirect cannot ACK-suppress the later paid snapshot (WEBHOOKS-1).
@@ -204,22 +210,24 @@ complete fulfillment on Paymob `payment.processing` — wait for processed
 `TRANSACTION`.
 
 Providers redeliver the same event when your endpoint returns 5xx (including when
-`onWebhookVerified` throws). Without an idempotency check on the inbox key, a
-retry after a partial fulfillment will run your handler again.
+`onWebhookVerified` throws). Without an inbox claim, a retry after a partial
+fulfillment will run your handler again.
 
 ```typescript
 hooks: {
+  // Metrics only. Never fulfill / updatePaymentStatus here (pre-claim).
   onWebhookVerified: async (event) => {
-    const inboxId =
-      event.gateway === 'paymob'
-        ? `${event.type}:${event.id}`
-        : event.id;
-    if (await alreadyProcessed(inboxId)) return;
-    await fulfillOrder(event);
-    await markProcessed(inboxId);
+    await metrics.increment("webhook.verified", { gateway: event.gateway });
   },
 }
 ```
+
+Fulfill only **after** `processVerified` claims, and only when the rematched
+event is still `payment.succeeded` | `capture.completed` **and**
+`payment.status === "paid"`. Bind `gatewayPaymentId` (metadata `orderId` must
+not fulfill an order whose stored PI differs). See the inbox sample below and
+`isPaidFulfillmentEvent` / `findOrderForEvent` in
+[`examples/checkout-kernel`](../../../examples/checkout-kernel/src/kernel.ts).
 
 ### `onWebhookFailed` = verification failures only
 
@@ -230,9 +238,11 @@ errors after verify without invoking this hook.
 
 > ⚠️ The payload given to `onWebhookReceived` is **unverified and untrusted** —
 > anyone who can reach your endpoint can trigger it with arbitrary data. Use it
-> only for side-effect-free work (logging, metrics). Put all trusted,
-> state-changing logic (fulfilling orders, updating payment status) in
-> `onWebhookVerified`.
+> only for side-effect-free work (logging, metrics). `onWebhookVerified` is
+> **trusted for authenticity only** — still side-effect-free (metrics). Never
+> fulfill orders or update payment/inventory status there. Claim via
+> `@paykernel/webhooks`, then rematch + bind `gatewayPaymentId` in the inbox
+> handler.
 
 ## Normalized event
 
@@ -294,23 +304,73 @@ import {
 } from '@paykernel/webhooks';
 
 declare const store: WebhookInboxStore; // testkit memory in tests; production: @paykernel/store-*
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== 'object') return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === 'payment.succeeded' || rec.type === 'capture.completed') &&
+    rec.payment?.status === 'paid'
+  );
+}
+
+/** Bind webhook PI first. Metadata orderId must not fulfill a different stored PI. */
+function findOrderForEvent(
+  webhookEvent: { gatewayPaymentId?: string; paymentId?: string },
+  _event: unknown,
+): { kind: 'ok'; order: Order } | { kind: 'mismatch' } | { kind: 'missing' } {
+  const webhookPi =
+    typeof webhookEvent.gatewayPaymentId === 'string' &&
+    webhookEvent.gatewayPaymentId.length > 0
+      ? webhookEvent.gatewayPaymentId
+      : undefined;
+  if (webhookPi === undefined) return { kind: 'missing' };
+  const byGw = findOrderByGatewayPaymentId(webhookPi);
+  if (byGw) return { kind: 'ok', order: byGw };
+  const candidate = webhookEvent.paymentId
+    ? findOrderById(webhookEvent.paymentId)
+    : undefined;
+  if (!candidate) return { kind: 'missing' };
+  if (candidate.gatewayPaymentId === undefined) {
+    candidate.gatewayPaymentId = webhookPi;
+    return { kind: 'ok', order: candidate };
+  }
+  if (candidate.gatewayPaymentId === webhookPi) {
+    return { kind: 'ok', order: candidate };
+  }
+  return { kind: 'mismatch' };
+}
 
 const engine = createWebhookInboxEngine({ store, mode: 'inline' });
 
-const event = await client.handleWebhook('stripe', rawBody, signature);
+const webhookEvent = await client.handleWebhook('stripe', rawBody, signature);
 
 const outcome = await engine.processVerified({
   gateway: 'stripe',
-  providerEventId: event.id,
+  providerEventId: webhookEvent.id,
   // Prefer event.payloadHash. Never hash rawBody as a fallback for an object hash.
   payloadHash: resolveInboxPayloadHash({
-    eventPayloadHash: event.payloadHash,
-    payloadForHash: event.rawPayload ?? event,
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
   }),
   // PaymentEvent is event.event — Paymob keys need payment.status / provider.eventType.
-  event: event.event ?? event,
+  event: webhookEvent.event ?? webhookEvent,
   handler: async (ctx) => {
-    await fulfillOrder(ctx.event);
+    if (!isPaidFulfillmentEvent(ctx.event)) return;
+    const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+    if (typeof gatewayPaymentId !== 'string' || gatewayPaymentId.length === 0) {
+      return;
+    }
+    const found = findOrderForEvent(webhookEvent, ctx.event);
+    if (found.kind === 'mismatch') return;
+    if (found.kind === 'missing') {
+      throw new Error('no local order for paid webhook');
+    }
+    await fulfillOrder(found.order, gatewayPaymentId);
   },
 });
 // Map outcome → HTTP in your framework — never silent-ACK failures.

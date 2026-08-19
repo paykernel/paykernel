@@ -4,6 +4,9 @@
  * Does not claim multi-host coordination — single-host / single-process only.
  */
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   createExecutorFromBunSqlite,
   createBunSqliteExecutor,
@@ -83,6 +86,48 @@ describe("bun:sqlite driver binding", () => {
       expect(r.kind).toBe("acquired");
     } finally {
       bundle.close();
+    }
+  });
+
+  it.each([
+    ["empty string", ""],
+    ["undefined", undefined],
+  ] as const)(
+    "S20-SQLITE-MEMORY: openBunSqliteDatabase rejects missing path (%s)",
+    (_label, path) => {
+      expect(() =>
+        openBunSqliteDatabase(path as unknown as string),
+      ).toThrow(/path is required/);
+    },
+  );
+
+  it("S20-SQLITE-MEMORY: :memory: is explicit and does not apply busy_timeout", () => {
+    const db = openBunSqliteDatabase(":memory:");
+    try {
+      const executor = createBunSqliteExecutor(db);
+      const busy = executor.query<Record<string, unknown>>("PRAGMA busy_timeout");
+      const busyVal = Number(Object.values(busy[0] ?? {})[0] ?? -1);
+      expect(busyVal).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("S20-SQLITE-MEMORY: file-backed open applies busy_timeout", () => {
+    const dir = mkdtempSync(join(tmpdir(), "paykernel-sqlite-busy-"));
+    const path = join(dir, "busy.db");
+    try {
+      const db = openBunSqliteDatabase(path);
+      try {
+        const executor = createBunSqliteExecutor(db);
+        const busy = executor.query<Record<string, unknown>>("PRAGMA busy_timeout");
+        const busyVal = Number(Object.values(busy[0] ?? {})[0] ?? 0);
+        expect(busyVal).toBe(5_000);
+      } finally {
+        db.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

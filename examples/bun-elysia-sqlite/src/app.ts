@@ -19,8 +19,8 @@ function invalidJsonResponse(): Response {
  * Thin Elysia adapter over {@link createCheckoutHandlers}.
  * Stripe webhook reads `request.text()` with `parse: "none"` — no JSON body parser.
  *
- * `/internal/reconcile` and `/internal/provider-paid` are test hooks.
- * They are unauthenticated — do not deploy them.
+ * `/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count`
+ * are test hooks. They are unauthenticated — do not deploy them.
  */
 export function createElysiaCheckoutApp(
   kernel: CheckoutKernel,
@@ -87,6 +87,7 @@ export function createElysiaCheckoutApp(
     noParse,
   );
 
+  // Test hook only — unauthenticated. Do not deploy this route.
   app.get("/internal/create-count", () => checkoutJsonResponse(handlers.createCount()));
 
   return app;

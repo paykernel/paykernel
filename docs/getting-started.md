@@ -64,7 +64,9 @@ const webhookEvent = await client.handleWebhook("moyasar", rawBody, signature);
 // webhookEvent.event is the Phase 7 PaymentEvent when mapping succeeds.
 ```
 
-Do **not** fulfill inside `onWebhookVerified` if you will use the inbox. Verification can succeed on a payload you must still claim and lease. Guides: [webhooks.md](../packages/core/docs/webhooks.md), [webhook-events.md](../packages/core/docs/webhook-events.md).
+**Never fulfill inside `onWebhookVerified`.** That hook is authenticity-only
+(metrics). Verification can succeed on a payload you must still claim and lease.
+Guides: [webhooks.md](../packages/core/docs/webhooks.md), [webhook-events.md](../packages/core/docs/webhook-events.md).
 
 `handleWebhook` throws on a failed signature (`InvalidWebhookError`). That is forgery — map to a 4xx in *your* HTTP adapter. The inbox engine never sets status codes.
 
@@ -92,7 +94,46 @@ import {
 } from "@paykernel/store-postgres/pg";
 import { Pool } from "pg";
 
-declare function fulfillOrder(event: unknown): Promise<void>;
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+/** Bind webhook PI first. Metadata orderId must not fulfill a different stored PI. */
+function findOrderForEvent(
+  webhookEvent: { gatewayPaymentId?: string; paymentId?: string },
+  _event: unknown,
+): { kind: "ok"; order: Order } | { kind: "mismatch" } | { kind: "missing" } {
+  const webhookPi =
+    typeof webhookEvent.gatewayPaymentId === "string" &&
+    webhookEvent.gatewayPaymentId.length > 0
+      ? webhookEvent.gatewayPaymentId
+      : undefined;
+  if (webhookPi === undefined) return { kind: "missing" };
+  const byGw = findOrderByGatewayPaymentId(webhookPi);
+  if (byGw) return { kind: "ok", order: byGw };
+  const candidate = webhookEvent.paymentId
+    ? findOrderById(webhookEvent.paymentId)
+    : undefined;
+  if (!candidate) return { kind: "missing" };
+  if (candidate.gatewayPaymentId === undefined) {
+    candidate.gatewayPaymentId = webhookPi;
+    return { kind: "ok", order: candidate };
+  }
+  if (candidate.gatewayPaymentId === webhookPi) {
+    return { kind: "ok", order: candidate };
+  }
+  return { kind: "mismatch" };
+}
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
@@ -132,16 +173,19 @@ export async function onStripeWebhook(rawBody: string, signature: string) {
     // payment.status / refund.status / provider.eventType from that object.
     event: webhookEvent.event ?? webhookEvent,
     handler: async (ctx) => {
-      const paymentEvent = ctx.event as { type?: string; payment?: { status?: string } };
       // Rematch can demote payment.succeeded / capture.completed when domain
       // status is refunded, failed, cancelled, authorized, or open money.
-      if (
-        (paymentEvent.type === "payment.succeeded" ||
-          paymentEvent.type === "capture.completed") &&
-        paymentEvent.payment?.status === "paid"
-      ) {
-        await fulfillOrder(paymentEvent);
+      if (!isPaidFulfillmentEvent(ctx.event)) return;
+      const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+        return;
       }
+      const found = findOrderForEvent(webhookEvent, ctx.event);
+      if (found.kind === "mismatch") return;
+      if (found.kind === "missing") {
+        throw new Error("no local order for paid webhook");
+      }
+      await fulfillOrder(found.order, gatewayPaymentId);
     },
   });
 
@@ -176,7 +220,7 @@ function mapInboxOutcome(outcome: WebhookProcessingOutcome) {
 
 Inbox modes, outcomes, and crash matrix: [webhook-inbox.md](../packages/webhooks/docs/webhook-inbox.md).
 
-Fulfill only when the rematched stable type is still `payment.succeeded` / `capture.completed` **and** nested `payment.status === "paid"`. Do not fulfill on `payment.processing`, `partially_captured`, or Paymob `TRANSACTION_RESPONSE`. See [operation-results.md](../packages/core/docs/operation-results.md).
+Fulfill only when the rematched stable type is still `payment.succeeded` / `capture.completed` **and** nested `payment.status === "paid"`, then bind `gatewayPaymentId`. Do not fulfill on `payment.processing`, `partially_captured`, or Paymob `TRANSACTION_RESPONSE`. Never fulfill in `onWebhookVerified`. See [operation-results.md](../packages/core/docs/operation-results.md).
 
 ---
 
@@ -190,12 +234,65 @@ import {
   createReconciliationScheduler,
   createGetPaymentLookupPort,
   buildReconciliationTarget,
+  buildProviderPaymentSnapshot,
   decideReconciliationPolicy,
   type ReconciliationTarget,
 } from "@paykernel/reconciliation";
-import { NetworkError, type Money } from "@paykernel/core";
+import {
+  money,
+  NetworkError,
+  type GatewayPaymentResult,
+  type Money,
+} from "@paykernel/core";
 
-declare function loadTrustedMoney(gatewayPaymentId: string): Money;
+function publishableCurrency(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function moneyFromMajorUnits(
+  amount: number | undefined,
+  currency: string | undefined,
+): Money | undefined {
+  if (amount === undefined || !Number.isFinite(amount)) return undefined;
+  if (currency === undefined) return undefined;
+  try {
+    return money(amount, currency);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Provider recon snapshot from `getPayment` money only. Incomplete money fails closed. */
+function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
+  if (!got.gatewayId) return undefined;
+  const currency = publishableCurrency(got.currency);
+  const hasAmountLike =
+    got.amount !== undefined ||
+    got.capturedAmount !== undefined ||
+    got.refundedAmount !== undefined;
+  if (hasAmountLike && currency === undefined) return undefined;
+  const amount = moneyFromMajorUnits(got.amount, currency);
+  if (amount === undefined) return undefined;
+  const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
+    gatewayPaymentId: got.gatewayId,
+    status: got.status,
+    amount,
+    providerStatus: got.status,
+  };
+  if (got.capturedAmount !== undefined) {
+    const captured = moneyFromMajorUnits(got.capturedAmount, currency);
+    if (captured === undefined) return undefined;
+    input.capturedAmount = captured;
+  }
+  if (got.refundedAmount !== undefined) {
+    const refunded = moneyFromMajorUnits(got.refundedAmount, currency);
+    if (refunded === undefined) return undefined;
+    input.refundedAmount = refunded;
+  }
+  return buildProviderPaymentSnapshot(input);
+}
 
 const scheduler = createReconciliationScheduler({
   store: stores.reconciliation,
@@ -205,17 +302,9 @@ const reconciler = createPaymentReconciler({
   lookup: createGetPaymentLookupPort({
     getPayment: async ({ gateway, gatewayPaymentId }) => {
       const got = await client.getPayment({ gatewayPaymentId }, gateway);
-      // Map GatewayPaymentResult → ProviderPaymentSnapshot in your app.
-      // Do not feed 0.x major-unit `number` amounts back into money() —
-      // keep a trusted decimal string on the order row. See money.md and
-      // packages/reconciliation/docs/safe-lookup.md.
-      if (!got.gatewayId) return undefined;
-      return {
-        gatewayPaymentId: got.gatewayId,
-        status: got.status,
-        amount: loadTrustedMoney(gatewayPaymentId),
-        providerStatus: got.status,
-      };
+      // Never copy catalog / local trusted amount onto the provider snapshot.
+      // Publish currency with every major-unit field; omit incomplete money.
+      return providerSnapshotFromGetPayment(got);
     },
   }),
 });

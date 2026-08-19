@@ -2489,13 +2489,34 @@ describe("PaymobGateway", () => {
       expect(fetchCalls).toHaveLength(1);
     });
 
-    it("inquiry missing success is fail-closed (not paid / not isPaidOutcome)", async () => {
+    it("inquiry missing success is processing, not declined (S20-PAYMOB-SUCCESS-OMIT)", async () => {
       const actionGateway = new PaymobGateway(withMutationFence(), hooksManager);
       mockFetchSequence(
         jsonResponse({ token: "auth_token_123" }),
         jsonResponse({
           id: 123456789,
-          // success omitted — must not default true
+          // success omitted — identified txn (id + money) is incomplete, not declined
+          pending: false,
+          amount_cents: 10000,
+          currency: "SAR",
+        }),
+      );
+
+      const result = await actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      expect(result.status).toBe("processing");
+      expect(result.status).not.toBe("failed");
+      expect(result.outcome).toBe("requires_action");
+      expect(result.outcome).not.toBe("declined");
+      expect(isPaidOutcome(result)).toBe(false);
+    });
+
+    it("inquiry explicit success:false is failed", async () => {
+      const actionGateway = new PaymobGateway(withMutationFence(), hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({
+          id: 123456789,
+          success: false,
           pending: false,
           amount_cents: 10000,
           currency: "SAR",
@@ -4353,6 +4374,45 @@ describe("PaymobGateway", () => {
       expect(event.stableType).not.toBe("payment.authorized");
       expect(event.stableType).not.toBe("payment.succeeded");
       expect(event.stableType).not.toBe("capture.completed");
+    });
+
+    it("redirect void/fail/refund terminals stay processing (S20-PAYMOB-REDIR-TERM)", () => {
+      const base = {
+        id: "123456789",
+        pending: "false",
+        amount_cents: "10000",
+        currency: "SAR",
+        created_at: "2024-12-31T12:00:00Z",
+      };
+      const rows = [
+        {
+          extra: { success: "true", is_voided: "true" },
+          notStatus: ["cancelled"],
+          notStable: ["payment.cancelled"],
+        },
+        {
+          extra: { success: "false" },
+          notStatus: ["failed"],
+          notStable: ["payment.failed"],
+        },
+        {
+          extra: { success: "true", is_refunded: "true" },
+          notStatus: ["refund_completed", "refunded"],
+          notStable: ["refund.completed", "refund.pending"],
+        },
+      ] as const;
+      for (const row of rows) {
+        const event = gateway.parseWebhookEvent({ ...base, ...row.extra });
+        expect(event.type).toBe("TRANSACTION_RESPONSE");
+        expect(event.status).toBe("processing");
+        expect(event.stableType).toBe("payment.processing");
+        for (const status of row.notStatus) {
+          expect(event.status).not.toBe(status);
+        }
+        for (const stable of row.notStable) {
+          expect(event.stableType).not.toBe(stable);
+        }
+      }
     });
   });
 

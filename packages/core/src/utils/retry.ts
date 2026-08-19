@@ -121,8 +121,8 @@ export async function withRetry<T>(
   options: WithRetryOptions,
 ): Promise<T> {
   const config: RetryConfig = { ...DEFAULT_RETRY_CONFIG, ...options.config };
-  // Guard against maxAttempts <= 0 (would skip the loop and throw undefined).
-  config.maxAttempts = Math.max(1, config.maxAttempts);
+  // S20-RETRY-NAN: Math.max(1, NaN) is NaN → loop never runs → throw undefined.
+  config.maxAttempts = sanitizeMaxAttempts(config.maxAttempts);
   let lastError: unknown;
 
   for (let attempt = 0; attempt < config.maxAttempts; attempt++) {
@@ -148,6 +148,18 @@ export async function withRetry<T>(
   }
 
   throw lastError;
+}
+
+/**
+ * S20-RETRY-NAN: `Math.max(1, NaN)` is `NaN`, so the retry loop never runs
+ * and `throw lastError` throws `undefined`. Coerce to a finite integer ≥ 1.
+ * Non-finite values (NaN, ±∞) and non-numbers run once; fractions trunc toward 0.
+ */
+function sanitizeMaxAttempts(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return 1;
+  }
+  return Math.max(1, Math.trunc(value));
 }
 
 /**

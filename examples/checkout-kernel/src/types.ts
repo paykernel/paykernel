@@ -23,8 +23,8 @@ export type CreateOrderPaymentInput = {
 /** HTTP test-hook gating. Do not enable on a deployed host. */
 export type CheckoutHttpOptions = {
   /**
-   * Serve unauthenticated `/internal/reconcile` and `/internal/provider-paid`.
-   * Test-only. Do not deploy with this flag on.
+   * Serve unauthenticated `/internal/reconcile`, `/internal/provider-paid`,
+   * and `/internal/create-count`. Test-only. Do not deploy with this flag on.
    */
   enableTestHooks?: boolean;
 };

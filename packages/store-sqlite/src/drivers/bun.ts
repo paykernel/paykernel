@@ -21,7 +21,7 @@ import {
 } from "../index-stores";
 import type { SqliteStoreOptions, SqliteStoresBundle } from "../types";
 import type { StoreClock } from "../clock";
-import { applyRecommendedPragmas } from "../pragmas";
+import { applyFileBackedBusyTimeout, applyRecommendedPragmas } from "../pragmas";
 import { createTransactionScope } from "../transaction-scope";
 
 /**
@@ -155,24 +155,40 @@ export function createBunSqliteStores(opts: BunSqliteStoreOptions): SqliteStores
 }
 
 /**
- * Open a bun:sqlite Database (file or `:memory:`).
- * Does not migrate and does not apply pragmas by default.
+ * Open a bun:sqlite Database.
+ *
+ * `path` is required — pass `":memory:"` explicitly for ephemeral tests.
+ * `:memory:` is process-local only (lost on process restart) and does **not**
+ * satisfy `SQLITE_STORAGE_ADAPTER_MANIFEST.durability: "durable"`.
+ * File-backed opens apply `PRAGMA busy_timeout` (default 5000 ms).
+ * Does not migrate. Does not enable WAL (call {@link applyRecommendedPragmas}).
  */
 export function openBunSqliteDatabase(
-  path: string = ":memory:",
-  options?: { create?: boolean; readonly?: boolean },
+  path: string,
+  options?: { create?: boolean; readonly?: boolean; busyTimeoutMs?: number },
 ): Database {
+  if (typeof path !== "string" || path.length === 0) {
+    throw new TypeError(
+      'openBunSqliteDatabase: path is required; pass ":memory:" explicitly for ephemeral process-local databases',
+    );
+  }
   const openOpts: { create?: boolean; readonly?: boolean } = {};
   if (options?.create !== undefined) openOpts.create = options.create;
   if (options?.readonly !== undefined) openOpts.readonly = options.readonly;
-  return new Database(path, {
+  const db = new Database(path, {
     create: openOpts.create ?? true,
     ...(openOpts.readonly !== undefined ? { readonly: openOpts.readonly } : {}),
   });
+  applyFileBackedBusyTimeout(
+    (sql) => db.exec(sql),
+    path,
+    options?.busyTimeoutMs ?? 5_000,
+  );
+  return db;
 }
 
 /**
- * In-memory test helper: open `:memory:`, optional recommended pragmas.
+ * In-memory test helper: open `:memory:` (ephemeral), optional recommended pragmas.
  * Does **not** migrate — call `migrateSqliteAdapter` explicitly.
  */
 export function createInMemoryBunSqliteExecutor(options?: {

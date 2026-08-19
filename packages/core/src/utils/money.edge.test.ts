@@ -134,10 +134,26 @@ describe("5.4 large values (beyond Number.MAX_SAFE_INTEGER)", () => {
 // 5) Invalid precision rejected by default for each exponent class
 // ---------------------------------------------------------------------------
 describe("5.4 invalid precision (reject by default)", () => {
-  it("rejects one excess digit for 0 / 2 / 3 decimal classes", () => {
-    expect(() => toMinorUnits("1.0", "JPY")).toThrow(InvalidRequestError);
-    expect(() => toMinorUnits("1.000", "USD")).toThrow(InvalidRequestError);
-    expect(() => toMinorUnits("1.0000", "KWD")).toThrow(InvalidRequestError);
+  it("accepts unused trailing-zero remainder for 0 / 2 / 3 decimal classes (S20-TRAILING-ZERO)", () => {
+    for (const [raw, currency, minor] of [
+      ["1.0", "JPY", 1n],
+      ["1.000", "USD", 100n],
+      ["1.0000", "KWD", 1000n],
+    ] as const) {
+      expect(toMinorUnits(raw, currency)).toBe(minor);
+    }
+    expect(money("100.00", "JPY")).toEqual({ amount: "100", currency: "JPY" });
+    expect(money("10.500", "USD").amount).toBe("10.50");
+  });
+
+  it("rejects non-zero excess digits for 0 / 2 / 3 decimal classes", () => {
+    for (const [raw, currency] of [
+      ["1.1", "JPY"],
+      ["1.001", "USD"],
+      ["1.0001", "KWD"],
+    ] as const) {
+      expect(() => toMinorUnits(raw, currency)).toThrow(InvalidRequestError);
+    }
   });
 
   it("rejects long trailing noise that float paths often round away", () => {

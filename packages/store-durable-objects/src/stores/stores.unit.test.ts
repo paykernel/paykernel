@@ -933,6 +933,32 @@ describe("listRetryable now canonical (STORES-2)", () => {
     expect(select).toBeDefined();
     expect(select!.params[0]).toBe(canonicalNow);
   });
+
+  it("S20-LIST-NOW: listRetryable does not wipe isolate-issued leases with Worker now ahead", async () => {
+    const isolateMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: isolateMs });
+    const isolateNow = "2026-01-15T12:00:00.000Z";
+    const workerNow = "2026-01-15T12:00:35.000Z";
+    const executor = createScriptedExecutor({
+      onRun: () => ({ changes: 0 }),
+      onQuery: () => [],
+    });
+    const store = createDoWebhookInboxStore({ executor, clock });
+    await store.listRetryable({ now: workerNow });
+    const soft = executor.calls.find(
+      (c) => c.sql.includes("status = 'claimed'") && c.sql.includes("lease_expires_at"),
+    );
+    expect(soft).toBeDefined();
+    expect(soft!.params[0]).toBe(isolateNow);
+    expect(soft!.params[1]).toBe(isolateNow);
+    expect(soft!.params[2]).toBe(isolateNow);
+    expect(soft!.params).not.toContain(workerNow);
+    const select = executor.calls.find(
+      (c) => c.sql.includes("available_at <=") && !/^\s*UPDATE/i.test(c.sql),
+    );
+    expect(select).toBeDefined();
+    expect(select!.params[0]).toBe(workerNow);
+  });
 });
 
 describe("withTransaction honesty (SHARED-1 / DO)", () => {

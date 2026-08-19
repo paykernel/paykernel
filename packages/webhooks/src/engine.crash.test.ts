@@ -274,11 +274,16 @@ describe("crash boundaries (10.6)", () => {
       });
       expect(claim.kind).toBe("acquired");
       if (claim.kind === "acquired") {
-        // Soft-release on get restores unfinished attempt (WEBHOOKS-1).
+        // S20-MEM-GET-WIPE: get is read-only. listRetryable is the store-clock
+        // restore path (WEBHOOKS-1).
         clock.advance(2000);
         const after = await store.get("stripe:evt_crash_budget");
-        expect(after?.status).toBe("pending");
-        expect(after?.attempts).toBe(0);
+        expect(after?.status).toBe("claimed");
+        expect(after?.attempts).toBe(1);
+        const listed = await store.listRetryable({ limit: 10 });
+        const row = listed.find((r) => r.key === "stripe:evt_crash_budget");
+        expect(row?.status).toBe("pending");
+        expect(row?.attempts).toBe(0);
       }
     }
 

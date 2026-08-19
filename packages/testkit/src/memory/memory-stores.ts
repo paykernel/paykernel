@@ -458,6 +458,7 @@ export function createMemoryWebhookInboxStore(
     ) {
       // WEBHOOKS-1: restore unfinished claim attempt so crash reclaim does not
       // burn maxAttempts handler budget (parity with @paykernel/webhooks memory).
+      // Soft-release only on listRetryable/claim (S20-MEM-GET-WIPE).
       const released: WebhookInboxRecord = {
         ...rec,
         status: "pending",
@@ -657,9 +658,8 @@ export function createMemoryWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      const existing = entries.get(key);
-      if (!existing) return undefined;
-      return releaseExpiredLease(key, existing);
+      // S20-MEM-GET-WIPE: get is read-only. Soft-release lives on list/claim.
+      return entries.get(key);
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {
@@ -738,6 +738,7 @@ export function createMemoryReconciliationStore(
     ) {
       // STORES-1: restore unfinished claim so crash/listDue reclaim does not
       // burn maxAttempts (parity with SQL CASE WHEN status=claimed THEN attempts).
+      // Soft-release only on listDue/claim (S20-MEM-GET-WIPE).
       const released: ReconciliationRecord = {
         ...rec,
         status: "scheduled",
@@ -985,9 +986,8 @@ export function createMemoryReconciliationStore(
     },
 
     async get(key: ReconciliationKey): Promise<ReconciliationRecord | undefined> {
-      const existing = entries.get(key);
-      if (!existing) return undefined;
-      return releaseExpiredLease(key, existing);
+      // S20-MEM-GET-WIPE: get is read-only. Soft-release lives on list/claim.
+      return entries.get(key);
     },
 
     async listDue(input: ListDueInput): Promise<ReconciliationRecord[]> {

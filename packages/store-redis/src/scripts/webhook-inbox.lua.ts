@@ -4,8 +4,10 @@
  */
 
 /** KEYS[1]=record KEYS[2]=retryIndex
- * ARGV: nowMs, nowIso, payloadHash, owner, leaseToken, leaseExpiresAt, leaseExpiresMs, payloadRef, logicalKey, ifMatchPayloadHash
- * ifMatchPayloadHash empty = omitted (WEBHOOKS-3 idle supersede). Non-empty CAS (S19).
+ * ARGV: nowMs, nowIso, payloadHash, owner, leaseToken, leaseExpiresAt, leaseExpiresMs, payloadRef, logicalKey, ifMatchPayloadHash, ifMatchPresent
+ * ifMatchPresent '1' = CAS even when ifMatchPayloadHash is empty (S20).
+ * ifMatchPresent '0' / omitted ARGV[11] = WEBHOOKS-3 idle supersede (field missing/NULL).
+ * Empty string is never omit.
  */
 export const WEBHOOK_CLAIM_LUA = `
 local rec = KEYS[1]
@@ -20,6 +22,7 @@ local leaseExpiresMs = ARGV[7]
 local payloadRef = ARGV[8]
 local logicalKey = ARGV[9]
 local ifMatchPayloadHash = ARGV[10] or ''
+local ifMatchPresent = ARGV[11] == '1'
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -106,9 +109,11 @@ if status == 'claimed' then
   -- expired lease → fall through to re-claim (recovery / hash supersede)
 end
 
--- S19: compare-and-claim. Retry workers pass the listed hash so an idle
--- WEBHOOKS-3 supersede between get and claim cannot roll the body back.
-if ifMatchPayloadHash ~= '' and ph ~= ifMatchPayloadHash then
+-- S19 / S20-REDIS-IFMATCH-EMPTY: compare-and-claim. Retry workers pass the
+-- listed hash so an idle WEBHOOKS-3 supersede between get and claim cannot
+-- roll the body back. Omit only when ifMatchPresent is not '1' (missing/NULL).
+-- Empty ifMatchPayloadHash is CAS-match-empty, never omit.
+if ifMatchPresent and ph ~= ifMatchPayloadHash then
   local p = pack(m)
   return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
 end

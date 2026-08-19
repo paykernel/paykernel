@@ -478,6 +478,47 @@ describe("createMemoryWebhookInboxStore", () => {
     expect(rec?.status).toBe("pending");
   });
 
+  it("S20-MEM-GET-WIPE: get() after expiry is read-only; listRetryable still soft-releases", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_get_wipe",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 1_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    clock.advance(2_000);
+    const peeked = await store.get("e_get_wipe");
+    expect(peeked?.status).toBe("claimed");
+    expect(peeked?.leaseToken).toBe(a.leaseToken);
+    const listed = await store.listRetryable({ limit: 10 });
+    const row = listed.find((r) => r.key === "e_get_wipe");
+    expect(row?.status).toBe("pending");
+    expect(row?.leaseToken).toBeUndefined();
+    expect((await store.get("e_get_wipe"))?.status).toBe("pending");
+  });
+
+  it("S20-LIST-NOW: listRetryable with caller now ahead of store clock does not wipe a live lease", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryWebhookInboxStore({ clock });
+    const a = await store.claim({
+      key: "e_list_ahead",
+      payloadHash: "h",
+      owner: "w",
+      leaseMs: 30_000,
+    });
+    expect(a.kind).toBe("acquired");
+    if (a.kind !== "acquired") return;
+    const workerNow = new Date(clock.nowMs() + 35_000).toISOString();
+    const listed = await store.listRetryable({ now: workerNow, limit: 10 });
+    expect(listed.find((r) => r.key === "e_list_ahead")).toBeUndefined();
+    const got = await store.get("e_list_ahead");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(a.leaseToken);
+  });
+
   it("WEBHOOKS-1: completed terminal wins before payload_hash_conflict", async () => {
     const store = createMemoryWebhookInboxStore({ clock: createFakeClock() });
     const a = await store.claim({
@@ -845,6 +886,55 @@ describe("createMemoryReconciliationStore", () => {
     // Soft-release must persist for subsequent get.
     const got = await store.get("r_list_soft");
     expect(got?.status).toBe("scheduled");
+  });
+
+  it("S20-MEM-GET-WIPE: get() after expiry is read-only; listDue still soft-releases", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_get_wipe",
+      subjectId: "pay_get",
+      reason: "indeterminate",
+      dueAt: clock.nowIso(),
+    });
+    const claimed = await store.claim({
+      key: "r_get_wipe",
+      owner: "w_dead",
+      leaseMs: 1_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    clock.advance(2_000);
+    const peeked = await store.get("r_get_wipe");
+    expect(peeked?.status).toBe("claimed");
+    expect(peeked?.leaseToken).toBe(claimed.leaseToken);
+    const due = await store.listDue({ now: clock.nowIso(), limit: 10 });
+    expect(due.find((r) => r.key === "r_get_wipe")?.status).toBe("scheduled");
+    expect((await store.get("r_get_wipe"))?.status).toBe("scheduled");
+  });
+
+  it("S20-LIST-NOW: listDue with caller now ahead of store clock does not wipe a live lease", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    await store.schedule({
+      key: "r_list_ahead",
+      subjectId: "pay_ahead",
+      reason: "indeterminate",
+      dueAt: clock.nowIso(),
+    });
+    const claimed = await store.claim({
+      key: "r_list_ahead",
+      owner: "w",
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+    const workerNow = new Date(clock.nowMs() + 35_000).toISOString();
+    const due = await store.listDue({ now: workerNow, limit: 10 });
+    expect(due.find((r) => r.key === "r_list_ahead")).toBeUndefined();
+    const got = await store.get("r_list_ahead");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(claimed.leaseToken);
   });
 
   it("maxEntries skips active claimed and evicts terminal; refuses when all leased", async () => {

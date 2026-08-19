@@ -827,7 +827,7 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(result.completed).toBe(3);
   });
 
-  it("S19-CLAIM-DUE: claimDue claims listed rows one-at-a-time", async () => {
+  it("S19-CLAIM-DUE / S20-CLAIM-DUE-N: claimDue claims listed rows one-at-a-time", async () => {
     const clock = createFakeClock();
     const inner = createMemoryReconciliationStore({ clock });
     const now = new Date(clock.nowMs()).toISOString();
@@ -857,7 +857,7 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(maxInflight).toBe(1);
   });
 
-  it("S19-CLAIM-DUE: claimDue does not hold N live leases across a slow second claim", async () => {
+  it("S19-CLAIM-DUE / S20-CLAIM-DUE-N: claimDue does not hold N live leases across a slow second claim", async () => {
     const clock = createFakeClock();
     const inner = createMemoryReconciliationStore({ clock });
     const now = new Date(clock.nowMs()).toISOString();
@@ -905,6 +905,37 @@ describe("createReconciliationScheduler (A3)", () => {
     releaseSecond();
     const claimed = await running;
     expect(claimed).toHaveLength(3);
+  });
+
+  it("S20-CLAIM-DUE-N: claimDue bulk-returns live leases (discovery, not a production worker)", async () => {
+    const clock = createFakeClock();
+    const store = createMemoryReconciliationStore({ clock });
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      owner: "w1",
+      defaultLeaseMs: 30_000,
+    });
+    const runAt = new Date(clock.nowMs()).toISOString();
+    const keys = ["pi_a", "pi_b", "pi_c"].map((id) =>
+      deriveReconciliationJobKey({ gateway: "stripe", gatewayPaymentId: id }),
+    );
+    for (const id of ["pi_a", "pi_b", "pi_c"]) {
+      await scheduler.schedule({
+        target: { gateway: "stripe", gatewayPaymentId: id },
+        runAt,
+        reason: "due",
+      });
+    }
+
+    const claimed = await scheduler.claimDue({ limit: 3 });
+    expect(claimed).toHaveLength(3);
+    const mid = await Promise.all(keys.map((k) => store.get(k)));
+    expect(mid.filter((r) => r?.status === "claimed")).toHaveLength(3);
+    expect(mid.every((r) => r?.leaseToken !== undefined)).toBe(true);
+
+    // Contrast: processDue (the production loop) holds only one lease at a
+    // time across serial handlers — see NEW-RECON-2.
   });
 
   it("RECON-7: schedule reopens terminal completed job under same key", async () => {
@@ -1165,5 +1196,108 @@ describe("createReconciliationScheduler (A3)", () => {
     const firstResult = await first;
     expect(firstResult.processed).toBe(1);
     expect(firstResult.completed).toBe(1);
+  });
+
+  it("S20-HEARTBEAT-RACE: renew after stop does not rotate the token before complete", async () => {
+    const realSetInterval = globalThis.setInterval.bind(globalThis);
+    const realClearInterval = globalThis.clearInterval.bind(globalThis);
+    let capturedTick: (() => void) | undefined;
+    let stopped = false;
+    globalThis.setInterval = ((handler: TimerHandler) => {
+      capturedTick =
+        typeof handler === "function"
+          ? () => {
+              (handler as () => void)();
+            }
+          : undefined;
+      return realSetInterval(() => undefined, 2_147_483_647);
+    }) as typeof setInterval;
+    globalThis.clearInterval = ((id) => {
+      stopped = true;
+      realClearInterval(id);
+    }) as typeof clearInterval;
+
+    try {
+      const inner = createMemoryReconciliationStore();
+      let renewCalls = 0;
+      let releaseFirst!: () => void;
+      const firstHeld = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let enteredFirst!: () => void;
+      const inFirst = new Promise<void>((resolve) => {
+        enteredFirst = resolve;
+      });
+      const store: ReconciliationStore = {
+        ...inner,
+        async renew(input) {
+          renewCalls += 1;
+          if (renewCalls === 1) {
+            enteredFirst();
+            await firstHeld;
+          }
+          return inner.renew(input);
+        },
+      };
+      const scheduler = createReconciliationScheduler({
+        store,
+        defaultLeaseMs: 30_000,
+      });
+      await scheduler.schedule({
+        target: { gateway: "stripe", gatewayPaymentId: "pi_hb_race" },
+        runAt: new Date().toISOString(),
+        reason: "heartbeat",
+      });
+      const key = deriveReconciliationJobKey({
+        gateway: "stripe",
+        gatewayPaymentId: "pi_hb_race",
+      });
+
+      let releaseHandler!: () => void;
+      const handlerHeld = new Promise<void>((resolve) => {
+        releaseHandler = resolve;
+      });
+      let enteredHandler!: () => void;
+      const inHandler = new Promise<void>((resolve) => {
+        enteredHandler = resolve;
+      });
+
+      const running = scheduler.processDue({
+        leaseMs: 30_000,
+        handler: async () => {
+          enteredHandler();
+          await handlerHeld;
+          return { disposition: "complete" as const };
+        },
+      });
+
+      await inHandler;
+      expect(capturedTick).toBeDefined();
+      capturedTick!();
+      await inFirst;
+
+      releaseHandler();
+      for (let i = 0; i < 40 && !stopped; i++) {
+        await Promise.resolve();
+      }
+      if (!stopped) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      expect(stopped).toBe(true);
+      // Queued interval tick after stopHeartbeat — must not enqueue a renew
+      // that rotates the token after await renewTail (S20-HEARTBEAT-RACE).
+      capturedTick!();
+
+      releaseFirst();
+      const result = await running;
+      expect(renewCalls).toBe(1);
+      expect(result.completed).toBe(1);
+      expect(result.leaseLost).toBe(0);
+      expect(result.hangOverrun).toBe(0);
+      expect((await store.get(key))?.status).toBe("completed");
+    } finally {
+      globalThis.setInterval = realSetInterval;
+      globalThis.clearInterval = realClearInterval;
+    }
   });
 });

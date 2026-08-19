@@ -847,6 +847,36 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.authorized");
     });
 
+    it("S20: TRANSACTION_RESPONSE cancelled/failed/refund stables → payment.processing", () => {
+      const redirectHints = [
+        { status: "cancelled" },
+        { flags: { isVoid: true, success: true } },
+        { flags: { isVoided: true } },
+        { status: "failed" },
+        { flags: { success: false } },
+        { flags: { isRefund: true, success: true } },
+        { status: "refunded" },
+        { status: "refund_pending" },
+        { status: "refund_failed" },
+      ] as const;
+      for (const hints of redirectHints) {
+        expect(
+          mapProviderEventTypeToStable("paymob", "TRANSACTION_RESPONSE", hints),
+        ).toBe("payment.processing");
+      }
+      // Processed HMAC TRANSACTION still publishes terminal restock arms.
+      const processed = [
+        [{ status: "cancelled" }, "payment.cancelled"],
+        [{ flags: { success: false } }, "payment.failed"],
+        [{ flags: { isRefund: true, success: true } }, "refund.completed"],
+      ] as const;
+      for (const [hints, stable] of processed) {
+        expect(mapProviderEventTypeToStable("paymob", "TRANSACTION", hints)).toBe(
+          stable,
+        );
+      }
+    });
+
     it("TRANSACTION with paid status still → payment.succeeded", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {
@@ -885,6 +915,36 @@ describe("mapProviderEventTypeToStable tables", () => {
           amounts: { amountCents: 10000, refundedAmountCents: 2500 },
         }),
       ).toBe("refund.completed");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          amounts: { amountCents: 10000, refundedAmountCents: 2500 },
+        }),
+      ).toBe("refund.completed");
+    });
+
+    it("S20-PAYMOB-AMOUNT-REFUND: paid+refund cents without flags stays paid, not refund.completed", () => {
+      const rows = [
+        [
+          {
+            status: "paid",
+            amounts: { amountCents: 10000, refundedAmountCents: 2500 },
+          },
+          "payment.succeeded",
+        ],
+        [
+          { status: "cancelled", amounts: { refundedAmountCents: 2500 } },
+          "payment.cancelled",
+        ],
+        [
+          { status: "failed", amounts: { refundedAmountCents: 2500 } },
+          "payment.failed",
+        ],
+      ] as const;
+      for (const [hints, stable] of rows) {
+        expect(mapProviderEventTypeToStable("paymob", "TRANSACTION", hints)).toBe(
+          stable,
+        );
+      }
     });
 
     it("TRANSACTION is_auth + paid/partially_captured status is not payment.authorized", () => {

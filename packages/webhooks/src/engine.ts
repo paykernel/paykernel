@@ -962,10 +962,19 @@ export function createWebhookInboxEngine(
     let currentRecord = args.record;
     let lostOwnership = false;
     let heartbeatLostOwnership = false;
+    let closed = false;
     let renewTail: Promise<void> = Promise.resolve();
 
     const renew = async (leaseMs?: number): Promise<void> => {
+      // S20-HEARTBEAT-RACE: ignore ticks after stopHeartbeat so a queued
+      // renew cannot rotate the token complete/fail will use.
+      if (closed) {
+        return;
+      }
       const run = async (): Promise<void> => {
+        if (closed) {
+          return;
+        }
         if (lostOwnership) {
           throw new StoreLeaseLostError("renewLease failed: lease_lost");
         }
@@ -985,6 +994,8 @@ export function createWebhookInboxEngine(
             `renewLease failed: ${result.reason}`,
           );
         }
+        // In-flight renew started before close: apply rotation — complete
+        // awaits this tail. Do not start a *new* renew after close.
         currentToken = result.leaseToken;
         currentRecord = result.record;
       };
@@ -1016,12 +1027,15 @@ export function createWebhookInboxEngine(
     const heartbeatMs = Math.max(1, Math.floor(args.leaseMs / 3));
     let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
     const stopHeartbeat = (): void => {
+      // Set closed before awaiting the renew tail (callers await after this).
+      closed = true;
       if (heartbeatTimer !== undefined) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = undefined;
       }
     };
     heartbeatTimer = setInterval(() => {
+      if (closed) return;
       void renew().catch(() => {
         lostOwnership = true;
         heartbeatLostOwnership = true;
@@ -1171,17 +1185,15 @@ export function createWebhookInboxEngine(
     priorAttempts: number;
   }): Promise<{ terminal: boolean; recorded: boolean }> {
     try {
-      const claimInput: {
-        key: string;
-        payloadHash: string;
-        owner: string;
-        leaseMs: number;
-        payloadRef?: string;
-      } = {
+      const claimInput: ClaimWebhookInput = {
         key: args.key,
         payloadHash: args.payloadHash,
         owner: args.owner,
         leaseMs: args.leaseMs,
+        // S20-WH-FAIL-RECLAIM: fence the body this handler ran. Idle
+        // WEBHOOKS-3 may have moved the row to a newer hash — do not
+        // supersede backwards (same CAS as processRetryable / S19).
+        ifMatchPayloadHash: args.payloadHash,
       };
       if (args.payloadRef !== undefined) {
         claimInput.payloadRef = args.payloadRef;
@@ -1189,6 +1201,9 @@ export function createWebhookInboxEngine(
       const reclaim = await store.claim(claimInput);
       if (reclaim.kind === "already_completed" || reclaim.kind === "duplicate_failed") {
         return { terminal: true, recorded: true };
+      }
+      if (reclaim.kind === "payload_hash_conflict") {
+        return { terminal: false, recorded: false };
       }
       if (reclaim.kind !== "acquired") {
         return { terminal: false, recorded: false };

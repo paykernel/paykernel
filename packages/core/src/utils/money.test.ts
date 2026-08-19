@@ -92,6 +92,24 @@ describe("strict precision and rounding", () => {
     }
   });
 
+  it("strips unused trailing-zero remainder before excess_precision (S20-TRAILING-ZERO)", () => {
+    for (const [raw, currency, amount, minor] of [
+      ["10.500", "USD", "10.50", 1050n],
+      ["100.00", "JPY", "100", 100n],
+      ["1.0000", "KWD", "1.000", 1000n],
+    ] as const) {
+      expect(money(raw, currency).amount).toBe(amount);
+      expect(toMinorUnits(raw, currency)).toBe(minor);
+    }
+    expect(() => money("10.501", "USD")).toThrow(MoneyAmountError);
+    expect(() => money("100.10", "JPY")).toThrow(MoneyAmountError);
+    try {
+      money("10.501", "USD");
+    } catch (error) {
+      expect((error as MoneyAmountError).kind).toBe("excess_precision");
+    }
+  });
+
   it("applies half_up half_even floor ceil trunc when requested", () => {
     expect(money("10.999", "SAR", { rounding: "half_up" }).amount).toBe(
       "11.00",

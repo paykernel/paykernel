@@ -334,7 +334,7 @@ describe("webhook store mock port", () => {
     expect(r.kind).toBe("payload_hash_conflict");
   });
 
-  it("S19 claim EVAL binds ifMatchPayloadHash as ARGV[10]", async () => {
+  it("S19 claim EVAL binds ifMatchPayloadHash and ifMatchPresent", async () => {
     const fields = webhookPack({
       status: "pending",
       payload_hash: "hash-b",
@@ -357,7 +357,53 @@ describe("webhook store mock port", () => {
       (c) => c.command === "EVAL" || c.command === "EVALSHA",
     );
     expect(evalCall).toBeDefined();
-    expect(evalCall!.args.at(-1)).toBe("hash-a");
+    expect(evalCall!.args.at(-2)).toBe("hash-a");
+    expect(evalCall!.args.at(-1)).toBe("1");
+  });
+
+  it.each([
+    [
+      "ifMatchPayloadHash",
+      { payloadHash: "hash-a", ifMatchPayloadHash: "" },
+    ],
+    ["payloadHash", { payloadHash: "" }],
+  ] as const)(
+    "S20-REDIS-IFMATCH-EMPTY: empty %s is rejected (not omit)",
+    async (_label, extra) => {
+      let evals = 0;
+      const { port } = createMockPort(() => {
+        evals += 1;
+        return ["acquired"];
+      });
+      const store = createRedisWebhookInboxStore({ port });
+      await expect(
+        store.claim({
+          key: "e1",
+          owner: "w",
+          leaseMs: 1000,
+          ...extra,
+        }),
+      ).rejects.toBeInstanceOf(StoreInvalidSchemaError);
+      expect(evals).toBe(0);
+    },
+  );
+
+  it("S20-REDIS-IFMATCH-EMPTY: omitted ifMatch binds present flag 0", async () => {
+    const fields = webhookPack();
+    const { port, calls } = createMockPort(() => ["acquired", ...fields, "lt"]);
+    const store = createRedisWebhookInboxStore({ port });
+    const r = await store.claim({
+      key: "e1",
+      payloadHash: "h1",
+      owner: "w",
+      leaseMs: 1000,
+    });
+    expect(r.kind).toBe("acquired");
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    expect(evalCall!.args.at(-1)).toBe("0");
   });
 
   it("claim not_available maps tagged result (availableAt backoff)", async () => {
@@ -978,6 +1024,9 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
   });
 
   it("P1315-REDIS-5: listDue / listRetryable write canonical Z nowIso", async () => {
+    const clock = createFakeClock({
+      initialMs: Date.parse("2026-01-15T12:00:00.000Z"),
+    });
     const { port, calls } = createMockPort((call) => {
       if (call.command === "ZRANGEBYSCORE") {
         return String(call.args[0] ?? "").includes("whinbox") ? ["e1"] : ["j1"];
@@ -991,19 +1040,64 @@ describe("deleteExpired composite logical keys (REDIS-1)", () => {
       }
       return null;
     });
-    const recon = createRedisReconciliationStore({ port });
-    const webhook = createRedisWebhookInboxStore({ port });
+    const recon = createRedisReconciliationStore({ port, clock });
+    const webhook = createRedisWebhookInboxStore({ port, clock });
     const offsetNow = "2026-06-15T13:00:00.000+05:00";
+    const storeNowZ = "2026-01-15T12:00:00.000Z";
+    const listNowZ = "2026-06-15T08:00:00.000Z";
     await recon.listDue({ now: offsetNow, limit: 1 });
     await webhook.listRetryable({ now: offsetNow, limit: 1 });
+    const zrangeCalls = calls.filter((c) => c.command === "ZRANGEBYSCORE");
+    expect(zrangeCalls.length).toBeGreaterThan(0);
+    for (const call of zrangeCalls) {
+      expect(call.args.map(String)).toContain(String(Date.parse(listNowZ)));
+    }
     const evalCalls = calls.filter(
       (c) => c.command === "EVAL" || c.command === "EVALSHA",
     );
     expect(evalCalls.length).toBeGreaterThan(0);
     for (const call of evalCalls) {
       const args = call.args.map(String);
-      expect(args).toContain("2026-06-15T08:00:00.000Z");
+      expect(args).toContain(storeNowZ);
       expect(args).not.toContain(offsetNow);
+      expect(args).not.toContain(listNowZ);
+    }
+  });
+
+  it("S20-LIST-NOW: list EVAL wipes with store clock, ZRANGE filters with caller now", async () => {
+    const storeMs = Date.parse("2026-01-15T12:00:00.000Z");
+    const clock = createFakeClock({ initialMs: storeMs });
+    const workerNow = "2026-01-15T12:00:35.000Z";
+    const { port, calls } = createMockPort((call) => {
+      if (call.command === "ZRANGEBYSCORE") {
+        return String(call.args[0] ?? "").includes("whinbox") ? ["e1"] : ["j1"];
+      }
+      if (call.command === "EVAL" || call.command === "EVALSHA") {
+        const joined = call.args.map(String).join(" ");
+        if (joined.includes("whinbox")) {
+          return [["ok", ...webhookPack({ status: "pending" })]];
+        }
+        return [["ok", ...reconPack({ status: "scheduled" })]];
+      }
+      return null;
+    });
+    const recon = createRedisReconciliationStore({ port, clock });
+    const webhook = createRedisWebhookInboxStore({ port, clock });
+    await recon.listDue({ now: workerNow, limit: 1 });
+    await webhook.listRetryable({ now: workerNow, limit: 1 });
+    const zrangeCalls = calls.filter((c) => c.command === "ZRANGEBYSCORE");
+    for (const call of zrangeCalls) {
+      expect(call.args.map(String)).toContain(String(Date.parse(workerNow)));
+      expect(call.args.map(String)).not.toContain(String(storeMs));
+    }
+    const evalCalls = calls.filter(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    for (const call of evalCalls) {
+      const args = call.args.map(String);
+      expect(args).toContain("2026-01-15T12:00:00.000Z");
+      expect(args).toContain(String(storeMs));
+      expect(args).not.toContain(workerNow);
     }
   });
 });

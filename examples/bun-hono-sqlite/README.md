@@ -35,7 +35,7 @@ The kernel uses in-memory Bun SQLite (`:memory:`) after an explicit `migrateSqli
 | `POST` | `/internal/reconcile` | **Test hook only** (unauthenticated). Process due recon jobs when `enableTestHooks: true`. Do not deploy. |
 | `GET` | `/orders/:orderId` | Order book lookup |
 | `POST` | `/internal/provider-paid` | **Test hook only** (unauthenticated). Injects a paid provider snapshot for local recon tests. Do not deploy. |
-| `GET` | `/internal/create-count` | `createPayment` call count |
+| `GET` | `/internal/create-count` | **Test hook only** (unauthenticated). `createPayment` call count when `enableTestHooks: true`. Do not deploy. |
 
 ## Listen (optional)
 
