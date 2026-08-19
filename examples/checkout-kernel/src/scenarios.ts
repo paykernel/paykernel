@@ -40,6 +40,21 @@ function postStripeWebhook(
   );
 }
 
+/** Paid Stripe fixture whose PI matches the stored mock charge id. */
+function signedPaidMatchingOrder(
+  kernel: CheckoutKernel,
+  created: { orderId: string; gatewayPaymentId?: string },
+): SignedStripeWebhook {
+  const overrides: Parameters<typeof signedStripePaidWebhook>[0] = {
+    orderId: created.orderId,
+    nowMs: kernel.clock.nowMs(),
+  };
+  if (created.gatewayPaymentId !== undefined) {
+    overrides.paymentIntentId = created.gatewayPaymentId;
+  }
+  return signedStripePaidWebhook(overrides);
+}
+
 async function createOrder(
   app: CheckoutFetchApp,
 ): Promise<{ orderId: string; gatewayPaymentId?: string }> {
@@ -100,8 +115,54 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
+        expect(created.gatewayPaymentId).toBeDefined();
+        const signed = signedPaidMatchingOrder(kernel, created);
+        const res = await postStripeWebhook(app, signed);
+        expect(res.status).toBe(200);
+        const order = await getOrder(app, created.orderId);
+        expect(order.status).toBe("paid");
+        expect(order.fulfillCount).toBe(1);
+        expect(order.gatewayPaymentId).toBe(created.gatewayPaymentId);
+      } finally {
+        kernel.close();
+      }
+    });
+
+    it("Stripe fixture metadata cannot fulfill a mock-charged order with a different PI", async () => {
+      const kernel = await createCheckoutKernel();
+      const app = createApp(kernel);
+      try {
+        const created = await createOrder(app);
+        expect(created.gatewayPaymentId).toBeDefined();
+        expect(created.gatewayPaymentId).not.toBe("pi_example_checkout_paid");
         const signed = signedStripePaidWebhook({
           orderId: created.orderId,
+          paymentIntentId: "pi_example_checkout_paid",
+          nowMs: kernel.clock.nowMs(),
+        });
+        const res = await postStripeWebhook(app, signed);
+        expect(res.status).toBe(200);
+        const order = await getOrder(app, created.orderId);
+        expect(order.status).toBe("unpaid");
+        expect(order.fulfillCount).toBe(0);
+        expect(order.gatewayPaymentId).toBe(created.gatewayPaymentId);
+      } finally {
+        kernel.close();
+      }
+    });
+
+    it("paid Stripe webhook binds missing gatewayPaymentId then fulfills", async () => {
+      const kernel = await createCheckoutKernel({
+        scriptCreate: [{ outcome: "provider_ok_client_timeout" }],
+      });
+      const app = createApp(kernel);
+      try {
+        const created = await createOrder(app);
+        expect(created.gatewayPaymentId).toBeUndefined();
+        const signed = signedStripePaidWebhook({
+          orderId: created.orderId,
+          paymentIntentId: "pi_bound_from_webhook",
+          eventId: "evt_bind_from_webhook",
           nowMs: kernel.clock.nowMs(),
         });
         const res = await postStripeWebhook(app, signed);
@@ -109,6 +170,7 @@ export function runCheckoutHttpScenarios(
         const order = await getOrder(app, created.orderId);
         expect(order.status).toBe("paid");
         expect(order.fulfillCount).toBe(1);
+        expect(order.gatewayPaymentId).toBe("pi_bound_from_webhook");
       } finally {
         kernel.close();
       }
@@ -119,10 +181,7 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
-        const signed = signedStripePaidWebhook({
-          orderId: created.orderId,
-          nowMs: kernel.clock.nowMs(),
-        });
+        const signed = signedPaidMatchingOrder(kernel, created);
         const first = await postStripeWebhook(app, signed);
         expect(first.status).toBe(200);
         const second = await postStripeWebhook(app, signed);
@@ -140,10 +199,7 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
-        const signed = signedStripePaidWebhook({
-          orderId: created.orderId,
-          nowMs: kernel.clock.nowMs(),
-        });
+        const signed = signedPaidMatchingOrder(kernel, created);
         const res = await app.fetch(
           new Request(`${ORIGIN}/webhooks/stripe`, {
             method: "POST",
@@ -168,10 +224,7 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
-        const signed = signedStripePaidWebhook({
-          orderId: created.orderId,
-          nowMs: kernel.clock.nowMs(),
-        });
+        const signed = signedPaidMatchingOrder(kernel, created);
         const parsed = JSON.parse(signed.rawBody) as unknown;
         let reserialized = JSON.stringify(parsed);
         if (reserialized === signed.rawBody) {
@@ -202,10 +255,7 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
-        const signed = signedStripePaidWebhook({
-          orderId: created.orderId,
-          nowMs: kernel.clock.nowMs(),
-        });
+        const signed = signedPaidMatchingOrder(kernel, created);
         const [a, b] = await Promise.all([
           postStripeWebhook(app, signed),
           postStripeWebhook(app, signed),
@@ -226,10 +276,7 @@ export function runCheckoutHttpScenarios(
       const app = createApp(kernel);
       try {
         const created = await createOrder(app);
-        const signed = signedStripePaidWebhook({
-          orderId: created.orderId,
-          nowMs: kernel.clock.nowMs(),
-        });
+        const signed = signedPaidMatchingOrder(kernel, created);
         const res = await postStripeWebhook(app, signed);
         expect(res.status).toBe(500);
         const order = await getOrder(app, created.orderId);
@@ -288,13 +335,21 @@ export function runCheckoutHttpScenarios(
       }
     });
 
-    it("invalid amount maps to 400 without creating an order", async () => {
+    it("ignores client-posted amount and charges the server catalog amount", async () => {
       const kernel = await createCheckoutKernel();
       const app = createApp(kernel);
       try {
-        const res = await postJson(app, "/payments", { amount: "10.001", currency: "USD" });
-        expect(res.status).toBe(400);
-        expect(await getCreateCount(app)).toBe(0);
+        const res = await postJson(app, "/payments", {
+          amount: "10.001",
+          currency: "USD",
+        });
+        expect(res.status).toBe(200);
+        const body = await readJson(res);
+        expect(typeof body.orderId).toBe("string");
+        expect(body.status).toBe("unpaid");
+        expect(JSON.stringify(body)).not.toContain("10.001");
+        expect(JSON.stringify(body)).not.toContain("trustedAmount");
+        expect(await getCreateCount(app)).toBe(1);
       } finally {
         kernel.close();
       }

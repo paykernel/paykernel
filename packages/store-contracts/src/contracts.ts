@@ -106,8 +106,9 @@ export type WithTransaction = {
  * Normalized store failure codes (roadmap §9.4).
  *
  * Extension: `payload_hash_conflict` for webhook inbox payload mismatch
- * **under an active lease**. Idle/expired non-terminal mismatch supersedes
- * (WEBHOOKS-3 / NEW-SQL-1) and is not this error.
+ * **under an active lease**, or compare-and-claim `ifMatchPayloadHash` miss
+ * (S19-WH-HASH-TOCTOU). Idle/expired non-terminal mismatch without
+ * `ifMatchPayloadHash` supersedes (WEBHOOKS-3 / NEW-SQL-1) and is not this error.
  */
 export type StoreErrorCode =
   | "unavailable"
@@ -217,9 +218,11 @@ export class StoreCorruptedRecordError extends StoreError {
 }
 
 /**
- * Same webhook key, different payload hash **while a lease is active**.
- * Idle pending / expired claimed mismatch is not this error — adapters
- * must supersede and store the caller hash (`decideWebhookClaim`, NEW-SQL-1).
+ * Same webhook key, different payload hash **while a lease is active**,
+ * or compare-and-claim `ifMatchPayloadHash` miss (S19 — no rewrite).
+ * Idle pending / expired claimed mismatch without `ifMatchPayloadHash`
+ * is not this error — adapters must supersede and store the caller hash
+ * (`decideWebhookClaim`, NEW-SQL-1 / WEBHOOKS-3).
  */
 export class StorePayloadHashConflictError extends StoreError {
   constructor(message = "Payload hash conflict for existing key", cause?: unknown) {
@@ -481,6 +484,17 @@ export type ClaimWebhookInput = {
   leaseMs: number;
   /** Optional opaque reference (not raw secret payload). */
   payloadRef?: string;
+  /**
+   * Compare-and-claim fence (S19-WH-HASH-TOCTOU). When set, acquire only if
+   * the current row's `payloadHash` equals this value. Mismatch returns
+   * `payload_hash_conflict` **without** rewriting hash/body — idle WEBHOOKS-3
+   * supersede must not run backwards.
+   *
+   * `processRetryable` passes the listed hash so a get→claim race cannot roll
+   * a newer idle payload back to the list snapshot. Omit on first-delivery
+   * `processVerified` so idle hash mismatch still supersedes (WEBHOOKS-3).
+   */
+  ifMatchPayloadHash?: string;
 };
 
 export type ClaimWebhookResult =
@@ -566,8 +580,11 @@ export type ListRetryableInput = {
  * Same event key: second claim with same payload hash while an **active lease**
  * is held → in_progress; completed → already_completed;
  * **active lease** + different hash → payload_hash_conflict (cannot supersede);
+ * `ifMatchPayloadHash` set and current hash differs → payload_hash_conflict
+ * (no write; S19 — retry workers must not supersede backwards);
  * idle/expired/pending (non-terminal) + different hash **supersedes** (`acquired`,
- * stores the caller hash) — not `payload_hash_conflict` (NEW-SQL-1 / WEBHOOKS-3);
+ * stores the caller hash) — not `payload_hash_conflict` (NEW-SQL-1 / WEBHOOKS-3)
+ * unless `ifMatchPayloadHash` was set;
  * dead_letter/failed → duplicate_failed;
  * pending + same hash + `availableAt` in the future → `not_available` (no acquire, no attempt++);
  * expired lease may be re-acquired with a new fencing token (generation++).
@@ -584,8 +601,9 @@ export interface WebhookInboxStore extends WithTransaction {
    * MUST NOT acquire a pending row whose `availableAt` is still in the future
    * **when the hash matches** — return `{ kind: "not_available", ... }` instead
    * (no attempt increment). Idle/expired non-terminal **hash mismatch supersedes**
-   * even during backoff (WEBHOOKS-3). `payload_hash_conflict` only under an
-   * **active** lease (NEW-SQL-1).
+   * even during backoff (WEBHOOKS-3) unless `ifMatchPayloadHash` is set and
+   * differs (S19 — `payload_hash_conflict`, no rewrite). Active-lease hash
+   * mismatch is always `payload_hash_conflict` (NEW-SQL-1).
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 

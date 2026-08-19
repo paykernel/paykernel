@@ -4,7 +4,8 @@
  */
 
 /** KEYS[1]=record KEYS[2]=retryIndex
- * ARGV: nowMs, nowIso, payloadHash, owner, leaseToken, leaseExpiresAt, leaseExpiresMs, payloadRef, logicalKey
+ * ARGV: nowMs, nowIso, payloadHash, owner, leaseToken, leaseExpiresAt, leaseExpiresMs, payloadRef, logicalKey, ifMatchPayloadHash
+ * ifMatchPayloadHash empty = omitted (WEBHOOKS-3 idle supersede). Non-empty CAS (S19).
  */
 export const WEBHOOK_CLAIM_LUA = `
 local rec = KEYS[1]
@@ -18,6 +19,7 @@ local leaseExpiresAt = ARGV[6]
 local leaseExpiresMs = ARGV[7]
 local payloadRef = ARGV[8]
 local logicalKey = ARGV[9]
+local ifMatchPayloadHash = ARGV[10] or ''
 
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
@@ -102,8 +104,18 @@ if status == 'claimed' then
     return {'in_progress', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
   end
   -- expired lease → fall through to re-claim (recovery / hash supersede)
-elseif status == 'pending' then
-  -- Same-hash backoff only; idle hash mismatch supersedes even during backoff.
+end
+
+-- S19: compare-and-claim. Retry workers pass the listed hash so an idle
+-- WEBHOOKS-3 supersede between get and claim cannot roll the body back.
+if ifMatchPayloadHash ~= '' and ph ~= ifMatchPayloadHash then
+  local p = pack(m)
+  return {'payload_hash_conflict', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+end
+
+if status == 'pending' then
+  -- Same-hash backoff only; idle hash mismatch supersedes even during backoff
+  -- (processVerified omits ifMatchPayloadHash).
   if ph == payloadHash then
     local avail = tonumber(m['available_ms'] or '0') or 0
     if avail > nowMs then
@@ -143,7 +155,7 @@ redis.call('HSET', rec,
   'available_ms', tostring(nowMs)
 )
 -- P1315-REDIS-2: keep claimed keys on the retry index scored at lease expiry.
--- Complete/fail/dead_letter still ZREM. GET_LUA still soft-releases expired claimed.
+-- Complete/fail/dead_letter still ZREM. LIST_GET_LUA soft-releases expired claimed.
 redis.call('ZADD', idx, tonumber(leaseExpiresMs), logicalKey)
 m = hgetall_map(rec)
 local p = pack(m)
@@ -350,11 +362,7 @@ end
 return {'ok'}
 `.trim();
 
-/**
- * Shared get-one body (soft-release + ghost ZREM). Used by single GET and
- * PERF-4 list GET.
- */
-const WEBHOOK_GET_ONE_LUA = `
+const WEBHOOK_GET_HELPERS_LUA = `
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
   local m = {}
@@ -381,6 +389,37 @@ local function pack(m)
     m['last_error'] or ''
   }
 end
+`.trim();
+
+/**
+ * S19-CLOCK-LEASE: key-addressed GET is read-only for leases. A caller/injected
+ * now ahead of the issuer must not HSET-clear lease_token. Ghost ZREM only.
+ */
+const WEBHOOK_READ_ONE_LUA = `
+${WEBHOOK_GET_HELPERS_LUA}
+
+local function webhook_read_one(rec, idx, listedKey)
+  if redis.call('EXISTS', rec) == 0 then
+    -- NEW-STORE-1: drop ghost ZSET members so listRetryable LIMIT windows
+    -- cannot fill with dead keys (hash gone, retry member left).
+    if idx ~= nil and idx ~= '' and listedKey ~= '' then
+      redis.call('ZREM', idx, listedKey)
+    end
+    return {'missing'}
+  end
+
+  local m = hgetall_map(rec)
+  local p = pack(m)
+  return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+end
+`.trim();
+
+/**
+ * Shared list get-one body (soft-release + ghost ZREM). Used by PERF-4 list GET
+ * only — not key-addressed GET (S19-CLOCK-LEASE).
+ */
+const WEBHOOK_GET_ONE_LUA = `
+${WEBHOOK_GET_HELPERS_LUA}
 
 local function webhook_get_one(rec, idx, nowMs, nowIso, listedKey)
   if redis.call('EXISTS', rec) == 0 then
@@ -431,13 +470,13 @@ end
 
 /**
  * KEYS[1]=record KEYS[2]=retryIndex
- * ARGV: nowMs, nowIso, logicalKey
- * Soft-release expired claim → pending and re-index so listRetryable sees it.
- * Missing hash ZREMs ARGV logicalKey from the retry index (NEW-STORE-1).
+ * ARGV: nowMs, nowIso, logicalKey (now unused for lease wipe; call-site parity)
+ * Read-only get. Missing hash ZREMs ARGV logicalKey (NEW-STORE-1).
+ * Soft-release lives on LIST_GET_LUA / claim only (S19-CLOCK-LEASE).
  */
 export const WEBHOOK_GET_LUA = `
-${WEBHOOK_GET_ONE_LUA}
-return webhook_get_one(KEYS[1], KEYS[2], tonumber(ARGV[1]), ARGV[2], ARGV[3] or '')
+${WEBHOOK_READ_ONE_LUA}
+return webhook_read_one(KEYS[1], KEYS[2], ARGV[3] or '')
 `.trim();
 
 /**

@@ -233,7 +233,12 @@ app.post("/webhook/stripe", async ({ request }) => {
   const rawBody = await request.text(); // raw body — do not JSON.parse first
 
   const event = await client.handleWebhook("stripe", rawBody, signature);
-  // fulfill from event.status / event.gatewayPaymentId — be idempotent on event.id
+  // handleWebhook verifies only. Production: claim via @paykernel/webhooks inbox,
+  // then fulfill when event.status === "paid" (or isPaidOutcome on create/capture).
+  // Never if (result.success). Be idempotent on event.id.
+  if (event.status === "paid") {
+    // after inbox claim: fulfill from event.gatewayPaymentId
+  }
   return { received: true };
 });
 ```

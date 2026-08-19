@@ -78,6 +78,7 @@ const orderId = req.query.token; // PayPal order ID
 
 const captureResult = await client.gateway('paypal').capturePayment({
   gatewayPaymentId: orderId,
+  idempotencyKey: crypto.randomUUID(),
 });
 
 // Store the capture ID for refunds. For successful PayPal captures,
@@ -340,7 +341,7 @@ app.post('/webhooks/paypal', async (req) => {
 | **Refund webhook IDs** | For refund lifecycle webhooks, `event.gatewayPaymentId` is the related capture ID when PayPal includes it in `supplementary_data.related_ids.capture_id` or a `rel: "up"` capture link; `event.gatewayObjectId` is the refund ID. Refund resource `custom_id` is not treated as the original payment ID. On **multi-capture** order snapshots, if exactly one capture is still refundable, `gatewayPaymentId` is that still-held capture (not last / `related_ids.capture_id`, which can be the already-refunded slice). If more than one remains refundable, `gatewayPaymentId` is the **order id**. |
 | **Reversals** | `PAYMENT.CAPTURE.REVERSED` maps to `reversed`, not `refunded`, because reversals can represent chargebacks or other non-merchant refund flows. `event.amount` is **0** remaining (with currency), not the original capture face. |
 | **Webhook retries** | If PayPal's verification API is unavailable, the SDK throws instead of treating the webhook as invalid. Return a retryable HTTP status from your webhook route. |
-| **Idempotency** | **Prefer always setting** a stable UUID `idempotencyKey` on create, capture, refund, and void. Mutations **always** send `PayPal-Request-Id` (caller key or generated UUID) so in-process retries after timeout/5xx cannot double-mutate. When omitted the SDK generates an ephemeral UUID and **warns** — app-level retries after crash/timeout are still unprotected. Shared param validation rejects empty/whitespace-only keys; `getRequestId` still **trims** and treats empty/whitespace as omitted so the header is never skipped. Surrounding whitespace is stripped from a non-empty key. Orders API: ≤108 chars; Payments v2: wider limit. |
+| **Idempotency** | **Prefer always setting** a stable UUID `idempotencyKey` on create. **capture / refund / void / authorize require** a caller `idempotencyKey` (throws `InvalidRequestError` before POST). `createPayment` may mint an ephemeral `PayPal-Request-Id` for in-process `withRetry` only and **warns** — crash retries mint a new key. Shared param validation rejects empty/whitespace-only keys; `getRequestId` **trims** empty/whitespace as omitted. Orders API: ≤108 chars; Payments v2: wider limit. |
 | **Token Caching** | Access tokens are cached and refreshed automatically |
 | **Retry Logic** | Transient errors (5xx, rate limits, network failures, and PayPal `PREVIOUS_REQUEST_IN_PROGRESS` 409 conflicts) retry with exponential backoff; `Retry-After` is honored when PayPal sends it. |
 | **Response validation** | PayPal success responses must include the expected order ID, approval link, capture ID, authorization ID, or refund ID. Missing fields throw a gateway error. |

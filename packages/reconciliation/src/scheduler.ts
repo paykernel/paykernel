@@ -14,7 +14,7 @@ import type {
   ReconciliationStore,
   ScheduleResult,
 } from "./store";
-import { isStoreLeaseLostError } from "./store";
+import { isStoreLeaseLostError, StoreLeaseLostError } from "./store";
 import type { ExponentialBackoff } from "./backoff";
 import { createExponentialBackoff } from "./backoff";
 import { sanitizeReconciliationError } from "./sanitize";
@@ -49,7 +49,15 @@ export type ScheduleJobInput = {
   key?: string;
 };
 
+/**
+ * Options for {@link ReconciliationScheduler.claimDue}.
+ *
+ * Claims are sequential (S19-CLAIM-DUE). Production workers should prefer
+ * {@link ReconciliationScheduler.processDue}, which claims immediately before
+ * each handler and auto-renews the lease.
+ */
 export type ClaimDueOptions = {
+  /** listDue window and max jobs to claim (each claim is one-at-a-time). */
   limit?: number;
   owner?: string;
   leaseMs?: number;
@@ -138,10 +146,16 @@ export type ProcessDueOptions = {
    *   still calls fail so attempts can budget (RECON-LEASE-1).
    * - Return `{ disposition: "retry_later" }` → failAndReschedule **without**
    *   consuming the maxAttempts dead-letter budget (RECON-3 — in-flight
-   *   settlement must not park after ~10 claims).
+   *   settlement must not park after ~10 claims). Same-worker lease-lost
+   *   hangs after `retry_later` do **not** increment `hangByKey` or park
+   *   to `manual_review` (S19-RECON-HB).
    * - Return `{ disposition: "manual_review" }` to dead-letter without counting
    *   as a transient failure path.
    * - Return `void` / `undefined` → treated as retry (fail-closed; RECON-2).
+   *
+   * While this handler runs, `processDue` auto-renews on `leaseMs/3`
+   * (webhook parity). Heartbeat `lease_lost` stops owner mutations.
+   * Successful renew rotates `job.leaseToken`.
    */
   handler: (job: ClaimedJob) => Promise<ProcessDueDisposition | void>;
 };
@@ -165,7 +179,8 @@ export type ProcessDueResult = {
    * Handler returned/threw after lease expiry and the terminal mutation
    * was rejected without a foreign reclaim. Instance hang budget parks
    * the key at `maxAttempts` even when `fail` still returns `lease_lost`
-   * (token already wiped by `listDue`).
+   * (token already wiped by `listDue`), except `{ disposition: "retry_later" }`
+   * which never parks via `hangByKey` (S19-RECON-HB / RECON-3).
    */
   hangOverrun: number;
 };
@@ -174,10 +189,11 @@ export type ProcessDueResult = {
 const LIST_DUE_OVERSAMPLE_CAP = 200;
 
 /**
- * PERF-7 / claimDue: list is discovery only; claim is the fence.
- * Claim listed rows concurrently so lease remaining time is not burned
- * by serial RTTs. `processDue` must not pre-claim the list at all — it
- * claims immediately before each handler (NEW-RECON-2 / NEW-WEBHOOKS-1).
+ * S19-CLAIM-DUE / claimDue: list is discovery only; claim is the fence.
+ * Claim listed rows **one-at-a-time**. `Promise.all` would hold N live
+ * leases while a later claim is still in flight (and the caller typically
+ * works the returned array serially). `processDue` must not pre-claim the
+ * list at all — it claims immediately before each handler (NEW-RECON-2).
  */
 async function claimListedDue(
   store: ReconciliationStore,
@@ -185,18 +201,13 @@ async function claimListedDue(
   owner: string,
   leaseMs: number,
 ): Promise<ClaimedJob[]> {
-  if (records.length === 0) return [];
-  const results = await Promise.all(
-    records.map((rec) =>
-      store.claim({
-        key: rec.key,
-        owner,
-        leaseMs,
-      }),
-    ),
-  );
   const claimed: ClaimedJob[] = [];
-  for (const result of results) {
+  for (const rec of records) {
+    const result = await store.claim({
+      key: rec.key,
+      owner,
+      leaseMs,
+    });
     if (result.kind === "acquired") {
       claimed.push({
         key: result.record.key,
@@ -239,8 +250,14 @@ function deriveSubjectId(target: ReconciliationTarget, key: string): string {
 export type ReconciliationScheduler = {
   schedule(input: ScheduleJobInput): Promise<ScheduleResult>;
   /**
-   * Claim due jobs: listDue then atomic claim each.
-   * Skips not_due / in_progress / already_terminal / not_found.
+   * Claim due jobs: listDue then atomic claim each, **one-at-a-time**
+   * (S19-CLAIM-DUE — do not `Promise.all` N leases). Skips not_due /
+   * in_progress / already_terminal / not_found.
+   *
+   * Production workers should use {@link ReconciliationScheduler.processDue}:
+   * it claims immediately before each handler and auto-renews the lease.
+   * `claimDue` still returns every acquired lease at once; serial work on
+   * that array can expire later default-30s leases.
    */
   claimDue(options?: ClaimDueOptions): Promise<ClaimedJob[]>;
   complete(input: CompleteJobInput): Promise<void>;
@@ -255,6 +272,7 @@ export type ReconciliationScheduler = {
   ): Promise<ReconciliationRecord[]>;
   /**
    * Claim due and run handler; reschedule or markManualReview on failure.
+   * Claims one-at-a-time, auto-renews on `leaseMs/3` while the handler runs.
    * Documents per-provider concurrency via maxInFlightByGateway.
    */
   processDue(options: ProcessDueOptions): Promise<ProcessDueResult>;
@@ -487,12 +505,20 @@ export function createReconciliationScheduler(
             continue;
           }
 
-          let disposition: ProcessDueDisposition;
-          try {
-            const raw = await options.handler(job);
-            disposition = normalizeHandlerDisposition(raw);
-          } catch (err) {
-            disposition = { disposition: "retry", error: err };
+          const ran = await runProcessDueHandlerUnderLease({
+            store,
+            job,
+            leaseMs,
+            handler: options.handler,
+          });
+          const disposition = ran.disposition;
+          // RECON-3: in-flight retry_later must not dead-letter at maxAttempts
+          // or via hangByKey (S19-RECON-HB).
+          skipAttemptBudget = disposition.disposition === "retry_later";
+          if (ran.lostOwnership) {
+            throw new StoreLeaseLostError(
+              "processDue heartbeat lost lease (renew lease_lost)",
+            );
           }
 
           if (disposition.disposition === "complete") {
@@ -520,11 +546,6 @@ export function createReconciliationScheduler(
             manualReview++;
             continue;
           }
-
-          // RECON-3: in-flight retry_later must not dead-letter at maxAttempts.
-          // Settlement (bank transfer / 3DS / async) can outlive the default
-          // 10-claim budget; parking would leave local pending after provider paid.
-          skipAttemptBudget = disposition.disposition === "retry_later";
 
           // retry (explicit, retry_later, or fail-closed void / throw)
           if (!skipAttemptBudget && job.record.attempts >= maxAttempts) {
@@ -595,12 +616,16 @@ export function createReconciliationScheduler(
             continue;
           }
 
-          hangByKey[job.key] = priorHangs + 1;
           hangOverrun++;
+          // S19-RECON-HB / RECON-3: retry_later hangs are in-flight settlement,
+          // not a handler-failure budget. Do not park via hangByKey.
+          if (skipAttemptBudget) continue;
+
+          hangByKey[job.key] = priorHangs + 1;
 
           const budgeted =
             hangByKey[job.key]! >= maxAttempts ||
-            (!skipAttemptBudget && job.record.attempts >= maxAttempts);
+            job.record.attempts >= maxAttempts;
           if (!budgeted) continue;
 
           try {
@@ -653,6 +678,79 @@ function isForeignLeaseOwner(
     return true;
   }
   return false;
+}
+
+/**
+ * S19-RECON-HB: auto-renew on `leaseMs/3` while the handler runs (webhook
+ * `runHandlerUnderLease` parity). Heartbeat `lease_lost` does not complete
+ * or fail as owner. Successful renew rotates `job.leaseToken`.
+ */
+async function runProcessDueHandlerUnderLease(args: {
+  store: ReconciliationStore;
+  job: ClaimedJob;
+  leaseMs: number;
+  handler: (job: ClaimedJob) => Promise<ProcessDueDisposition | void>;
+}): Promise<{ disposition: ProcessDueDisposition; lostOwnership: boolean }> {
+  let currentToken = args.job.leaseToken;
+  let lostOwnership = false;
+  let renewTail: Promise<void> = Promise.resolve();
+
+  const enqueueRenew = (): Promise<void> => {
+    const run = async (): Promise<void> => {
+      if (lostOwnership) return;
+      try {
+        const result = await args.store.renew({
+          key: args.job.key,
+          leaseToken: currentToken,
+          leaseMs: args.leaseMs,
+        });
+        if (!result.ok) {
+          lostOwnership = true;
+          return;
+        }
+        currentToken = result.leaseToken;
+        args.job.leaseToken = result.leaseToken;
+        args.job.record = result.record;
+      } catch {
+        lostOwnership = true;
+      }
+    };
+    const next = renewTail.then(run, run);
+    renewTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  };
+
+  const heartbeatMs = Math.max(1, Math.floor(args.leaseMs / 3));
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  const stopHeartbeat = (): void => {
+    if (heartbeatTimer !== undefined) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = undefined;
+    }
+  };
+  heartbeatTimer = setInterval(() => {
+    void enqueueRenew().then(() => {
+      if (lostOwnership) stopHeartbeat();
+    });
+  }, heartbeatMs);
+
+  let disposition: ProcessDueDisposition;
+  try {
+    try {
+      const raw = await args.handler(args.job);
+      disposition = normalizeHandlerDisposition(raw);
+    } catch (err) {
+      disposition = { disposition: "retry", error: err };
+    }
+  } finally {
+    stopHeartbeat();
+    await renewTail;
+  }
+
+  return { disposition, lostOwnership };
 }
 
 /** Only `{ disposition: "complete" }` finishes a job; void → fail-closed retry. */

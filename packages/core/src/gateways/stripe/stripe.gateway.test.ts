@@ -11,7 +11,12 @@ import {
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { money } from "../../utils/money";
-import { InvalidRequestError, NetworkError } from "../../errors";
+import {
+  AuthenticationError,
+  InvalidRequestError,
+  NetworkError,
+  RateLimitError,
+} from "../../errors";
 import { createHmac } from "node:crypto";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -393,7 +398,10 @@ describe("StripeGateway", () => {
 
       expect(event.gateway).toBe("stripe");
       expect(event.type).toBe("checkout.session.completed");
-      expect(event.status).toBe("paid");
+      // S19-CKO-UNEXPANDED: string payment_intent cannot rematch refunds.
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
       expect(event.gatewayPaymentId).toBe("pi_checkout_123");
       expect(event.gatewayObjectId).toBe("cs_123");
       expect(event.paymentId).toBe("internal_checkout_123");
@@ -527,6 +535,72 @@ describe("StripeGateway", () => {
       expect(event.currency).toBe("USD");
       expect(event.stableType).toBe("refund.completed");
       expect(event.event?.type).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
+    it("S19-CKO-AMOUNT: hydrated checkout.session.completed publishes amount_received not amount_total", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_amount_received",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_amount_received",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_amount_received",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 6000,
+              latest_charge: {
+                id: "ch_cs_amount_received",
+                amount_captured: 6000,
+                amount_refunded: 0,
+                currency: "usd",
+              },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_captured");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(60);
+      expect(event.amount).not.toBe(100);
+      expect(event.currency).toBe("USD");
+    });
+
+    it("S19-CKO-UNEXPANDED: classic string payment_intent is processing not paid", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_string_pi",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_string_pi",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: "pi_cs_string",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.stableType).toBe("payment.processing");
+      expect(event.event?.type).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
@@ -819,7 +893,8 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      expect(event.status).toBe("paid");
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
       expect(event.gatewayPaymentId).toBe("sub_123");
       expect(event.gatewayObjectId).toBe("cs_sub_done");
       expect(event.amount).toBe(20);
@@ -847,7 +922,8 @@ describe("StripeGateway", () => {
         livemode: false,
       });
 
-      expect(event.status).toBe("paid");
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
       expect(event.gatewayPaymentId).toBe("sub_preferred");
       expect(event.gatewayObjectId).toBe("cs_sub_with_pi");
       expect(event.paymentId).toBe("order_sub_both");
@@ -896,7 +972,7 @@ describe("StripeGateway", () => {
         livemode: false,
       } as any);
 
-      expect(event.status).toBe("paid");
+      expect(event.status).toBe("processing");
       expect(event.currency).toBeUndefined();
       expect(event.amount).toBeUndefined();
       // Would have been 50.00 if wrongly defaulted to usd (2-decimal)
@@ -1955,6 +2031,45 @@ describe("StripeGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
+    it("S19-STRIPE-LATE-REFUND: payment_intent.succeeded after charge.refunded is not paid when charges.data proves refunds", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_pi_late_refund",
+        type: "payment_intent.succeeded",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "pi_late_refund",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            // Stripe does not decrement amount_received on refund.
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: "ch_late_refund",
+            charges: {
+              data: [
+                {
+                  id: "ch_late_refund",
+                  amount_captured: 10000,
+                  amount_refunded: 4000,
+                  refunded: false,
+                  currency: "usd",
+                },
+              ],
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("partially_refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.amount).toBe(40);
+      expect(event.stableType).toBe("refund.completed");
+      expect(event.stableType).not.toBe("payment.succeeded");
+    });
+
     it("STRIPE-CHG-1: unexpanded latest_charge still uses observable charges.data refunds", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_pi_unexpanded_uses_charges_data",
@@ -1992,6 +2107,50 @@ describe("StripeGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
     });
 
+    it("STRIPE-CHG-1: hydrated checkout string latest_charge rematches charges.data refund", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_cs_string_charge_refund",
+        type: "checkout.session.completed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "cs_string_charge_refund",
+            object: "checkout.session",
+            payment_status: "paid",
+            status: "complete",
+            amount_total: 10000,
+            currency: "usd",
+            payment_intent: {
+              id: "pi_cs_string_charge_refund",
+              object: "payment_intent",
+              status: "succeeded",
+              amount: 10000,
+              amount_received: 10000,
+              latest_charge: "ch_cs_string_refund",
+              charges: {
+                data: [
+                  {
+                    id: "ch_cs_string_refund",
+                    amount_captured: 10000,
+                    amount_refunded: 10000,
+                    refunded: true,
+                    currency: "usd",
+                  },
+                ],
+              },
+            },
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).toBe("refunded");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("processing");
+      expect(event.stableType).toBe("refund.completed");
+    });
+
     it("NEW-STRIPE-2: hydrated checkout.session.completed with id-only latest_charge is processing", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_cs_id_only_charge",
@@ -2023,6 +2182,64 @@ describe("StripeGateway", () => {
       expect(event.status).not.toBe("paid");
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
+    });
+
+    it("S19-STRIPE-DISPUTE: charge.dispute.created does not map a paid envelope to pending", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_dispute_created",
+        type: "charge.dispute.created",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "dp_created",
+            object: "dispute",
+            status: "needs_response",
+            amount: 10000,
+            currency: "usd",
+            payment_intent: "pi_disputed_paid",
+            charge: "ch_disputed_paid",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).not.toBe("pending");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).toBe("needs_response");
+      expect(event.gatewayPaymentId).toBe("pi_disputed_paid");
+      expect(event.stableType).toBe("dispute.opened");
+      expect(event.event?.type).toBe("dispute.opened");
+      expect(event.event?.type).not.toBe("payment.processing");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      if (event.event?.type === "dispute.opened") {
+        expect(event.event.dispute.status).toBe("needs_response");
+      }
+    });
+
+    it("S19-STRIPE-DISPUTE: charge.dispute.closed lost is not pending", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_dispute_lost",
+        type: "charge.dispute.closed",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "dp_lost",
+            object: "dispute",
+            status: "lost",
+            amount: 5000,
+            currency: "usd",
+            payment_intent: "pi_dispute_lost",
+            metadata: {},
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).not.toBe("pending");
+      expect(event.status).toBe("lost");
+      expect(event.stableType).toBe("dispute.closed");
+      expect(event.event?.type).toBe("dispute.closed");
     });
 
     it("should omit currency when Stripe omits it on the webhook object", () => {
@@ -2960,6 +3177,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.capturePayment({
         gatewayPaymentId: "pi_cap",
+        idempotencyKey: "idem_stripe_test_key",
       });
       expect(result.status).toBe("paid");
       expect(result.amount).toBe(100);
@@ -2988,6 +3206,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_cap_partial",
         amount: 60,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("partially_captured");
@@ -3009,6 +3228,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.capturePayment({
         gatewayPaymentId: "pi_cap_incomplete",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       // STRIPE-2: missing settled amount → not paid; amount uses auth (not 0).
@@ -3025,6 +3245,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.capturePayment({
         gatewayPaymentId: "pi_cap_missing_status",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.outcome).toBe("indeterminate");
@@ -3052,6 +3273,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_cap_via_charge",
         amount: 60,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("partially_captured");
@@ -3079,6 +3301,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_cap_jpy",
         amount: 750,
         currency: "JPY",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(new URLSearchParams(capturedBody).get("amount_to_capture")).toBe(
@@ -3108,6 +3331,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_cap_large",
         amount: 1_000_000,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(new URLSearchParams(capturedBody).get("amount_to_capture")).toBe(
@@ -3120,6 +3344,7 @@ describe("StripeGateway", () => {
         gateway.capturePayment({
           gatewayPaymentId: "pi_cap_missing_currency",
           amount: 10,
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(
         "Stripe capturePayment requires currency when amount is provided",
@@ -3143,6 +3368,7 @@ describe("StripeGateway", () => {
           gatewayPaymentId: "pi_cap_currency_mismatch",
           amount: 50,
           currency: "JPY",
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(
         /capturePayment currency JPY does not match PaymentIntent currency USD/i,
@@ -3180,6 +3406,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_cap_usd_scale",
         amount: 50,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(getCount).toBeGreaterThanOrEqual(1);
@@ -3195,8 +3422,27 @@ describe("StripeGateway", () => {
       await expect(
         gateway.capturePayment({
           gatewayPaymentId: "pi_cap/../charges",
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow("Stripe PaymentIntent ID must start with pi_");
+    });
+
+    it("S19-EPHEMERAL-KEY: capturePayment requires caller idempotencyKey before POST", async () => {
+      let fetchCalls = 0;
+      globalThis.fetch = mock(async () => {
+        fetchCalls += 1;
+        return createMockResponse({
+          id: "pi_cap_nokey",
+          status: "succeeded",
+          amount: 1000,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.capturePayment({ gatewayPaymentId: "pi_cap_nokey" }),
+      ).rejects.toThrow(/requires idempotencyKey/i);
+      expect(fetchCalls).toBe(0);
     });
   });
 
@@ -3217,6 +3463,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.voidPayment({
         gatewayPaymentId: "pi_cancel",
+        idempotencyKey: "idem_stripe_test_key",
       });
       expect(result.success).toBe(true);
       expect(result.status).toBe("cancelled");
@@ -3234,6 +3481,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.voidPayment({
         gatewayPaymentId: "pi_void_missing_status",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.outcome).toBe("indeterminate");
@@ -3243,6 +3491,24 @@ describe("StripeGateway", () => {
       expect(result.status).not.toBe("failed");
       expect(result.status).not.toBe("cancelled");
       expect(result.success).not.toBe(true);
+    });
+
+    it("S19-EPHEMERAL-KEY: voidPayment requires caller idempotencyKey before POST", async () => {
+      let fetchCalls = 0;
+      globalThis.fetch = mock(async () => {
+        fetchCalls += 1;
+        return createMockResponse({
+          id: "pi_void_nokey",
+          status: "canceled",
+          amount: 1000,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.voidPayment({ gatewayPaymentId: "pi_void_nokey" }),
+      ).rejects.toThrow(/requires idempotencyKey/i);
+      expect(fetchCalls).toBe(0);
     });
   });
 
@@ -3269,6 +3535,7 @@ describe("StripeGateway", () => {
         currency: "USD",
         successUrl: "https://success",
         cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -3285,41 +3552,50 @@ describe("StripeGateway", () => {
       expect(params.get("line_items[0][quantity]")).toBe("1");
     });
 
-    it("NEW-STRIPE-CKO-200: empty HTTP 200 on createCheckoutSession is not success:true", async () => {
+    it("NEW-STRIPE-CKO-200 / S19-CKO-TIMEOUT: empty HTTP 200 on createCheckoutSession is checkout-shaped indeterminate, not success:true", async () => {
       globalThis.fetch = mock(async () =>
         createMockResponse(""),
       ) as unknown as typeof fetch;
 
-      await expect(
-        gateway.createCheckoutSession({
-          amount: 100,
-          currency: "USD",
-          successUrl: "https://success",
-          cancelUrl: "https://cancel",
-        }),
-      ).rejects.toBeInstanceOf(NetworkError);
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
+      });
+
+      expect(result.success).not.toBe(true);
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.sessionId).toBe("idem_stripe_test_key");
+      expect(result).not.toEqual(
+        expect.objectContaining({ status: "processing" }),
+      );
+      expect(result).not.toEqual(
+        expect.objectContaining({ gatewayId: "idem_stripe_test_key" }),
+      );
     });
 
-    it("NEW-STRIPE-CKO-200: HTTP 200 {} on createCheckoutSession is not success:true", async () => {
+    it("NEW-STRIPE-CKO-200 / S19-CKO-TIMEOUT: HTTP 200 {} on createCheckoutSession is checkout-shaped indeterminate, not success:true", async () => {
       globalThis.fetch = mock(async () =>
         createMockResponse({}),
       ) as unknown as typeof fetch;
 
-      let thrown: unknown;
-      try {
-        await gateway.createCheckoutSession({
-          amount: 100,
-          currency: "USD",
-          successUrl: "https://success",
-          cancelUrl: "https://cancel",
-        });
-      } catch (error) {
-        thrown = error;
-      }
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
+      });
 
-      expect(thrown).toBeInstanceOf(NetworkError);
-      expect(thrown).not.toEqual(
-        expect.objectContaining({ success: true }),
+      expect(result.success).not.toBe(true);
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result).not.toEqual(expect.objectContaining({ success: true }));
+      expect(result).not.toEqual(
+        expect.objectContaining({ status: "processing" }),
       );
     });
 
@@ -3339,6 +3615,7 @@ describe("StripeGateway", () => {
         currency: "USD",
         successUrl: "https://success",
         cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.success).toBe(true);
@@ -3365,6 +3642,7 @@ describe("StripeGateway", () => {
         currency: "USD",
         successUrl: "https://success",
         cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -3392,6 +3670,7 @@ describe("StripeGateway", () => {
         currency: "JPY",
         successUrl: "https://success",
         cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -3416,6 +3695,7 @@ describe("StripeGateway", () => {
         amount: 20,
         currency: "USD",
         successUrl: "https://success",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -3443,6 +3723,7 @@ describe("StripeGateway", () => {
             quantity: 2,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -3460,16 +3741,17 @@ describe("StripeGateway", () => {
           cancelUrl: "https://cancel",
           customerId: "cus_123",
           customerEmail: "test@example.com",
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(
         "Stripe Checkout Sessions cannot include both customerId and customerEmail",
       );
     });
 
-    it("should auto-generate an Idempotency-Key when the caller omits one", async () => {
-      let capturedKey = "";
-      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
-        capturedKey = new Headers(opts.headers).get("Idempotency-Key") ?? "";
+    it("S19-EPHEMERAL-KEY: createCheckoutSession requires caller idempotencyKey", async () => {
+      let fetchCalls = 0;
+      globalThis.fetch = mock(async () => {
+        fetchCalls += 1;
         return createMockResponse({
           id: "cs_auto_idem",
           object: "checkout.session",
@@ -3479,19 +3761,17 @@ describe("StripeGateway", () => {
         });
       }) as unknown as typeof fetch;
 
-      await gateway.createCheckoutSession({
-        amount: 20,
-        currency: "USD",
-        successUrl: "https://success",
-      });
-
-      expect(capturedKey.length).toBeGreaterThan(0);
+      await expect(
+        gateway.createCheckoutSession({
+          amount: 20,
+          currency: "USD",
+          successUrl: "https://success",
+        }),
+      ).rejects.toThrow(/requires idempotencyKey/i);
+      expect(fetchCalls).toBe(0);
     });
 
-    it("should reject whitespace-only idempotencyKey at validation (omit key to auto-generate)", async () => {
-      // OptionalIdempotencyKeySchema rejects whitespace-only keys; omit the field
-      // entirely (previous test) so resolveStripeIdempotencyKey can mint an
-      // ephemeral in-process key (STRIPE-6).
+    it("should reject whitespace-only idempotencyKey at validation", async () => {
       await expect(
         gateway.createCheckoutSession({
           amount: 20,
@@ -3500,6 +3780,42 @@ describe("StripeGateway", () => {
           idempotencyKey: "   ",
         }),
       ).rejects.toThrow(/idempotencyKey|Validation failed/i);
+    });
+
+    it("S19-CKO-TIMEOUT: mutating checkout POST timeout is not a retryable failed-create", async () => {
+      const timeoutGateway = new StripeGateway(
+        {
+          ...STRIPE_TEST_CONFIG,
+          timeoutMs: 1,
+        },
+        hooksManager,
+      );
+
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          opts.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await timeoutGateway.createCheckoutSession({
+        amount: 10,
+        currency: "USD",
+        successUrl: "https://success",
+        idempotencyKey: "idem_cko_timeout",
+      });
+
+      expect(result.success).not.toBe(true);
+      expect(result.outcome).toBe("indeterminate");
+      expect(result.reconciliationRequired).toBe(true);
+      expect(result.sessionId).toBe("idem_cko_timeout");
+      expect(result).not.toEqual(
+        expect.objectContaining({ status: "failed" }),
+      );
+      expect(result).not.toEqual(
+        expect.objectContaining({ status: "processing" }),
+      );
     });
   });
 
@@ -3520,6 +3836,7 @@ describe("StripeGateway", () => {
       lineItems: [{ price: "price_recurring_123", quantity: 1 }],
       successUrl: "https://success",
       cancelUrl: "https://cancel",
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3545,6 +3862,7 @@ describe("StripeGateway", () => {
       cancelUrl: "https://cancel",
       currency: "USD",
       customerId: "cus_123",
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3579,6 +3897,7 @@ describe("StripeGateway", () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3609,6 +3928,7 @@ describe("StripeGateway", () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3631,6 +3951,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3651,6 +3972,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Stripe USD amount must be at most 99999999");
   });
@@ -3672,6 +3994,7 @@ describe("StripeGateway", () => {
       successUrl: "https://success",
       cancelUrl: "https://cancel",
       metadata: { paymentId: "order_123" },
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3698,6 +4021,7 @@ describe("StripeGateway", () => {
       successUrl: "https://success",
       cancelUrl: "https://cancel",
       metadata: { attempt: 2, testMode: true },
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3714,6 +4038,7 @@ describe("StripeGateway", () => {
         successUrl: "https://success",
         cancelUrl: "https://cancel",
         customerId: "cus_123",
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3723,6 +4048,7 @@ describe("StripeGateway", () => {
       gateway.createCheckoutSession({
         successUrl: "https://success",
         cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3734,6 +4060,7 @@ describe("StripeGateway", () => {
         successUrl: "https://success",
         cancelUrl: "https://cancel",
         lineItems: [{ quantity: 1 } as any],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3755,6 +4082,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3767,6 +4095,7 @@ describe("StripeGateway", () => {
         successUrl: "https://success",
         cancelUrl: "https://cancel",
         lineItems: [],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3779,6 +4108,7 @@ describe("StripeGateway", () => {
         successUrl: "https://success",
         cancelUrl: "https://cancel",
         lineItems: [{ price: "price_123", quantity: 1 }],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3791,6 +4121,7 @@ describe("StripeGateway", () => {
         successUrl: "https://success",
         cancelUrl: "https://cancel",
         allowPromotionCodes: true,
+        idempotencyKey: "idem_stripe_test_key",
       } as any),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3805,6 +4136,7 @@ describe("StripeGateway", () => {
           price: `price_${index}`,
           quantity: 1,
         })),
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3824,6 +4156,7 @@ describe("StripeGateway", () => {
           },
           quantity: 1,
         })),
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3836,6 +4169,7 @@ describe("StripeGateway", () => {
         cancelUrl: "https://cancel",
         currency: "USD",
         lineItems: [{ price: "price_123", quantity: 1 }],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3856,6 +4190,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow("Validation failed for createCheckoutSession");
   });
@@ -3886,6 +4221,7 @@ describe("StripeGateway", () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3921,6 +4257,7 @@ describe("StripeGateway", () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3951,6 +4288,7 @@ describe("StripeGateway", () => {
           quantity: 1,
         },
       ],
+      idempotencyKey: "idem_stripe_test_key",
     });
 
     const params = new URLSearchParams(capturedBody);
@@ -3973,6 +4311,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       }),
     ).rejects.toThrow(
       "Stripe KWD minor-unit amounts must be divisible by 10",
@@ -4016,6 +4355,7 @@ describe("StripeGateway", () => {
           successUrl: "https://success",
           cancelUrl: "https://cancel",
           lineItems: [{ priceData, quantity: 1 }],
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(message);
     },
@@ -4060,6 +4400,7 @@ describe("StripeGateway", () => {
             quantity: 1,
           },
         ],
+        idempotencyKey: "idem_stripe_test_key",
       });
       expect(
         new URLSearchParams(capturedBody).get(
@@ -4162,6 +4503,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_ref",
         amount: 5,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
       expect(result.success).toBe(true);
       expect(result.outcome).toBe("succeeded");
@@ -4186,6 +4528,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_ref_empty_list",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("completed");
@@ -4225,6 +4568,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_ref_pending_only",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("completed");
@@ -4254,6 +4598,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_ref_empty_recover",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("completed");
@@ -4286,6 +4631,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_ref_list_err_zero",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.status).toBe("completed");
@@ -4300,6 +4646,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_refund_empty_body",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.outcome).toBe("indeterminate");
@@ -4315,6 +4662,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_refund_empty_obj",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.outcome).toBe("indeterminate");
@@ -4330,6 +4678,7 @@ describe("StripeGateway", () => {
 
       const result = await gateway.refundPayment({
         gatewayPaymentId: "pi_refund_missing_status",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(result.outcome).toBe("indeterminate");
@@ -4343,6 +4692,7 @@ describe("StripeGateway", () => {
         gateway.refundPayment({
           gatewayPaymentId: "pi_ref_missing_currency",
           amount: 5,
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(
         "Stripe refundPayment requires currency when amount is provided",
@@ -4365,6 +4715,7 @@ describe("StripeGateway", () => {
           gatewayPaymentId: "pi_ref_currency_mismatch",
           amount: 50,
           currency: "JPY",
+          idempotencyKey: "idem_stripe_test_key",
         }),
       ).rejects.toThrow(
         /refundPayment currency JPY does not match PaymentIntent currency USD/i,
@@ -4412,6 +4763,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_ref_usd_scale",
         amount: 50,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("5000");
@@ -4460,6 +4812,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_ref_jpy",
         amount: 500,
         currency: "JPY",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("500");
@@ -4507,6 +4860,7 @@ describe("StripeGateway", () => {
         gatewayPaymentId: "pi_ref_large",
         amount: 1_000_000,
         currency: "USD",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       expect(new URLSearchParams(capturedBody).get("amount")).toBe("100000000");
@@ -4555,6 +4909,7 @@ describe("StripeGateway", () => {
         amount: 5,
         currency: "USD",
         reason: "requested_by_customer",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -4604,6 +4959,7 @@ describe("StripeGateway", () => {
         amount: 5,
         currency: "USD",
         reason: "warehouse_return",
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
@@ -4656,11 +5012,30 @@ describe("StripeGateway", () => {
           transactionId: "tx-1",
           tenantId: "tenant-1",
         },
+        idempotencyKey: "idem_stripe_test_key",
       });
 
       const params = new URLSearchParams(capturedBody);
       expect(params.get("metadata[transactionId]")).toBe("tx-1");
       expect(params.get("metadata[tenantId]")).toBe("tenant-1");
+    });
+
+    it("S19-EPHEMERAL-KEY: refundPayment requires caller idempotencyKey before POST", async () => {
+      let fetchCalls = 0;
+      globalThis.fetch = mock(async () => {
+        fetchCalls += 1;
+        return createMockResponse({
+          id: "re_nokey",
+          status: "succeeded",
+          amount: 500,
+          currency: "usd",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.refundPayment({ gatewayPaymentId: "pi_ref_nokey" }),
+      ).rejects.toThrow(/requires idempotencyKey/i);
+      expect(fetchCalls).toBe(0);
     });
   });
 
@@ -5107,6 +5482,91 @@ describe("StripeGateway", () => {
       expect(result.status).not.toBe("paid");
     });
 
+    it("S19-STRIPE-CHARGE-SWALLOW: GET /charges 401 is AuthenticationError, not processing", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse(
+            {
+              error: {
+                message: "Invalid API Key provided",
+                type: "invalid_request_error",
+              },
+            },
+            false,
+            401,
+          );
+        }
+        return createMockResponse({
+          id: "pi_charge_401",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: "ch_charge_401",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.getPayment({ gatewayPaymentId: "pi_charge_401" }),
+      ).rejects.toBeInstanceOf(AuthenticationError);
+    });
+
+    it("S19-STRIPE-CHARGE-SWALLOW: GET /charges 500 is NetworkError, not processing", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse(
+            {
+              error: {
+                message: "Stripe API unavailable",
+                type: "api_error",
+              },
+            },
+            false,
+            500,
+          );
+        }
+        return createMockResponse({
+          id: "pi_charge_500",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: "ch_charge_500",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.getPayment({ gatewayPaymentId: "pi_charge_500" }),
+      ).rejects.toBeInstanceOf(NetworkError);
+    });
+
+    it("S19-STRIPE-CHARGE-SWALLOW: GET /charges 429 is RateLimitError, not processing", async () => {
+      globalThis.fetch = mock(async (url) => {
+        if (String(url).includes("/charges/")) {
+          return createMockResponse(
+            { error: { message: "Too many requests", type: "api_error" } },
+            false,
+            429,
+          );
+        }
+        return createMockResponse({
+          id: "pi_charge_429",
+          object: "payment_intent",
+          status: "succeeded",
+          amount: 10000,
+          amount_received: 10000,
+          currency: "usd",
+          latest_charge: "ch_charge_429",
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        gateway.getPayment({ gatewayPaymentId: "pi_charge_429" }),
+      ).rejects.toBeInstanceOf(RateLimitError);
+    });
+
     it("NEW-STRIPE-2: getPayment id-only latest_charge is processing not paid", async () => {
       globalThis.fetch = mock(async (url) => {
         if (String(url).includes("/charges/")) {
@@ -5164,6 +5624,109 @@ describe("StripeGateway", () => {
       expect(result.paymentIntentId).toBe("pi_from_session");
       expect(result.amount).toBe(10);
       expect(result.currency).toBe("usd");
+      // Id-only expanded PI has no charge snapshot — fail-closed (S19-CKO-GET).
+      expect(result.paymentStatus).toBe("processing");
+      expect(result.paymentStatus).not.toBe("paid");
+    });
+
+    it("S19-CKO-GET: expanded PI amount_received is published, not amount_total", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_expanded_received",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/c/session",
+          status: "complete",
+          payment_status: "paid",
+          amount_total: 10000,
+          currency: "usd",
+          payment_intent: {
+            id: "pi_expanded_received",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 6000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_expanded_received",
+              amount_captured: 6000,
+              amount_refunded: 0,
+              currency: "usd",
+            },
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getCheckoutSession({
+        sessionId: "cs_expanded_received",
+      });
+
+      expect(result.paymentIntentId).toBe("pi_expanded_received");
+      expect(result.amount).toBe(60);
+      expect(result.amount).not.toBe(100);
+      expect(result.currency).toBe("usd");
+      expect(result.paymentStatus).toBe("partially_captured");
+      expect(result.paymentStatus).not.toBe("paid");
+    });
+
+    it("S19-CKO-GET: expanded PI with amount_refunded is not paid", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_expanded_refunded",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/c/session",
+          status: "complete",
+          payment_status: "paid",
+          amount_total: 10000,
+          currency: "usd",
+          payment_intent: {
+            id: "pi_expanded_refunded",
+            object: "payment_intent",
+            status: "succeeded",
+            amount: 10000,
+            amount_received: 10000,
+            currency: "usd",
+            latest_charge: {
+              id: "ch_expanded_refunded",
+              amount_captured: 10000,
+              amount_refunded: 10000,
+              refunded: true,
+              currency: "usd",
+            },
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getCheckoutSession({
+        sessionId: "cs_expanded_refunded",
+      });
+
+      expect(result.paymentStatus).toBe("refunded");
+      expect(result.paymentStatus).not.toBe("paid");
+      expect(result.amount).toBe(100);
+      expect(result.refundedAmount).toBe(100);
+      expect(result.currency).toBe("usd");
+    });
+
+    it("S19-CKO-TIMEOUT: getCheckoutSession GET timeout still throws", async () => {
+      const timeoutGateway = new StripeGateway(
+        {
+          ...STRIPE_TEST_CONFIG,
+          timeoutMs: 1,
+        },
+        hooksManager,
+      );
+
+      globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          opts.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      }) as unknown as typeof fetch;
+
+      await expect(
+        timeoutGateway.getCheckoutSession({ sessionId: "cs_get_timeout" }),
+      ).rejects.toBeInstanceOf(NetworkError);
     });
 
     it("NEW-STRIPE-0: missing amount_total is omitted, not major 0", async () => {

@@ -14,10 +14,13 @@
  * ## Required gate coverage (B4 / ackAfterClaim parity)
  * - Pending rows with future `availableAt` → `{ kind: "not_available" }` (no attempt++).
  * - `fail({ restoreAttempt: true })` decrements `attempts` by 1 (floor 0).
- * - Soft-release of expired claimed restores one attempt (WEBHOOKS-1); direct
- *   reclaim of expired claimed also must not burn attempts.
+ * - Soft-release of expired claimed on list/claim restores one attempt
+ *   (WEBHOOKS-1). `get()` may be read-only (S19-CLOCK-LEASE). Direct reclaim
+ *   of expired claimed also must not burn attempts.
  * - `fail` with matching token after lease expiry records pending/dead_letter
  *   without a prior get/listRetryable soft-release (WEBHOOKS-2).
+ * - `ifMatchPayloadHash` miss on an idle newer hash returns
+ *   `payload_hash_conflict` without rewriting (S19-WH-HASH-TOCTOU).
  */
 
 import type { WebhookInboxStore } from "./contracts";
@@ -113,6 +116,66 @@ export async function runWebhookInboxStoreConformanceSuite(
       });
       assert(b.kind === "payload_hash_conflict", `got ${b.kind}`);
     }),
+  );
+
+  results.push(
+    await runCase(
+      "S19 ifMatchPayloadHash miss does not rewrite an idle newer hash",
+      async () => {
+        const clock = createClock();
+        const store = await options.createStore({ clock });
+        const first = await store.claim({
+          key: "evt_s19_cas",
+          payloadHash: "hash-a",
+          owner: "w1",
+          leaseMs: 30_000,
+          payloadRef: JSON.stringify({ id: "old" }),
+        });
+        assert(first.kind === "acquired", `got ${first.kind}`);
+        await store.fail({
+          key: "evt_s19_cas",
+          leaseToken: first.leaseToken,
+          error: "park a",
+          retryAfterMs: 0,
+        });
+
+        const newer = await store.claim({
+          key: "evt_s19_cas",
+          payloadHash: "hash-b",
+          owner: "w2",
+          leaseMs: 30_000,
+          payloadRef: JSON.stringify({ id: "new" }),
+        });
+        assert(newer.kind === "acquired", `WEBHOOKS-3 supersede got ${newer.kind}`);
+        await store.fail({
+          key: "evt_s19_cas",
+          leaseToken: newer.leaseToken,
+          error: "park b",
+          retryAfterMs: 0,
+          restoreAttempt: true,
+        });
+
+        const stale = await store.claim({
+          key: "evt_s19_cas",
+          payloadHash: "hash-a",
+          owner: "worker",
+          leaseMs: 30_000,
+          payloadRef: JSON.stringify({ id: "old" }),
+          ifMatchPayloadHash: "hash-a",
+        });
+        assert(
+          stale.kind === "payload_hash_conflict",
+          `stale listed hash must not acquire, got ${stale.kind}`,
+        );
+        const rec = await store.get("evt_s19_cas");
+        assert(rec?.payloadHash === "hash-b", `hash rolled back to ${rec?.payloadHash}`);
+        assert(
+          rec?.payloadRef === JSON.stringify({ id: "new" }),
+          `payloadRef rolled back to ${rec?.payloadRef}`,
+        );
+        assert(rec?.status === "pending", `status became ${rec?.status}`);
+      },
+    ),
   );
 
   results.push(
@@ -547,34 +610,48 @@ export async function runWebhookInboxStoreConformanceSuite(
         if (a.kind !== "acquired") return;
         assert(a.record.attempts === 1, "first claim attempts=1");
         clock.advance(1_001);
-        // Soft-release via get must restore unfinished attempt
+        // S19-CLOCK-LEASE: get() is allowed to be read-only. A host clock
+        // ahead of the issuer must not UPDATE/clear lease_token. Memory
+        // stores may still soft-release on get; durable adapters must not.
         const afterGet = await store.get("evt_soft_restore");
-        assert(afterGet?.status === "pending", "soft-release → pending");
+        assert(afterGet !== undefined, "get after expiry");
         assert(
-          afterGet?.attempts === 0,
-          `get soft-release must restore attempt (got ${afterGet?.attempts})`,
+          (afterGet?.attempts ?? 99) <= 1,
+          `get must not burn attempts (got ${afterGet?.attempts})`,
         );
-        // Reclaim after soft-release is a pending claim → attempts++
+        if (afterGet?.status === "claimed") {
+          assert(
+            afterGet.leaseToken === a.leaseToken,
+            "read-only get must keep issuer lease_token",
+          );
+          assert(afterGet.attempts === 1, "read-only get must not restore/burn");
+        } else {
+          assert(afterGet?.status === "pending", "optional get soft-release → pending");
+          assert(
+            afterGet?.attempts === 0,
+            `get soft-release must restore attempt (got ${afterGet?.attempts})`,
+          );
+        }
+        // listRetryable is the store-clock release path (WEBHOOKS-1).
+        const listed = await store.listRetryable({ limit: 10 });
+        const row = listed.find((r) => r.key === "evt_soft_restore");
+        assert(row !== undefined, "listRetryable rediscovers expired claimed");
+        assert(row!.status === "pending", "listRetryable soft-release → pending");
+        assert(
+          row!.attempts === 0,
+          `listRetryable soft-release must restore attempt (got ${row!.attempts})`,
+        );
         const b = await store.claim({
           key: "evt_soft_restore",
           payloadHash: "h1",
           owner: "w2",
           leaseMs: 1_000,
         });
-        assert(b.kind === "acquired", "reclaim after soft-release");
+        assert(b.kind === "acquired", "reclaim after listRetryable soft-release");
         if (b.kind !== "acquired") return;
         assert(
           b.record.attempts === 1,
           `pending reclaim after soft-release → attempts=1 (got ${b.record.attempts})`,
-        );
-        clock.advance(1_001);
-        // listRetryable soft-release path also restores
-        const listed = await store.listRetryable({ limit: 10 });
-        const row = listed.find((r) => r.key === "evt_soft_restore");
-        assert(row !== undefined, "listRetryable rediscovers soft-released row");
-        assert(
-          row!.attempts === 0,
-          `listRetryable soft-release must restore attempt (got ${row!.attempts})`,
         );
       },
     ),

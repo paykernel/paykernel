@@ -469,6 +469,7 @@ describe("legacy PaymentClient still works", () => {
       expect(client.hasGateway("stripe")).toBe(true);
       const result = await client.voidPayment({
         gatewayPaymentId: "pi_legacy",
+        idempotencyKey: "idem_legacy_void",
       });
       expect(result.gatewayId).toBe("pi_legacy");
     } finally {

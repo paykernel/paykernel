@@ -1,6 +1,5 @@
 import {
   createPaymentClient,
-  InvalidRequestError,
   InvalidWebhookError,
   NetworkError,
   money,
@@ -8,6 +7,7 @@ import {
   type Clock,
   type CreatePaymentParams,
   type GatewayAdapter,
+  type GatewayPaymentResult,
   type Money,
   type PaymentGateway,
   type WebhookEvent,
@@ -47,13 +47,75 @@ import type {
 
 const DEFAULT_AMOUNT = "10.00";
 const DEFAULT_CURRENCY = "USD";
+/** Server catalog price. Never charge client-posted amounts. */
+const CATALOG_AMOUNT = money(DEFAULT_AMOUNT, DEFAULT_CURRENCY);
 const CALLBACK_URL = "https://example.invalid/callback";
 const STRIPE_SECRET_KEY = "sk_test_example_not_live";
 const CHARGE_GATEWAY = "mock";
 
+function publishableCurrency(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function moneyFromMajorUnits(
+  amount: number | undefined,
+  currency: string | undefined,
+): Money | undefined {
+  if (amount === undefined || !Number.isFinite(amount)) return undefined;
+  if (currency === undefined) return undefined;
+  try {
+    return money(amount, currency);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Provider recon snapshot from `getPayment` money only.
+ * Incomplete major-unit fields (amount without currency) fail closed.
+ */
+function providerSnapshotFromGetPayment(
+  got: GatewayPaymentResult,
+): ProviderPaymentSnapshot | undefined {
+  if (!got.gatewayId) return undefined;
+  const currency = publishableCurrency(got.currency);
+  const hasAmountLike =
+    got.amount !== undefined ||
+    got.capturedAmount !== undefined ||
+    got.refundedAmount !== undefined;
+  if (hasAmountLike && currency === undefined) {
+    return undefined;
+  }
+  const amount = moneyFromMajorUnits(got.amount, currency);
+  if (amount === undefined) {
+    return undefined;
+  }
+  const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
+    gatewayPaymentId: got.gatewayId,
+    status: got.status,
+    amount,
+    providerStatus: got.status,
+  };
+  if (got.capturedAmount !== undefined) {
+    const captured = moneyFromMajorUnits(got.capturedAmount, currency);
+    if (captured === undefined) return undefined;
+    input.capturedAmount = captured;
+  }
+  if (got.refundedAmount !== undefined) {
+    const refunded = moneyFromMajorUnits(got.refundedAmount, currency);
+    if (refunded === undefined) return undefined;
+    input.refundedAmount = refunded;
+  }
+  return buildProviderPaymentSnapshot(input);
+}
+
 export type CreateCheckoutKernelOptions = {
   /** FIFO mock `createPayment` outcomes (scripted). */
-  scriptCreate?: ScriptedPaymentOutcome[];
+  scriptCreate?: readonly ScriptedPaymentOutcome[];
+  /** FIFO mock `getPayment` outcomes (scripted). */
+  scriptGet?: readonly ScriptedPaymentOutcome[];
   /** Throw in the inbox fulfill handler before marking the order paid. */
   fulfillThrows?: boolean;
   clock?: Clock;
@@ -70,6 +132,7 @@ export type CheckoutKernel = {
   ): Promise<CheckoutHttpResult>;
   /** Test hook: inject a paid provider snapshot. Not a production API. */
   markProviderPaid(gatewayPaymentId: string): CheckoutHttpResult;
+  /** Test hook: process due recon jobs. Not a production API. */
   reconcileDue(): Promise<CheckoutHttpResult>;
   close(): void;
 };
@@ -147,7 +210,10 @@ export async function createCheckoutKernel(
     clock,
   };
   if (options.scriptCreate !== undefined) {
-    mockOptions.createPayment = options.scriptCreate;
+    mockOptions.createPayment = [...options.scriptCreate];
+  }
+  if (options.scriptGet !== undefined) {
+    mockOptions.getPayment = [...options.scriptGet];
   }
   const mock = mockGateway(mockOptions);
 
@@ -210,23 +276,17 @@ export async function createCheckoutKernel(
     if (override) return { kind: "found", snapshots: [override] };
     try {
       const got = await client.getPayment({ gatewayPaymentId }, order.gateway);
-      if (got.gatewayId) {
-        return {
-          kind: "found",
-          snapshots: [
-            buildProviderPaymentSnapshot({
-              gatewayPaymentId: got.gatewayId,
-              status: got.status,
-              amount: order.amount,
-              providerStatus: got.status,
-            }),
-          ],
-        };
+      const snapshot = providerSnapshotFromGetPayment(got);
+      if (snapshot) {
+        return { kind: "found", snapshots: [snapshot] };
       }
+      if (!got.gatewayId) {
+        return { kind: "not_found" };
+      }
+      return { kind: "unavailable" };
     } catch {
       return { kind: "unavailable" };
     }
-    return { kind: "not_found" };
   }
 
   const lookup: ProviderLookupPort = {
@@ -252,12 +312,6 @@ export async function createCheckoutKernel(
 
   const reconciler = createPaymentReconciler({ lookup });
 
-  function trustedAmount(input?: CreateOrderPaymentInput): Money {
-    const amount = input?.amount ?? DEFAULT_AMOUNT;
-    const currency = input?.currency ?? DEFAULT_CURRENCY;
-    return money(amount, currency);
-  }
-
   function nextOrderId(): string {
     orderSeq += 1;
     return `order_checkout_${orderSeq}`;
@@ -272,38 +326,81 @@ export async function createCheckoutKernel(
     return row ? publicOrder(row) : undefined;
   }
 
+  function eventInternalReference(event: unknown): string | undefined {
+    if (event === null || typeof event !== "object" || !("payment" in event)) {
+      return undefined;
+    }
+    const payment = (event as { payment?: { references?: { internalReference?: string } } })
+      .payment;
+    const ref = payment?.references?.internalReference;
+    return typeof ref === "string" && ref.length > 0 ? ref : undefined;
+  }
+
+  type OrderForPaidWebhook =
+    | { kind: "ok"; order: CheckoutOrderRecord }
+    | { kind: "mismatch" }
+    | { kind: "missing" };
+
+  /**
+   * Bind webhook PI first, then match. Metadata orderId alone must not
+   * fulfill a mock-charged order whose stored gatewayPaymentId differs.
+   */
   function findOrderForEvent(
     webhookEvent: WebhookEvent,
     event: unknown,
-  ): CheckoutOrderRecord | undefined {
-    if (webhookEvent.paymentId) {
-      const byPaymentId = orders.get(webhookEvent.paymentId);
-      if (byPaymentId) return byPaymentId;
+  ): OrderForPaidWebhook {
+    const webhookPi =
+      typeof webhookEvent.gatewayPaymentId === "string" &&
+      webhookEvent.gatewayPaymentId.length > 0
+        ? webhookEvent.gatewayPaymentId
+        : undefined;
+    if (webhookPi === undefined) {
+      return { kind: "missing" };
     }
-    const fromMeta = metadataOrderId(webhookEvent.rawPayload);
-    if (fromMeta) {
-      const byMeta = orders.get(fromMeta);
-      if (byMeta) return byMeta;
+
+    const byGw = findByGatewayPaymentId(webhookPi);
+    if (byGw) {
+      return { kind: "ok", order: byGw };
     }
-    if (webhookEvent.gatewayPaymentId) {
-      const byGw = findByGatewayPaymentId(webhookEvent.gatewayPaymentId);
-      if (byGw) return byGw;
-    }
-    if (event !== null && typeof event === "object" && "payment" in event) {
-      const payment = (event as { payment?: { references?: { internalReference?: string } } })
-        .payment;
-      const ref = payment?.references?.internalReference;
-      if (ref) {
-        const byRef = orders.get(ref);
-        if (byRef) return byRef;
+
+    const candidates: CheckoutOrderRecord[] = [];
+    const seen = new Set<string>();
+    const add = (row: CheckoutOrderRecord | undefined): void => {
+      if (row && !seen.has(row.orderId)) {
+        seen.add(row.orderId);
+        candidates.push(row);
       }
+    };
+    if (webhookEvent.paymentId) add(orders.get(webhookEvent.paymentId));
+    const fromMeta = metadataOrderId(webhookEvent.rawPayload);
+    if (fromMeta) add(orders.get(fromMeta));
+    const fromRef = eventInternalReference(event);
+    if (fromRef) add(orders.get(fromRef));
+
+    let sawMismatch = false;
+    for (const candidate of candidates) {
+      if (candidate.gatewayPaymentId === undefined) {
+        return { kind: "ok", order: candidate };
+      }
+      if (candidate.gatewayPaymentId === webhookPi) {
+        return { kind: "ok", order: candidate };
+      }
+      sawMismatch = true;
     }
-    return undefined;
+    if (sawMismatch) return { kind: "mismatch" };
+    return { kind: "missing" };
   }
 
-  function fulfill(order: CheckoutOrderRecord): void {
+  function fulfill(order: CheckoutOrderRecord, gatewayPaymentId?: string): void {
     if (fulfillThrows) {
       throw new Error("checkout kernel fulfillThrows");
+    }
+    if (gatewayPaymentId !== undefined && gatewayPaymentId.length > 0) {
+      if (order.gatewayPaymentId === undefined) {
+        rememberGatewayPaymentId(order, gatewayPaymentId);
+      } else if (order.gatewayPaymentId !== gatewayPaymentId) {
+        return;
+      }
     }
     if (order.status === "paid") return;
     order.status = "paid";
@@ -346,15 +443,7 @@ export async function createCheckoutKernel(
   async function createOrderPayment(
     input: CreateOrderPaymentInput = {},
   ): Promise<CheckoutHttpResult> {
-    let amount: Money;
-    try {
-      amount = trustedAmount(input);
-    } catch (err) {
-      if (err instanceof InvalidRequestError) {
-        return jsonError(400, "invalid_amount");
-      }
-      throw err;
-    }
+    const amount = CATALOG_AMOUNT;
     const orderId = input.orderId ?? nextOrderId();
     if (orders.has(orderId)) {
       return jsonError(409, "order_exists");
@@ -450,11 +539,16 @@ export async function createCheckoutKernel(
       payloadHash: resolveInboxPayloadHash(hashInput),
       handler: async (ctx) => {
         if (!isPaidFulfillmentEvent(ctx.event)) return;
-        const order = findOrderForEvent(webhookEvent, ctx.event);
-        if (!order) {
+        const webhookPi = webhookEvent.gatewayPaymentId;
+        if (typeof webhookPi !== "string" || webhookPi.length === 0) {
+          return;
+        }
+        const found = findOrderForEvent(webhookEvent, ctx.event);
+        if (found.kind === "mismatch") return;
+        if (found.kind === "missing") {
           throw new Error("no local order for paid webhook");
         }
-        fulfill(order);
+        fulfill(found.order, webhookPi);
       },
     };
     if (webhookEvent.event !== undefined) {
@@ -491,6 +585,7 @@ export async function createCheckoutKernel(
     return { status: 200, body: { ok: true, gatewayPaymentId } };
   }
 
+  /** Test hook: process due recon jobs. Not a production API. */
   async function reconcileDue(): Promise<CheckoutHttpResult> {
     const result = await scheduler.processDue({
       handler: async (job) => {

@@ -4,6 +4,7 @@
 
 ### Patch
 
+- **S19-WH-HASH-TOCTOU:** webhook `claim` UPSERT honors `ifMatchPayloadHash` (idle miss is `payload_hash_conflict`, no rewrite).
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - Reconciliation `listDue` soft-releases expired claimed rows so abandoned jobs are rediscoverable via poll; `markManualReview` requires active (unexpired) lease (parity with complete/fail).
 

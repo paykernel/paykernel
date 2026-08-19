@@ -56,7 +56,7 @@ function webhookMissToResult(
 
 /**
  * Single-statement atomic claim.
- * params: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now
+ * params: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now, ifMatch, ifMatch
  */
 function claimSql(table: string): string {
   return `
@@ -99,6 +99,7 @@ WHERE ${table}.status NOT IN ('completed', 'failed', 'dead_letter')
       )
     )
   )
+  AND (? IS NULL OR ${table}.payload_hash = ?)
 RETURNING ${WEBHOOK_SELECT_COLS}
 `.trim();
 }
@@ -139,20 +140,24 @@ export function createDoWebhookInboxStore(
         const now = clockNowIso(ctx.clock);
         const leaseExpiresAt = clockAddMsIso(ctx.clock, input.leaseMs);
         const payloadRef = input.payloadRef ?? null;
+        const ifMatch = input.ifMatchPayloadHash ?? null;
+        const claimParams = [
+          input.key,
+          input.payloadHash,
+          payloadRef,
+          input.owner,
+          leaseToken,
+          leaseExpiresAt,
+          now,
+          now,
+          now,
+          ifMatch,
+          ifMatch,
+        ] as const;
 
         const claimed = ctx.getExecutor().query<Record<string, unknown>>(
           claimTpl,
-          [
-            input.key,
-            input.payloadHash,
-            payloadRef,
-            input.owner,
-            leaseToken,
-            leaseExpiresAt,
-            now,
-            now,
-            now,
-          ],
+          [...claimParams],
         );
 
         if (claimed.length > 0) {
@@ -178,6 +183,7 @@ export function createDoWebhookInboxStore(
           },
           input.payloadHash,
           ctx.clock.nowMs(),
+          input.ifMatchPayloadHash,
         );
         if (miss !== "claimable") {
           return webhookMissToResult(miss, existing);
@@ -191,17 +197,7 @@ export function createDoWebhookInboxStore(
 
         const retried = ctx.getExecutor().query<Record<string, unknown>>(
           claimTpl,
-          [
-            input.key,
-            input.payloadHash,
-            payloadRef,
-            input.owner,
-            leaseToken,
-            leaseExpiresAt,
-            now,
-            now,
-            now,
-          ],
+          [...claimParams],
         );
         if (retried.length > 0) {
           const record = mapWebhookRow(retried[0]!);
@@ -225,6 +221,7 @@ export function createDoWebhookInboxStore(
           },
           input.payloadHash,
           ctx.clock.nowMs(),
+          input.ifMatchPayloadHash,
         );
         if (miss2 === "claimable") {
           throw new StoreUnavailableError(
@@ -345,26 +342,9 @@ export function createDoWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(() => {
-        // WEBHOOKS-1: restore unfinished claim attempt on expired-lease soft-release.
-        const now = clockNowIso(ctx.clock);
-        ctx.getExecutor().run(
-          `UPDATE ${table} SET
-             status = 'pending',
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-             available_at = ?,
-             updated_at = ?
-           WHERE key = ?
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= ?`,
-          [now, now, key, now],
-        );
-        return selectByKey(key);
-      });
+      // S19-CLOCK-LEASE: get is read-only. A host clock ahead of the issuer
+      // must not UPDATE/clear lease_token. Soft-release on listRetryable/claim.
+      return withMappedErrors(() => selectByKey(key));
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {

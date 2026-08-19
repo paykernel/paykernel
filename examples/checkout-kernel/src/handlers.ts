@@ -1,6 +1,7 @@
 import type { CheckoutKernel } from "./kernel";
 import type {
   CheckoutFetchApp,
+  CheckoutHttpOptions,
   CheckoutHttpResult,
   CreateOrderPaymentInput,
 } from "./types";
@@ -35,8 +36,6 @@ export function createPaymentInputFromUnknown(value: unknown): CreateOrderPaymen
   const rec = value as Record<string, unknown>;
   const input: CreateOrderPaymentInput = {};
   if (typeof rec.orderId === "string") input.orderId = rec.orderId;
-  if (typeof rec.amount === "string") input.amount = rec.amount;
-  if (typeof rec.currency === "string") input.currency = rec.currency;
   return input;
 }
 
@@ -46,11 +45,23 @@ export function gatewayPaymentIdFromUnknown(value: unknown): string | undefined 
   return typeof gatewayPaymentId === "string" ? gatewayPaymentId : undefined;
 }
 
+function testHookDisabled(): CheckoutHttpResult {
+  return { status: 404, body: { error: "not_found" } };
+}
+
 /**
  * Shared route helpers so Hono/Elysia stay thin.
  * Webhook callers must pass the **raw** body text (do not JSON.parse first).
+ *
+ * `/internal/reconcile` and `/internal/provider-paid` are test hooks.
+ * They are unauthenticated — do not deploy them. Pass `{ enableTestHooks: true }`
+ * only in local tests.
  */
-export function createCheckoutHandlers(kernel: CheckoutKernel): CheckoutHandlers {
+export function createCheckoutHandlers(
+  kernel: CheckoutKernel,
+  options: CheckoutHttpOptions = {},
+): CheckoutHandlers {
+  const enableTestHooks = options.enableTestHooks === true;
   return {
     createPayment(input) {
       return kernel.createOrderPayment(input ?? {});
@@ -58,7 +69,9 @@ export function createCheckoutHandlers(kernel: CheckoutKernel): CheckoutHandlers
     handleStripeWebhook(rawBody, signature) {
       return kernel.handleStripeWebhook(rawBody, signature);
     },
-    reconcile() {
+    async reconcile() {
+      // Test hook only — unauthenticated. Do not deploy this route.
+      if (!enableTestHooks) return testHookDisabled();
       return kernel.reconcileDue();
     },
     getOrder(orderId) {
@@ -70,6 +83,7 @@ export function createCheckoutHandlers(kernel: CheckoutKernel): CheckoutHandlers
     },
     providerPaid(input) {
       // Test hook only — unauthenticated. Do not deploy this route.
+      if (!enableTestHooks) return testHookDisabled();
       if (typeof input.gatewayPaymentId !== "string") {
         return { status: 400, body: { error: "gatewayPaymentId required" } };
       }
@@ -84,8 +98,9 @@ export function createCheckoutHandlers(kernel: CheckoutKernel): CheckoutHandlers
 export async function dispatchCheckoutRequest(
   kernel: CheckoutKernel,
   req: Request,
+  options: CheckoutHttpOptions = {},
 ): Promise<Response> {
-  const handlers = createCheckoutHandlers(kernel);
+  const handlers = createCheckoutHandlers(kernel, options);
   const url = new URL(req.url);
   const path = url.pathname;
   const method = req.method;
@@ -101,6 +116,7 @@ export async function dispatchCheckoutRequest(
         req.headers.get("stripe-signature") ?? req.headers.get("Stripe-Signature");
       return checkoutJsonResponse(await handlers.handleStripeWebhook(rawBody, signature));
     }
+    // Test hook only — unauthenticated. Do not deploy this route.
     if (method === "POST" && path === "/internal/reconcile") {
       return checkoutJsonResponse(await handlers.reconcile());
     }
@@ -130,10 +146,13 @@ export async function dispatchCheckoutRequest(
   return checkoutJsonResponse({ status: 404, body: { error: "not_found" } });
 }
 
-export function createCheckoutFetchApp(kernel: CheckoutKernel): CheckoutFetchApp {
+export function createCheckoutFetchApp(
+  kernel: CheckoutKernel,
+  options: CheckoutHttpOptions = {},
+): CheckoutFetchApp {
   return {
     fetch(req: Request): Promise<Response> {
-      return dispatchCheckoutRequest(kernel, req);
+      return dispatchCheckoutRequest(kernel, req, options);
     },
   };
 }

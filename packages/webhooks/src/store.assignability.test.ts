@@ -226,4 +226,52 @@ describe("WebhookInboxStore structural contract", () => {
       "pending",
     );
   });
+
+  it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {
+    const store = createMemoryWebhookInboxStore();
+    const first = await store.claim({
+      key: "stripe:evt_s19_cas",
+      payloadHash: "hash-a",
+      owner: "w1",
+      leaseMs: 30_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    if (first.kind !== "acquired") throw new Error("expected acquired");
+    await store.fail({
+      key: "stripe:evt_s19_cas",
+      leaseToken: first.leaseToken,
+      error: "park a",
+      retryAfterMs: 0,
+    });
+
+    const newer = await store.claim({
+      key: "stripe:evt_s19_cas",
+      payloadHash: "hash-b",
+      owner: "w2",
+      leaseMs: 30_000,
+      payloadRef: JSON.stringify({ id: "new" }),
+    });
+    if (newer.kind !== "acquired") throw new Error("expected supersede");
+    await store.fail({
+      key: "stripe:evt_s19_cas",
+      leaseToken: newer.leaseToken,
+      error: "park b",
+      retryAfterMs: 0,
+      restoreAttempt: true,
+    });
+
+    const stale = await store.claim({
+      key: "stripe:evt_s19_cas",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 30_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(stale.kind).toBe("payload_hash_conflict");
+    const rec = await store.get("stripe:evt_s19_cas");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.payloadRef).toBe(JSON.stringify({ id: "new" }));
+    expect(rec?.status).toBe("pending");
+  });
 });

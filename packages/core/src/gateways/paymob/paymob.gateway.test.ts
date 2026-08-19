@@ -206,6 +206,20 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+function emptyResponse(status = 200): Response {
+  return new Response("", {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function htmlResponse(status = 200): Response {
+  return new Response("<html><body>upstream</body></html>", {
+    status,
+    headers: { "Content-Type": "text/html" },
+  });
+}
+
 /** Logger that records warn/error calls as [message, context?] tuples. */
 function fakeClock(startMs: number): {
   now(): Date;
@@ -811,8 +825,11 @@ describe("PaymobGateway", () => {
         "https://accept.paymob.com/api/ecommerce/orders",
         "https://accept.paymob.com/api/acceptance/payment_keys",
       ]);
-      expect(result.gatewayId).toBe("777");
-      expect(result.gatewayObjectId).toBe("777");
+      // S19-PAYMOB-LEGACY-ID: ecommerce order id stays on orderId / nextAction only.
+      expect(result.gatewayId).not.toBe("777");
+      expect(result.gatewayId).not.toMatch(/^\d+$/);
+      expect(result.gatewayId).toBe("legacy:777");
+      expect(result.gatewayObjectId).toBeUndefined();
       expect(result.orderId).toBe("777");
       expect(result.nextAction).toEqual({
         type: "redirect",
@@ -823,6 +840,19 @@ describe("PaymobGateway", () => {
       expect(result.redirectUrl).toBe(
         "https://accept.paymob.com/api/acceptance/iframes/998877?payment_token=payment_key_123",
       );
+
+      fetchCalls = [];
+      const actionGateway = new PaymobGateway(withMutationFence(), hooksManager);
+      await expect(
+        actionGateway.getPayment({ gatewayPaymentId: result.gatewayId }),
+      ).rejects.toThrow(InvalidRequestError);
+      await expect(
+        actionGateway.refundPayment({
+          gatewayPaymentId: result.gatewayId,
+          idempotencyKey: nextMutationKey(),
+        }),
+      ).rejects.toThrow(InvalidRequestError);
+      expect(fetchCalls).toHaveLength(0);
     });
 
     it("URL-encodes legacy iframe payment tokens", async () => {
@@ -1440,7 +1470,9 @@ describe("PaymobGateway", () => {
       }).fingerprintParams.bind(gateway);
       const at = new Date("2026-01-15T12:00:00.000Z");
 
-      expect(fp({ at })).toContain("__date__:2026-01-15T12:00:00.000Z");
+      // Stored fingerprint is a sha256 of the Date-tagged canonical form, not
+      // raw stringify (S19-FINGERPRINT). Date vs ISO string still differ.
+      expect(fp({ at })).toMatch(/^[0-9a-f]{64}$/);
       expect(fp({ at })).not.toBe(fp({ at: "2026-01-15T12:00:00.000Z" }));
     });
 
@@ -2164,6 +2196,90 @@ describe("PaymobGateway", () => {
       ]);
     });
 
+    it.each([
+      {
+        label: "refund pending sale",
+        op: "refund" as const,
+        inquiry: {
+          id: 123,
+          success: false,
+          pending: true,
+          amount_cents: 10000,
+          currency: "SAR",
+        },
+      },
+      {
+        label: "refund failed sale",
+        op: "refund" as const,
+        inquiry: {
+          id: 123,
+          success: false,
+          pending: false,
+          amount_cents: 10000,
+          currency: "SAR",
+        },
+      },
+      {
+        label: "capture pending sale",
+        op: "capture" as const,
+        inquiry: {
+          id: 123,
+          success: false,
+          pending: true,
+          amount_cents: 10000,
+          currency: "SAR",
+        },
+      },
+      {
+        label: "capture failed sale",
+        op: "capture" as const,
+        inquiry: {
+          id: 123,
+          success: false,
+          pending: false,
+          amount_cents: 10000,
+          currency: "SAR",
+        },
+      },
+    ])(
+      "refuses $label before POST (S19-PAYMOB-REFUND-UNPAID)",
+      async ({ op, inquiry }) => {
+        const actionGateway = new PaymobGateway(
+          withMutationFence(PAYMOB_TEST_CONFIG),
+          hooksManager,
+        );
+        mockFetchSequence(jsonResponse(inquiry));
+
+        if (op === "refund") {
+          await expect(
+            actionGateway.refundPayment({
+              gatewayPaymentId: "123456789",
+              idempotencyKey: nextMutationKey(),
+            }),
+          ).rejects.toThrow(InvalidRequestError);
+        } else {
+          await expect(
+            actionGateway.capturePayment({
+              gatewayPaymentId: "123456789",
+              idempotencyKey: nextMutationKey(),
+            }),
+          ).rejects.toThrow(InvalidRequestError);
+        }
+
+        expect(
+          fetchCalls.filter(
+            (call) =>
+              call.url.endsWith("/void_refund/refund") ||
+              call.url.endsWith("/api/acceptance/capture"),
+          ),
+        ).toHaveLength(0);
+        expect(fetchCalls).toHaveLength(1);
+        expect(fetchCalls[0]!.url).toBe(
+          "https://ksa.paymob.com/api/acceptance/transactions/123456789",
+        );
+      },
+    );
+
     it("converts OMR action amounts and response amounts with three decimal places", async () => {
       const actionGateway = new PaymobGateway(
         { ...withMutationFence(), region: "om" },
@@ -2332,6 +2448,45 @@ describe("PaymobGateway", () => {
       );
 
       await expect(actionGateway.getPaymentStatus("123456789")).resolves.toBe("paid");
+    });
+
+    it("empty HTTP 200 inquiry is GatewayApiError, not declined (S19-PAYMOB-JSON)", async () => {
+      const actionGateway = new PaymobGateway(
+        withMutationFence(PAYMOB_TEST_CONFIG),
+        hooksManager,
+      );
+      mockFetchSequence(emptyResponse());
+
+      const inquiry = actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      await expect(inquiry).rejects.toBeInstanceOf(GatewayApiError);
+      await expect(inquiry).rejects.not.toMatchObject({ outcome: "declined" });
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("non-JSON HTTP 200 inquiry is GatewayApiError, not declined (S19-PAYMOB-JSON)", async () => {
+      const actionGateway = new PaymobGateway(
+        withMutationFence(PAYMOB_TEST_CONFIG),
+        hooksManager,
+      );
+      mockFetchSequence(htmlResponse());
+
+      const inquiry = actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      await expect(inquiry).rejects.toBeInstanceOf(GatewayApiError);
+      await expect(inquiry).rejects.toThrow(/invalid JSON/i);
+      expect(fetchCalls).toHaveLength(1);
+    });
+
+    it("empty-object HTTP 200 inquiry is GatewayApiError, not declined (S19-PAYMOB-JSON)", async () => {
+      const actionGateway = new PaymobGateway(
+        withMutationFence(PAYMOB_TEST_CONFIG),
+        hooksManager,
+      );
+      mockFetchSequence(jsonResponse({}));
+
+      const inquiry = actionGateway.getPayment({ gatewayPaymentId: "123456789" });
+      await expect(inquiry).rejects.toBeInstanceOf(GatewayApiError);
+      await expect(inquiry).rejects.toThrow(/missing transaction data/i);
+      expect(fetchCalls).toHaveLength(1);
     });
 
     it("inquiry missing success is fail-closed (not paid / not isPaidOutcome)", async () => {
@@ -2657,6 +2812,41 @@ describe("PaymobGateway", () => {
       });
       expect(malformed.outcome).toBe("indeterminate");
       expect(malformed.reconciliationRequired).toBe(true);
+    });
+
+    it("treats empty or non-JSON HTTP 200 capture as indeterminate (S19-PAYMOB-JSON)", async () => {
+      const emptyGateway = new PaymobGateway(withMutationFence(), hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        emptyResponse(),
+      );
+
+      const emptyBody = await emptyGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "capture_200_empty_body",
+      });
+      expect(emptyBody.outcome).toBe("indeterminate");
+      expect(emptyBody.reconciliationRequired).toBe(true);
+      expect(emptyBody.outcome).not.toBe("declined");
+      expect(emptyBody.status).not.toBe("failed");
+
+      const htmlGateway = new PaymobGateway(withMutationFence(), hooksManager);
+      mockFetchSequence(
+        jsonResponse({ token: "auth_token_123" }),
+        jsonResponse({ id: 123, amount_cents: 10000, captured_amount: 0, currency: "SAR" }),
+        htmlResponse(),
+      );
+      const htmlBody = await htmlGateway.capturePayment({
+        gatewayPaymentId: "123456789",
+        amount: 50,
+        currency: "SAR",
+        idempotencyKey: "capture_200_html_body",
+      });
+      expect(htmlBody.outcome).toBe("indeterminate");
+      expect(htmlBody.reconciliationRequired).toBe(true);
     });
 
     it("keeps idempotency fence after HTTP 200 + malformed capture body (PAYMOB-1)", async () => {
@@ -3884,7 +4074,8 @@ describe("PaymobGateway", () => {
       // merchant_order_id is unsigned — correlate via signed gatewayPaymentId only.
       expect(event.paymentId).toBeUndefined();
       expect(event.gatewayPaymentId).toBe("123456789");
-      expect(event.status).toBe("paid");
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
       expect(event.amount).toBe(100);
       // Dual-write must not look fulfillment-ready on redirect success alone.
       expect(event.stableType).toBe("payment.processing");
@@ -3909,6 +4100,8 @@ describe("PaymobGateway", () => {
       expect(event.type).toBe("TRANSACTION_RESPONSE");
       expect(event.type).not.toBe("TRANSACTION");
       expect(event.id).toBe("123456789:redirect");
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
       // Settlement arms must stay demoted — never look fulfillment-ready on redirect.
       expect(event.stableType).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.succeeded");
@@ -4150,9 +4343,12 @@ describe("PaymobGateway", () => {
       const event = gateway.parseWebhookEvent(payload);
       expect(event.type).toBe("TRANSACTION_RESPONSE");
       // Unsigned amounts/is_captured must not promote auth → paid/partial.
-      expect(event.status).toBe("authorized");
+      // S19-PAYMOB-REDIR-STATUS: envelope status matches dual-write processing.
+      expect(event.status).toBe("processing");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).not.toBe("authorized");
       // AUTH redirect is browser-only (PAYMOB-AUTH-REDIR): dual-write is
-      // processing, same as sale redirect. Domain status stays authorized.
+      // processing, same as sale redirect.
       expect(event.stableType).toBe("payment.processing");
       expect(event.stableType).not.toBe("payment.authorized");
       expect(event.stableType).not.toBe("payment.succeeded");

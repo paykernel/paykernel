@@ -8,7 +8,7 @@
  *
  * @example
  * ```typescript
- * import { PaymentClient } from '@paykernel/core';
+ * import { PaymentClient, isPaidOutcome } from '@paykernel/core';
  *
  * const client = new PaymentClient({
  *   moyasar: {
@@ -22,11 +22,14 @@
  *       return { proceed: true };
  *     },
  *     afterCreatePayment: async (ctx, result) => {
- *       await analytics.track('payment_created', { status: result.status });
+ *       if (isPaidOutcome(result)) {
+ *         await analytics.track('payment_paid', { status: result.status });
+ *       }
  *       return { proceed: true };
  *     },
  *     onWebhookVerified: async (event) => {
- *       await orderService.updatePaymentStatus(event.paymentId, event.status);
+ *       // Verification only. Fulfill after @paykernel/webhooks inbox claim
+ *       // when event.status === 'paid' — never if (result.success).
  *     },
  *   },
  * });
@@ -42,8 +45,11 @@
  *   },
  *   metadata: { orderId: 'order_123' },
  * });
+ * if (isPaidOutcome(result)) {
+ *   // fulfill — paid settlement only (`status === 'paid'`)
+ * }
  *
- * // Handle webhook
+ * // Handle webhook (verify). Production: inbox claim, then status === 'paid'.
  * const event = await client.handleWebhook('moyasar', webhookPayload);
  * ```
  */

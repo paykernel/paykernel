@@ -206,8 +206,17 @@ export function createMemoryWebhookInboxStore(
           }
           return { kind: "in_progress", record: base };
         }
+        // S19: compare-and-claim. Retry workers pass the listed hash so an
+        // idle WEBHOOKS-3 supersede between get and claim cannot roll back.
+        if (
+          input.ifMatchPayloadHash !== undefined &&
+          base.payloadHash !== input.ifMatchPayloadHash
+        ) {
+          return { kind: "payload_hash_conflict", record: base };
+        }
         // Same-hash backoff only. Idle hash mismatch falls through and
-        // supersedes so raw-string vs object digests do not stick redrive.
+        // supersedes so raw-string vs object digests do not stick redrive
+        // (processVerified omits ifMatchPayloadHash).
         if (
           base.payloadHash === input.payloadHash &&
           base.status === "pending" &&

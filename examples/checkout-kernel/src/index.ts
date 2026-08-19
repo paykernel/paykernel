@@ -28,6 +28,7 @@ export {
 export { runCheckoutHttpScenarios, type CheckoutScenarioCreateApp } from "./scenarios";
 export type {
   CheckoutFetchApp,
+  CheckoutHttpOptions,
   CheckoutHttpResult,
   CheckoutOrder,
   CreateOrderPaymentInput,

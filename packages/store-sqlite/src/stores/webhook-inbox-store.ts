@@ -125,9 +125,10 @@ export function createSqliteWebhookInboxStore(
             };
           }
 
+          const ifMatch = input.ifMatchPayloadHash ?? null;
           // step2: conditional reclaim / hash supersede
-          // bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now
-          const reclaimed = exec.run(updateSql, [
+          // bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now, ifMatch, ifMatch
+          const updateBinds = [
             input.payloadHash,
             payloadRef,
             input.owner,
@@ -139,7 +140,10 @@ export function createSqliteWebhookInboxStore(
             now,
             input.payloadHash,
             now,
-          ]);
+            ifMatch,
+            ifMatch,
+          ] as const;
+          const reclaimed = exec.run(updateSql, [...updateBinds]);
 
           if (reclaimed.changes === 1) {
             const record = selectByKey(input.key);
@@ -172,6 +176,7 @@ export function createSqliteWebhookInboxStore(
             },
             input.payloadHash,
             ctx.clock.nowMs(),
+            input.ifMatchPayloadHash,
           );
           if (miss !== "claimable") {
             return webhookMissToResult(miss, existing);
@@ -187,19 +192,7 @@ export function createSqliteWebhookInboxStore(
           // params: availableAt, leaseExpiresAt, key, now
           exec.run(repairTpl.sql, [availableAtZ, leaseZ, input.key, now]);
 
-          const retried = exec.run(updateSql, [
-            input.payloadHash,
-            payloadRef,
-            input.owner,
-            leaseToken,
-            leaseExpiresAt,
-            now,
-            now,
-            input.key,
-            now,
-            input.payloadHash,
-            now,
-          ]);
+          const retried = exec.run(updateSql, [...updateBinds]);
           if (retried.changes === 1) {
             const record = selectByKey(input.key);
             if (!record) {
@@ -229,6 +222,7 @@ export function createSqliteWebhookInboxStore(
             },
             input.payloadHash,
             ctx.clock.nowMs(),
+            input.ifMatchPayloadHash,
           );
           if (miss2 === "claimable") {
             throw new StoreUnavailableError(
@@ -331,26 +325,9 @@ export function createSqliteWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(() => {
-        // WEBHOOKS-1: restore unfinished claim attempt on expired-lease soft-release.
-        const now = clockNowIso(ctx.clock);
-        ctx.getExecutor().run(
-          `UPDATE ${table} SET
-             status = 'pending',
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-             available_at = ?,
-             updated_at = ?
-           WHERE key = ?
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= ?`,
-          [now, now, key, now],
-        );
-        return selectByKey(key);
-      });
+      // S19-CLOCK-LEASE: get is read-only. A host clock ahead of the issuer
+      // must not UPDATE/clear lease_token. Soft-release on listRetryable/claim.
+      return withMappedErrors(() => selectByKey(key));
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {

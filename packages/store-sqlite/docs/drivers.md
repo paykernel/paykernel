@@ -31,6 +31,8 @@ await migrateSqliteAdapter(stores.executor);
 
 ## `/node` — `node:sqlite` (`DatabaseSync`)
 
+Package `engines.node` is `>=18` because `/better-sqlite3` and the root types run on Node 18. **This subpath** (`@paykernel/store-sqlite/node`) requires **Node >= 22.5.0**. See `NODE_SQLITE_SUPPORT` and `package.json` `paymentsSdk.nodeSqliteMinimum`.
+
 ### Supported Node version matrix
 
 | Node line | Module status | Notes |

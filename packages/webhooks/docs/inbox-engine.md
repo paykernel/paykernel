@@ -43,7 +43,7 @@ Engine returns `handler_failed { retryable: true }` (at-least-once) and never
 | `durable_retry` | yes | `scheduled_for_retry { reason: "handler_retry" }` if retryable; else `handler_failed` |
 | `durable_retry` + `ackAfterClaim` | yes | N/A — parks with `scheduled_for_retry { reason: "parked" }` only when `workerGuaranteed: true`; requires `envelope`; worker via `processRetryable` |
 
-Modes are never mixed implicitly inside `process*`. `processRetryable` throws on `inline` engines. `processRetryable` claims one-at-a-time so later leases cannot expire during earlier handler I/O (NEW-WEBHOOKS-1).
+Modes are never mixed implicitly inside `process*`. `processRetryable` throws on `inline` engines. `processRetryable` claims one-at-a-time so later leases cannot expire during earlier handler I/O (NEW-WEBHOOKS-1). Worker `claim` uses the listed hash with `ifMatchPayloadHash` so idle WEBHOOKS-3 supersede cannot roll a newer body backwards (S19-WH-HASH-TOCTOU).
 
 ## Outcomes (10.4)
 

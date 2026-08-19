@@ -843,6 +843,77 @@ describe("I14 processRetryable must not supersede a newer idle hash", () => {
   });
 });
 
+describe("S19 processRetryable get→claim must not supersede a newer idle hash", () => {
+  it("listed hash-a + idle hash-b at claim time does not rewrite to hash-a", async () => {
+    const clock = createTestClock();
+    const inner = createMemoryWebhookInboxStore({ clock });
+    const seed = await inner.claim({
+      key: "stripe:evt_s19",
+      payloadHash: "hash-a",
+      owner: "seed",
+      leaseMs: 30_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    if (seed.kind !== "acquired") throw new Error("expected acquired");
+    await inner.fail({
+      key: "stripe:evt_s19",
+      leaseToken: seed.leaseToken,
+      error: "park old",
+      retryAfterMs: 0,
+    });
+
+    const claimedHashes: string[] = [];
+    const store = {
+      ...inner,
+      async claim(input: Parameters<typeof inner.claim>[0]) {
+        // After get (hash-a), idle supersede to hash-b before this claim.
+        const newer = await inner.claim({
+          key: "stripe:evt_s19",
+          payloadHash: "hash-b",
+          owner: "newer",
+          leaseMs: 30_000,
+          payloadRef: JSON.stringify({ id: "new" }),
+        });
+        if (newer.kind === "acquired") {
+          await inner.fail({
+            key: "stripe:evt_s19",
+            leaseToken: newer.leaseToken,
+            error: "park newer",
+            retryAfterMs: 0,
+            restoreAttempt: true,
+          });
+        }
+        claimedHashes.push(input.payloadHash);
+        return inner.claim(input);
+      },
+    };
+
+    const engine = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      clock,
+    });
+    let runs = 0;
+    const result = await engine.processRetryable({
+      handler: async () => {
+        runs++;
+      },
+    });
+
+    expect(runs).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.outcome).toEqual({
+      outcome: "handler_failed",
+      retryable: true,
+    });
+    const rec = await inner.get("stripe:evt_s19");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.payloadRef).toBe(JSON.stringify({ id: "new" }));
+    expect(rec?.status).toBe("pending");
+    expect(claimedHashes).toContain("hash-a");
+  });
+});
+
 describe("leaseMs / defaultLeaseMs validation", () => {
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY] as const)(
     "defaultLeaseMs=%s throws at construction",

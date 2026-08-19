@@ -75,49 +75,45 @@ await scheduler.schedule({
   reason: "indeterminate_create",
 });
 
-const claimed = await scheduler.claimDue({ limit: 10 });
-for (const job of claimed) {
-  const target = await loadTarget(job); // store row is subjectId + reason, not a full target
-  const result = await reconciler.reconcile(target);
-  const decision = decideReconciliationPolicy(result, target);
-  // Never complete on raw result.outcome === "consistent" — pending/processing
-  // still settling maps to retry_later, not recovery-complete.
+// Production worker: processDue claims immediately before each handler and
+// auto-renews on leaseMs/3. Do not claimDue({ limit: N }) then work the
+// array serially — that holds N 30s leases and a peer can steal later ones.
+await scheduler.processDue({
+  limit: 10,
+  handler: async (job) => {
+    const target = await loadTarget(job); // store row is subjectId + reason, not a full target
+    const result = await reconciler.reconcile(target);
+    const decision = decideReconciliationPolicy(result, target);
+    // Never complete on raw result.outcome === "consistent" — pending/processing
+    // still settling maps to retry_later, not recovery-complete.
 
-  if (decision.action === "mark_consistent" && decision.safe) {
-    await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
-  } else if (
-    (decision.action === "update_local_to_paid" ||
-      decision.action === "update_local_to_failed") &&
-    decision.safe
-  ) {
-    // apply the safe local paid/failed update in YOUR app first, then complete:
-    await scheduler.complete({ key: job.key, leaseToken: job.leaseToken });
-  } else if (decision.action === "retry_later") {
-    await scheduler.failAndReschedule({
-      key: job.key,
-      leaseToken: job.leaseToken,
-      error: new Error("retry_later"),
-      attempt: job.record.attempts,
-    });
-  } else if (decision.action === "do_not_create_replacement") {
-    // Never createPayment for the same intent; reschedule lookup if needed.
-    await scheduler.failAndReschedule({
-      key: job.key,
-      leaseToken: job.leaseToken,
-      error: new Error(decision.reason),
-      attempt: job.record.attempts,
-    });
-  } else if (
-    decision.action === "manual_review" ||
-    decision.action === "apply_drift_review"
-  ) {
-    await scheduler.markManualReview({
-      key: job.key,
-      leaseToken: job.leaseToken,
-      note: decision.action,
-    });
-  }
-}
+    if (decision.action === "mark_consistent" && decision.safe) {
+      return { disposition: "complete" };
+    }
+    if (
+      (decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+      decision.safe
+    ) {
+      // apply the safe local paid/failed update in YOUR app first, then complete:
+      return { disposition: "complete" };
+    }
+    if (decision.action === "retry_later") {
+      return { disposition: "retry_later", error: new Error("retry_later") };
+    }
+    if (decision.action === "do_not_create_replacement") {
+      // Never createPayment for the same intent; reschedule lookup if needed.
+      return { disposition: "retry", error: new Error(decision.reason) };
+    }
+    if (
+      decision.action === "manual_review" ||
+      decision.action === "apply_drift_review"
+    ) {
+      return { disposition: "manual_review", note: decision.action };
+    }
+    return { disposition: "retry" };
+  },
+});
 ```
 
 Inject any `ReconciliationStore` (testkit `createMemoryReconciliationStore` in tests; postgres/redis/sqlite/turso/d1/do adapters in production). Durable adapters must pass `runReconciliationStoreConformanceSuite` from `@paykernel/testkit`.

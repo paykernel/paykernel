@@ -5,6 +5,7 @@ import {
   createPaymentInputFromUnknown,
   gatewayPaymentIdFromUnknown,
   readRequestJson,
+  type CheckoutHttpOptions,
   type CheckoutKernel,
 } from "@paykernel/example-checkout-kernel";
 
@@ -17,9 +18,15 @@ function invalidJsonResponse(): Response {
 /**
  * Thin Elysia adapter over {@link createCheckoutHandlers}.
  * Stripe webhook reads `request.text()` with `parse: "none"` — no JSON body parser.
+ *
+ * `/internal/reconcile` and `/internal/provider-paid` are test hooks.
+ * They are unauthenticated — do not deploy them.
  */
-export function createElysiaCheckoutApp(kernel: CheckoutKernel): Elysia {
-  const handlers = createCheckoutHandlers(kernel);
+export function createElysiaCheckoutApp(
+  kernel: CheckoutKernel,
+  options: CheckoutHttpOptions = {},
+): Elysia {
+  const handlers = createCheckoutHandlers(kernel, options);
   const app = new Elysia();
 
   app.post(
@@ -50,6 +57,7 @@ export function createElysiaCheckoutApp(kernel: CheckoutKernel): Elysia {
     noParse,
   );
 
+  // Test hook only — unauthenticated. Do not deploy this route.
   app.post(
     "/internal/reconcile",
     async () => checkoutJsonResponse(await handlers.reconcile()),

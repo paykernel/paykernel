@@ -11,6 +11,7 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     );
 
     expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).toContain("payload_hash");
+    expect(REDIS_SCRIPT_REGISTRY.webhookInbox.claim).toContain("ifMatchPayloadHash");
     expect(REDIS_SCRIPT_REGISTRY.webhookInbox.fail).toContain("dead_letter");
 
     expect(REDIS_SCRIPT_REGISTRY.reconciliation.schedule).toContain("scheduled");
@@ -95,10 +96,14 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(claim).toMatch(/if status == 'pending'/);
   });
 
-  it("webhook get soft-release restores unfinished attempt (WEBHOOKS-1)", () => {
+  it("S19-CLOCK-LEASE: webhook GET does not wipe leases; list GET still soft-releases", () => {
     const get = REDIS_SCRIPT_REGISTRY.webhookInbox.get;
-    expect(get).toContain("attempts");
-    expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    const listGet = REDIS_SCRIPT_REGISTRY.webhookInbox.listGet;
+    expect(get).not.toMatch(/redis\.call\(\s*['"]HSET['"]/i);
+    expect(get).not.toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    expect(listGet).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    expect(listGet).toMatch(/redis\.call\(\s*['"]HSET['"]/i);
+    expect(listGet).toContain("'lease_token', ''");
   });
 
   it("webhook fail script encodes restoreAttempt parking decrement", () => {
@@ -147,10 +152,14 @@ describe("REDIS_SCRIPT_REGISTRY", () => {
     expect(claim).toContain("prevAttempts");
   });
 
-  it("P1315-REDIS-1: recon get soft-release restores unfinished attempt", () => {
+  it("S19-CLOCK-LEASE: recon GET does not wipe leases; list GET still soft-releases", () => {
     const get = REDIS_SCRIPT_REGISTRY.reconciliation.get;
-    expect(get).toContain("attempts");
-    expect(get).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    const listGet = REDIS_SCRIPT_REGISTRY.reconciliation.listGet;
+    expect(get).not.toMatch(/redis\.call\(\s*['"]HSET['"]/i);
+    expect(get).not.toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    expect(listGet).toMatch(/attempts\s*=\s*attempts\s*-\s*1|attempts - 1/);
+    expect(listGet).toMatch(/redis\.call\(\s*['"]HSET['"]/i);
+    expect(listGet).toContain("'lease_token', ''");
   });
 
   it("NEW-STORE-1: GET Lua ZREMs ghost index members when hash is missing", () => {

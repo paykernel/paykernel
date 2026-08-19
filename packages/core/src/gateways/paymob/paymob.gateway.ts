@@ -579,7 +579,9 @@ export class PaymobGateway extends BaseGateway {
       "Intention",
     );
 
-    const data = await this.parseJson<PaymobIntentionResponse>(response);
+    const data = await this.parseJson<PaymobIntentionResponse>(response, {
+      mutationOperation: "Intention",
+    });
 
     if (!response.ok) {
       this.throwPaymobApiError(
@@ -709,7 +711,9 @@ export class PaymobGateway extends BaseGateway {
       "Orders",
     );
 
-    const orderData = await this.parseJson<PaymobOrderResponse>(orderResponse);
+    const orderData = await this.parseJson<PaymobOrderResponse>(orderResponse, {
+      mutationOperation: "Orders",
+    });
 
     if (!orderResponse.ok) {
       this.throwPaymobApiError(
@@ -751,8 +755,10 @@ export class PaymobGateway extends BaseGateway {
       "Payment Keys",
     );
 
-    const paymentKeyData =
-      await this.parseJson<PaymobPaymentKeyResponse>(paymentKeyResponse);
+    const paymentKeyData = await this.parseJson<PaymobPaymentKeyResponse>(
+      paymentKeyResponse,
+      { mutationOperation: "Payment Keys" },
+    );
 
     if (!paymentKeyResponse.ok) {
       // NEW-PAYMOB-4XX: Orders HTTP 200 + id already minted a Paymob order.
@@ -784,11 +790,14 @@ export class PaymobGateway extends BaseGateway {
       orderId: orderIdStr,
       paymentToken,
     };
+    // S19-PAYMOB-LEGACY-ID: the ecommerce order id is digits-only, same shape as
+    // a transaction id. Never put it on gatewayId (assertPaymobTransactionId
+    // would accept it as transaction_id). Keep it on orderId / nextAction only.
+    const gatewayId = `legacy:${orderIdStr}`;
     // Legacy checkout also requires customer action — never paid/succeeded.
     return applyOutcomeToGatewayResult(
       {
-        gatewayId: orderIdStr,
-        gatewayObjectId: orderIdStr,
+        gatewayId,
         orderId: orderIdStr,
         status: "pending",
         redirectUrl: iframeUrl,
@@ -843,7 +852,9 @@ export class PaymobGateway extends BaseGateway {
           "Capture",
         );
 
-        const data = await this.parseJson<PaymobCaptureResponse>(response);
+        const data = await this.parseJson<PaymobCaptureResponse>(response, {
+          mutationOperation: "Capture",
+        });
 
         if (!response.ok) {
           this.throwPaymobApiError(
@@ -970,7 +981,9 @@ export class PaymobGateway extends BaseGateway {
           "Void",
         );
 
-        const data = await this.parseJson<PaymobVoidResponse>(response);
+        const data = await this.parseJson<PaymobVoidResponse>(response, {
+          mutationOperation: "Void",
+        });
 
         if (!response.ok) {
           this.throwPaymobApiError(
@@ -1066,7 +1079,9 @@ export class PaymobGateway extends BaseGateway {
           "Refund",
         );
 
-        const data = await this.parseJson<PaymobRefundResponse>(response);
+        const data = await this.parseJson<PaymobRefundResponse>(response, {
+          mutationOperation: "Refund",
+        });
 
         if (!response.ok) {
           this.throwPaymobApiError(
@@ -1411,13 +1426,18 @@ export class PaymobGateway extends BaseGateway {
     this.assignOptionalBoolean(statusData, "has_parent_transaction", payload.has_parent_transaction);
     this.assignOptionalBoolean(statusData, "error_occured", payload.error_occured);
     const statusSource = this.sanitizeWebhookTransactionForStatus(statusData);
-    const status = this.mapTransactionStatus(statusSource);
+    const mappedStatus = this.mapTransactionStatus(statusSource);
     const amount = this.resolveWebhookEventAmount(
-      status,
+      mappedStatus,
       amountCents,
       payload.currency,
       statusSource.refunded_amount_cents,
     );
+    // S19-PAYMOB-REDIR-STATUS: browser-replayable GET must not publish paid /
+    // authorized. Dual-write already demotes TRANSACTION_RESPONSE settlement to
+    // payment.processing; envelope status must match so handlers that fulfill on
+    // event.status === "paid" cannot settle from redirect alone.
+    const status = this.redirectEnvelopeStatus(mappedStatus);
 
     // PAYMOB-3: redirect `type` is not HMAC-bound. Always force TRANSACTION_RESPONSE
     // so dual-write demotes settlement arms to payment.processing — never fulfill
@@ -1768,10 +1788,10 @@ export class PaymobGateway extends BaseGateway {
         const transaction = this.normalizeApiTransactionResponse(data, "transaction inquiry");
         const moneyCurrency = this.resolveMoneyCurrency(transaction, "transaction inquiry");
         const status = this.mapTransactionStatus(transaction);
-        // Fail-closed: missing success must not look paid. Mutations use
-        // requireMutationBoolean (indeterminate after HTTP 200); inquiry defaults
-        // false so mapPaymobOutcome declines and mapTransactionStatus cannot
-        // treat uncertain success as paid.
+        // Fail-closed: missing success on a real transaction (id / money present)
+        // must not look paid. Empty / invalid JSON is thrown as GatewayApiError
+        // (never mapped to declined). Mutations use requireMutationBoolean
+        // (indeterminate after HTTP 200).
         const successFlag =
           typeof transaction.success === "boolean" ? transaction.success : false;
         const outcome = this.mapPaymobOutcome(status, successFlag, {
@@ -1914,6 +1934,8 @@ export class PaymobGateway extends BaseGateway {
     transaction: PaymobTransactionResponse,
     operation: PaymobActionOperation,
   ): number {
+    this.assertInquiryAllowsMoneyAction(transaction, operation);
+
     const amountCents = this.requireNumber(
       transaction.amount_cents,
       `Paymob ${operation} requires amount_cents, but transaction inquiry response is missing amount_cents`,
@@ -1977,6 +1999,40 @@ export class PaymobGateway extends BaseGateway {
     }
 
     return remainingCents;
+  }
+
+  /**
+   * S19-PAYMOB-REFUND-UNPAID: do not POST refund/capture against a pending or
+   * failed sale. Remaining math would treat omitted captured_amount as the full
+   * amount_cents and mutate an unpaid transaction.
+   *
+   * Capture of an authorization (`success` + `is_auth`, no capture yet) is
+   * allowed. Refund of a paid sale (`success: true`) is allowed. Inquiry that
+   * omits `success`/`pending` keeps prior remaining-math behavior.
+   */
+  private assertInquiryAllowsMoneyAction(
+    transaction: PaymobTransactionResponse,
+    operation: PaymobActionOperation,
+  ): void {
+    if (transaction.pending === true) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires a captured/paid transaction, not a pending sale`,
+        [{ path: ["gatewayPaymentId"] }],
+      );
+    }
+
+    const hasPositiveCaptured =
+      transaction.captured_amount !== undefined && transaction.captured_amount > 0;
+    if (
+      transaction.success === false &&
+      !hasPositiveCaptured &&
+      transaction.is_captured !== true
+    ) {
+      throw new InvalidRequestError(
+        `Paymob ${operation} requires a captured/paid transaction, not a failed or declined sale`,
+        [{ path: ["gatewayPaymentId"] }],
+      );
+    }
   }
 
   private isUncapturedAuthorization(transaction: PaymobTransactionResponse): boolean {
@@ -2263,7 +2319,7 @@ export class PaymobGateway extends BaseGateway {
     }
 
     throw new InvalidRequestError(
-      `Paymob ${operation} requires a numeric transaction ID from the verified Paymob webhook (obj.id) or dashboard. Do not pass an intention ID, order ID, or other non-numeric reference from createPayment.`,
+      `Paymob ${operation} requires a numeric transaction ID from the verified Paymob webhook (obj.id) or dashboard. Do not pass an intention ID, ecommerce order ID, or createPayment gatewayId from iframe checkout.`,
       [{ path: ["gatewayPaymentId"] }],
     );
   }
@@ -2757,11 +2813,54 @@ export class PaymobGateway extends BaseGateway {
     );
   }
 
-  private async parseJson<T>(response: Response): Promise<T> {
+  /**
+   * Parse a Paymob JSON body. Must not swallow invalid JSON as `{}` —
+   * inquiry would then map missing success → failed/declined (S19-PAYMOB-JSON).
+   *
+   * GET / non-mutating empty or non-JSON → {@link GatewayApiError}.
+   * Mutating HTTP 200 empty or non-JSON → {@link PaymobIndeterminateResponseError}
+   * so requireMutation* fences stay unknown (never a retryable failed/declined).
+   */
+  private async parseJson<T>(
+    response: Response,
+    options?: { mutationOperation?: string },
+  ): Promise<T> {
+    const text = await response.text();
+    const trimmed = text.trim();
+    const failClosed = (detail: string, cause?: unknown): never => {
+      const raw = {
+        status: response.status,
+        body: text.slice(0, 200),
+        ...(cause !== undefined ? { cause } : {}),
+      };
+      if (options?.mutationOperation !== undefined && response.ok) {
+        throw new PaymobIndeterminateResponseError(
+          options.mutationOperation,
+          detail,
+          raw,
+        );
+      }
+      if (
+        options?.mutationOperation !== undefined &&
+        isPaymobIndeterminateMutationHttpStatus(response.status)
+      ) {
+        throw new PaymobIndeterminateGatewayError(
+          options.mutationOperation,
+          response.status,
+          raw,
+        );
+      }
+      throw new GatewayApiError(detail, "paymob", raw);
+    };
+
+    if (!trimmed) {
+      return failClosed("Paymob API returned an empty response");
+    }
+
     try {
-      return (await response.json()) as T;
-    } catch {
-      return {} as T;
+      return JSON.parse(trimmed) as T;
+    } catch (error) {
+      return failClosed("Paymob API returned an invalid JSON response", error);
     }
   }
 
@@ -3423,6 +3522,23 @@ export class PaymobGateway extends BaseGateway {
       : providerTxnId;
   }
 
+  /**
+   * Redirect callbacks are browser-replayable GETs. Settlement-looking domain
+   * statuses must not appear on the envelope (S19-PAYMOB-REDIR-STATUS).
+   */
+  private redirectEnvelopeStatus(mapped: PaymentStatus): PaymentStatus {
+    if (
+      mapped === "paid" ||
+      mapped === "authorized" ||
+      mapped === "partially_captured" ||
+      mapped === "refunded" ||
+      mapped === "partially_refunded"
+    ) {
+      return "processing";
+    }
+    return mapped;
+  }
+
   private recordOrUndefined(value: unknown): Record<string, unknown> | undefined {
     return value && typeof value === "object" && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -3535,6 +3651,31 @@ export class PaymobGateway extends BaseGateway {
       this.stringOrUndefined(source.data_message);
     if (message) {
       transaction.message = message;
+    }
+
+    // S19-PAYMOB-JSON: `{}` / HTML-parsed-as-empty must not fall through
+    // mapTransactionStatus → failed → declined. Require a transaction signal.
+    const hasTransactionSignal =
+      transaction.id !== undefined ||
+      transaction.success !== undefined ||
+      transaction.pending !== undefined ||
+      transaction.amount_cents !== undefined ||
+      transaction.captured_amount !== undefined ||
+      transaction.refunded_amount_cents !== undefined ||
+      transaction.is_void !== undefined ||
+      transaction.is_refund !== undefined ||
+      transaction.is_voided !== undefined ||
+      transaction.is_refunded !== undefined ||
+      transaction.is_auth !== undefined ||
+      transaction.is_capture !== undefined ||
+      transaction.is_captured !== undefined;
+
+    if (!hasTransactionSignal) {
+      throw new GatewayApiError(
+        `Paymob ${operation} response is missing transaction data`,
+        "paymob",
+        data,
+      );
     }
 
     return transaction;

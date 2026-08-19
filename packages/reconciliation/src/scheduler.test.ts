@@ -827,7 +827,7 @@ describe("createReconciliationScheduler (A3)", () => {
     expect(result.completed).toBe(3);
   });
 
-  it("PERF-7: claimDue claims listed rows concurrently", async () => {
+  it("S19-CLAIM-DUE: claimDue claims listed rows one-at-a-time", async () => {
     const clock = createFakeClock();
     const inner = createMemoryReconciliationStore({ clock });
     const now = new Date(clock.nowMs()).toISOString();
@@ -854,7 +854,57 @@ describe("createReconciliationScheduler (A3)", () => {
     const scheduler = createReconciliationScheduler({ store, clock });
     const claimed = await scheduler.claimDue({ limit: 3 });
     expect(claimed).toHaveLength(3);
-    expect(maxInflight).toBe(3);
+    expect(maxInflight).toBe(1);
+  });
+
+  it("S19-CLAIM-DUE: claimDue does not hold N live leases across a slow second claim", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    const now = new Date(clock.nowMs()).toISOString();
+    const keys = ["a", "b", "c"].map((id) => `recon:stripe:${id}`);
+    for (const id of ["a", "b", "c"]) {
+      await inner.schedule({
+        key: `recon:stripe:${id}`,
+        subjectId: id,
+        reason: "timeout",
+        dueAt: now,
+      });
+    }
+
+    let claimCount = 0;
+    let releaseSecond!: () => void;
+    const secondHeld = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    let enteredSecond!: () => void;
+    const inSecond = new Promise<void>((resolve) => {
+      enteredSecond = resolve;
+    });
+
+    const store: ReconciliationStore = {
+      ...inner,
+      async claim(input) {
+        claimCount += 1;
+        if (claimCount === 2) {
+          enteredSecond();
+          await secondHeld;
+        }
+        return inner.claim(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({ store, clock });
+    const running = scheduler.claimDue({ limit: 3 });
+    await inSecond;
+    const mid = await Promise.all(keys.map((k) => store.get(k)));
+    const claimedMid = mid.filter((r) => r?.status === "claimed");
+    const scheduledMid = mid.filter((r) => r?.status === "scheduled");
+    expect(claimedMid).toHaveLength(1);
+    expect(scheduledMid).toHaveLength(2);
+    expect(scheduledMid.every((r) => r?.leaseToken === undefined)).toBe(true);
+
+    releaseSecond();
+    const claimed = await running;
+    expect(claimed).toHaveLength(3);
   });
 
   it("RECON-7: schedule reopens terminal completed job under same key", async () => {
@@ -941,6 +991,136 @@ describe("createReconciliationScheduler (A3)", () => {
     const dead = await scheduler.listDeadLetter();
     expect(dead.length).toBe(1);
     expect(dead[0]?.status).toBe("manual_review");
+  });
+
+  it("S19-RECON-HB: auto-renews lease while handler runs longer than leaseMs", async () => {
+    const inner = createMemoryReconciliationStore();
+    let renewCalls = 0;
+    const store: ReconciliationStore = {
+      ...inner,
+      async renew(input) {
+        renewCalls += 1;
+        return inner.renew(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({
+      store,
+      defaultLeaseMs: 250,
+    });
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_hb" },
+      runAt: new Date().toISOString(),
+      reason: "heartbeat",
+    });
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_hb",
+    });
+
+    const result = await scheduler.processDue({
+      leaseMs: 250,
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 600));
+        return { disposition: "complete" as const };
+      },
+    });
+    expect(renewCalls).toBeGreaterThan(0);
+    expect(result.completed).toBe(1);
+    expect(result.hangOverrun).toBe(0);
+    expect(result.leaseLost).toBe(0);
+    expect((await store.get(key))?.status).toBe("completed");
+  });
+
+  it("S19-RECON-HB: heartbeat lease_lost stops treating the run as owner", async () => {
+    const inner = createMemoryReconciliationStore();
+    let renewCalls = 0;
+    let completeCalls = 0;
+    let failCalls = 0;
+    const store: ReconciliationStore = {
+      ...inner,
+      async renew() {
+        renewCalls += 1;
+        return { ok: false as const, reason: "lease_lost" as const };
+      },
+      async complete(input) {
+        completeCalls += 1;
+        return inner.complete(input);
+      },
+      async fail(input) {
+        failCalls += 1;
+        return inner.fail(input);
+      },
+    };
+    const scheduler = createReconciliationScheduler({
+      store,
+      defaultLeaseMs: 90,
+    });
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_hb_lost" },
+      runAt: new Date().toISOString(),
+      reason: "heartbeat",
+    });
+    const result = await scheduler.processDue({
+      leaseMs: 90,
+      handler: async () => {
+        await new Promise((r) => setTimeout(r, 280));
+        return { disposition: "complete" as const };
+      },
+    });
+    expect(renewCalls).toBeGreaterThan(0);
+    expect(completeCalls).toBe(0);
+    expect(failCalls).toBe(0);
+    expect(result.completed).toBe(0);
+    expect(result.manualReview).toBe(0);
+    const rec = await inner.get("recon:stripe:pi_hb_lost");
+    expect(rec?.status).not.toBe("completed");
+    expect(rec?.status).not.toBe("failed");
+    expect(rec?.status).not.toBe("manual_review");
+  });
+
+  it("S19-RECON-HB: hang after expiry does not park retry_later", async () => {
+    const clock = createFakeClock();
+    const inner = createMemoryReconciliationStore({ clock });
+    const store: ReconciliationStore = {
+      ...inner,
+      async fail() {
+        throw new StoreLeaseLostError("fail: lease expired (adapter)");
+      },
+    };
+    const scheduler = createReconciliationScheduler({
+      store,
+      clock,
+      defaultLeaseMs: 1_000,
+      maxAttempts: 1,
+    });
+
+    await scheduler.schedule({
+      target: { gateway: "stripe", gatewayPaymentId: "pi_retry_later_hang" },
+      runAt: new Date(clock.nowMs()).toISOString(),
+      reason: "in_flight",
+    });
+    const key = deriveReconciliationJobKey({
+      gateway: "stripe",
+      gatewayPaymentId: "pi_retry_later_hang",
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const result = await scheduler.processDue({
+        leaseMs: 1_000,
+        handler: async () => {
+          clock.advance(2_000);
+          return {
+            disposition: "retry_later" as const,
+            error: "still settling",
+          };
+        },
+      });
+      expect(result.processed).toBe(1);
+      expect(result.manualReview).toBe(0);
+      expect(result.completed).toBe(0);
+      expect((await store.get(key))?.status).not.toBe("manual_review");
+    }
+    expect((await store.get(key))?.status).not.toBe("manual_review");
   });
 
   it("maxInFlightByGateway is shared across overlapping processDue calls", async () => {

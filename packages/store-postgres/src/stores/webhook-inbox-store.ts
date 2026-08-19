@@ -85,20 +85,23 @@ export function createPostgresWebhookInboxStore(
         const now = clockNowIso(ctx.clock);
         const leaseExpiresAt = clockAddMsIso(ctx.clock, input.leaseMs);
         const payloadRef = input.payloadRef ?? null;
+        // params: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, ifMatch
+        const claimParams = [
+          input.key,
+          input.payloadHash,
+          payloadRef,
+          input.owner,
+          leaseToken,
+          leaseExpiresAt,
+          now,
+          input.ifMatchPayloadHash ?? null,
+        ] as const;
 
-        // params: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now
         // Template gates pending on available_at <= now; expired claimed leases may reclaim.
+        // S19: $8 ifMatchPayloadHash CAS — NULL keeps WEBHOOKS-3 idle supersede.
         const claimed = await ctx.getExecutor().query<Record<string, unknown>>(
           claimTpl.sql,
-          [
-            input.key,
-            input.payloadHash,
-            payloadRef,
-            input.owner,
-            leaseToken,
-            leaseExpiresAt,
-            now,
-          ],
+          [...claimParams],
         );
 
         if (claimed.length > 0) {
@@ -125,6 +128,7 @@ export function createPostgresWebhookInboxStore(
           },
           input.payloadHash,
           ctx.clock.nowMs(),
+          input.ifMatchPayloadHash,
         );
         if (miss !== "claimable") {
           return webhookMissToResult(miss, existing);
@@ -145,15 +149,7 @@ export function createPostgresWebhookInboxStore(
 
         const retried = await ctx.getExecutor().query<Record<string, unknown>>(
           claimTpl.sql,
-          [
-            input.key,
-            input.payloadHash,
-            payloadRef,
-            input.owner,
-            leaseToken,
-            leaseExpiresAt,
-            now,
-          ],
+          [...claimParams],
         );
         if (retried.length > 0) {
           const record = mapWebhookRow(retried[0]!);
@@ -177,6 +173,7 @@ export function createPostgresWebhookInboxStore(
           },
           input.payloadHash,
           ctx.clock.nowMs(),
+          input.ifMatchPayloadHash,
         );
         if (miss2 === "claimable") {
           throw new StoreUnavailableError(
@@ -273,28 +270,9 @@ export function createPostgresWebhookInboxStore(
     },
 
     async get(key: WebhookEventKey): Promise<WebhookInboxRecord | undefined> {
-      return withMappedErrors(async () => {
-        // Soft-release abandoned expired claims so get reclaims expired leases for this key
-        // (parity with memory get soft-release and Redis WEBHOOK_GET_LUA).
-        // WEBHOOKS-1: restore unfinished claim attempt so crash reclaim does not burn maxAttempts.
-        const now = clockNowIso(ctx.clock);
-        await ctx.getExecutor().execute(
-          `UPDATE ${table} SET
-             status = 'pending',
-             lease_owner = NULL,
-             lease_token = NULL,
-             lease_expires_at = NULL,
-             attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
-             available_at = $1,
-             updated_at = $1
-           WHERE key = $2
-             AND status = 'claimed'
-             AND lease_expires_at IS NOT NULL
-             AND lease_expires_at <= $1`,
-          [now, key],
-        );
-        return selectByKey(key);
-      });
+      // S19-CLOCK-LEASE: get is read-only. A host clock ahead of the issuer
+      // must not UPDATE/clear lease_token. Soft-release on listRetryable/claim.
+      return withMappedErrors(async () => selectByKey(key));
     },
 
     async listRetryable(input: ListRetryableInput): Promise<WebhookInboxRecord[]> {

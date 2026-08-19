@@ -194,6 +194,7 @@ export function createInMemoryNodeSqliteStores(options?: {
  * Keep in sync with docs/drivers.md and package README.
  */
 export const NODE_SQLITE_SUPPORT = {
+  /** Isolated `/node` subpath only. Package `engines.node` stays `>=18` for `/better-sqlite3`. */
   minimumNode: "22.5.0",
   module: "node:sqlite",
   api: "DatabaseSync",

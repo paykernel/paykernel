@@ -436,10 +436,15 @@ the active lease on ~`leaseMs/3` while a handler runs (I5); `ctx.renew`
 remains available. If a heartbeat renew is `lease_lost`, the run stops
 treating itself as owner (`handler_failed` retryable — no `complete`).
 
-**I14:** `processRetryable` re-reads each listed row immediately before
-`claim`. If the current `payloadHash` differs from the listed snapshot,
-the engine **skips** that row (retryable `handler_failed`) and does **not**
-claim with the stale hash — idle supersede must not run backwards.
+**I14 / S19-WH-HASH-TOCTOU:** `processRetryable` re-reads each listed row
+before `claim`. If the current `payloadHash` differs from the listed
+snapshot, the engine **skips** that row (retryable `handler_failed`) and
+does **not** claim with the stale hash. The subsequent `claim` uses the
+**listed** hash with `ifMatchPayloadHash` so an idle WEBHOOKS-3 supersede
+between `get` and `claim` cannot roll the body backwards. A compare miss
+is also a retryable skip (not `payload_conflict` — the worker is not a
+delivery ACK). First-delivery `processVerified` omits `ifMatchPayloadHash`
+so idle hash mismatch still supersedes (WEBHOOKS-3).
 
 **Default event materialization:** when `payloadRef` parses as a core
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),

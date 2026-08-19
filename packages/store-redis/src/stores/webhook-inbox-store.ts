@@ -106,6 +106,7 @@ export function createRedisWebhookInboxStore(
             clockAddMsString(ctx.clock, input.leaseMs),
             payloadRef,
             input.key,
+            input.ifMatchPayloadHash ?? "",
           ],
         );
         const tagged = parseTaggedResult(raw);

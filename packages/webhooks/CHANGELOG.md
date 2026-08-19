@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **S19-WH-HASH-TOCTOU:** `processRetryable` claims with the listed hash and `ifMatchPayloadHash` so an idle WEBHOOKS-3 supersede between `get` and `claim` cannot roll the body backwards. Compare miss skips (retryable `handler_failed`); `processVerified` still supersedes when `ifMatchPayloadHash` is omitted.
 - **NEW-WEBHOOKS-1:** `processRetryable` claims one listed row at a time (next `store.claim` after the previous handler returns). Parallel pre-claim of `limit` leases is unsafe with default `leaseMs=30s` when handlers average ≥3s (peer reclaim + this worker still handles).
 - **NEW-WEBHOOKS-2:** Processed Paymob `TRANSACTION` inbox keys include domain status when available (`paymob:TRANSACTION:{id}:{status}`) so a later same-id void/refund snapshot is not `already_completed`. Redirect stays `TRANSACTION_RESPONSE:{txnId}`. Do not complete fulfillment on Paymob `payment.processing`.
 - **NEW-WH-1:** Inbox notification class uses `provider.eventType` or known native HMAC classes (`TRANSACTION` / `TRANSACTION_RESPONSE`) only — remapped `payment.succeeded` is not a second key.

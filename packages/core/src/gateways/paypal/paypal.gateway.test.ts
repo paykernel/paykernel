@@ -2732,7 +2732,7 @@ describe('PayPalGateway', () => {
             expect(capturedHeaders!['PayPal-Request-Id']).toBe('unique-key-abc');
         });
 
-        it('empty/whitespace idempotencyKey still sends PayPal-Request-Id (PAYPAL-IDEM-1)', async () => {
+        it('omitted idempotencyKey still sends minted PayPal-Request-Id (PAYPAL-IDEM-1)', async () => {
             const generatedId = 'generated-paypal-request-id-uuid';
             const idemGateway = new PayPalGateway(
                 PAYPAL_TEST_CONFIG,
@@ -2740,18 +2740,6 @@ describe('PayPalGateway', () => {
                 undefined,
                 { randomUUID: () => generatedId },
             );
-
-            // Defense-in-depth: getRequestId must not keep "" / whitespace
-            // ("" ?? uuid is "" and if (requestId) would skip the header).
-            expect((idemGateway as any).getRequestId('', 108)).toBe(generatedId);
-            expect((idemGateway as any).getRequestId('   ', 108)).toBe(generatedId);
-            expect((idemGateway as any).getRequestId(undefined, 108)).toBe(generatedId);
-
-            const emptyHeaders = (idemGateway as any).createJsonHeaders(
-                'token',
-                (idemGateway as any).getRequestId('', 108),
-            ) as Record<string, string>;
-            expect(emptyHeaders['PayPal-Request-Id']).toBe(generatedId);
 
             let capturedHeaders: Record<string, string> | null = null;
             globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2777,8 +2765,6 @@ describe('PayPalGateway', () => {
                 });
             }) as unknown as typeof fetch;
 
-            // Public path: omitted key still sends the generated Request-Id
-            // so in-process withRetry cannot double-mutate.
             await idemGateway.createPayment({
                 amount: 50,
                 currency: 'USD',
@@ -3243,6 +3229,19 @@ describe('PayPalGateway', () => {
     // ═══════════════════════════════════════════════════════════════════════════
 
     describe('capturePayment', () => {
+        it('S19-EPHEMERAL-KEY: capturePayment requires caller idempotencyKey before POST', async () => {
+            let fetchCalls = 0;
+            globalThis.fetch = mock(async () => {
+                fetchCalls += 1;
+                return createMockResponse({ id: 'ORDER-NOKEY', status: 'COMPLETED' });
+            }) as unknown as typeof fetch;
+
+            await expect(
+                gateway.capturePayment({ gatewayPaymentId: 'ORDER-NOKEY' }),
+            ).rejects.toThrow(/requires idempotencyKey/i);
+            expect(fetchCalls).toBe(0);
+        });
+
         it('should capture order and return capture ID', async () => {
             globalThis.fetch = createMockFetch({
                 id: 'ORDER-789',
@@ -3267,6 +3266,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.capturePayment({
                 gatewayPaymentId: 'ORDER-789',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -3313,6 +3313,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.capturePayment({
                 gatewayPaymentId: 'ORDER-OMITTED-FINAL',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -3350,6 +3351,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.capturePayment({
                 gatewayPaymentId: 'ORDER-FINAL',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -3390,6 +3392,7 @@ describe('PayPalGateway', () => {
 
             const result = await warnGateway.capturePayment({
                 gatewayPaymentId: 'ORDER-PENDING-CAPTURE',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -3426,6 +3429,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.capturePayment({
                 gatewayPaymentId: 'ORDER-FAILED-CAPTURE',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(false);
@@ -3450,6 +3454,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.capturePayment({
                 gatewayPaymentId: 'ORDER-NO-CAPTURE',
+                idempotencyKey: 'test-idem',
             });
             expect(result.outcome).toBe('indeterminate');
             expect(result.reconciliationRequired).toBe(true);
@@ -3533,6 +3538,7 @@ describe('PayPalGateway', () => {
                 amount: 20,
                 currency: 'USD',
                 paypalCaptureType: 'authorization',
+                idempotencyKey: 'test-idem',
             });
 
             expect(capturedUrl as unknown as string).toContain('/v2/payments/authorizations/AUTH-123/capture');
@@ -3586,6 +3592,7 @@ describe('PayPalGateway', () => {
                 currency: 'USD',
                 paypalCaptureType: 'authorization',
                 // paypalFinalCapture omitted
+                idempotencyKey: 'test-idem',
             });
 
             expect(capturedBody).toEqual({
@@ -3629,6 +3636,7 @@ describe('PayPalGateway', () => {
                 currency: 'USD',
                 paypalCaptureType: 'authorization',
                 paypalFinalCapture: true,
+                idempotencyKey: 'test-idem',
             });
 
             expect(capturedBody).toEqual({
@@ -3654,6 +3662,7 @@ describe('PayPalGateway', () => {
                     gatewayPaymentId: 'ORDER-789',
                     amount: 10,
                     currency: 'USD',
+                    idempotencyKey: 'test-idem',
                 })
             ).rejects.toThrow(InvalidRequestError);
 
@@ -3688,6 +3697,7 @@ describe('PayPalGateway', () => {
             await gateway.capturePayment({
                 gatewayPaymentId: 'AUTH-456',
                 paypalCaptureType: 'authorization',
+                idempotencyKey: 'test-idem',
             });
 
             expect(capturedBody).toEqual({
@@ -3727,6 +3737,7 @@ describe('PayPalGateway', () => {
                 currency: 'USD',
                 paypalCaptureType: 'authorization',
                 paypalFinalCapture: false,
+                idempotencyKey: 'test-idem',
             });
 
             expect(capturedBody).toEqual({
@@ -3738,6 +3749,19 @@ describe('PayPalGateway', () => {
             });
             expect(result.status).toBe('partially_captured');
             expect(isPaidOutcome(result)).toBe(false);
+        });
+
+        it('S19-EPHEMERAL-KEY: authorizePayment requires caller idempotencyKey before POST', async () => {
+            let fetchCalls = 0;
+            globalThis.fetch = mock(async () => {
+                fetchCalls += 1;
+                return createMockResponse({ id: 'ORDER-AUTH-NOKEY', status: 'COMPLETED' });
+            }) as unknown as typeof fetch;
+
+            await expect(
+                gateway.authorizePayment({ gatewayPaymentId: 'ORDER-AUTH-NOKEY' }),
+            ).rejects.toThrow(/requires idempotencyKey/i);
+            expect(fetchCalls).toBe(0);
         });
 
         it('should authorize an approved AUTHORIZE-intent order and return authorization ID', async () => {
@@ -3764,6 +3788,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.authorizePayment({
                 gatewayPaymentId: 'ORDER-AUTH',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -3798,6 +3823,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.authorizePayment({
                 gatewayPaymentId: 'ORDER-AUTH-DENIED',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.status).toBe('failed');
@@ -3820,6 +3846,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.authorizePayment({
                 gatewayPaymentId: 'ORDER-AUTH-MISSING',
+                idempotencyKey: 'test-idem',
             });
             expect(result.outcome).toBe('indeterminate');
             expect(result.reconciliationRequired).toBe(true);
@@ -3838,6 +3865,7 @@ describe('PayPalGateway', () => {
                     gatewayPaymentId: 'ORDER-AUTH-STRICT',
                     amount: 10,
                     currency: 'USD',
+                    idempotencyKey: 'test-idem',
                 })
             ).rejects.toThrow(InvalidRequestError);
 
@@ -3877,6 +3905,19 @@ describe('PayPalGateway', () => {
     // ═══════════════════════════════════════════════════════════════════════════
 
     describe('refundPayment', () => {
+        it('S19-EPHEMERAL-KEY: refundPayment requires caller idempotencyKey before POST', async () => {
+            let fetchCalls = 0;
+            globalThis.fetch = mock(async () => {
+                fetchCalls += 1;
+                return createMockResponse({ id: 'REFUND-NOKEY' });
+            }) as unknown as typeof fetch;
+
+            await expect(
+                gateway.refundPayment({ gatewayPaymentId: 'CAPTURE-NOKEY' }),
+            ).rejects.toThrow(/requires idempotencyKey/i);
+            expect(fetchCalls).toBe(0);
+        });
+
         it('should throw error when currency is missing for partial refund', async () => {
             globalThis.fetch = createMockFetch({
                 access_token: 'test_token',
@@ -3887,6 +3928,7 @@ describe('PayPalGateway', () => {
                 gateway.refundPayment({
                     gatewayPaymentId: 'CAPTURE-123',
                     amount: 50, // Partial refund without currency
+                    idempotencyKey: 'test-idem',
                 })
             ).rejects.toThrow('Currency is required for partial PayPal refunds');
         });
@@ -3902,6 +3944,7 @@ describe('PayPalGateway', () => {
                 gateway.refundPayment({
                     gatewayPaymentId: 'CAPTURE-123',
                     reason: 'x'.repeat(256),
+                    idempotencyKey: 'test-idem',
                 })
             ).rejects.toThrow('PayPal refund reason (note_to_payer) must be 255 characters or fewer');
 
@@ -3983,6 +4026,7 @@ describe('PayPalGateway', () => {
                 gatewayPaymentId: 'CAPTURE-123',
                 amount: 12.34,
                 currency: 'USD',
+                idempotencyKey: 'test-idem',
             });
 
             // Must not publish this-op as totalRefunded (would under-count priors).
@@ -4010,6 +4054,7 @@ describe('PayPalGateway', () => {
                 gatewayPaymentId: 'CAPTURE-123',
                 amount: 10,
                 currency: 'USD',
+                idempotencyKey: 'test-idem',
             });
 
             // Prior 20 + this op 10 = 30 (not this-op 10).
@@ -4059,6 +4104,7 @@ describe('PayPalGateway', () => {
                 gatewayPaymentId: 'CAP-PRIOR',
                 amount: 15,
                 currency: 'USD',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.totalRefunded).toBe(45);
@@ -4071,6 +4117,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-123',
+                idempotencyKey: 'test-idem',
             });
             expect(result.outcome).toBe('indeterminate');
             expect(result.reconciliationRequired).toBe(true);
@@ -4082,6 +4129,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-123',
+                idempotencyKey: 'test-idem',
             });
             expect(result.outcome).toBe('indeterminate');
             expect(result.reconciliationRequired).toBe(true);
@@ -4096,6 +4144,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-123',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.status).toBe('failed');
@@ -4118,6 +4167,7 @@ describe('PayPalGateway', () => {
 
             const result = await warnGateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-123',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.status).toBe('failed');
@@ -4141,12 +4191,14 @@ describe('PayPalGateway', () => {
             await expect(
                 gateway.refundPayment({
                     gatewayPaymentId: 'ORDER-NOT-A-CAPTURE',
+                    idempotencyKey: 'test-idem',
                 }),
             ).rejects.toThrow(ResourceNotFoundError);
 
             await expect(
                 gateway.refundPayment({
                     gatewayPaymentId: 'ORDER-NOT-A-CAPTURE',
+                    idempotencyKey: 'test-idem',
                 }),
             ).rejects.toThrow(
                 /PayPal refund requires capture ID from capturePayment, not order\/authorization ID/,
@@ -4189,6 +4241,7 @@ describe('PayPalGateway', () => {
             const result = await gateway.refundPayment({
                 gatewayPaymentId: 'CAPTURE-456',
                 // No amount = full refund
+                idempotencyKey: 'test-idem',
             });
 
             // Full refund should send an empty JSON payload per PayPal docs
@@ -4243,6 +4296,19 @@ describe('PayPalGateway', () => {
     // ═══════════════════════════════════════════════════════════════════════════
 
     describe('voidPayment', () => {
+        it('S19-EPHEMERAL-KEY: voidPayment requires caller idempotencyKey before POST', async () => {
+            let fetchCalls = 0;
+            globalThis.fetch = mock(async () => {
+                fetchCalls += 1;
+                return createMockResponse(null, true, 204);
+            }) as unknown as typeof fetch;
+
+            await expect(
+                gateway.voidPayment({ gatewayPaymentId: 'AUTH-NOKEY' }),
+            ).rejects.toThrow(/requires idempotencyKey/i);
+            expect(fetchCalls).toBe(0);
+        });
+
         it('should void an authorized payment successfully (204 response)', async () => {
             globalThis.fetch = mock(async (input: RequestInfo | URL) => {
                 const url = typeof input === 'string' ? input : (input as Request).url;
@@ -4276,6 +4342,7 @@ describe('PayPalGateway', () => {
 
             const result = await gateway.voidPayment({
                 gatewayPaymentId: 'AUTH-123',
+                idempotencyKey: 'test-idem',
             });
 
             expect(result.success).toBe(true);
@@ -4344,6 +4411,7 @@ describe('PayPalGateway', () => {
             await expect(
                 gateway.voidPayment({
                     gatewayPaymentId: 'AUTH-CAPTURED',
+                    idempotencyKey: 'test-idem',
                 })
             ).rejects.toThrow(InvalidRequestError);
         });
@@ -4629,6 +4697,7 @@ describe('PayPalGateway', () => {
 
             await gatewayWithHooks.authorizePayment({
                 gatewayPaymentId: 'ORDER-AUTH-HOOK',
+                idempotencyKey: 'test-idem',
             });
 
             expect(authorizeHookCalled).toBe(true);

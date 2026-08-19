@@ -142,6 +142,7 @@ export type MemoryRelationalStore = {
     owner: string;
     leaseMs: number;
     payloadRef?: string;
+    ifMatchPayloadHash?: string;
   }): Promise<
     | { kind: "acquired"; record: WebhookInboxRecordShape; leaseToken: string }
     | { kind: "already_completed"; record: WebhookInboxRecordShape }
@@ -455,6 +456,7 @@ export function createMemoryRelationalStore(
           newLeaseToken: token,
           clock: { nowMs: clockMs },
           payloadRef: input.payloadRef,
+          ifMatchPayloadHash: input.ifMatchPayloadHash,
           existing,
         });
 

@@ -204,6 +204,12 @@ describe("node:sqlite driver binding", () => {
     expect(NODE_SQLITE_SUPPORT.minimumNode).toBe("22.5.0");
     expect(NODE_SQLITE_SUPPORT.api).toBe("DatabaseSync");
     expect(NODE_SQLITE_SUPPORT.matrix.length).toBeGreaterThan(0);
+    const pkg = (await Bun.file(new URL("../../package.json", import.meta.url)).json()) as {
+      engines?: { node?: string };
+      paymentsSdk?: { nodeSqliteMinimum?: string };
+    };
+    expect(pkg.engines?.node).toBe(">=18");
+    expect(pkg.paymentsSdk?.nodeSqliteMinimum).toBe("22.5.0");
 
     const db = new DatabaseSync(":memory:");
     try {

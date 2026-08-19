@@ -4,6 +4,7 @@
 
 ### Patch
 
+- **S19-WH-HASH-TOCTOU:** `decideWebhookClaim` / `classifyWebhookClaimMiss` / `webhookClaimTemplates` honor optional `ifMatchPayloadHash`. Idle hash mismatch with the fence set is `payload_hash_conflict` (no rewrite); omit it to keep WEBHOOKS-3 supersede.
 - **PERF-3 honesty:** `buildListIndexMigrationSql(qualify)` no longer takes an unused dialect argument (Postgres and SQLite emit the same `CREATE INDEX IF NOT EXISTS` bodies).
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **N8:** `validateTablePrefix` samples **every** foundation logical table (longest: `payment_reconciliation_jobs`, 27 chars). Prefixes that previously passed validation then failed `resolveUnqualifiedTableName` for recon now fail closed at validate (`MAX_SAFE_TABLE_PREFIX_LENGTH` = 36). Exports: `LONGEST_LOGICAL_TABLE_NAME_LENGTH`, `MAX_SAFE_TABLE_PREFIX_LENGTH`.

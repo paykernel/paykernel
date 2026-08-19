@@ -197,6 +197,8 @@ Mode is fixed at `createWebhookInboxEngine` construction. Process methods never 
 lease is acquired only after the previous handler returns. Do not assume
 `limit=10` + `leaseMs=30s` covers N serial handlers if claims were taken
 up front — they are not.
+Worker claims pass the listed `payloadHash` with `ifMatchPayloadHash` so a
+newer idle body cannot be rolled back to the list snapshot (S19 / I14).
 
 **Default `processRetryable` materialization:** if `payloadRef` is a
 `PersistedPaymentEventEnvelope` (`schemaVersion` + `event` + `payloadHash`),

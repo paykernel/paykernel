@@ -529,7 +529,16 @@ export function createMemoryWebhookInboxStore(
           }
           return { kind: "in_progress", record: rec };
         }
-        // Same-hash backoff only; idle hash mismatch supersedes (WEBHOOKS-3).
+        // S19: compare-and-claim. Retry workers pass the listed hash so an
+        // idle WEBHOOKS-3 supersede between get and claim cannot roll back.
+        if (
+          input.ifMatchPayloadHash !== undefined &&
+          rec.payloadHash !== input.ifMatchPayloadHash
+        ) {
+          return { kind: "payload_hash_conflict", record: rec };
+        }
+        // Same-hash backoff only; idle hash mismatch supersedes (WEBHOOKS-3)
+        // when ifMatchPayloadHash is omitted (processVerified).
         if (
           rec.payloadHash === input.payloadHash &&
           rec.status === "pending" &&

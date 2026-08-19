@@ -93,7 +93,7 @@ You can also pass billing details explicitly with `paymobBillingData`, and overr
 
 The create result `gatewayId` is the Paymob **intention** ID (often `pi_...`), and `nextAction` exposes the checkout URL, intention ID, client secret, and payment keys returned by Paymob. Capture, refund, void, and inquiry methods require the **numeric Paymob transaction ID** from a verified processed webhook (`obj.id`) or the Paymob dashboard — **not** the intention ID from `createPayment`. Passing an intention ID such as `pi_...` or any non-numeric value is rejected before the SDK calls Paymob.
 
-**Legacy order IDs (PAYMOB-4):** the deprecated iframe flow returns Paymob's **order** id as `gatewayId` / `orderId` (also pure digits). Transaction ids and order ids share the same numeric shape, so the SDK **cannot** distinguish them at the mutation boundary — always store **`obj.id` from a verified TRANSACTION webhook** (or dashboard transaction id) for post-pay ops. Do **not** pass the legacy create `gatewayId`/order id into capture/refund/void/getPayment. Child refund/capture webhooks set `gatewayPaymentId` to the child transaction id (true refund/capture resource). When HMAC covers a distinct `order.id`, Phase-7 dual-write binds that order id on `references.parentId` and `relatedIds.orderId` only — **not** on `gatewayObjectId` (which Phase-7 would promote to `refundId`/`captureId`).
+**Legacy order IDs (PAYMOB-4 / S19-PAYMOB-LEGACY-ID):** the deprecated iframe flow returns Paymob's **order** id on `orderId` and `nextAction.orderId` only — **not** on `gatewayId` (create `gatewayId` is a non-numeric `legacy:…` handle). Transaction ids and ecommerce order ids share the same numeric shape; `assertPaymobTransactionId` still requires the **numeric** `obj.id` from a verified TRANSACTION webhook (or dashboard transaction id). Never pass create `gatewayId` from iframe checkout into refund, capture, void, or inquiry. Child refund/capture webhooks set `gatewayPaymentId` to the child transaction id (true refund/capture resource). When HMAC covers a distinct `order.id`, Phase-7 dual-write binds that order id on `references.parentId` and `relatedIds.orderId` only — **not** on `gatewayObjectId` (which Phase-7 would promote to `refundId`/`captureId`).
 
 ### Auth / capture dual model
 
@@ -182,7 +182,7 @@ When an explicit `amount` is provided, the SDK validates it against Paymob's rem
 
 ## Legacy Iframe Checkout
 
-The deprecated legacy iframe flow returns Paymob's order ID as `gatewayId`, `gatewayObjectId`, and `orderId` because no transaction exists until the customer pays. Capture, refund, void, and inquiry methods still require the **transaction** id from the processed callback or dashboard — **not** this order id (order and transaction ids are both numeric; the SDK cannot auto-reject order ids by shape alone).
+The deprecated legacy iframe flow returns Paymob's ecommerce order ID on `orderId` / `nextAction.orderId` only. `gatewayId` is **not** that numeric order id (it is a non-numeric `legacy:…` handle so it cannot be posted as `transaction_id`). Capture, refund, void, and inquiry still require the **transaction** id from a verified processed callback (`obj.id`) or the dashboard — never create `gatewayId` from iframe checkout, and never the raw order id.
 
 ## Get Payment Details
 
@@ -217,7 +217,7 @@ app.post('/webhooks/paymob', async (req) => {
 
 The SDK verifies transaction processed callbacks, saved-card token callbacks, and query-style transaction response callbacks with their separate Paymob HMAC field shapes.
 
-> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks always parse with `event.type === 'TRANSACTION_RESPONSE'` — Paymob's query `type` is **not** HMAC-bound, so the SDK forces this value and never trusts a client-supplied `type=TRANSACTION` (which would otherwise skip redirect demotion). Phase 7 dual-write maps redirect success/paid/capture signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
+> ⚠️ **Never fulfill on redirect-only callbacks.** Browser/redirect (query-style) callbacks always parse with `event.type === 'TRANSACTION_RESPONSE'` — Paymob's query `type` is **not** HMAC-bound, so the SDK forces this value and never trusts a client-supplied `type=TRANSACTION` (which would otherwise skip redirect demotion). Envelope **`event.status` is `processing`**, not `paid` (S19-PAYMOB-REDIR-STATUS), so handlers that fulfill on `event.status === 'paid'` cannot settle a browser-replayable GET. Phase 7 dual-write maps redirect success/paid/capture/auth signals to **`payment.processing`**, never `payment.succeeded` or `capture.completed`, so fulfill-on-stable-type handlers that key only on settlement arms ignore redirects. Use the **processed** backend notification (`type: 'TRANSACTION'`) as the sole source of truth for fulfillment, capture, refund, and inventory. Redirect callbacks are for customer-facing result pages only — they can be replayed, abandoned, or spoofed by a client that never completed payment. Always wait for a verified processed webhook (or transaction inquiry) before marking an order paid. Prefer `event.stableType` / `event.event.type` for new fulfillment; if you still branch on native `type`, require `TRANSACTION` (not `TRANSACTION_RESPONSE`) plus paid-like status / `isPaidOutcome` on inquiry.
 >
 > **Inbox / `event.id` (WEBHOOKS-1):** redirect and processed notifications share Paymob's transaction id. The SDK sets redirect `event.id` to `<txnId>:redirect` and keeps processed `TRANSACTION` `event.id` as the raw `obj.id`. `gatewayPaymentId` stays the signed txn id on both. Dedupe on `event.id` (or `deriveWebhookEventKey`) so a handler return on the documented redirect cannot ACK-suppress the later paid processed callback.
 
@@ -245,6 +245,16 @@ Saved-card token callbacks normalize to `status: 'setup_completed'`. Their `paym
   Partial captures dual-write `outcome: 'requires_action'` (open money story) with
   status `partially_captured` and `isPaidOutcome` false. Inquiry `is_captured`
   without positive `captured_amount` is `processing` / not paid-like.
+- **Inquiry empty / non-JSON HTTP 200 is unavailable, not declined
+  (S19-PAYMOB-JSON):** `parseJson` does **not** swallow invalid JSON as `{}`.
+  GET inquiry with empty, HTML, or `{}` bodies throws `GatewayApiError`. Do not
+  map that to `failed` / `declined` (recon `update_local_to_failed` would mark a
+  captured payment failed). Mutations with HTTP 200 missing `success`/`id` stay
+  `requireMutation*` indeterminate and keep the fence.
+- **Refund/capture of unpaid sales is refused (S19-PAYMOB-REFUND-UNPAID):**
+  inquiry `pending: true` or `success: false` without a positive `captured_amount`
+  throws `InvalidRequestError` **before** the mutating POST. Refund still also
+  refuses uncaptured authorizations (use void).
 - **Inquiry `success` missing is fail-closed:** transaction inquiry defaults
   missing `success` to **false** (mutations require a boolean/`"true"`/`"false"`
   success and treat other missing/invalid bodies after HTTP 200 as indeterminate).

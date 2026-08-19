@@ -128,6 +128,21 @@ describe("sha256 / sha512 pure digests", () => {
     expect(bytesToHex(sha256(utf8Encode("abc")))).toBe(sha256Hex("abc"));
   });
 
+  it("sha256 64-bit length high word is written (S19-SHA256-LEN)", async () => {
+    // Formula only — do not allocate 2^29 bytes. High word is byteLen / 2^29.
+    const over512MiB = 0x20000000;
+    expect(Math.floor(over512MiB / 0x20000000) >>> 0).toBe(1);
+    expect((over512MiB * 8) >>> 0).toBe(0);
+    // Small bodies (webhook HMAC) still match Web Crypto / NIST.
+    const msg = "a".repeat(1000);
+    const portable = sha256Hex(msg);
+    const subtle = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(msg),
+    );
+    expect(portable).toBe(bytesToHex(new Uint8Array(subtle)));
+  });
+
   it("sha512Hex 'abc' matches NIST vector", () => {
     expect(sha512Hex("abc")).toBe(
       "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a" +

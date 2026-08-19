@@ -728,6 +728,36 @@ describe("mapProviderEventTypeToStable tables", () => {
       ).toBe("payment.processing");
     });
 
+    it("S19-MAP-REFUND-PENDING: flags pending+success+isRefund, no status → payment.processing", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          flags: { pending: true, success: true, isRefund: true },
+        }),
+      ).toBe("payment.processing");
+    });
+
+    it("S19-MAP-REFUND-PENDING: refundedAmountCents + flags.pending is not refund.completed", () => {
+      const mapped = mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+        flags: { pending: true },
+        amounts: { refundedAmountCents: 2500 },
+      });
+      expect(["payment.processing", "refund.pending"]).toContain(mapped);
+      expect(mapped).not.toBe("refund.completed");
+    });
+
+    it("S19-MAP-REFUND-PENDING: refund_pending → refund.pending; refund_failed → refund.failed", () => {
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "refund_pending",
+        }),
+      ).toBe("refund.pending");
+      expect(
+        mapProviderEventTypeToStable("paymob", "TRANSACTION", {
+          status: "refund_failed",
+        }),
+      ).toBe("refund.failed");
+    });
+
     it("TRANSACTION failed → payment.failed", () => {
       expect(
         mapProviderEventTypeToStable("paymob", "TRANSACTION", {

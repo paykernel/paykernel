@@ -508,6 +508,53 @@ describe("decideWebhookClaim", () => {
       expect(reclaim.generation).toBe(4);
     }
   });
+
+  it("S19 ifMatchPayloadHash miss does not supersede an idle newer hash", () => {
+    const base = {
+      payloadHash: "hash-b",
+      generation: 2,
+      attempts: 1,
+      createdAt: "2026-01-15T11:00:00.000Z",
+      availableAt: "2026-01-15T11:00:00.000Z",
+    };
+    const miss = decideWebhookClaim({
+      key: "e",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 1000,
+      newLeaseToken: "t",
+      clock: { nowMs },
+      ifMatchPayloadHash: "hash-a",
+      existing: { ...base, status: "pending" },
+    });
+    expect(miss.kind).toBe("payload_hash_conflict");
+
+    const omit = decideWebhookClaim({
+      key: "e",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 1000,
+      newLeaseToken: "t",
+      clock: { nowMs },
+      existing: { ...base, status: "pending" },
+    });
+    expect(omit.kind).toBe("acquired");
+    if (omit.kind === "acquired") {
+      expect(omit.payloadHash).toBe("hash-a");
+    }
+
+    const hit = decideWebhookClaim({
+      key: "e",
+      payloadHash: "hash-b",
+      owner: "worker",
+      leaseMs: 1000,
+      newLeaseToken: "t",
+      clock: { nowMs },
+      ifMatchPayloadHash: "hash-b",
+      existing: { ...base, status: "pending" },
+    });
+    expect(hit.kind).toBe("acquired");
+  });
 });
 
 describe("decideReconciliationClaim", () => {
@@ -739,6 +786,45 @@ describe("classifyWebhookClaimMiss (STORES-4)", () => {
     },
   ])("classifies $label as $expected", ({ existing, hash, expected }) => {
     expect(classifyWebhookClaimMiss(existing, hash, nowMs)).toBe(expected);
+  });
+
+  it("S19 ifMatchPayloadHash miss is payload_hash_conflict (not claimable supersede)", () => {
+    expect(
+      classifyWebhookClaimMiss(
+        {
+          status: "pending",
+          payloadHash: "hash-b",
+          availableAt: "2026-01-15T11:00:00.000Z",
+        },
+        "hash-a",
+        nowMs,
+        "hash-a",
+      ),
+    ).toBe("payload_hash_conflict");
+    expect(
+      classifyWebhookClaimMiss(
+        {
+          status: "pending",
+          payloadHash: "hash-b",
+          availableAt: "2026-01-15T11:00:00.000Z",
+        },
+        "hash-a",
+        nowMs,
+      ),
+    ).toBe("claimable");
+    expect(
+      classifyWebhookClaimMiss(
+        {
+          status: "claimed",
+          payloadHash: "hash-b",
+          availableAt: "2026-01-15T11:00:00.000Z",
+          leaseExpiresAt: "2026-01-15T11:30:00.000Z",
+        },
+        "hash-a",
+        nowMs,
+        "hash-a",
+      ),
+    ).toBe("payload_hash_conflict");
   });
 });
 
@@ -1012,7 +1098,10 @@ describe("dialect claim templates", () => {
     expect(wh.postgres.sql).toContain("available_at");
     expect(wh.postgres.sql).toContain("status = 'pending'");
     expect(wh.postgres.sql).toContain("status = 'claimed'");
+    expect(wh.postgres.sql).toContain("$8::text IS NULL OR");
+    expect(wh.postgres.params).toContain("ifMatchPayloadHash");
     expect(wh.sqlite.sql).toContain("available_at");
+    expect(wh.sqlite.sql).toMatch(/\? IS NULL OR payload_hash = \?/);
 
     const rec = reconciliationClaimTemplates(ns);
     expect(rec.postgres.sql).toContain("UPDATE");

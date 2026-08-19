@@ -190,10 +190,12 @@ export function webhookClaimTemplates(namespace?: ResolvedSchemaNamespace): Clai
   const intent =
     "Atomic claim: insert-if-absent or reclaim pending-when-due/expired lease; " +
     "pending same-hash requires available_at <= now; hash mismatch supersedes even " +
-    "during backoff (idle only); expired claimed may reclaim; active lease never " +
-    "supersedes; attempts++ only for pending reclaim (WEBHOOKS-1 / WEBHOOKS-3).";
+    "during backoff (idle only) unless ifMatchPayloadHash is bound (S19 CAS); " +
+    "expired claimed may reclaim; active lease never supersedes; attempts++ only " +
+    "for pending reclaim (WEBHOOKS-1 / WEBHOOKS-3 / S19-WH-HASH-TOCTOU).";
 
-  // WEBHOOKS-3: idle hash mismatch may reclaim and SET payload_hash = EXCLUDED.
+  // WEBHOOKS-3: idle hash mismatch may reclaim and SET payload_hash = EXCLUDED
+  // unless $8 (ifMatchPayloadHash) is set and differs (S19 — no backwards supersede).
   // Active lease is excluded by lease_expires_at > now (classified as conflict).
   const postgresSql = `
 INSERT INTO ${t} (
@@ -234,6 +236,7 @@ WHERE ${t}.status NOT IN ('completed', 'failed', 'dead_letter')
       )
     )
   )
+  AND ($8::text IS NULL OR ${t}.payload_hash = $8)
 RETURNING *
 `.trim();
 
@@ -278,6 +281,7 @@ WHERE key = ?
       )
     )
   )
+  AND (? IS NULL OR payload_hash = ?)
 `.trim();
 
   return {
@@ -285,13 +289,22 @@ WHERE key = ?
     postgres: {
       dialect: "postgres",
       sql: postgresSql,
-      params: ["key", "payloadHash", "payloadRef", "owner", "leaseToken", "leaseExpiresAt", "now"],
+      params: [
+        "key",
+        "payloadHash",
+        "payloadRef",
+        "owner",
+        "leaseToken",
+        "leaseExpiresAt",
+        "now",
+        "ifMatchPayloadHash",
+      ],
       intent,
     },
     sqlite: {
       dialect: "sqlite",
       // Multi-step in one transaction; bind each step separately (see sql comments).
-      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now):\n${sqliteUpdate}`,
+      sql: `-- step1 insert-or-ignore (bind: key, payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, now):\n${sqliteInsert}\n-- step2 conditional reclaim (bind: payloadHash, payloadRef, owner, leaseToken, leaseExpiresAt, now, now, key, now, payloadHash, now, ifMatch, ifMatch):\n${sqliteUpdate}`,
       params: [
         "step1:key",
         "step1:payloadHash",
@@ -313,13 +326,23 @@ WHERE key = ?
         "step2:now",
         "step2:payloadHash",
         "step2:now",
+        "step2:ifMatchPayloadHash",
+        "step2:ifMatchPayloadHash",
       ],
       intent: intent + " SQLite multi-step txn; bind each step separately.",
     },
     generic: {
       dialect: "generic",
-      sql: `-- Portable claim intent for webhook inbox (see decideWebhookClaim).`,
-      params: ["key", "payloadHash", "owner", "leaseToken", "leaseExpiresAt", "now"],
+      sql: `-- Portable claim intent for webhook inbox (see decideWebhookClaim; optional ifMatchPayloadHash CAS).`,
+      params: [
+        "key",
+        "payloadHash",
+        "owner",
+        "leaseToken",
+        "leaseExpiresAt",
+        "now",
+        "ifMatchPayloadHash",
+      ],
       intent,
     },
   };

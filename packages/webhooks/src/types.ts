@@ -380,6 +380,11 @@ export type WebhookInboxEngine = {
   /**
    * Worker path for **durable_retry** pending rows (`listRetryable` → claim → handler).
    * Throws if engine mode is `inline` (modes are fixed at construction; no silent mix).
+   *
+   * Claims with the listed `payloadHash` and `ifMatchPayloadHash` so an idle
+   * WEBHOOKS-3 supersede between `get` and `claim` cannot roll the body back
+   * (S19-WH-HASH-TOCTOU). Hash mismatch on get or compare-and-claim skip is
+   * retryable `handler_failed` (not `payload_conflict`).
    */
   processRetryable(input: ProcessRetryableInput): Promise<ProcessRetryableResult>;
   /**

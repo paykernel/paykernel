@@ -212,7 +212,6 @@ function rotr32(x: number, n: number): number {
 }
 
 function sha256Bytes(message: Uint8Array): Uint8Array {
-  const bitLen = message.length * 8;
   // padding: 0x80 + zeros + 8-byte length → multiple of 64
   const withPad = message.length + 1 + 8;
   const padLen = (64 - (withPad % 64)) % 64;
@@ -220,9 +219,14 @@ function sha256Bytes(message: Uint8Array): Uint8Array {
   const buf = new Uint8Array(total);
   buf.set(message);
   buf[message.length] = 0x80;
-  // big-endian 64-bit bit length (high 32 always 0 for practical sizes)
+  // big-endian 64-bit bit length (S19-SHA256-LEN: write high 32 bits too)
   const view = new DataView(buf.buffer);
-  view.setUint32(total - 4, bitLen >>> 0, false);
+  view.setUint32(
+    total - 8,
+    Math.floor(message.length / 0x20000000) >>> 0,
+    false,
+  );
+  view.setUint32(total - 4, (message.length * 8) >>> 0, false);
 
   let h0 = 0x6a09e667;
   let h1 = 0xbb67ae85;

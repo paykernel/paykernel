@@ -76,6 +76,7 @@ describe("PaymentClient capture/refund convenience routing", () => {
 
     const result = await client.capturePayment({
       gatewayPaymentId: "pi_cap",
+      idempotencyKey: "idem_client_capture",
     });
 
     expect(requestedUrl).toContain("/payment_intents/pi_cap/capture");
@@ -124,6 +125,7 @@ describe("PaymentClient capture/refund convenience routing", () => {
 
     const result = await client.refundPayment({
       gatewayPaymentId: "pi_ref",
+      idempotencyKey: "idem_client_refund",
     });
 
     expect(requestedUrls.some((u) => u.includes("/refunds"))).toBe(true);

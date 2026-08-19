@@ -96,4 +96,22 @@ describe("sanitizeReconciliationError", () => {
     }
     expect(out).toContain("[REDACTED]");
   });
+
+  it("redacts 13-19 digit PAN runs (S19-RECON-PAN)", () => {
+    const pan = sanitizeReconciliationError("card 4111111111111111 charged");
+    expect(pan).not.toContain("4111111111111111");
+    expect(pan).toContain("[REDACTED]");
+
+    const dashed = sanitizeReconciliationError("pan 4111-1111-1111-1111 used");
+    expect(dashed).not.toContain("4111-1111-1111-1111");
+    expect(dashed).toContain("[REDACTED]");
+
+    const spaced = sanitizeReconciliationError("pan 4111 1111 1111 1111 used");
+    expect(spaced).not.toContain("4111 1111 1111 1111");
+    expect(spaced).toContain("[REDACTED]");
+
+    const short = sanitizeReconciliationError("ref 1234567890 leftover");
+    expect(short).toContain("1234567890");
+    expect(short).not.toContain("[REDACTED]");
+  });
 });

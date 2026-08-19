@@ -725,8 +725,16 @@ function stripeWebhookPaymentId(
     return subscriptionId ?? paymentIntentId ?? object.id;
   }
 
-  if (object.object === "charge" || object.object === "refund") {
-    return expandableId((object as any).payment_intent) ?? object.id;
+  if (
+    object.object === "charge" ||
+    object.object === "refund" ||
+    object.object === "dispute"
+  ) {
+    return (
+      expandableId((object as any).payment_intent) ??
+      expandableId((object as any).charge) ??
+      object.id
+    );
   }
 
   return object.id;
@@ -1026,8 +1034,11 @@ function stripeChargeSnapshotForRefundStatus(
   if (isObservableStripeChargeSnapshot(latest)) {
     return latest;
   }
-  // Unexpanded `latest_charge` (string / id-only) is not a refund snapshot.
-  // Still honor an observable `charges.data[0]` when Stripe included it.
+  // Unexpanded `latest_charge` (string / id-only) is not itself refund proof
+  // (C1: amount_received stays paid when no snapshot exists). When Stripe
+  // includes an observable `charges.data[0]` list charge, honor those refunds
+  // (S19-STRIPE-LATE-REFUND / STRIPE-CHG-1) — delayed payment_intent.succeeded
+  // must not last-write paid over charge.refunded.
   const firstCharge = pi.charges?.data?.[0];
   return isObservableStripeChargeSnapshot(firstCharge)
     ? firstCharge
@@ -1098,7 +1109,7 @@ function resolveStripeRefundedMinor(
 /**
  * Expanded PI / charge fields on a Checkout Session (thin-event hydration).
  * Classic snapshot webhooks keep `payment_intent` as a string id and return
- * undefined so `payment_status: paid` can stay `paid`.
+ * undefined — callers must not treat that as a paid proof (S19-CKO-UNEXPANDED).
  */
 function stripeCheckoutHydratedRefundSource(session: {
   payment_intent?: unknown;
@@ -1154,9 +1165,10 @@ function stripeCheckoutPaidSessionStatus(session: {
 }): PaymentStatus {
   const hydrated = stripeCheckoutHydratedRefundSource(session);
   if (hydrated === undefined) {
-    return "paid";
-  }
-  if (isUnobservableStripeChargeRef(hydrated.latest_charge)) {
+    // S19-CKO-UNEXPANDED: payment_status stays paid after refunds. A string
+    // payment_intent (or missing charge snapshot) cannot rematch. Fail-closed
+    // to processing. Hydrated PIs rematch via charges.data even when
+    // latest_charge is an unexpanded id (STRIPE-CHG-1).
     return "processing";
   }
   const refundStatus = stripeSucceededIntentRefundStatus(hydrated);
@@ -1178,6 +1190,49 @@ function stripeCheckoutPaidSessionStatus(session: {
     return "partially_captured";
   }
   return "paid";
+}
+
+/**
+ * Checkout amount prefers settled PI money (`amount_received` →
+ * `amount_captured`) when the session is hydrated / expanded. Falls back to
+ * `amount_total` when settled fields are missing (classic string PI).
+ */
+function stripeCheckoutPublishedAmountMinor(session: {
+  payment_intent?: unknown;
+  latest_charge?: unknown;
+  charges?: { data?: Array<StripeChargeSnapshot> };
+  amount?: unknown;
+  amount_total?: unknown;
+  amount_received?: unknown;
+}): number | undefined {
+  const hydrated = stripeCheckoutHydratedRefundSource(session);
+  if (hydrated !== undefined) {
+    const settled = resolveStripeCapturedMinor(hydrated);
+    if (settled !== undefined) {
+      return settled;
+    }
+  }
+  return finiteStripeMinor(session.amount_total);
+}
+
+function isStripeChargeDisputeEventType(type: string): boolean {
+  return type.startsWith("charge.dispute.");
+}
+
+/**
+ * Dispute envelope status is the Stripe dispute lifecycle string, never generic
+ * payment `pending` (S19-STRIPE-DISPUTE). Last-write persist of `event.status`
+ * must not move a paid payment to pending. Dual-write stays `dispute.*`.
+ */
+function stripeDisputeEnvelopeStatus(
+  object: StripeWebhookPayload["data"]["object"],
+): PaymentStatus {
+  const native = (object as { status?: unknown }).status;
+  if (typeof native === "string" && native.trim().length > 0) {
+    return native as PaymentStatus;
+  }
+  // Missing native dispute status is still not a payment pending last-write.
+  return "processing";
 }
 
 function isStripePaidLikeWebhookType(type: string): boolean {
@@ -1219,25 +1274,40 @@ function validateStripeIdempotencyKey(idempotencyKey?: string): void {
 
 /**
  * Stripe mutations are only safe to retry when an Idempotency-Key is present.
- * Auto-generate an ephemeral key when the caller omits it (or passes
- * empty/whitespace) so **in-process** retries of transient network/5xx errors
- * do not create duplicate PaymentIntents, captures, refunds, voids, or sessions.
  *
- * STRIPE-6 honesty: the auto-generated key is known only for the lifetime of
- * that single SDK call. It does **not** protect app-level crash/retry across
- * processes or after the call returns. Callers that need durable mutation
- * fencing must supply their own stable `idempotencyKey`.
+ * S19-EPHEMERAL-KEY: capture / refund / void / createCheckoutSession **require**
+ * a caller `idempotencyKey` (Paymob/Moyasar parity). Silently minting a UUID
+ * would let a crash retry POST a second capture/refund/void/session. Checkout
+ * create is post-submit indeterminate on timeout (S19-CKO-TIMEOUT) — a new
+ * ephemeral key would look like a fresh session.
+ *
+ * `createPayment` may still mint an ephemeral key for in-process `withRetry`
+ * and warns: that key is known only for the lifetime of the call.
  */
 function resolveStripeIdempotencyKey(
   idempotencyKey: string | undefined,
   randomUUID: () => string,
+  mode: {
+    operation: string;
+    policy: "require-caller" | "ephemeral-ok";
+    warn?: (message: string) => void;
+  },
 ): string {
   const key = idempotencyKey?.trim();
-  if (!key) {
-    return randomUUID();
+  if (key) {
+    validateStripeIdempotencyKey(key);
+    return key;
   }
-  validateStripeIdempotencyKey(key);
-  return key;
+  if (mode.policy === "require-caller") {
+    throw new InvalidRequestError(
+      `Stripe ${mode.operation} requires idempotencyKey so crash retries do not duplicate the mutation`,
+      [{ path: ["idempotencyKey"] }],
+    );
+  }
+  mode.warn?.(
+    `[Stripe] ${mode.operation} omitted idempotencyKey; minted an ephemeral Idempotency-Key for in-process withRetry only. Crash retries mint a new key and can duplicate the mutation.`,
+  );
+  return randomUUID();
 }
 
 /**
@@ -1680,7 +1750,15 @@ export class StripeGateway extends BaseGateway {
           "POST",
           "/payment_intents",
           body,
-          resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
+          resolveStripeIdempotencyKey(
+            p.idempotencyKey,
+            () => this.runtime.randomUUID(),
+            {
+              operation: "createPayment",
+              policy: "ephemeral-ok",
+              warn: (message) => this.logger.warn(message),
+            },
+          ),
           extractAbortSignal(p),
         );
         requireStripeMutationId(
@@ -1740,6 +1818,11 @@ export class StripeGateway extends BaseGateway {
         const paymentIntentPathId = stripePaymentIntentPathId(
           p.gatewayPaymentId,
         );
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "capturePayment", policy: "require-caller" },
+        );
         const callerSignal = extractAbortSignal(p);
         const body: Record<string, any> = {};
         if (p.amount !== undefined) {
@@ -1757,7 +1840,7 @@ export class StripeGateway extends BaseGateway {
           "POST",
           `/payment_intents/${paymentIntentPathId}/capture`,
           body,
-          resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
+          idempotencyKey,
           callerSignal,
         );
         requireStripeMutationId(
@@ -1816,6 +1899,11 @@ export class StripeGateway extends BaseGateway {
         const paymentIntentPathId = stripePaymentIntentPathId(
           p.gatewayPaymentId,
         );
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "refundPayment", policy: "require-caller" },
+        );
         const callerSignal = extractAbortSignal(p);
         const body: Record<string, any> = {
           payment_intent: p.gatewayPaymentId,
@@ -1856,7 +1944,7 @@ export class StripeGateway extends BaseGateway {
           "POST",
           "/refunds",
           body,
-          resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
+          idempotencyKey,
           callerSignal,
         );
         requireStripeMutationId(
@@ -1931,11 +2019,16 @@ export class StripeGateway extends BaseGateway {
         const paymentIntentPathId = stripePaymentIntentPathId(
           p.gatewayPaymentId,
         );
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "voidPayment", policy: "require-caller" },
+        );
         const response = await this.stripeRequest<StripePaymentIntent>(
           "POST",
           `/payment_intents/${paymentIntentPathId}/cancel`,
           undefined,
-          resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
+          idempotencyKey,
           extractAbortSignal(p),
         );
         requireStripeMutationId(
@@ -2042,7 +2135,17 @@ export class StripeGateway extends BaseGateway {
                 } else {
                   chargeRefundStateUnknown = true;
                 }
-              } catch {
+              } catch (error) {
+                // S19-STRIPE-CHARGE-SWALLOW: 401/429/5xx/transport are not
+                // "still settling". Keep processing only when the charge is
+                // unobservable (404 / other GatewayApiError).
+                if (
+                  error instanceof AuthenticationError ||
+                  error instanceof NetworkError ||
+                  error instanceof RateLimitError
+                ) {
+                  throw error;
+                }
                 chargeRefundStateUnknown = true;
               }
             } else if (
@@ -2166,6 +2269,7 @@ export class StripeGateway extends BaseGateway {
     paymentStatus: string;
     amount?: number | undefined;
     currency?: string | undefined;
+    refundedAmount?: number | undefined;
     rawResponse: unknown;
   }> {
     return this.executeWithHooks(
@@ -2189,7 +2293,32 @@ export class StripeGateway extends BaseGateway {
             session,
           );
         }
-        const currency = session.currency?.toLowerCase();
+        const pi = session.payment_intent;
+        const piCurrency =
+          typeof pi === "object" && pi !== null
+            ? (pi as { currency?: string | null }).currency
+            : undefined;
+        const currency = stripeCurrencyCode(session.currency, piCurrency);
+        const refundSource = stripeCheckoutHydratedRefundSource(session);
+        const amountMinor = stripeCheckoutPublishedAmountMinor(session);
+        const refundedMinor =
+          refundSource !== undefined
+            ? resolveStripeRefundedMinor(refundSource)
+            : undefined;
+        // S19-CKO-GET: rematch expanded PI refunds / settled money. Native
+        // unpaid / no_payment_required stay as Stripe sent them.
+        const paymentStatus =
+          session.payment_status === "paid"
+            ? stripeCheckoutPaidSessionStatus(session)
+            : session.payment_status;
+        const amount =
+          currency !== undefined && amountMinor !== undefined
+            ? fromStripeAmount(amountMinor, currency)
+            : undefined;
+        const refundedAmount =
+          currency !== undefined && refundedMinor !== undefined
+            ? fromStripeAmount(refundedMinor, currency)
+            : undefined;
 
         return {
           success: true,
@@ -2197,12 +2326,15 @@ export class StripeGateway extends BaseGateway {
           paymentIntentId: expandableId(session.payment_intent),
           url: session.url,
           status: session.status,
-          paymentStatus: session.payment_status,
-          amount:
-            currency !== undefined
-              ? fromStripeAmount(session.amount_total, currency)
-              : undefined,
-          currency,
+          paymentStatus,
+          ...(amount !== undefined && currency !== undefined
+            ? { amount, currency }
+            : currency !== undefined
+              ? { currency }
+              : {}),
+          ...(refundedAmount !== undefined && currency !== undefined
+            ? { refundedAmount }
+            : {}),
           rawResponse: session,
         };
       },
@@ -2225,12 +2357,19 @@ export class StripeGateway extends BaseGateway {
     success: boolean;
     sessionId: string;
     url?: string;
+    outcome?: PaymentOperationOutcome;
+    reconciliationRequired?: boolean;
     rawResponse: unknown;
   }> {
     return this.executeWithHooks(
       "createCheckoutSession",
       params,
       async (p) => {
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "createCheckoutSession", policy: "require-caller" },
+        );
         const mode = p.mode ?? "payment";
         const metadata = sanitizedStripeMetadata(p.metadata);
         const body: Record<string, any> = {
@@ -2328,7 +2467,7 @@ export class StripeGateway extends BaseGateway {
           "POST",
           "/checkout/sessions",
           body,
-          resolveStripeIdempotencyKey(p.idempotencyKey, () => this.runtime.randomUUID()),
+          idempotencyKey,
           extractAbortSignal(p),
         );
         const sessionId = requireStripeMutationId(
@@ -2583,8 +2722,17 @@ export class StripeGateway extends BaseGateway {
     } else if (object.amount !== undefined) {
       amount = convertMinor(object.amount);
     }
-    // Checkout sessions use amount_total instead of amount
-    if (object.amount_total !== undefined) {
+    if (object.object === "checkout.session") {
+      // S19-CKO-AMOUNT: expanded PI publishes amount_received (settled), not
+      // always amount_total. Refund rematch below still overwrites refunded
+      // snapshots with cumulative amount_refunded.
+      const publishedMinor = stripeCheckoutPublishedAmountMinor(
+        object as unknown as StripeCheckoutSession & StripeIntentRefundSource,
+      );
+      if (publishedMinor !== undefined) {
+        amount = convertMinor(publishedMinor);
+      }
+    } else if (object.amount_total !== undefined) {
       amount = convertMinor(object.amount_total);
     }
     if (object.object === "invoice") {
@@ -2615,9 +2763,9 @@ export class StripeGateway extends BaseGateway {
           mode?: string;
         };
         if (session.payment_status === "paid") {
-          // STRIPE-CKO-1: payment_status stays paid after refunds. Hydrated
-          // PI/charge snapshots rematch refunds; missing charge snapshot
-          // fail-closes to processing. Classic string payment_intent stays paid.
+          // STRIPE-CKO-1 / S19-CKO-UNEXPANDED: payment_status stays paid after
+          // refunds. Observable charge/expanded PI rematch refunds; string PI
+          // or missing charge snapshot fail-closes to processing.
           status = stripeCheckoutPaidSessionStatus(session);
         } else if (
           session.payment_status === "no_payment_required" &&
@@ -2785,6 +2933,12 @@ export class StripeGateway extends BaseGateway {
         status = "pending";
         break;
       default:
+        // S19-STRIPE-DISPUTE: charge.dispute.* must not last-write a paid
+        // envelope as generic pending. Dual-write is dispute.* (catalog map).
+        if (isStripeChargeDisputeEventType(raw.type)) {
+          status = stripeDisputeEnvelopeStatus(object);
+          break;
+        }
         // Only map PaymentIntent statuses via mapStatus (fail-closed for
         // unknown PI states). Non-PI objects must not run through the PI map —
         // foreign statuses like subscription "active" would incorrectly become
@@ -2839,6 +2993,7 @@ export class StripeGateway extends BaseGateway {
     if (typeof object.object === "string") {
       mapContext.objectType = object.object;
     }
+    mapContext.status = status;
     if (typeof object.payment_status === "string") {
       mapContext.paymentStatus = object.payment_status;
     }
@@ -3241,7 +3396,10 @@ export class StripeGateway extends BaseGateway {
    * - settled missing → processing (never invent paid)
    *
    * Default Stripe PI webhooks send `latest_charge` as a `ch_…` string plus
-   * `amount_received`. The string is not refund proof; use settled money.
+   * `amount_received`. The string is not refund proof (C1: stays paid when
+   * settled and no refund snapshot). Observable `charges.data` / expanded
+   * charge refunds still rematch (S19-STRIPE-LATE-REFUND). Apps must not
+   * last-write `payment_intent.succeeded` over `charge.refunded`.
    */
   private succeededPaymentIntentWebhookStatus(
     object: StripeWebhookPayload["data"]["object"],

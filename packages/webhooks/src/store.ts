@@ -179,6 +179,17 @@ export type ClaimWebhookInput = {
   leaseMs: number;
   /** Optional opaque reference (not raw secret payload). */
   payloadRef?: string;
+  /**
+   * Compare-and-claim fence (S19-WH-HASH-TOCTOU). When set, acquire only if
+   * the current row's `payloadHash` equals this value. Mismatch returns
+   * `payload_hash_conflict` **without** rewriting hash/body — idle WEBHOOKS-3
+   * supersede must not run backwards.
+   *
+   * `processRetryable` passes the listed hash so a get→claim race cannot roll
+   * a newer idle payload back to the list snapshot. Omit on first-delivery
+   * `processVerified` so idle hash mismatch still supersedes (WEBHOOKS-3).
+   */
+  ifMatchPayloadHash?: string;
 };
 
 /**
@@ -190,19 +201,23 @@ export type ClaimWebhookInput = {
  * 3. active lease + same hash → `in_progress`
  * 4. active lease + **different** hash → `payload_hash_conflict` (cannot
  *    supersede while another worker holds the row)
- * 5. non-terminal, **no** active lease, different hash → **supersede**: acquire
+ * 5. `ifMatchPayloadHash` set and current hash differs → `payload_hash_conflict`
+ *    (no write; S19 — retry workers must not supersede backwards)
+ * 6. non-terminal, **no** active lease, different hash → **supersede**: acquire
  *    with the new hash (WEBHOOKS-3 recovery for hash-source mistakes so paid
  *    redrive is not permanently stuck). Updates `payloadHash` / optional
- *    `payloadRef` on acquire.
- * 6. pending with future `availableAt` + **same** hash → `not_available`
- * 7. else acquire
+ *    `payloadRef` on acquire. Skipped when `ifMatchPayloadHash` was set (step 5).
+ * 7. pending with future `availableAt` + **same** hash → `not_available`
+ * 8. else acquire
  *
  * Kinds:
  * - `acquired` — caller holds the lease; run handler or park
  * - `already_completed` / `duplicate_failed` — terminal; do not re-run
  * - `in_progress` — active lease held by another worker
  * - `payload_hash_conflict` — same key, different body hash **while a lease is
- *   still active** (non-terminal). Idle pending/expired-claimed rows supersede.
+ *   still active** (non-terminal), **or** `ifMatchPayloadHash` missed (S19).
+ *   Idle pending/expired-claimed rows supersede only when `ifMatchPayloadHash`
+ *   is omitted (WEBHOOKS-3).
  * - `not_available` — pending but `availableAt` is still in the future (backoff);
  *   must **not** increment attempts; engine maps to
  *   `scheduled_for_retry { reason: "not_available" }`
@@ -290,7 +305,9 @@ export type ListRetryableInput = {
  * Same event key: second claim with same payload hash while in-progress → in_progress;
  * completed → already_completed (before hash check); dead_letter/failed → duplicate_failed
  * (before hash check); active lease + different hash → payload_hash_conflict;
- * non-terminal **idle** different hash → **supersede** acquire (WEBHOOKS-3);
+ * `ifMatchPayloadHash` miss → payload_hash_conflict (no write, S19);
+ * non-terminal **idle** different hash → **supersede** acquire (WEBHOOKS-3)
+ * unless `ifMatchPayloadHash` was set;
  * pending with `availableAt` in the future and same hash → `not_available`
  * (no acquire, no attempt++); expired lease may be re-acquired with a new
  * fencing token (generation++).
@@ -308,8 +325,9 @@ export interface WebhookInboxStore extends WithTransaction {
    * MUST NOT acquire a pending row whose `availableAt` is still in the future —
    * return `{ kind: "not_available", ... }` instead (no attempt increment).
    * Terminal statuses are classified before hash / lease checks.
-   * Non-terminal idle hash mismatch supersedes (WEBHOOKS-3); active-lease
-   * hash mismatch returns `payload_hash_conflict`.
+   * Non-terminal idle hash mismatch supersedes (WEBHOOKS-3) unless
+   * `ifMatchPayloadHash` is set and differs (S19 — no backwards supersede).
+   * Active-lease hash mismatch returns `payload_hash_conflict`.
    */
   claim(input: ClaimWebhookInput): Promise<ClaimWebhookResult>;
 

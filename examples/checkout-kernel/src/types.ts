@@ -18,8 +18,15 @@ export type CheckoutOrderRecord = CheckoutOrder & {
 
 export type CreateOrderPaymentInput = {
   orderId?: string;
-  amount?: string;
-  currency?: string;
+};
+
+/** HTTP test-hook gating. Do not enable on a deployed host. */
+export type CheckoutHttpOptions = {
+  /**
+   * Serve unauthenticated `/internal/reconcile` and `/internal/provider-paid`.
+   * Test-only. Do not deploy with this flag on.
+   */
+  enableTestHooks?: boolean;
 };
 
 export type CheckoutHttpResult = {

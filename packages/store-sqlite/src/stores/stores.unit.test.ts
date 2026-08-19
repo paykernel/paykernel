@@ -619,6 +619,38 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
     expect(got?.status).toBe("pending");
   });
 
+  it("S19-CLOCK-LEASE: get() on a still-valid lease does not null lease_token", async () => {
+    const issuerMs = 1_700_000_000_000;
+    const issuerClock = createFakeClock({ initialMs: issuerMs });
+    const issuer = createSqliteWebhookInboxStore({ executor, clock: issuerClock });
+    const claimed = await issuer.claim({
+      key: "evt-clock-live",
+      payloadHash: "h1",
+      owner: "issuer",
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe("acquired");
+    if (claimed.kind !== "acquired") return;
+
+    const same = await issuer.get("evt-clock-live");
+    expect(same?.status).toBe("claimed");
+    expect(same?.leaseToken).toBe(claimed.leaseToken);
+
+    // Fast host shares the DB; its clock is 35s ahead of a 30s issuer lease.
+    const fastClock = createFakeClock({ initialMs: issuerMs + 35_000 });
+    const observer = createSqliteWebhookInboxStore({ executor, clock: fastClock });
+    const got = await observer.get("evt-clock-live");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe(claimed.leaseToken);
+
+    await issuer.complete({
+      key: "evt-clock-live",
+      leaseToken: claimed.leaseToken,
+    });
+    const done = await issuer.get("evt-clock-live");
+    expect(done?.status).toBe("completed");
+  });
+
   it("claim blocks pending when availableAt is in the future", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const store = createSqliteWebhookInboxStore({ executor, clock });
@@ -734,6 +766,57 @@ describe("sqlite stores unit (bun:sqlite memory)", () => {
       // STORES-1/WEBHOOKS-1: expired claimed reclaim keeps attempts
       expect(reclaim.record.attempts).toBe(first.record.attempts);
     }
+  });
+
+  it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const store = createSqliteWebhookInboxStore({ executor, clock });
+    const first = await store.claim({
+      key: "evt-s19-cas",
+      payloadHash: "hash-a",
+      owner: "w1",
+      leaseMs: 5_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") return;
+    await store.fail({
+      key: "evt-s19-cas",
+      leaseToken: first.leaseToken,
+      error: "park a",
+      retryAfterMs: 0,
+    });
+
+    const newer = await store.claim({
+      key: "evt-s19-cas",
+      payloadHash: "hash-b",
+      owner: "w2",
+      leaseMs: 5_000,
+      payloadRef: JSON.stringify({ id: "new" }),
+    });
+    expect(newer.kind).toBe("acquired");
+    if (newer.kind !== "acquired") return;
+    await store.fail({
+      key: "evt-s19-cas",
+      leaseToken: newer.leaseToken,
+      error: "park b",
+      retryAfterMs: 0,
+      restoreAttempt: true,
+    });
+
+    const stale = await store.claim({
+      key: "evt-s19-cas",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 5_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(stale.kind).toBe("payload_hash_conflict");
+    const rec = await store.get("evt-s19-cas");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.payloadRef).toBe(JSON.stringify({ id: "new" }));
+    expect(rec?.status).toBe("pending");
   });
 
   it("STORES-2: listRetryable canonicalizes offset input.now", async () => {

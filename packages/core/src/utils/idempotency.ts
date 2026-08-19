@@ -10,6 +10,9 @@
  * backed by Redis/SQL, across processes.
  */
 
+import { sha256Hex } from "../runtime/crypto-portable";
+import { stripAbortSignal } from "../runtime/abort";
+import { redact } from "./logger";
 import { isMoney, money } from "./money";
 
 type MaybePromise<T> = T | Promise<T>;
@@ -179,8 +182,21 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
 }
 
 /**
+ * Canonical stringify for fingerprint inputs (sorted keys, Money collapse,
+ * distinct `undefined`/`null`/`Date`/`NaN` tags). Used by tests; persisted
+ * store records must use {@link fingerprintParams} (SHA-256 digest).
+ */
+export function stableStringifyParams(value: unknown): string {
+  return stableStringify(value);
+}
+
+/**
  * Produce a stable fingerprint for arbitrary request params, with object keys
  * sorted so equivalent payloads hash identically regardless of key order.
+ *
+ * Persisted value is `sha256Hex(stableStringify(redact(stripAbortSignal(value))))`
+ * (S19-FINGERPRINT) so stores never keep raw PII / billing payloads. AbortSignal
+ * is omitted so live abort objects are not part of business-params identity.
  *
  * `undefined` and `null` are encoded distinctly so omitting a field (or an
  * explicit `undefined`) does not collide with an explicit `null`.
@@ -198,7 +214,100 @@ export class InMemoryIdempotencyStore implements IdempotencyStore {
  * string (MONEY-2).
  */
 export function fingerprintParams(value: unknown): string {
-  return stableStringify(value);
+  return sha256Hex(
+    stableStringify(
+      redactForFingerprint(stripAbortSignalsForFingerprint(value)),
+    ),
+  );
+}
+
+function isAbortSignalValue(value: unknown): boolean {
+  if (typeof AbortSignal !== "undefined" && value instanceof AbortSignal) {
+    return true;
+  }
+  if (value == null || typeof value !== "object" || value instanceof Date) {
+    return false;
+  }
+  const candidate = value as {
+    aborted?: unknown;
+    addEventListener?: unknown;
+  };
+  return (
+    typeof candidate.aborted === "boolean" &&
+    typeof candidate.addEventListener === "function"
+  );
+}
+
+/**
+ * Drop AbortSignal values (top-level `signal` via {@link stripAbortSignal},
+ * plus nested instances) so caller abort controllers are not identity.
+ */
+function stripAbortSignalsForFingerprint(value: unknown): unknown {
+  if (isAbortSignalValue(value)) {
+    return undefined;
+  }
+  if (value == null || typeof value !== "object") {
+    return value;
+  }
+  if (value instanceof Date) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map(stripAbortSignalsForFingerprint);
+  }
+
+  const { rest } = stripAbortSignal(value);
+  if (rest == null || typeof rest !== "object" || rest instanceof Date) {
+    return rest;
+  }
+  if (Array.isArray(rest)) {
+    return rest.map(stripAbortSignalsForFingerprint);
+  }
+
+  const record = rest as Record<string, unknown>;
+  const cleaned: Record<string, unknown> = {};
+  for (const key of Object.keys(record)) {
+    const nested = record[key];
+    if (isAbortSignalValue(nested)) {
+      continue;
+    }
+    cleaned[key] = stripAbortSignalsForFingerprint(nested);
+  }
+  return cleaned;
+}
+
+/**
+ * {@link redact} walks Date as a plain object (`{}`), which would collide with
+ * empty bags and drop the `__date__:` tag. Preserve Date (and recurse) while
+ * still redacting sensitive keys / PAN-shaped leaves.
+ */
+function redactForFingerprint(value: unknown, depth = 0): unknown {
+  if (depth > 6) {
+    return "[REDACTED]";
+  }
+  if (value instanceof Date) {
+    return value;
+  }
+  if (value === null || typeof value !== "object") {
+    return redact(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactForFingerprint(item, depth + 1));
+  }
+
+  const out: Record<string, unknown> = {};
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+      continue;
+    }
+    const probe = redact({ [key]: 0 }) as Record<string, unknown>;
+    if (probe[key] === "[REDACTED]") {
+      out[key] = "[REDACTED]";
+    } else {
+      out[key] = redactForFingerprint(val, depth + 1);
+    }
+  }
+  return out;
 }
 
 /**

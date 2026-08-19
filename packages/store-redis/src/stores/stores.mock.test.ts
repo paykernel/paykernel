@@ -334,6 +334,32 @@ describe("webhook store mock port", () => {
     expect(r.kind).toBe("payload_hash_conflict");
   });
 
+  it("S19 claim EVAL binds ifMatchPayloadHash as ARGV[10]", async () => {
+    const fields = webhookPack({
+      status: "pending",
+      payload_hash: "hash-b",
+    });
+    const { port, calls } = createMockPort(() => [
+      "payload_hash_conflict",
+      ...fields,
+    ]);
+    const store = createRedisWebhookInboxStore({ port });
+    const r = await store.claim({
+      key: "e1",
+      payloadHash: "hash-a",
+      owner: "w",
+      leaseMs: 1000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(r.kind).toBe("payload_hash_conflict");
+    const evalCall = calls.find(
+      (c) => c.command === "EVAL" || c.command === "EVALSHA",
+    );
+    expect(evalCall).toBeDefined();
+    expect(evalCall!.args.at(-1)).toBe("hash-a");
+  });
+
   it("claim not_available maps tagged result (availableAt backoff)", async () => {
     const fields = webhookPack();
     const { port } = createMockPort(() => ["not_available", ...fields]);

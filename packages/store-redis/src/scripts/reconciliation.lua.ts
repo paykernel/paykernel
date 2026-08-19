@@ -431,11 +431,7 @@ redis.call('PERSIST', rec)
 return {'ok'}
 `.trim();
 
-/**
- * Shared get-one body (soft-release + ghost ZREM). Used by single GET and
- * PERF-4 list GET. rec/idx/nowMs/nowIso/listedKey are locals in the caller.
- */
-const RECON_GET_ONE_LUA = `
+const RECON_GET_HELPERS_LUA = `
 local function hgetall_map(key)
   local arr = redis.call('HGETALL', key)
   local m = {}
@@ -462,6 +458,37 @@ local function pack(m)
     m['last_error'] or ''
   }
 end
+`.trim();
+
+/**
+ * S19-CLOCK-LEASE: key-addressed GET is read-only for leases. A caller/injected
+ * now ahead of the issuer must not HSET-clear lease_token. Ghost ZREM only.
+ */
+const RECON_READ_ONE_LUA = `
+${RECON_GET_HELPERS_LUA}
+
+local function recon_read_one(rec, idx, listedKey)
+  if redis.call('EXISTS', rec) == 0 then
+    -- NEW-STORE-1: drop ghost ZSET members so listDue LIMIT windows
+    -- cannot fill with dead keys (hash gone, due member left).
+    if idx ~= nil and idx ~= '' and listedKey ~= '' then
+      redis.call('ZREM', idx, listedKey)
+    end
+    return {'missing'}
+  end
+
+  local m = hgetall_map(rec)
+  local p = pack(m)
+  return {'ok', p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11], p[12], p[13]}
+end
+`.trim();
+
+/**
+ * Shared list get-one body (soft-release + ghost ZREM). Used by PERF-4 list GET
+ * only — not key-addressed GET (S19-CLOCK-LEASE).
+ */
+const RECON_GET_ONE_LUA = `
+${RECON_GET_HELPERS_LUA}
 
 local function recon_get_one(rec, idx, nowMs, nowIso, listedKey)
   if redis.call('EXISTS', rec) == 0 then
@@ -480,7 +507,7 @@ local function recon_get_one(rec, idx, nowMs, nowIso, listedKey)
     if exp <= nowMs then
       local dueMs = tonumber(m['due_ms'] or tostring(nowMs)) or nowMs
       -- P1315-REDIS-1: restore unfinished claim attempt so crash reclaim does not
-      -- burn maxAttempts (parity with WEBHOOK_GET_LUA / memory soft-release).
+      -- burn maxAttempts (parity with list GET / memory listDue soft-release).
       local attempts = tonumber(m['attempts'] or '0') or 0
       if attempts > 0 then
         attempts = attempts - 1
@@ -511,13 +538,13 @@ end
 
 /**
  * KEYS[1]=record KEYS[2]=dueIndex
- * ARGV: nowMs, nowIso, logicalKey
- * Soft-release expired claim → scheduled and re-index so listDue sees it.
- * Missing hash ZREMs ARGV logicalKey from the due index (NEW-STORE-1).
+ * ARGV: nowMs, nowIso, logicalKey (now unused for lease wipe; call-site parity)
+ * Read-only get. Missing hash ZREMs ARGV logicalKey (NEW-STORE-1).
+ * Soft-release lives on LIST_GET_LUA / claim only (S19-CLOCK-LEASE).
  */
 export const RECON_GET_LUA = `
-${RECON_GET_ONE_LUA}
-return recon_get_one(KEYS[1], KEYS[2], tonumber(ARGV[1]), ARGV[2], ARGV[3] or '')
+${RECON_READ_ONE_LUA}
+return recon_read_one(KEYS[1], KEYS[2], ARGV[3] or '')
 `.trim();
 
 /**

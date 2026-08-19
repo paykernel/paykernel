@@ -365,7 +365,8 @@ function isPostSubmitMoneyMutation(operation: OperationType): boolean {
         operation === "capturePayment" ||
         operation === "refundPayment" ||
         operation === "voidPayment" ||
-        operation === "confirmStcPayOtp"
+        operation === "confirmStcPayOtp" ||
+        operation === "createCheckoutSession"
     );
 }
 
@@ -409,6 +410,40 @@ function providerObjectIdFromParams(params: unknown): string {
 }
 
 /**
+ * Checkout-shaped post-submit unknown (S19-CKO-TIMEOUT).
+ * Must not reuse {@link applyIndeterminatePaymentOutcome} — that snapshot has
+ * `gatewayId` / payment `status` and is the wrong result shape for
+ * `createCheckoutSession`. `getCheckoutSession` stays a thrown NetworkError.
+ */
+function applyIndeterminateCheckoutSessionOutcome(input: {
+    sessionId: string;
+    message: string;
+    errorName: string;
+}): {
+    success: false;
+    sessionId: string;
+    outcome: "indeterminate";
+    reconciliationRequired: true;
+    rawResponse: {
+        indeterminate: true;
+        message: string;
+        name: string;
+    };
+} {
+    return {
+        success: false,
+        sessionId: input.sessionId,
+        outcome: "indeterminate",
+        reconciliationRequired: true,
+        rawResponse: {
+            indeterminate: true,
+            message: input.message,
+            name: input.errorName,
+        },
+    };
+}
+
+/**
  * Convert a post-submit NetworkError on a money mutation into the Phase 6
  * indeterminate result. Returns undefined for queries, aborts, and non-network errors.
  */
@@ -417,7 +452,11 @@ function tryIndeterminateFromNetworkError(
     params: unknown,
     error: Error,
     gateway: string,
-): GatewayPaymentResult | GatewayRefundResult | undefined {
+):
+    | GatewayPaymentResult
+    | GatewayRefundResult
+    | ReturnType<typeof applyIndeterminateCheckoutSessionOutcome>
+    | undefined {
     if (!(error instanceof NetworkError) || error.afterProviderSubmit !== true) {
         return undefined;
     }
@@ -425,6 +464,13 @@ function tryIndeterminateFromNetworkError(
         return undefined;
     }
     const providerObjectId = providerObjectIdFromParams(params);
+    if (operation === "createCheckoutSession") {
+        return applyIndeterminateCheckoutSessionOutcome({
+            sessionId: providerObjectId,
+            message: error.message,
+            errorName: error.name,
+        });
+    }
     if (operation === "refundPayment") {
         return applyIndeterminateRefundOutcome({
             gatewayRefundId: providerObjectId,

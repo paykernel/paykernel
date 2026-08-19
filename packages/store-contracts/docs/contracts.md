@@ -76,7 +76,9 @@ Prefer the type alias `LeaseAwareIdempotencyStore` when core 0.x `IdempotencySto
 | `deleteExpired(input)` | Retention cleanup.                                                                               |
 | `withTransaction?(fn)` | Optional helper only.                                                                            |
 
-`claim` result kinds: `acquired` | `already_completed` | `in_progress` | `payload_hash_conflict` | `duplicate_failed`.
+`claim` result kinds: `acquired` | `already_completed` | `in_progress` | `payload_hash_conflict` | `duplicate_failed` | `not_available`.
+
+Optional `ifMatchPayloadHash` is a compare-and-claim fence (**S19-WH-HASH-TOCTOU**). When set, an idle row whose stored hash differs returns `payload_hash_conflict` **without rewriting** hash/body. Omit it on first delivery so idle hash mismatch still supersedes (WEBHOOKS-3). `processRetryable` workers must pass the listed hash.
 
 **Dual ownership (stability):** `@paykernel/webhooks` exports its own `WebhookInboxStore` + `StoreLeaseLostError` (engine must not import testkit). Types are **structurally compatible** with this package; memory factories here remain assignable to the webhooks interface (covered by assignability tests). Durable adapters **must** still pass `runWebhookInboxStoreConformanceSuite` from **testkit**. Do not diverge method shapes or lease fields without updating both packages and the suites.
 

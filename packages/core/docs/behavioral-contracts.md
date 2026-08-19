@@ -21,10 +21,10 @@ Shared retry helper: `withRetry` in `src/utils/retry.ts` (default up to **3** at
 | Operation family | Moyasar | PayPal | Paymob | Stripe |
 |------------------|---------|--------|--------|--------|
 | **GET / inquiry** (`getPayment`, status lookup, token refresh as applicable) | Auto-retry on network / 5xx / 429 | Auto-retry on network / 5xx / 429 / specific 409 in-progress conflict | Auto-retry on network / 5xx / 429 | Auto-retry GET/HEAD on `NetworkError` / `RateLimitError` |
-| **createPayment** | Auto-retry **only if** `idempotencyKey` set (`given_id`) | Always sends `PayPal-Request-Id` (caller key or generated UUID) → auto-retry enabled | **Not** auto-retried via `withRetry`; optional `idempotencyKey` + in-memory/store guard | Always sends `Idempotency-Key` (caller key or generated UUID) → auto-retry enabled |
-| **capture / refund / void** | **Never** auto-retried (`withRetry` not used). **Requires** `moyasar.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded) | Always sends `PayPal-Request-Id` (caller key or generated UUID) → auto-retry enabled | **Never** auto-retried. **Requires** `paymob.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded — I2) | Always sends `Idempotency-Key` (caller key or generated UUID) → auto-retry enabled |
-| **authorizePayment** (PayPal) | N/A | Same as mutations: request id always present → auto-retry | N/A | N/A |
-| **createCheckoutSession** (Stripe) | N/A | N/A | N/A | Same as Stripe mutations (idempotency key always present) |
+| **createPayment** | Auto-retry **only if** `idempotencyKey` set (`given_id`) | Sends `PayPal-Request-Id` (caller key, or ephemeral UUID + warn) → auto-retry enabled | **Not** auto-retried via `withRetry`; optional `idempotencyKey` + in-memory/store guard | Sends `Idempotency-Key` (caller key, or ephemeral UUID + warn) → auto-retry enabled |
+| **capture / refund / void** | **Never** auto-retried (`withRetry` not used). **Requires** `moyasar.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded) | **Requires** caller `idempotencyKey` (throws before POST). Sends `PayPal-Request-Id` → auto-retry enabled | **Never** auto-retried. **Requires** `paymob.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded — I2) | **Requires** caller `idempotencyKey` (throws before POST). Sends `Idempotency-Key` → auto-retry enabled |
+| **authorizePayment** (PayPal) | N/A | **Requires** caller `idempotencyKey` (throws before POST) | N/A | N/A |
+| **createCheckoutSession** (Stripe) | N/A | N/A | N/A | **Requires** caller `idempotencyKey` (throws before POST) |
 
 Transient classes generally treated as retryable where auto-retry is enabled: `NetworkError` (including abort/timeouts), provider 5xx, and 429 / `RateLimitError`. PayPal also retries certain `409 RESOURCE_CONFLICT` / `PREVIOUS_REQUEST_IN_PROGRESS` responses. Definite 4xx validation / business declines are **not** retried.
 
@@ -39,8 +39,9 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 
 #### PayPal
 
-- Mutations always include `PayPal-Request-Id` via `getRequestId(idempotencyKey ?? crypto.randomUUID())`, so in-process SDK retries of create/capture/authorize/refund/void are protected by PayPal’s native key for that single call.
-- Supply your own stable `idempotencyKey` when the **application** must retry after process crash (the auto-generated UUID is only known for the lifetime of that call).
+- **capture / refund / void / authorize require** a caller `idempotencyKey` (throws `InvalidRequestError` before POST).
+- **createPayment** may mint an ephemeral `PayPal-Request-Id` for in-process `withRetry` only and **warns**. Crash retries mint a new key.
+- Supply a stable `idempotencyKey` on create when the **application** must retry after process crash.
 - GETs always use the retryable-error predicate.
 
 #### Paymob
@@ -54,7 +55,8 @@ Transient classes generally treated as retryable where auto-retry is enabled: `N
 #### Stripe
 
 - GET/HEAD always retryable; POST mutations retryable when an `Idempotency-Key` is present.
-- The gateway **always** resolves a key (`resolveStripeIdempotencyKey`): caller key, or `randomUUID()` if omitted/blank — so mutations are always auto-retry-safe within a single call.
+- **capture / refund / void / createCheckoutSession require** a caller `idempotencyKey` (throws `InvalidRequestError` before POST).
+- **createPayment** may mint an ephemeral `Idempotency-Key` for in-process `withRetry` only and **warns**. Crash retries mint a new key.
 - Supply a stable caller key for cross-process retry after crash. Keys longer than Stripe’s limit (255) are rejected. See [stripe.md — Idempotency](./stripe.md#idempotency).
 
 ### Uncertain timeouts must not be treated as “payment failed”
@@ -97,20 +99,31 @@ Details: [moyasar.md](./moyasar.md).
 
 ```typescript
 // Order capture (CAPTURE intent, after approval)
-await paypal.capturePayment({ gatewayPaymentId: orderId });
+await paypal.capturePayment({
+  gatewayPaymentId: orderId,
+  idempotencyKey: crypto.randomUUID(),
+});
 
 // Auth hold capture
 await paypal.capturePayment({
   gatewayPaymentId: authorizationId,
   paypalCaptureType: 'authorization',
   amount?, currency?, paypalFinalCapture?,
+  idempotencyKey: crypto.randomUUID(),
 });
 
 // Void authorization only
-await client.voidPayment({ gatewayPaymentId: authorizationId }, 'paypal');
+await client.voidPayment({
+  gatewayPaymentId: authorizationId,
+  idempotencyKey: crypto.randomUUID(),
+}, 'paypal');
 
 // Refund — capture ID required
-await client.refundPayment({ gatewayPaymentId: captureId, amount?, currency? }, 'paypal');
+await client.refundPayment({
+  gatewayPaymentId: captureId,
+  amount?, currency?,
+  idempotencyKey: crypto.randomUUID(),
+}, 'paypal');
 ```
 
 Details: [paypal.md](./paypal.md).
@@ -129,9 +142,20 @@ Details: [paymob.md](./paymob.md).
 #### Stripe
 
 ```typescript
-await stripe.capturePayment({ gatewayPaymentId: 'pi_...', amount?, currency? });
-await client.voidPayment({ gatewayPaymentId: 'pi_...' }, 'stripe');
-await client.refundPayment({ gatewayPaymentId: 'pi_...', amount?, currency? }, 'stripe');
+await stripe.capturePayment({
+  gatewayPaymentId: 'pi_...',
+  amount?, currency?,
+  idempotencyKey: crypto.randomUUID(),
+});
+await client.voidPayment({
+  gatewayPaymentId: 'pi_...',
+  idempotencyKey: crypto.randomUUID(),
+}, 'stripe');
+await client.refundPayment({
+  gatewayPaymentId: 'pi_...',
+  amount?, currency?,
+  idempotencyKey: crypto.randomUUID(),
+}, 'stripe');
 ```
 
 Details: [stripe.md](./stripe.md).
@@ -332,8 +356,8 @@ Full Phase 8 guide: [runtime.md](./runtime.md).
 
 | Gateway | Native provider keys | SDK store |
 |---------|---------------------|-----------|
-| Stripe | Yes (`Idempotency-Key`; auto-generated if omitted) | Not required |
-| PayPal | Yes (`PayPal-Request-Id`; auto-generated if omitted) | Not required |
+| Stripe | Yes (`Idempotency-Key`). capture / refund / void / createCheckoutSession **require** a caller key (throw before POST). createPayment may mint an ephemeral key + warn | Not required |
+| PayPal | Yes (`PayPal-Request-Id`). capture / refund / void / authorize **require** a caller key (throw before POST). createPayment may mint an ephemeral key + warn | Not required |
 | Moyasar create | Yes via `given_id` when caller supplies UUID `idempotencyKey` | N/A for create |
 | Moyasar capture/refund/void | **No** | **Required** `moyasar.idempotencyStore` with atomic `reserve()` + `idempotencyKey` (throws if missing; process-local if `InMemoryIdempotencyStore`) |
 | Paymob create | **No** native keys | Per-instance cache + optional `paymob.idempotencyStore` |

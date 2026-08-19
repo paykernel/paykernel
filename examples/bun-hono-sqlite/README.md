@@ -32,7 +32,7 @@ The kernel uses in-memory Bun SQLite (`:memory:`) after an explicit `migrateSqli
 | --- | --- | --- |
 | `POST` | `/payments` | Create order + charge |
 | `POST` | `/webhooks/stripe` | Raw body + `stripe-signature` |
-| `POST` | `/internal/reconcile` | Process due reconciliation jobs |
+| `POST` | `/internal/reconcile` | **Test hook only** (unauthenticated). Process due recon jobs when `enableTestHooks: true`. Do not deploy. |
 | `GET` | `/orders/:orderId` | Order book lookup |
 | `POST` | `/internal/provider-paid` | **Test hook only** (unauthenticated). Injects a paid provider snapshot for local recon tests. Do not deploy. |
 | `GET` | `/internal/create-count` | `createPayment` call count |
@@ -43,4 +43,4 @@ The kernel uses in-memory Bun SQLite (`:memory:`) after an explicit `migrateSqli
 bun src/index.ts
 ```
 
-Not used by tests. Local listen exposes unauthenticated test hooks (`/internal/provider-paid`). Do not deploy this example as-is.
+Not used by tests. Local listen does **not** enable test hooks (`enableTestHooks` stays off). Do not deploy this example as-is.

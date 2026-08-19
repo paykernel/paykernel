@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { NetworkError } from "@paykernel/core";
 import { createCheckoutKernel } from "./kernel";
 
@@ -80,6 +82,88 @@ describe("checkout kernel recon bind", () => {
       expect(kernel.getOrder(orderId)?.status).toBe("unpaid");
       expect(kernel.getOrder(orderId)?.gatewayPaymentId).toBeUndefined();
       expect(kernel.createPaymentCount()).toBe(1);
+    } finally {
+      kernel.close();
+    }
+  });
+});
+
+describe("checkout kernel provider snapshot money", () => {
+  it("does not name trustedAmount and snapshotForOrder does not copy order.amount", () => {
+    const src = readFileSync(join(import.meta.dir, "kernel.ts"), "utf8");
+    expect(src).not.toContain("trustedAmount");
+    const start = src.indexOf("async function snapshotForOrder");
+    expect(start).toBeGreaterThan(0);
+    const end = src.indexOf("const lookup:", start);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+    expect(body).not.toContain("order.amount");
+    expect(body).toContain("providerSnapshotFromGetPayment");
+  });
+
+  it("uses getPayment money so a different provider amount is not treated as catalog paid", async () => {
+    const kernel = await createCheckoutKernel({
+      scriptCreate: [{ outcome: "indeterminate" }],
+      scriptGet: [
+        {
+          outcome: "custom",
+          result: {
+            success: true,
+            outcome: "succeeded",
+            gatewayId: "pay_mock_1",
+            status: "paid",
+            amount: 99,
+            currency: "USD",
+            redirectUrl: undefined,
+            rawResponse: {},
+          },
+        },
+      ],
+    });
+    try {
+      const created = await kernel.createOrderPayment({ orderId: "order_money" });
+      expect(created.status).toBe(200);
+      const createdBody = bodyOf(created);
+      expect(createdBody.gatewayPaymentId).toBe("pay_mock_1");
+      expect(createdBody.outcome).toBe("indeterminate");
+
+      const recon = await kernel.reconcileDue();
+      expect(recon.status).toBe(200);
+      const order = kernel.getOrder("order_money");
+      expect(order?.status).toBe("unpaid");
+      expect(order?.fulfillCount).toBe(0);
+    } finally {
+      kernel.close();
+    }
+  });
+
+  it("fail-closes getPayment amount without currency instead of copying order.amount", async () => {
+    const kernel = await createCheckoutKernel({
+      scriptCreate: [{ outcome: "indeterminate" }],
+      scriptGet: [
+        {
+          outcome: "custom",
+          result: {
+            success: true,
+            outcome: "succeeded",
+            gatewayId: "pay_mock_1",
+            status: "paid",
+            amount: 10,
+            redirectUrl: undefined,
+            rawResponse: {},
+          },
+        },
+      ],
+    });
+    try {
+      const created = await kernel.createOrderPayment({ orderId: "order_incomplete_money" });
+      expect(created.status).toBe(200);
+      expect(bodyOf(created).gatewayPaymentId).toBe("pay_mock_1");
+
+      await kernel.reconcileDue();
+      const order = kernel.getOrder("order_incomplete_money");
+      expect(order?.status).toBe("unpaid");
+      expect(order?.fulfillCount).toBe(0);
     } finally {
       kernel.close();
     }

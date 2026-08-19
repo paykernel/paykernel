@@ -4,6 +4,7 @@
 
 ### Patch
 
+- **S19-WH-HASH-TOCTOU:** webhook `claim` UPSERT honors `ifMatchPayloadHash` (idle miss is `payload_hash_conflict`, no rewrite).
 - **PERF-5:** `listDue` / `listRetryable` peek every enumerable hash shard when `partitions > 1` (now returning `{ occupied, earliest }`). A single enumerable isolate lists directly (no peek). Full list runs only on shards that can contribute to the global earliest-N; later occupied shards whose earliest is after the cutoff are skipped. Boolean peek (rolling old Workers) is fail-closed to “must list”. Expired `claimed` still counts as occupied.
 - **P17-RPC:** Worker wrappers must forward `bindHashPartitionLayout` (DO-1). `REQUIRED_DO_RPC_METHODS` lists the required stub surface; smoke Worker + wrangler sketch included.
 - **P17-ERR:** Reconstruct `StoreError` after a stub hop (`err.name` / `{ __pkStoreError, code }`) before `mapDriverError`. Cloned `StoreLeaseLostError` stays non-retryable (not `StoreUnavailableError`).

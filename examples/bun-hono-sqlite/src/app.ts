@@ -5,15 +5,22 @@ import {
   createPaymentInputFromUnknown,
   gatewayPaymentIdFromUnknown,
   readRequestJson,
+  type CheckoutHttpOptions,
   type CheckoutKernel,
 } from "@paykernel/example-checkout-kernel";
 
 /**
  * Thin Hono checkout adapter. Stripe HMAC is verified on Request.text();
  * do not use c.req.json() or any body parser on /webhooks/stripe.
+ *
+ * `/internal/reconcile` and `/internal/provider-paid` are test hooks.
+ * They are unauthenticated — do not deploy them.
  */
-export function createHonoCheckoutApp(kernel: CheckoutKernel): Hono {
-  const handlers = createCheckoutHandlers(kernel);
+export function createHonoCheckoutApp(
+  kernel: CheckoutKernel,
+  options: CheckoutHttpOptions = {},
+): Hono {
+  const handlers = createCheckoutHandlers(kernel, options);
   const app = new Hono();
 
   app.post("/payments", async (c) => {
@@ -35,6 +42,7 @@ export function createHonoCheckoutApp(kernel: CheckoutKernel): Hono {
     return checkoutJsonResponse(await handlers.handleStripeWebhook(raw, signature));
   });
 
+  // Test hook only — unauthenticated. Do not deploy this route.
   app.post("/internal/reconcile", async () => {
     return checkoutJsonResponse(await handlers.reconcile());
   });

@@ -214,6 +214,12 @@ export type WebhookClaimInput = {
   clock: ClaimClock;
   payloadRef?: string | undefined;
   existing?: WebhookExistingSnapshot | undefined;
+  /**
+   * Compare-and-claim fence (S19-WH-HASH-TOCTOU). When set, idle hash
+   * mismatch returns `payload_hash_conflict` instead of superseding.
+   * Omit so WEBHOOKS-3 idle supersede still runs (first delivery).
+   */
+  ifMatchPayloadHash?: string | undefined;
 };
 
 export type WebhookClaimDecision =
@@ -293,9 +299,19 @@ export function decideWebhookClaim(input: WebhookClaimInput): WebhookClaimDecisi
     return { kind: "in_progress" };
   }
 
+  // S19: compare-and-claim. Retry workers pass the listed hash so an idle
+  // WEBHOOKS-3 supersede between get and claim cannot roll the body back.
+  if (
+    input.ifMatchPayloadHash !== undefined &&
+    existing.payloadHash !== input.ifMatchPayloadHash
+  ) {
+    return { kind: "payload_hash_conflict" };
+  }
+
   // Idle non-terminal + same hash: honor pending backoff (not_available).
   // Hash mismatch supersedes even during backoff so hash-source mistakes
-  // (raw string vs object) do not permanently stick paid redrive.
+  // (raw string vs object) do not permanently stick paid redrive
+  // (processVerified omits ifMatchPayloadHash).
   if (!hashMismatch && existing.status === "pending") {
     const availableMs = Date.parse(existing.availableAt);
     if (Number.isFinite(availableMs) && availableMs > clock.nowMs) {
@@ -362,11 +378,15 @@ export type WebhookClaimMissSnapshot = {
  * @param existing - Row selected after empty claim RETURNING (adapters throw when missing).
  * @param inputPayloadHash - Caller's payload hash (for supersede vs conflict).
  * @param nowMs - Claim clock epoch ms.
+ * @param ifMatchPayloadHash - Optional compare-and-claim fence (S19). When set
+ *   and the stored hash differs, idle mismatch is `payload_hash_conflict`
+ *   (no rewrite) instead of `claimable` supersede.
  */
 export function classifyWebhookClaimMiss(
   existing: WebhookClaimMissSnapshot,
   inputPayloadHash: string,
   nowMs: number,
+  ifMatchPayloadHash?: string | null,
 ): WebhookClaimMissKind {
   if (existing.status === "completed") {
     return "already_completed";
@@ -376,8 +396,9 @@ export function classifyWebhookClaimMiss(
   }
 
   const hashMismatch = existing.payloadHash !== inputPayloadHash;
-  // Mirror decideWebhookClaim: conflict only under an *active* lease.
-  // Idle/expired claimed + different hash is supersede (claimable) — WEBHOOKS-3/4.
+  // Mirror decideWebhookClaim: active-lease mismatch is always conflict.
+  // Idle/expired claimed + different hash is supersede (claimable) — WEBHOOKS-3/4
+  // unless ifMatchPayloadHash misses (S19).
   const leaseActive =
     existing.status === "claimed" &&
     isLeaseActive(existing.leaseExpiresAt, nowMs);
@@ -387,6 +408,14 @@ export function classifyWebhookClaimMiss(
       return "payload_hash_conflict";
     }
     return "in_progress";
+  }
+
+  if (
+    ifMatchPayloadHash !== undefined &&
+    ifMatchPayloadHash !== null &&
+    existing.payloadHash !== ifMatchPayloadHash
+  ) {
+    return "payload_hash_conflict";
   }
 
   if (existing.status === "claimed") {

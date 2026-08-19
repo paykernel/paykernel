@@ -14,9 +14,10 @@ Kernel lives in [`checkout-kernel`](./checkout-kernel) (`@paykernel/example-chec
 
 - Local SQLite (`@paykernel/store-sqlite`) is **single-host only**. These examples use **in-memory** Bun SQLite (`createBunSqliteStoresInMemory`) after an explicit `migrateSqliteAdapter`. `:memory:` is one process, not multi-host.
 - HTTP status codes live in the checkout kernel (`mapInboxOutcome`), **not** in `@paykernel/webhooks`.
-- Fulfillment runs only after an inbox claim, and only when the rematched event is `payment.succeeded` / `capture.completed` with `payment.status === "paid"`.
+- Fulfillment runs only after an inbox claim, and only when the rematched event is `payment.succeeded` / `capture.completed` with `payment.status === "paid"`. Stripe metadata `orderId` cannot fulfill a mock-charged order whose stored `gatewayPaymentId` differs; a missing stored id is bound from the webhook PI then matched.
+- Charges use the **server catalog** amount. Provider recon snapshots use `getPayment` money (currency published with major-unit amounts), never `order.amount` or client JSON.
 - Never fulfill in `onWebhookVerified`. Never `createPayment` again after an indeterminate create — lookup + `decideReconciliationPolicy` only.
-- `POST /internal/provider-paid` is a **local test hook** (injects a paid provider snapshot). It is **unauthenticated** and **must not be deployed**.
+- `POST /internal/provider-paid` and `POST /internal/reconcile` are **local test hooks**. They are **unauthenticated** and **must not be deployed**. Serve them only with `{ enableTestHooks: true }` in tests.
 
 ## Public kernel helpers
 
@@ -48,7 +49,7 @@ Use `signStripeWebhook` / `signedStripePaidWebhook` from the kernel. Do not copy
 
 - `POST /payments`
 - `POST /webhooks/stripe` (raw body text + `stripe-signature`)
-- `POST /internal/reconcile`
+- `POST /internal/reconcile` — **test hook only**, unauthenticated; do not deploy (`enableTestHooks`)
 - `GET /orders/:id`
 - `POST /internal/provider-paid` — **test hook only**, unauthenticated; do not deploy
 - `GET /internal/create-count`

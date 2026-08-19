@@ -486,7 +486,10 @@ export class PayPalGateway extends BaseGateway {
         );
       }
 
-      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH);
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH, {
+        operation: "createPayment",
+        policy: "ephemeral-ok",
+      });
       this.assertMaxLength(
         p.orderId,
         PAYPAL_ORDER_ID_MAX_LENGTH,
@@ -599,6 +602,7 @@ export class PayPalGateway extends BaseGateway {
         isAuthorizationCapture
           ? PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH
           : PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH,
+        { operation: "capturePayment", policy: "require-caller" },
       );
       return withRetry(async () => {
         if (!isAuthorizationCapture && p.amount !== undefined) {
@@ -739,7 +743,10 @@ export class PayPalGateway extends BaseGateway {
    */
   async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
     return this.executeWithHooks("refundPayment", params, async (p) => {
-      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH);
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH, {
+        operation: "refundPayment",
+        policy: "require-caller",
+      });
       this.assertMaxLength(
         p.reason,
         PAYPAL_REFUND_NOTE_MAX_LENGTH,
@@ -892,7 +899,10 @@ export class PayPalGateway extends BaseGateway {
    */
   async voidPayment(params: VoidParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("voidPayment", params, async (p) => {
-      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH);
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_PAYMENTS_REQUEST_ID_MAX_LENGTH, {
+        operation: "voidPayment",
+        policy: "require-caller",
+      });
       return withRetry(async () => {
         const response = await this.fetchWithAccessToken(
           `${this.baseUrl}/v2/payments/authorizations/${p.gatewayPaymentId}/void`,
@@ -945,7 +955,10 @@ export class PayPalGateway extends BaseGateway {
   async authorizePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("authorizePayment", params, async (p) => {
       this.assertAuthorizeParams(p);
-      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH);
+      const requestId = this.getRequestId(p.idempotencyKey, PAYPAL_ORDER_REQUEST_ID_MAX_LENGTH, {
+        operation: "authorizePayment",
+        policy: "require-caller",
+      });
       return withRetry(async () => {
         const response = await this.fetchWithAccessToken(
           `${this.baseUrl}/v2/checkout/orders/${p.gatewayPaymentId}/authorize`,
@@ -1926,8 +1939,8 @@ export class PayPalGateway extends BaseGateway {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
-      // Mutations always send PayPal-Request-Id (caller key or generated UUID)
-      // so in-process withRetry after timeout/5xx cannot double-mutate.
+      // requestId is always a non-empty PayPal-Request-Id: caller key, or
+      // createPayment's ephemeral UUID. require-caller mutations throw first.
       "PayPal-Request-Id": requestId,
     };
 
@@ -1939,30 +1952,40 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Resolve PayPal-Request-Id the same way Stripe resolves Idempotency-Key:
-   * trim; empty / whitespace mint an ephemeral UUID. Empty string is not
-   * nullish — `"" ?? uuid` would keep "" and `if (requestId)` would skip the header.
+   * Resolve PayPal-Request-Id (Stripe Idempotency-Key parity).
+   * Empty / whitespace is omitted — `"" ?? uuid` would keep "" and skip the header.
+   *
+   * S19-EPHEMERAL-KEY: capture / refund / void / authorize **require** a caller
+   * `idempotencyKey`. createPayment may mint an ephemeral UUID for in-process
+   * `withRetry` only (warns).
    */
   private getRequestId(
     idempotencyKey: string | undefined,
     maxLength: number,
+    mode: {
+      operation: string;
+      policy: "require-caller" | "ephemeral-ok";
+    },
   ): string {
     const trimmed = idempotencyKey?.trim();
-    if (!trimmed) {
-      // Ephemeral IDs do not protect app-level retries after crash/timeout.
-      this.logger.warn(
-        "[PayPal] No idempotencyKey provided; generated ephemeral PayPal-Request-Id. App-level retries after crash/timeout can double-mutate — prefer a stable UUID idempotencyKey on every create/capture/refund/void.",
-      );
-      return this.runtime.randomUUID();
+    if (trimmed) {
+      if (trimmed.length > maxLength) {
+        throw new InvalidRequestError(
+          `PayPal idempotencyKey must be ${maxLength} characters or fewer for this operation`,
+        );
+      }
+      return trimmed;
     }
-
-    if (trimmed.length > maxLength) {
+    if (mode.policy === "require-caller") {
       throw new InvalidRequestError(
-        `PayPal idempotencyKey must be ${maxLength} characters or fewer for this operation`,
+        `PayPal ${mode.operation} requires idempotencyKey so crash retries do not duplicate the mutation`,
+        [{ path: ["idempotencyKey"] }],
       );
     }
-
-    return trimmed;
+    this.logger.warn(
+      `[PayPal] ${mode.operation} omitted idempotencyKey; minted an ephemeral PayPal-Request-Id for in-process withRetry only. Crash retries mint a new key and can double-mutate.`,
+    );
+    return this.runtime.randomUUID();
   }
 
   /**

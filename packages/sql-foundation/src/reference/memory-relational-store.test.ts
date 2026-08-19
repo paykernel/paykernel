@@ -151,6 +151,56 @@ describe("NEW-SQL-1: decideWebhookClaim via memory-relational (idle supersedes)"
     expect(store.getWebhook("evt-sql1-idle")?.payloadHash).toBe("h2");
   });
 
+  it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {
+    const store = createMemoryRelationalStore({ nowMs });
+    const first = await store.claimWebhook({
+      key: "evt-s19-cas",
+      payloadHash: "hash-a",
+      owner: "w1",
+      leaseMs: 60_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") throw new Error("expected acquired");
+    await store.failWebhook({
+      key: "evt-s19-cas",
+      leaseToken: first.leaseToken,
+      error: "park a",
+      retryAfterMs: 0,
+    });
+
+    const newer = await store.claimWebhook({
+      key: "evt-s19-cas",
+      payloadHash: "hash-b",
+      owner: "w2",
+      leaseMs: 60_000,
+      payloadRef: JSON.stringify({ id: "new" }),
+    });
+    expect(newer.kind).toBe("acquired");
+    if (newer.kind !== "acquired") throw new Error("expected supersede");
+    await store.failWebhook({
+      key: "evt-s19-cas",
+      leaseToken: newer.leaseToken,
+      error: "park b",
+      retryAfterMs: 0,
+    });
+
+    const stale = await store.claimWebhook({
+      key: "evt-s19-cas",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 60_000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(stale.kind).toBe("payload_hash_conflict");
+    expect(store.getWebhook("evt-s19-cas")?.payloadHash).toBe("hash-b");
+    expect(store.getWebhook("evt-s19-cas")?.payloadRef).toBe(
+      JSON.stringify({ id: "new" }),
+    );
+    expect(store.getWebhook("evt-s19-cas")?.status).toBe("pending");
+  });
+
   it("pending backoff same hash is not_available; mismatch still supersedes", async () => {
     const store = createMemoryRelationalStore({ nowMs });
     const first = await store.claimWebhook({
@@ -192,7 +242,8 @@ describe("NEW-SQL-1: decideWebhookClaim via memory-relational (idle supersedes)"
       join(import.meta.dir, "../../docs/atomic-claims.md"),
       "utf8",
     );
-    expect(claims).toContain("`payload_hash_conflict` is **only** for an **active** lease");
+    expect(claims).toMatch(/payload_hash_conflict/);
+    expect(claims).toMatch(/ifMatchPayloadHash/);
     expect(claims).toMatch(/supersede/i);
 
     const contracts = readFileSync(

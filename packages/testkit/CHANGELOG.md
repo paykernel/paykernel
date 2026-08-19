@@ -4,6 +4,7 @@
 
 ### Patch Changes
 
+- **S19-WH-HASH-TOCTOU:** memory webhook inbox and `runWebhookInboxStoreConformanceSuite` honor `ifMatchPayloadHash` — idle miss is `payload_hash_conflict` with no rewrite. Durable adapters must pass the new case.
 - **WEBHOOKS-1:** Soft-release of expired `claimed` restores one attempt (floor 0); direct reclaim of expired claimed keeps `attempts` unchanged so crash/deploy reclaim does not burn handler `maxAttempts`.
 - **N2 (webhook inbox conformance):** `runWebhookInboxStoreConformanceSuite` now asserts claim `not_available` / `availableAt` gate (no attempt++) and `fail({ restoreAttempt: true })` attempt restore (parking claim parity). Adapters that already implement correctly keep passing.
 - **Paid-like parity:** `paymentStatusToOperationOutcome("approved")` returns `requires_action` (not `succeeded`), matching core `inferOperationOutcome` / PayPal pre-capture semantics. `isPaidOutcome` remains false for approved.

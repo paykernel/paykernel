@@ -422,10 +422,10 @@ function mapPaymobCaptureSettle(
 /**
  * Map Paymob TRANSACTION flags/amounts to a stable type.
  *
- * Order aligns with `PaymobGateway.mapTransactionStatus`: normalized status
- * first, then amount-derived refunds, then flags. Among flags, `pending`
- * ranks before bare `success` (3DS success+pending is processing, not
- * succeeded). Never invent `payment.succeeded` from uncertain outcomes.
+ * Order aligns with `PaymobGateway.mapTransactionStatus`: `pending` /
+ * `processing` / `refund_pending` before refund-completed arms (`hasAmountRefund`,
+ * `isRefunded`, `isRefund`+success) and before bare `success`. Never invent
+ * `payment.succeeded` or `refund.completed` from an in-flight snapshot.
  * Partial capture is never `payment.succeeded` (full paid only).
  */
 function mapPaymobFromFlags(
@@ -438,6 +438,15 @@ function mapPaymobFromFlags(
     amounts?.refundedAmountCents !== undefined && amounts.refundedAmountCents > 0;
   const hasAmountCapture =
     amounts?.capturedAmountCents !== undefined && amounts.capturedAmountCents > 0;
+
+  // S19-MAP-REFUND-PENDING: pending ranks first (mapTransactionStatus).
+  // refund_pending is refund-domain in-flight; other pending is payment.processing.
+  if (s === "refund_pending") {
+    return "refund.pending";
+  }
+  if (flags.pending === true || s === "pending" || s === "processing") {
+    return "payment.processing";
+  }
 
   // Explicit capture action on paid / approved / partial status is decided
   // before the generic status map. Partials must not emit capture.completed
@@ -485,11 +494,6 @@ function mapPaymobFromFlags(
   if (hasAmountCapture && flags.success === true) {
     return mapPaymobCaptureSettle(flags, amounts, status);
   }
-  // I3-PAYMOB-FLAGS-PENDING: pending first (mapTransactionStatus), before
-  // bare success — 3DS success+pending is processing, not succeeded.
-  if (flags.pending === true) {
-    return "payment.processing";
-  }
   if (flags.success === true) {
     return "payment.succeeded";
   }
@@ -525,6 +529,9 @@ function mapPaymobStatusOnly(status?: string): MappedStableEventType | undefined
   if (s === "refund_completed") {
     return "refund.pending";
   }
+  // S19-MAP-REFUND-PENDING: in-flight / failed refund domain statuses.
+  if (s === "refund_pending") return "refund.pending";
+  if (s === "refund_failed") return "refund.failed";
   if (s === "pending" || s === "processing") return "payment.processing";
   if (s === "setup_completed") return "payment_method.setup_completed";
   return undefined;
@@ -545,6 +552,16 @@ function mapPaymobTransactionSignals(
     );
     if (fromFlags !== undefined) return fromFlags;
   }
+  // S19-MAP-REFUND-PENDING: pending-like / failed-refund status ranks above
+  // amount-only refund.completed when flags are absent.
+  const fromStatus = mapPaymobStatusOnly(context?.status);
+  if (
+    fromStatus === "payment.processing" ||
+    fromStatus === "refund.pending" ||
+    fromStatus === "refund.failed"
+  ) {
+    return fromStatus;
+  }
   // Amount-only without decisive flags (pure mapper / incomplete context)
   if (
     context?.amounts?.refundedAmountCents !== undefined &&
@@ -552,7 +569,7 @@ function mapPaymobTransactionSignals(
   ) {
     return "refund.completed";
   }
-  return mapPaymobStatusOnly(context?.status);
+  return fromStatus;
 }
 
 function mapPaymobEventType(

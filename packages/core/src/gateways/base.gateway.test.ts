@@ -24,6 +24,7 @@ class TestGateway extends BaseGateway {
       immediateCapture: true,
       refunds: true,
       voids: true,
+      hostedCheckout: true,
     });
   }
 
@@ -93,6 +94,53 @@ class TestGateway extends BaseGateway {
         gatewayId: "pay_otp",
         status: "paid",
         redirectUrl: undefined,
+        rawResponse: {},
+      };
+    });
+  }
+
+  async createCheckoutSession(params: {
+    successUrl: string;
+    amount?: number;
+    currency?: string;
+    idempotencyKey?: string;
+  }): Promise<{
+    success: boolean;
+    sessionId: string;
+    url?: string;
+    rawResponse: unknown;
+    outcome?: string;
+    reconciliationRequired?: boolean;
+  }> {
+    return this.executeWithHooks("createCheckoutSession", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        success: true,
+        sessionId: "cs_ok",
+        url: "https://checkout.test/pay",
+        rawResponse: {},
+      };
+    });
+  }
+
+  async getCheckoutSession(params: { sessionId: string }): Promise<{
+    success: boolean;
+    sessionId: string;
+    paymentIntentId: string | undefined;
+    url: string | null;
+    status: string;
+    paymentStatus: string;
+    rawResponse: unknown;
+  }> {
+    return this.executeWithHooks("getCheckoutSession", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        success: true,
+        sessionId: params.sessionId,
+        paymentIntentId: undefined,
+        url: null,
+        status: "open",
+        paymentStatus: "unpaid",
         rawResponse: {},
       };
     });
@@ -198,5 +246,34 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
     await expect(gw.createPayment(createBase)).rejects.toBeInstanceOf(
       NetworkError,
     );
+  });
+
+  it("S19-CKO-TIMEOUT: createCheckoutSession POST timeout is checkout-shaped indeterminate, not a retryable failed-create", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.createCheckoutSession({
+      successUrl: "https://example.test/success",
+      amount: 10,
+      currency: "USD",
+      idempotencyKey: "idem_cko_timeout",
+    });
+    expect(result.success).not.toBe(true);
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.sessionId).toBe("idem_cko_timeout");
+    expect(result).not.toEqual(
+      expect.objectContaining({ status: "processing" }),
+    );
+    expect(result).not.toEqual(
+      expect.objectContaining({ gatewayId: "idem_cko_timeout" }),
+    );
+  });
+
+  it("S19-CKO-TIMEOUT: getCheckoutSession stays throwing on afterProviderSubmit NetworkError", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    await expect(
+      gw.getCheckoutSession({ sessionId: "cs_get_timeout" }),
+    ).rejects.toBeInstanceOf(NetworkError);
   });
 });

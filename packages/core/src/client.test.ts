@@ -68,7 +68,10 @@ describe('PaymentClient Stripe convenience methods', () => {
             defaultGateway: 'stripe',
         });
 
-        const result = await client.voidPayment({ gatewayPaymentId: 'pi_cancel' });
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_cancel',
+            idempotencyKey: 'idem_client_void',
+        });
 
         expect(requestedUrl).toContain('/payment_intents/pi_cancel/cancel');
         expect(result.status).toBe('cancelled');
@@ -790,7 +793,10 @@ describe('PaymentClient after-hook post-success isolation', () => {
             },
         });
 
-        const result = await client.voidPayment({ gatewayPaymentId: 'pi_abort' });
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_abort',
+            idempotencyKey: 'idem_client_void',
+        });
         expect(result.gatewayId).toBe('pi_abort');
         expect(result.status).toBe('cancelled');
         expect(onErrorCalled).toBe(false);
@@ -822,7 +828,10 @@ describe('PaymentClient after-hook post-success isolation', () => {
             },
         });
 
-        const result = await client.voidPayment({ gatewayPaymentId: 'pi_after_throw' });
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_after_throw',
+            idempotencyKey: 'idem_client_void',
+        });
         expect(result.gatewayId).toBe('pi_after_throw');
         expect(result.status).toBe('cancelled');
         expect(onErrorCalled).toBe(false);
@@ -874,6 +883,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_compose_proceed',
+            idempotencyKey: 'idem_client_void',
         });
         expect(order).toEqual(['first', 'second']);
         expect(result.gatewayId).toBe('pi_compose_proceed');
@@ -917,7 +927,10 @@ describe('PaymentClient after-hook post-success isolation', () => {
             },
         });
 
-        const result = await client.voidPayment({ gatewayPaymentId: 'pi_after_keep' });
+        const result = await client.voidPayment({
+            gatewayPaymentId: 'pi_after_keep',
+            idempotencyKey: 'idem_client_void',
+        });
         expect(order).toEqual(['specific', 'global-throw']);
         expect(result.gatewayId).toBe('pi_after_keep');
         expect((result.rawResponse as { fromSpecific?: boolean }).fromSpecific).toBe(
@@ -965,6 +978,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_money_guard',
+            idempotencyKey: 'idem_client_void',
         });
         // Money identity restored from original gateway result
         expect(result.success).toBe(true);
@@ -1130,6 +1144,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_no_next_action',
+            idempotencyKey: 'idem_client_void',
         });
 
         expect(result.gatewayId).toBe('pi_no_next_action');
@@ -1354,6 +1369,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_no_redirect',
+            idempotencyKey: 'idem_client_void',
         });
 
         expect(result.gatewayId).toBe('pi_no_redirect');
@@ -1393,6 +1409,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_no_goid',
+            idempotencyKey: 'idem_client_void',
         });
 
         expect(result.gatewayId).toBe('pi_no_goid');
@@ -1571,6 +1588,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_nested_refs',
+            idempotencyKey: 'idem_client_void',
         });
 
         expect(result.gatewayId).toBe('pi_nested_refs');
@@ -1745,6 +1763,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_no_decline',
+            idempotencyKey: 'idem_client_void',
         });
 
         expect(result.gatewayId).toBe('pi_no_decline');
@@ -1789,6 +1808,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_inplace_guard',
+            idempotencyKey: 'idem_client_void',
         });
         expect(result.success).toBe(true);
         expect(result.status).toBe('cancelled');
@@ -1826,6 +1846,7 @@ describe('PaymentClient after-hook post-success isolation', () => {
 
         const result = await client.voidPayment({
             gatewayPaymentId: 'pi_null_mod',
+            idempotencyKey: 'idem_client_void',
         });
         expect(result.success).toBe(true);
         expect(result.status).toBe('cancelled');

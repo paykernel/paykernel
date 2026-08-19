@@ -1,4 +1,6 @@
 import { createCheckoutFetchApp } from "./handlers";
 import { runCheckoutHttpScenarios } from "./scenarios";
 
-runCheckoutHttpScenarios("checkout-kernel", (kernel) => createCheckoutFetchApp(kernel));
+runCheckoutHttpScenarios("checkout-kernel", (kernel) =>
+  createCheckoutFetchApp(kernel, { enableTestHooks: true }),
+);

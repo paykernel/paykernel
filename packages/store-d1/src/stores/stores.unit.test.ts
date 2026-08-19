@@ -482,6 +482,46 @@ describe("webhook store unit (B5/B4)", () => {
     expect(soft?.sql).toMatch(/WHERE\s+status\s*=\s*'claimed'\s+AND\s+key\s+IN/i);
   });
 
+  it("S19-CLOCK-LEASE: get() does not clear lease_token on a still-valid-to-issuer lease", async () => {
+    const issuerMs = 1_700_000_000_000;
+    const issuedAt = new Date(issuerMs).toISOString();
+    const leaseExp = new Date(issuerMs + 30_000).toISOString();
+    const clock = createFakeClock({ initialMs: issuerMs + 35_000 });
+    const claimed = {
+      key: "evt-live",
+      status: "claimed",
+      payload_hash: "h1",
+      payload_ref: null,
+      gateway: null,
+      provider_event_id: null,
+      lease_owner: "issuer",
+      lease_token: "lt_issuer",
+      lease_expires_at: leaseExp,
+      attempts: 1,
+      generation: 1,
+      available_at: issuedAt,
+      first_received_at: issuedAt,
+      last_received_at: issuedAt,
+      completed_at: null,
+      last_error_sanitized: null,
+      tenant_id: null,
+      created_at: issuedAt,
+      updated_at: issuedAt,
+    };
+    const executor = createScriptedExecutor({
+      onQuery: () => [claimed],
+      onExecute: () => ({ changes: 1 }),
+    });
+    const store = createD1WebhookInboxStore({ executor, clock });
+    const got = await store.get("evt-live");
+    expect(got?.status).toBe("claimed");
+    expect(got?.leaseToken).toBe("lt_issuer");
+    const wipe = executor.calls.find(
+      (c) => /^\s*UPDATE/i.test(c.sql) && /lease_token\s*=\s*NULL/i.test(c.sql),
+    );
+    expect(wipe).toBeUndefined();
+  });
+
   it("claim SQL gates pending on available_at", async () => {
     const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
     const now = new Date(clock.nowMs()).toISOString();
@@ -535,6 +575,69 @@ describe("webhook store unit (B5/B4)", () => {
       (c) => c.sql.includes("ON CONFLICT") || c.sql.includes("on conflict") || c.sql.includes("INSERT"),
     );
     expect(claimCall?.sql).toContain("available_at");
+    expect(claimCall?.sql).toMatch(/\? IS NULL OR/);
+  });
+
+  it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {
+    const clock = createFakeClock({ initialMs: 1_700_000_000_000 });
+    const now = new Date(clock.nowMs()).toISOString();
+    const idle = {
+      key: "evt-s19",
+      status: "pending",
+      payload_hash: "hash-b",
+      payload_ref: JSON.stringify({ id: "new" }),
+      gateway: null,
+      provider_event_id: null,
+      lease_owner: null,
+      lease_token: null,
+      lease_expires_at: null,
+      attempts: 1,
+      generation: 2,
+      available_at: now,
+      first_received_at: now,
+      last_received_at: now,
+      completed_at: null,
+      last_error_sanitized: null,
+      tenant_id: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const executor = createScriptedExecutor({
+      onQuery: (sql) => {
+        if (sql.includes("INSERT") || sql.includes("ON CONFLICT") || sql.includes("on conflict")) {
+          return [];
+        }
+        if (sql.includes("SELECT")) {
+          return [idle];
+        }
+        return [];
+      },
+    });
+    const store = createD1WebhookInboxStore({ executor, clock });
+    const r = await store.claim({
+      key: "evt-s19",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 1000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(r.kind).toBe("payload_hash_conflict");
+    if (r.kind === "payload_hash_conflict") {
+      expect(r.record.payloadHash).toBe("hash-b");
+      expect(r.record.status).toBe("pending");
+    }
+    const claimCall = executor.calls.find(
+      (c) => c.sql.includes("ON CONFLICT") || c.sql.includes("on conflict") || c.sql.includes("INSERT"),
+    );
+    expect(claimCall?.params.slice(-2)).toEqual(["hash-a", "hash-a"]);
+    const repair = executor.calls.find(
+      (c) =>
+        /^\s*UPDATE/i.test(c.sql) &&
+        c.sql.includes("available_at") &&
+        c.sql.includes("lease_expires_at"),
+    );
+    expect(repair).toBeUndefined();
   });
 });
 

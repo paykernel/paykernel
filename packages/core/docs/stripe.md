@@ -66,6 +66,7 @@ const session = await stripe.createCheckoutSession({
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
     metadata: { paymentId: 'order_1234' },
+    idempotencyKey: crypto.randomUUID(),
     lineItems: [
         {
             priceData: {
@@ -97,6 +98,7 @@ const session = await stripe.createCheckoutSession({
     currency: 'USD',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
+    idempotencyKey: crypto.randomUUID(),
 });
 ```
 
@@ -110,6 +112,7 @@ const session = await stripe.createCheckoutSession({
     mode: 'subscription',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
+    idempotencyKey: crypto.randomUUID(),
     lineItems: [
         {
             price: 'price_123456789',
@@ -126,6 +129,7 @@ const session = await stripe.createCheckoutSession({
     mode: 'subscription',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
+    idempotencyKey: crypto.randomUUID(),
     lineItems: [
         {
             priceData: {
@@ -151,6 +155,7 @@ const session = await stripe.createCheckoutSession({
     cancelUrl: 'https://example.com/cancel',
     currency: 'USD',
     customerId: 'cus_123456789',
+    idempotencyKey: crypto.randomUUID(),
 });
 ```
 
@@ -227,18 +232,19 @@ const session = await stripe.getCheckoutSession({
 
 // session.sessionId, session.url, session.status, session.paymentStatus
 // session.paymentIntentId — use this pi_... for refund/capture/void
-// session.amount, session.currency (when Stripe includes amount_total)
+// session.amount, session.currency (settled amount_received when PI is expanded)
 ```
 
 Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must match Stripe's `cs_...` form. The gateway expands `payment_intent` so `paymentIntentId` is available when the session created one.
-`createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** `{ success: true }` — it throws `NetworkError` (create is tagged `afterProviderSubmit` so callers must reconcile, not retry as a fresh session).
+When the expanded `payment_intent` is present, `getCheckoutSession` **does not ignore it**: `amount` prefers settled `amount_received` (then `amount_captured`) over `amount_total`, and `paymentStatus` rematches refunds / partial capture the same way `getPayment` does (`refunded` / `partially_refunded` / `partially_captured` / fail-closed `processing` when the charge snapshot is unobservable). Proven refunds also publish `refundedAmount` together with `currency`. Classic unpaid sessions keep native `payment_status`.
+`createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** `{ success: true }`. Create is tagged `afterProviderSubmit`: timeout / empty / non-JSON 200 returns a **checkout-shaped** result with `outcome: 'indeterminate'` and `reconciliationRequired: true` (`success` is not `true`, and it is **not** a payment snapshot with `status: 'processing'`). Do **not** retry as a fresh session. `getCheckoutSession` (GET) still **throws** `NetworkError`.
 `createCheckoutSession` may still return `success: true` with a session id when Stripe omits `url` (`null` or empty). The field is **omitted** in that case — it is not a string URL and must not be treated as one. Hosted Checkout can create a session before a customer-facing URL exists (for example some embedded / custom flows).
 
 ### `getPayment` status and amount derivation
 
 `getPayment` expands `latest_charge` and derives status as follows (for `succeeded` PaymentIntents). Refund math is the same helper used by `payment_intent.succeeded` webhooks (`stripeSucceededIntentRefundStatus`).
 
-1. **Charge snapshot**: prefer an expanded `latest_charge` object whose refund fields are **observable** (`refunded === true` or finite `amount_refunded`, including `0`). When Stripe returns `latest_charge` as an **unexpanded string ID** or an **id-only `{ id: "ch_…" }` object**, the gateway re-fetches `GET /charges/{id}`. If `latest_charge` is omitted, the gateway uses `charges.data[0]` (legacy list shape) the same way webhooks do. If the re-fetch fails or refunds stay unobservable, status is **`processing`** (fail closed) — never map `succeeded` + unobservable refunds as `paid` (Stripe keeps PaymentIntent status `succeeded` after refunds).
+1. **Charge snapshot**: prefer an expanded `latest_charge` object whose refund fields are **observable** (`refunded === true` or finite `amount_refunded`, including `0`). When Stripe returns `latest_charge` as an **unexpanded string ID** or an **id-only `{ id: "ch_…" }` object**, the gateway re-fetches `GET /charges/{id}`. If `latest_charge` is omitted, the gateway uses `charges.data[0]` (legacy list shape) the same way webhooks do. **Auth / 5xx / 429 / transport failures on `GET /charges/{id}` propagate** (`AuthenticationError` / `NetworkError` / `RateLimitError`) — they are not “still settling.” Fail-closed **`processing`** is only for an unobservable charge (no fetch attempted, 404, or a non-retryable `GatewayApiError`). Never map `succeeded` + unobservable refunds as `paid` (Stripe keeps PaymentIntent status `succeeded` after refunds).
 2. **Refunds first** (override capture state): `refunded: true` is a full refund. If `amount_refunded > 0`, completeness is measured against the **captured base**, not the original authorization:
    - captured base = `amount_received` (if finite) → else `latest_charge.amount_captured` (if finite). **No fallback to authorized PaymentIntent `amount`** (STRIPE-4) — that would claim full `refunded` against the auth total after a partial capture.
    - status is `refunded` when the captured base is known, `capturedBase > 0`, and `amount_refunded >= capturedBase`; otherwise `partially_refunded` (including when captured fields are missing — fail closed).
@@ -252,9 +258,14 @@ Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must matc
 
 ## Idempotency
 
-Stripe mutations (`createPayment`, `capturePayment`, `refundPayment`, `voidPayment`, `createCheckoutSession`) always send an `Idempotency-Key`. When you **omit** `idempotencyKey` (leave the field undefined), the SDK generates a `crypto.randomUUID()` so in-process retries of transient network/5xx errors are safe against double-charges. **Do not pass an empty or whitespace-only key** — validation rejects those with `InvalidRequestError` / schema failure (STRIPE-6). Supply your own stable UUID when you need app-level crash/retry safety across processes (the auto-generated key is only known for the lifetime of that single call).
+Stripe mutations always send an `Idempotency-Key` when they POST.
 
-HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true` (indeterminate — reconcile, do not treat as `failed` / `pending` / `success: true`). Create / capture / void require a string PaymentIntent `id` **and** `status`; refunds require string `id` **and** `status`. Missing `status` after HTTP 200 is the same indeterminate `NetworkError` (not `mapStatus(undefined)` → `failed` coerced to a clean decline). Void sets `forceOutcome: succeeded` only when native status is `canceled` / `cancelled` (intentional void). A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
+- **`capturePayment` / `refundPayment` / `voidPayment` / `createCheckoutSession` require a caller `idempotencyKey`.** Omitting it throws `InvalidRequestError` **before** the mutation POST (Paymob/Moyasar parity). Crash retries that mint a new UUID would otherwise duplicate captures, refunds, voids, or Checkout Sessions. Checkout create is post-submit indeterminate on timeout — a new key would look like a fresh session.
+- **`createPayment`** still mints an ephemeral `crypto.randomUUID()` when you omit the field, **and logs a warning**. That key exists only for in-process `withRetry` of transient network/5xx errors. Crash retries mint a new key and can create a second PaymentIntent.
+
+**Do not pass an empty or whitespace-only key** — validation rejects those with `InvalidRequestError` / schema failure (STRIPE-6). Supply your own stable UUID for app-level crash/retry safety across processes.
+
+HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true`. Payment / capture / refund / void map that to `outcome: 'indeterminate'` + `reconciliationRequired: true` (reconcile; do not treat as `failed` / `pending` / `success: true`). **Checkout create** maps to a **checkout-shaped** indeterminate result (`success` is not `true`, `sessionId` is the caller key / `"unknown"` when Stripe never returned `cs_...`) — not a payment snapshot. Create / capture / void require a string PaymentIntent `id` **and** `status`; refunds require string `id` **and** `status`. Missing `status` after HTTP 200 is the same indeterminate path (not `mapStatus(undefined)` → `failed` coerced to a clean decline). Void sets `forceOutcome: succeeded` only when native status is `canceled` / `cancelled` (intentional void). A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
 
 ## Checkout customer identity
 
@@ -267,7 +278,7 @@ Pass either `customerId` **or** `customerEmail`, not both. Stripe Checkout rejec
 Pass the exact raw request body string or `Buffer`. Do not pass a parsed JSON object; Stripe signs the original byte stream and verification will fail if the body is changed. Buffer payloads are verified from their original bytes.
 `parseWebhookEvent` expects Stripe snapshot event payloads that include `data.object`. If you configure Stripe thin events, retrieve or hydrate the related Stripe object first, then pass a snapshot-shaped payload to the parser.
 
-**STRIPE-CKO-1:** hydrating the *current* Checkout Session does not change `payment_status: paid` after refunds. When the hydrated session includes an expanded `payment_intent` / `latest_charge` / `charges` snapshot, `checkout.session.completed` (`payment_status: paid`) and `checkout.session.async_payment_succeeded` map `refunded` / `partially_refunded` (same captured-base rule as `payment_intent.succeeded`) and rematch Phase 7 dual-write to `refund.completed` (not `payment.succeeded`). When that hydrated object has **no charge snapshot** (refunds unobservable), or `latest_charge` is a string id / id-only `{ id: "ch_…" }`, status is **`processing`** and dual-write is `payment.processing` — do not invent `paid` / `payment.succeeded`. Classic snapshot events that keep `payment_intent` as a string id still map `paid` (the historical checkout-time object, not a current post-refund retrieve).
+**STRIPE-CKO-1:** hydrating the *current* Checkout Session does not change `payment_status: paid` after refunds. When the hydrated session includes an expanded `payment_intent` / `latest_charge` / `charges` snapshot, `checkout.session.completed` (`payment_status: paid`) and `checkout.session.async_payment_succeeded` map `refunded` / `partially_refunded` (same captured-base rule as `payment_intent.succeeded`) and rematch Phase 7 dual-write to `refund.completed` (not `payment.succeeded`). **Amount** on those hydrated events prefers settled `amount_received` (then `amount_captured`) over `amount_total`; refund rematch then publishes cumulative `amount_refunded`. When that hydrated object has **no charge snapshot** (no expanded charge and no observable `charges.data[0]`), status is **`processing`** and dual-write is `payment.processing` — do not invent `paid` / `payment.succeeded`. A string / id-only `latest_charge` still rematches an observable `charges.data` refund (STRIPE-CHG-1). Classic snapshot events that keep `payment_intent` as a string id (no charge snapshot) also map **`processing`** / `payment.processing` — Stripe leaves `payment_status: paid` after refunds, so an unexpanded session cannot prove settlement. Expand `payment_intent` or fulfill from `payment_intent.succeeded` / `getPayment`.
 
 Keep the Stripe webhook endpoint API version aligned with this gateway's configured `apiVersion` when possible; Stripe webhook endpoints can use a different API version than direct REST requests. Set `webhookApiVersion` only when you want the SDK to reject events whose `api_version` does not match that value — it is not defaulted from `apiVersion`.
 
@@ -319,6 +330,8 @@ Subscription-related webhooks are normalized for common billing flows. `checkout
 
 Unhandled / unknown event types do **not** run non-`payment_intent` object statuses through the PaymentIntent status map (which fails closed as `failed` for unmapped PI states). Foreign statuses such as subscription/tax `active` on an unmapped event type normalize as `pending`.
 
+**`charge.dispute.*`:** envelope `status` is the Stripe dispute lifecycle (`needs_response`, `under_review`, `won`, `lost`, …) — **never generic payment `pending`**. Last-write persist of `event.status` must not move a paid payment to pending. Phase 7 dual-write is `dispute.opened` / `dispute.updated` / `dispute.closed` (`capabilities.disputes` stays `false`). Handle the dispute arm; do not treat these as payment lifecycle. `gatewayPaymentId` prefers `payment_intent` when present.
+
 ### Subscription status mapping
 
 | Stripe subscription `status` | SDK `PaymentStatus` |
@@ -329,11 +342,11 @@ Unhandled / unknown event types do **not** run non-`payment_intent` object statu
 | `canceled`, `incomplete_expired` | `cancelled` |
 | other / unknown | `pending` |
 
-Only `canceled` and `incomplete_expired` map to `cancelled`. **`active` maps to `processing`**, not `paid` — a live subscription is not a settled one-shot charge; fulfill from invoice/PI money events (or Checkout paid) instead of subscription status alone. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. Note: a Checkout Session with `payment_status: paid` for a $0 trial can still normalize as `paid` via the `checkout.session.completed` path.
+Only `canceled` and `incomplete_expired` map to `cancelled`. **`active` maps to `processing`**, not `paid` — a live subscription is not a settled one-shot charge; fulfill from invoice/PI money events (or Checkout paid) instead of subscription status alone. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. A Checkout Session with `payment_status: paid` and an unexpanded string `payment_intent` maps to **`processing`** (S19-CKO-UNEXPANDED), including $0 trials — expand `payment_intent` or fulfill from invoice / PaymentIntent money events. `no_payment_required` + `mode: subscription` is `pending`.
 
 > **Warning (STRIPE-5):** subscription lifecycle webhooks and **subscription-mode Checkout** paid events often set `gatewayPaymentId` to `sub_...` (not `pi_...`) and dual-write `provider.unmapped` for pure lifecycle events. Refund/capture/void **require** a `pi_...` PaymentIntent ID and fail closed with `InvalidRequestError` on `sub_*` / `cs_*`. Prefer invoice money events that surface a PaymentIntent, or resolve the PI via `getCheckoutSession` / Stripe before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
 
-For `payment_intent.succeeded` (and other succeeded PaymentIntent payloads), webhook `amount` prefers settled money: `amount_received` → `latest_charge.amount_captured` / `charges.data[0].amount_captured` so partial captures report the settled total. When settled is finite and less than authorized `amount`, status is `partially_captured` (not `paid`). When settled fields are **missing**, status is **`processing`** (fail closed) — never map an incomplete snapshot to full `paid` / over-fulfill on auth amount alone. **STRIPE-2:** Stripe does not decrement `amount_received` on refund and leaves PI status `succeeded`. When expanded `latest_charge` has `amount_refunded > 0` or `refunded: true`, domain status is **`refunded` / `partially_refunded`** (same captured-base rule as `getPayment`) and Phase 7 dual-write is **`refund.completed`** (not `payment.succeeded`). Webhook `amount` then publishes cumulative `amount_refunded`. When `latest_charge` is an **unexpanded id string** (Stripe's default PI webhook shape) and `amount_received` is finite and `> 0`, status is **`paid`** unless an *expanded* charge snapshot proves a refund. Keep **`processing`** only when settled money is missing. **STRIPE-CHG-1:** when `latest_charge` is omitted, refund totals are read from `charges.data[0].amount_refunded` / `refunded` (same list shape as captured amount). An unexpanded `latest_charge` id does **not** fall through to `charges.data`. **STRIPE-CKO-1:** the same refund rematch applies to hydrated Checkout `payment_status: paid` / `async_payment_succeeded` snapshots (see hydrate note above). **Phase 7 dual-write** for both the **partial** (`partially_captured`) and **incomplete-settled** (`processing`) cases sets `stableType` / `event.type` to **`payment.processing`**, not `payment.succeeded` — aligned with Paymob and with `isPaidOutcome` (neither partial nor incomplete settled is paid-like). Full success (status `paid`) dual-writes `payment.succeeded`. Fulfill only when status is `paid` or `isPaidOutcome(...)` is true; do not ship on type-only `payment.succeeded` handlers without checking status. Amount is only set from real money fields on the event object; it is not defaulted to `0` when Stripe omits amount data. Currency is only set when Stripe includes it — missing currency is left undefined rather than defaulted to `USD`. **Amount conversion is also skipped when currency is missing** (invoice/checkout and any incomplete snapshot): the gateway never invents a USD exponent to scale minor units, because that mis-scales zero-decimal and three-decimal currencies.
+For `payment_intent.succeeded` (and other succeeded PaymentIntent payloads), webhook `amount` prefers settled money: `amount_received` → `latest_charge.amount_captured` / `charges.data[0].amount_captured` so partial captures report the settled total. When settled is finite and less than authorized `amount`, status is `partially_captured` (not `paid`). When settled fields are **missing**, status is **`processing`** (fail closed) — never map an incomplete snapshot to full `paid` / over-fulfill on auth amount alone. **STRIPE-2 / C1:** Stripe does not decrement `amount_received` on refund and leaves PI status `succeeded`. When expanded `latest_charge` **or** an observable `charges.data[0]` has `amount_refunded > 0` or `refunded: true`, domain status is **`refunded` / `partially_refunded`** (same captured-base rule as `getPayment`) and Phase 7 dual-write is **`refund.completed`** (not `payment.succeeded`). Webhook `amount` then publishes cumulative `amount_refunded`. When `latest_charge` is an **unexpanded id string** (Stripe's default PI webhook shape), there is **no** `charges.data` refund snapshot, and `amount_received` is finite and `> 0`, status stays **`paid`** (C1). Keep **`processing`** only when settled money is missing. **Do not last-write `payment_intent.succeeded` over `charge.refunded`** — a delayed first delivery of PI.succeeded after the charge was refunded would otherwise persist `paid` on top of `refunded`. Prefer `charge.refunded` / refund events, or rematch from `getPayment`, when both arrive. **STRIPE-CHG-1:** observable `charges.data[0]` refunds are honored even when `latest_charge` is an unexpanded string id. **STRIPE-CKO-1:** the same refund rematch applies to hydrated Checkout `payment_status: paid` / `async_payment_succeeded` snapshots (see hydrate note above). **Phase 7 dual-write** for both the **partial** (`partially_captured`) and **incomplete-settled** (`processing`) cases sets `stableType` / `event.type` to **`payment.processing`**, not `payment.succeeded` — aligned with Paymob and with `isPaidOutcome` (neither partial nor incomplete settled is paid-like). Full success (status `paid`) dual-writes `payment.succeeded`. Fulfill only when status is `paid` or `isPaidOutcome(...)` is true; do not ship on type-only `payment.succeeded` handlers without checking status. Amount is only set from real money fields on the event object; it is not defaulted to `0` when Stripe omits amount data. Currency is only set when Stripe includes it — missing currency is left undefined rather than defaulted to `USD`. **Amount conversion is also skipped when currency is missing** (invoice/checkout and any incomplete snapshot): the gateway never invents a USD exponent to scale minor units, because that mis-scales zero-decimal and three-decimal currencies.
 
 `createPayment` / `capturePayment` / `getPayment` / `voidPayment` use the same settled-amount fail-closed rule when the PaymentIntent is `succeeded`: missing `amount_received` / `amount_captured` → domain status `processing` and outcome `requires_action` (not full `paid` / `succeeded`). Partial capture domain status is also outcome `requires_action` (open money), not operation-succeeded. **STRIPE-1:** PaymentIntent results always publish ISO `currency` together with major-unit `amount` / `refundedAmount` (never naked major units). When currency is missing, amount-like fields are omitted.
 

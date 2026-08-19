@@ -71,6 +71,8 @@ await migrateSqliteAdapter(stores.executor);
 
 ### Node version matrix (`/node`)
 
+`package.json` `engines.node` is **`>=18`** for `/better-sqlite3` and root types. **`@paykernel/store-sqlite/node` requires Node `>=22.5.0`.**
+
 | Node | `node:sqlite` status |
 |------|----------------------|
 | 22.5.0+ | Experimental (`DatabaseSync`) |

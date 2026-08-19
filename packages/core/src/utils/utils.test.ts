@@ -10,10 +10,12 @@ import {
   CreatePaymentParamsSchema,
   RefundParamsSchema,
 } from "../types/validation";
+import { sha256Hex } from "../runtime/crypto-portable";
 import { resolveDefaultCrypto } from "../runtime/crypto-provider";
 import {
   InMemoryIdempotencyStore,
   fingerprintParams,
+  stableStringifyParams,
 } from "./idempotency";
 import { money } from "./money";
 
@@ -1173,7 +1175,8 @@ describe("fingerprintParams", () => {
 
   it("fingerprints Date as ISO-8601, not empty object", () => {
     const d = new Date("2026-01-15T12:00:00.000Z");
-    expect(fingerprintParams(d)).toBe(`__date__:${d.toISOString()}`);
+    expect(stableStringifyParams(d)).toBe(`__date__:${d.toISOString()}`);
+    expect(fingerprintParams(d)).toBe(sha256Hex(stableStringifyParams(d)));
     expect(fingerprintParams(d)).not.toBe(fingerprintParams({}));
     expect(fingerprintParams({ at: d })).toBe(
       fingerprintParams({ at: new Date("2026-01-15T12:00:00.000Z") }),
@@ -1244,5 +1247,55 @@ describe("fingerprintParams", () => {
         currency: "USD",
       }),
     );
+  });
+
+  it("persists a sha256 digest, not raw stringify (S19-FINGERPRINT)", () => {
+    const params = { amount: 10, currency: "USD", orderId: "ord_1" };
+    const fp = fingerprintParams(params);
+    expect(fp).toMatch(/^[0-9a-f]{64}$/);
+    expect(fp).not.toBe(stableStringifyParams(params));
+    expect(fp).not.toContain("USD");
+    expect(fp).not.toContain("ord_1");
+    expect(fp).toBe(sha256Hex(stableStringifyParams(params)));
+    expect(fp).toBe(
+      fingerprintParams({ orderId: "ord_1", currency: "USD", amount: 10 }),
+    );
+  });
+
+  it("redacts PII so card numbers are not stored and do not split identity", () => {
+    const withVisa = {
+      amount: 10,
+      currency: "USD",
+      cardNumber: "4111111111111111",
+    };
+    const withMc = {
+      amount: 10,
+      currency: "USD",
+      cardNumber: "5555555555554444",
+    };
+    const redacted = {
+      amount: 10,
+      currency: "USD",
+      cardNumber: "[REDACTED]",
+    };
+    const fp = fingerprintParams(withVisa);
+    expect(fp).not.toContain("4111111111111111");
+    expect(fp).not.toBe(sha256Hex(stableStringifyParams(withVisa)));
+    expect(fp).toBe(sha256Hex(stableStringifyParams(redacted)));
+    expect(fp).toBe(fingerprintParams(withMc));
+  });
+
+  it("strips AbortSignal so caller signals are not identity", () => {
+    const amount = { amount: 10, currency: "USD", orderId: "ord_sig" };
+    const withSignal = {
+      ...amount,
+      signal: new AbortController().signal,
+    };
+    const otherSignal = {
+      ...amount,
+      signal: new AbortController().signal,
+    };
+    expect(fingerprintParams(withSignal)).toBe(fingerprintParams(amount));
+    expect(fingerprintParams(withSignal)).toBe(fingerprintParams(otherSignal));
   });
 });

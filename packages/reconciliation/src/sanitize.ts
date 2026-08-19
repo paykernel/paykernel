@@ -33,6 +33,21 @@ const SECRET_PATTERNS: RegExp[] = [
   /"(?:secret_token|client_secret|api_key|apiKey|password|authorization|signature)"\s*:\s*"[^"]*"/gi,
 ];
 
+/** Digit run that may be an embedded PAN (13–19 digits, optional spaces/dashes). */
+const EMBEDDED_PAN_IN_MESSAGE = /\d[\d\s-]{11,21}\d/g;
+
+function isPanDigitRun(value: string): boolean {
+  const digits = value.replace(/[\s-]/g, "");
+  return digits.length >= 13 && digits.length <= 19 && /^\d+$/.test(digits);
+}
+
+function redactEmbeddedPans(message: string): string {
+  EMBEDDED_PAN_IN_MESSAGE.lastIndex = 0;
+  return message.replace(EMBEDDED_PAN_IN_MESSAGE, (run) =>
+    isPanDigitRun(run) ? "[REDACTED]" : run,
+  );
+}
+
 /** Known secret object keys redacted when stringifying plain objects. */
 const SECRET_OBJECT_KEYS = new Set([
   "secret_token",
@@ -109,6 +124,7 @@ export function sanitizeReconciliationError(
     re.lastIndex = 0;
     out = out.replace(re, "[REDACTED]");
   }
+  out = redactEmbeddedPans(out);
 
   // Collapse runs of whitespace
   out = out.replace(/\s+/g, " ").trim();

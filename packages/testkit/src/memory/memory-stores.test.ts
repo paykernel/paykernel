@@ -430,6 +430,54 @@ describe("createMemoryWebhookInboxStore", () => {
     expect(c.kind).toBe("payload_hash_conflict");
   });
 
+  it("S19 ifMatchPayloadHash miss does not rewrite an idle newer hash", async () => {
+    const store = createMemoryWebhookInboxStore({ clock: createFakeClock() });
+    const first = await store.claim({
+      key: "evt_s19_cas",
+      payloadHash: "hash-a",
+      owner: "w1",
+      leaseMs: 5000,
+      payloadRef: JSON.stringify({ id: "old" }),
+    });
+    expect(first.kind).toBe("acquired");
+    if (first.kind !== "acquired") throw new Error("expected acquired");
+    await store.fail({
+      key: "evt_s19_cas",
+      leaseToken: first.leaseToken,
+      error: "park a",
+      retryAfterMs: 0,
+    });
+    const newer = await store.claim({
+      key: "evt_s19_cas",
+      payloadHash: "hash-b",
+      owner: "w2",
+      leaseMs: 5000,
+      payloadRef: JSON.stringify({ id: "new" }),
+    });
+    expect(newer.kind).toBe("acquired");
+    if (newer.kind !== "acquired") throw new Error("expected supersede");
+    await store.fail({
+      key: "evt_s19_cas",
+      leaseToken: newer.leaseToken,
+      error: "park b",
+      retryAfterMs: 0,
+      restoreAttempt: true,
+    });
+    const stale = await store.claim({
+      key: "evt_s19_cas",
+      payloadHash: "hash-a",
+      owner: "worker",
+      leaseMs: 5000,
+      payloadRef: JSON.stringify({ id: "old" }),
+      ifMatchPayloadHash: "hash-a",
+    });
+    expect(stale.kind).toBe("payload_hash_conflict");
+    const rec = await store.get("evt_s19_cas");
+    expect(rec?.payloadHash).toBe("hash-b");
+    expect(rec?.payloadRef).toBe(JSON.stringify({ id: "new" }));
+    expect(rec?.status).toBe("pending");
+  });
+
   it("WEBHOOKS-1: completed terminal wins before payload_hash_conflict", async () => {
     const store = createMemoryWebhookInboxStore({ clock: createFakeClock() });
     const a = await store.claim({

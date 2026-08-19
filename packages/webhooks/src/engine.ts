@@ -48,6 +48,7 @@ import {
 import {
   isStoreLeaseLostError,
   StoreLeaseLostError,
+  type ClaimWebhookInput,
   type LeaseToken,
   type WebhookEventKey,
   type WebhookInboxRecord,
@@ -1573,7 +1574,8 @@ export function createWebhookInboxEngine(
     // if handlers average >=3s and a peer reclaims the tail. Claim the next
     // row only after the previous handler returns.
     for (const row of prepared) {
-      // List snapshot can go stale. Skip if the idle hash moved forward.
+      // I14: list snapshot can go stale before get. Skip if the idle hash
+      // moved forward — do not claim with a hash the list did not show.
       const latest = await store.get(row.rec.key);
       if (
         latest === undefined ||
@@ -1586,16 +1588,33 @@ export function createWebhookInboxEngine(
         continue;
       }
 
-      const claim = await store.claim({
+      // S19: claim the *listed* hash under ifMatch so get→claim idle
+      // supersede cannot roll the row back to this snapshot (WEBHOOKS-3
+      // must not run backwards on the worker path).
+      const claimInput: ClaimWebhookInput = {
         key: row.rec.key,
-        payloadHash: latest.payloadHash,
+        payloadHash: row.payloadHash,
         owner,
         leaseMs,
-        ...(row.payloadRef !== undefined ? { payloadRef: row.payloadRef } : {}),
-      });
+        ifMatchPayloadHash: row.payloadHash,
+      };
+      const payloadRef = latest.payloadRef ?? row.payloadRef;
+      if (payloadRef !== undefined) {
+        claimInput.payloadRef = payloadRef;
+      }
+      const claim = await store.claim(claimInput);
       const { rec, gateway, providerEventId, event } = row;
 
       if (claim.kind !== "acquired") {
+        // CAS miss / active-lease hash mismatch: skip this poll. Do not
+        // surface payload_conflict — the worker is not a delivery ACK.
+        if (claim.kind === "payload_hash_conflict") {
+          items.push({
+            key: rec.key,
+            outcome: outcomeHandlerFailed(true),
+          });
+          continue;
+        }
         const outcome = mapClaimKindToOutcome(
           claim,
           retryAfterFromRecord,
