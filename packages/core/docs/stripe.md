@@ -212,7 +212,7 @@ const refund = await stripe.refundPayment({
 });
 ```
 
-> **Refund / capture / void IDs:** money mutations require a PaymentIntent ID (`pi_...`). Checkout Session IDs (`cs_...`) and Subscription IDs (`sub_...`) are rejected. Resolve the related PaymentIntent first (for example via `getCheckoutSession({ sessionId })` → `paymentIntentId`, or from an invoice money webhook's `gatewayPaymentId` when it is a `pi_...`).
+> **Refund / capture / void IDs:** money mutations require a PaymentIntent ID (`pi_...`). Checkout Session IDs (`cs_...`) and Subscription IDs (`sub_...`) are rejected. Resolve the related PaymentIntent first (for example via `getCheckoutSession({ sessionId })` → `result.session.references.relatedIds.paymentIntentId`, or from an invoice money webhook's `gatewayPaymentId` when it is a `pi_...`).
 
 Stripe-supported reasons (`duplicate`, `fraudulent`, `requested_by_customer`) are sent to Stripe as `reason`. Other custom reason strings are attached as `metadata.reason`. Caller-provided refund metadata is forwarded to Stripe and is useful for binding refund webhooks back to your own transaction or order records.
 
@@ -238,19 +238,24 @@ const status = await client.getPaymentStatus('pi_1234567890', 'stripe');
 Retrieve a Checkout Session by ID and resolve related payment details:
 
 ```typescript
-const session = await stripe.getCheckoutSession({
+const result = await stripe.getCheckoutSession({
     sessionId: 'cs_test_...',
 });
 
-// session.sessionId, session.url, session.status, session.paymentStatus
-// session.paymentIntentId — use this pi_... for refund/capture/void
-// session.amount, session.currency (settled amount_received when PI is expanded)
+if (result.outcome === 'succeeded') {
+    result.session.references.providerObjectId; // cs_...
+    result.session.references.relatedIds?.paymentIntentId; // pi_... for refund/capture/void
+    result.session.url;
+    result.session.status;
+    result.session.paymentStatus;
+    result.session.amount; // settled amount_received when PI is expanded
+}
 ```
 
-Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must match Stripe's `cs_...` form. The gateway expands `payment_intent` so `paymentIntentId` is available when the session created one.
+Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must match Stripe's `cs_...` form. The gateway expands `payment_intent` so `result.session.references.relatedIds.paymentIntentId` is available when the session created one.
 When the expanded `payment_intent` is present, `getCheckoutSession` **does not ignore it**: `amount` prefers settled `amount_received` (then `amount_captured`) over `amount_total`, and `paymentStatus` rematches refunds / partial capture the same way `getPayment` does (`refunded` / `partially_refunded` / `partially_captured` / fail-closed `processing` when the charge snapshot is unobservable). Proven refunds also publish `refundedAmount` together with `currency`. Classic unpaid sessions keep native `payment_status`.
-`createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** `{ success: true }`. Create is tagged `afterProviderSubmit`: timeout / empty / non-JSON 200 returns a **checkout-shaped** result with `outcome: 'indeterminate'` and `reconciliationRequired: true` (`success` is not `true`, and it is **not** a payment snapshot with `status: 'processing'`). Do **not** retry as a fresh session. `getCheckoutSession` (GET) still **throws** `NetworkError`.
-`createCheckoutSession` may still return `success: true` with a session id when Stripe omits `url` (`null` or empty). The field is **omitted** in that case — it is not a string URL and must not be treated as one. Hosted Checkout can create a session before a customer-facing URL exists (for example some embedded / custom flows).
+`createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** a succeeded checkout result. Create is tagged `afterProviderSubmit`: timeout / empty / non-JSON 200 returns a **checkout-shaped** result with `outcome: 'indeterminate'` and `reconciliationRequired: true` (it is **not** a payment snapshot with `status: 'processing'`). The lookup id lives on `session.references.providerObjectId` (caller idempotency key, or `"unknown"` when Stripe never returned `cs_...`). Do **not** retry as a fresh session. `getCheckoutSession` HTTP 404 is `outcome: 'failed'` (same contract as `getCustomer`) — not a thrown transport error. GET transport failures still throw `NetworkError`.
+When Stripe omits `url` (`null` or empty) after a successful create, `session.url` is **omitted** — it is not a string URL and must not be treated as one. Hosted Checkout can create a session before a customer-facing URL exists (for example some embedded / custom flows).
 
 ### `getPayment` status and amount derivation
 
@@ -277,7 +282,7 @@ Stripe mutations always send an `Idempotency-Key` when they POST.
 
 **Do not pass an empty or whitespace-only key** — validation rejects those with `InvalidRequestError` / schema failure (STRIPE-6). Supply your own stable UUID for app-level crash/retry safety across processes.
 
-HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true`. Payment / capture / refund / void map that to `outcome: 'indeterminate'` + `reconciliationRequired: true` (reconcile; do not treat as `failed` / `pending` / `success: true`). **Checkout create** maps to a **checkout-shaped** indeterminate result (`success` is not `true`, `sessionId` is the caller key / `"unknown"` when Stripe never returned `cs_...`) — not a payment snapshot. Create / capture / void require a string PaymentIntent `id` **and** `status`; refunds require string `id` **and** `status`. Missing `status` after HTTP 200 is the same indeterminate path (not `mapStatus(undefined)` → `failed` coerced to a clean decline). Void sets `forceOutcome: succeeded` only when native status is `canceled` / `cancelled` (intentional void). A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
+HTTP 200 with an empty or non-JSON body after a mutating request is `NetworkError` with `afterProviderSubmit: true`. Payment / capture / refund / void map that to `outcome: 'indeterminate'` + `reconciliationRequired: true` (reconcile; do not treat as `failed` / `pending` / `success: true`). **Checkout create** maps to a **checkout-shaped** indeterminate result (`success` is not `true`; lookup id lives on `session.references.providerObjectId` — caller idempotency key, or `"unknown"` when Stripe never returned `cs_...`) — not a payment snapshot. Create / capture / void require a string PaymentIntent `id` **and** `status`; refunds require string `id` **and** `status`. Missing `status` after HTTP 200 is the same indeterminate path (not `mapStatus(undefined)` → `failed` coerced to a clean decline). Void sets `forceOutcome: succeeded` only when native status is `canceled` / `cancelled` (intentional void). A parsed `{}` after 200 is the same indeterminate path — it is not mapped with `fromStripeAmount(undefined)` to major `0`.
 
 ## Checkout customer identity
 

@@ -23,3 +23,5 @@ if (gateway.supports("paymentLinks")) {
 ```
 
 Stripe create/deactivate require a caller `idempotencyKey` and `amount`+`currency` on create. Results are outcome unions; post-submit timeouts are indeterminate. Raw card material on create params is rejected before the adapter.
+
+Create may copy request `amount`/`currency` onto the succeeded snapshot. `getPaymentLink` publishes `amount`/`currency` only from an expanded single line item and omits them otherwise (unexpanded links, zero items, or more than one item).

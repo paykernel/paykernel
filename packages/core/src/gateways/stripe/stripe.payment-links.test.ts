@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { StripeGateway } from "./stripe.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
 import type { StripeConfig } from "../../types/config.types";
-import { money } from "../../index";
+import { money, NetworkError } from "../../index";
 
 const STRIPE_TEST_CONFIG: StripeConfig = {
   secretKey: "sk_test_123",
@@ -70,6 +70,7 @@ describe("StripeGateway payment links", () => {
       expect.unreachable("createPaymentLink must succeed");
     }
     expect(result.paymentLink.status).toBe("active");
+    expect(result.paymentLink.references.providerNativeStatus).toBe("true");
     expect(result.paymentLink.url).toBe("https://buy.stripe.com/test_123");
     expect(result.paymentLink.references.providerObjectId).toBe("plink_123");
     expect(result.paymentLink.amount).toBe(10);
@@ -102,10 +103,119 @@ describe("StripeGateway payment links", () => {
       });
     }) as unknown as typeof fetch;
     const result = await gateway.getPaymentLink({ paymentLinkId: "plink_abc" });
-    expect(capturedUrl).toBe(
-      "https://api.stripe.com/v1/payment_links/plink_abc",
-    );
+    expect(capturedUrl).toContain("/payment_links/plink_abc");
+    expect(capturedUrl).toContain("expand[]=line_items");
     expect(result.outcome).toBe("succeeded");
+  });
+
+  it("getPaymentLink 200 body without url throws NetworkError that is not afterProviderSubmit", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "plink_no_url",
+        active: true,
+      }),
+    ) as unknown as typeof fetch;
+
+    let thrown: unknown;
+    try {
+      await gateway.getPaymentLink({ paymentLinkId: "plink_no_url" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(NetworkError);
+    if (!(thrown instanceof NetworkError)) {
+      expect.unreachable("missing url must throw NetworkError");
+    }
+    expect(thrown.afterProviderSubmit).not.toBe(true);
+  });
+
+  it("getPaymentLink expanded single line item publishes amount and currency", async () => {
+    let capturedUrl = "";
+    globalThis.fetch = mock(async (url) => {
+      capturedUrl = String(url);
+      return createMockResponse({
+        id: "plink_priced",
+        url: "https://buy.stripe.com/priced",
+        active: true,
+        line_items: {
+          object: "list",
+          data: [
+            {
+              amount_total: 2500,
+              currency: "usd",
+              quantity: 1,
+              price: { unit_amount: 2500, currency: "usd" },
+            },
+          ],
+          has_more: false,
+        },
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await gateway.getPaymentLink({
+      paymentLinkId: "plink_priced",
+    });
+    expect(capturedUrl).toContain("expand[]=line_items");
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("getPaymentLink must succeed");
+    }
+    expect(result.paymentLink.amount).toBe(25);
+    expect(result.paymentLink.currency).toBe("USD");
+    expect(result.paymentLink.references.providerNativeStatus).toBe("true");
+  });
+
+  it("getPaymentLink quantity !== 1 omits amount", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "plink_qty",
+        url: "https://buy.stripe.com/qty",
+        active: true,
+        line_items: {
+          object: "list",
+          data: [
+            {
+              amount_total: 5000,
+              currency: "usd",
+              quantity: 2,
+              price: { unit_amount: 2500, currency: "usd" },
+            },
+          ],
+          has_more: false,
+        },
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.getPaymentLink({
+      paymentLinkId: "plink_qty",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("getPaymentLink must succeed");
+    }
+    expect(result.paymentLink.amount).toBeUndefined();
+    expect(result.paymentLink.currency).toBeUndefined();
+  });
+
+  it("getPaymentLink without line items omits amount", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "plink_nolines",
+        url: "https://buy.stripe.com/nolines",
+        active: true,
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.getPaymentLink({
+      paymentLinkId: "plink_nolines",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("getPaymentLink must succeed");
+    }
+    expect(result.paymentLink.amount).toBeUndefined();
+    expect(result.paymentLink.amount).not.toBe(0);
+    expect(result.paymentLink.currency).toBeUndefined();
   });
 
   it("deactivatePaymentLink sets active=false", async () => {
@@ -126,6 +236,7 @@ describe("StripeGateway payment links", () => {
     expect(result.outcome).toBe("succeeded");
     if (result.outcome === "succeeded") {
       expect(result.paymentLink.status).toBe("inactive");
+      expect(result.paymentLink.references.providerNativeStatus).toBe("false");
     }
   });
 });

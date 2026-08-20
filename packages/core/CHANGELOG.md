@@ -9,6 +9,8 @@
 
 ### Behavior (0.x)
 
+- **Phase 22 review close:** Stripe `getCheckoutSession` HTTP 404 is `outcome: failed` (same as getCustomer). Checkout session currency is uppercase ISO. Payment-link GET expands `line_items` and publishes amount only for a single quantity-1 item. After-hooks deep-clone `disputes` / `paymentMethods` lists.
+
 - **Phase 22.1 docs:** customers / stored payment methods / off-session vault surface is documented (`docs/customers.md`). Raw PAN/CVC remains rejected before adapters.
 - **Phase 22.4:** marketplace stays a capability group in core (Moyasar create-time `splits`); no Stripe Connect package.
 

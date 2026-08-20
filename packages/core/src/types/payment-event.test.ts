@@ -1671,3 +1671,119 @@ describe("envelope type shape", () => {
     expect(envelope.schemaVersion).toBe("1");
   });
 });
+
+describe("P22-DASH-URL dispute webhook dashboard URLs", () => {
+  function stripeDisputeWebhook(input: {
+    charge?: unknown;
+    livemode?: boolean;
+    disputeId?: string;
+  }): WebhookEvent {
+    const disputeId = input.disputeId ?? "dp_1";
+    const livemode = input.livemode ?? false;
+    return {
+      id: "evt_dp",
+      type: "charge.dispute.created",
+      gateway: "stripe",
+      paymentId: undefined,
+      gatewayPaymentId: "pi_1",
+      gatewayObjectId: disputeId,
+      status: "needs_response",
+      timestamp: new Date(),
+      livemode,
+      rawPayload: {
+        id: "evt_dp",
+        type: "charge.dispute.created",
+        data: {
+          object: {
+            id: disputeId,
+            object: "dispute",
+            status: "needs_response",
+            charge: input.charge,
+            payment_intent: "pi_1",
+            livemode,
+          },
+        },
+      },
+    };
+  }
+
+  function openedDashboardUrl(
+    event: ReturnType<typeof webhookEventToPaymentEvent>,
+  ): string {
+    expect(event.type).toBe("dispute.opened");
+    if (event.type !== "dispute.opened") {
+      expect.unreachable("must be dispute.opened");
+    }
+    expect(event.dispute.dashboardUrl).toBeDefined();
+    return event.dispute.dashboardUrl as string;
+  }
+
+  it("uses /test/payments/{id} for a canonical charge id in test mode", () => {
+    expect(
+      openedDashboardUrl(
+        webhookEventToPaymentEvent(
+          stripeDisputeWebhook({ charge: "ch_1", livemode: false }),
+        ),
+      ),
+    ).toBe("https://dashboard.stripe.com/test/payments/ch_1");
+  });
+
+  it("uses the live host (no /test) when livemode is true", () => {
+    const url = openedDashboardUrl(
+      webhookEventToPaymentEvent(
+        stripeDisputeWebhook({ charge: "ch_live_abc", livemode: true }),
+      ),
+    );
+    expect(url).toBe("https://dashboard.stripe.com/payments/ch_live_abc");
+    expect(url).not.toContain("/test/");
+  });
+
+  it.each([
+    "ch_",
+    "ch_abc-def",
+    "ch_abc/../x",
+    "ch_abc.def",
+    "ch_abc?foo=1",
+    "ch_abc def",
+  ])(
+    "does not treat prefix-only charge id %s as a payments URL",
+    (charge) => {
+      const event = webhookEventToPaymentEvent(
+        stripeDisputeWebhook({ charge, livemode: false }),
+      );
+      expect(openedDashboardUrl(event)).toBe(
+        "https://dashboard.stripe.com/test/disputes/dp_1",
+      );
+      if (event.type !== "dispute.opened") {
+        expect.unreachable("must be dispute.opened");
+      }
+      expect(event.dispute.references.relatedIds?.chargeId).toBe(charge);
+    },
+  );
+
+  it("accepts an expanded charge object with a canonical id", () => {
+    expect(
+      openedDashboardUrl(
+        webhookEventToPaymentEvent(
+          stripeDisputeWebhook({
+            charge: { id: "ch_expanded_1" },
+            livemode: false,
+          }),
+        ),
+      ),
+    ).toBe("https://dashboard.stripe.com/test/payments/ch_expanded_1");
+  });
+
+  it("falls back to /disputes/{id} for an expanded charge with a non-canonical id", () => {
+    expect(
+      openedDashboardUrl(
+        webhookEventToPaymentEvent(
+          stripeDisputeWebhook({
+            charge: { id: "ch_bad-id" },
+            livemode: true,
+          }),
+        ),
+      ),
+    ).toBe("https://dashboard.stripe.com/disputes/dp_1");
+  });
+});

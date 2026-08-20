@@ -1651,7 +1651,81 @@ type StripePaymentLinkObject = {
   object?: unknown;
   url?: unknown;
   active?: unknown;
+  line_items?: unknown;
 };
+
+function stripePaymentLinkLineItemRows(
+  object: StripePaymentLinkObject,
+): unknown[] | undefined {
+  const raw = object.line_items;
+  if (Array.isArray(raw)) {
+    return raw;
+  }
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const list = raw as { data?: unknown; has_more?: unknown };
+  // Paginated remainder is unobservable — do not pick a partial single item.
+  if (list.has_more === true) {
+    return undefined;
+  }
+  return Array.isArray(list.data) ? list.data : undefined;
+}
+
+/**
+ * Payment Link money is observable only for exactly one line item with a
+ * finite unit amount and currency. 0 / many / unexpanded lists omit money
+ * rather than inventing major 0.
+ */
+function stripePaymentLinkPublishedMoney(
+  object: StripePaymentLinkObject,
+): { amount: number; currency: string } | undefined {
+  const items = stripePaymentLinkLineItemRows(object);
+  if (items === undefined || items.length !== 1) {
+    return undefined;
+  }
+  const lineItem = items[0];
+  if (typeof lineItem !== "object" || lineItem === null) {
+    return undefined;
+  }
+  const row = lineItem as {
+    amount?: unknown;
+    amount_total?: unknown;
+    unit_amount?: unknown;
+    quantity?: unknown;
+    currency?: unknown;
+    price?: unknown;
+  };
+  // quantity !== 1 makes unit_amount and amount_total disagree — omit.
+  if (
+    typeof row.quantity === "number" &&
+    Number.isFinite(row.quantity) &&
+    row.quantity !== 1
+  ) {
+    return undefined;
+  }
+  const price =
+    typeof row.price === "object" && row.price !== null
+      ? (row.price as { unit_amount?: unknown; currency?: unknown })
+      : undefined;
+  const unitAmount =
+    finiteStripeMinor(price?.unit_amount) ??
+    finiteStripeMinor(row.amount) ??
+    finiteStripeMinor(row.unit_amount) ??
+    finiteStripeMinor(row.amount_total);
+  const currency = stripeCurrencyCode(
+    typeof price?.currency === "string" ? price.currency : undefined,
+    typeof row.currency === "string" ? row.currency : undefined,
+  );
+  if (unitAmount === undefined || currency === undefined) {
+    return undefined;
+  }
+  const amount = fromStripeAmount(unitAmount, currency);
+  if (amount === undefined) {
+    return undefined;
+  }
+  return { amount, currency: currency.toUpperCase() };
+}
 
 function checkoutSessionStatus(status: unknown): CheckoutSessionStatus | string {
   if (status === "open" || status === "complete" || status === "expired") {
@@ -1764,33 +1838,50 @@ function mapStripeDispute(object: StripeDisputeObject): Dispute {
 }
 
 function mapStripePaymentLink(object: StripePaymentLinkObject): PaymentLink {
-  const id = requireStripeMutationId(
-    object.id,
-    "Stripe Payment Link response missing id",
-    object,
-  );
-  const url = isNonEmptyStripeString(object.url)
-    ? object.url
-    : undefined;
+  return buildStripePaymentLink(object, (message, raw) => {
+    throw new NetworkError(message, raw);
+  });
+}
+
+function mapStripePaymentLinkAfterSubmit(
+  object: StripePaymentLinkObject,
+): PaymentLink {
+  return buildStripePaymentLink(object, (message, raw) => {
+    throwStripeIndeterminateResponse(message, raw);
+  });
+}
+
+function buildStripePaymentLink(
+  object: StripePaymentLinkObject,
+  missingIdentity: (message: string, raw: unknown) => never,
+): PaymentLink {
+  const id = isNonEmptyStripeString(object.id) ? object.id : undefined;
+  if (id === undefined) {
+    missingIdentity("Stripe Payment Link response missing id", object);
+  }
+  const url = isNonEmptyStripeString(object.url) ? object.url : undefined;
   if (url === undefined) {
-    throwStripeIndeterminateResponse(
-      "Stripe Payment Link response missing url",
-      object,
-    );
+    missingIdentity("Stripe Payment Link response missing url", object);
   }
   // Fail-closed: omitted `active` is not a live shareable link.
   const status = object.active === true ? "active" : "inactive";
-  return {
+  const snapshot: PaymentLink = {
     status,
     url,
     references: buildProviderReferences({
       gateway: "stripe",
       gatewayId: id,
       status,
-      providerNativeStatus: status,
+      providerNativeStatus: object.active === true ? "true" : "false",
     }),
     rawResponse: object,
   };
+  const money = stripePaymentLinkPublishedMoney(object);
+  if (money !== undefined) {
+    snapshot.amount = money.amount;
+    snapshot.currency = money.currency;
+  }
+  return snapshot;
 }
 
 function stripeExpectedWebhookApiVersion(
@@ -2729,13 +2820,22 @@ export class StripeGateway extends BaseGateway {
       params,
       async (p) => {
         const sessionPathId = stripeCheckoutSessionPathId(p.sessionId);
-        const session = await this.stripeRequest<StripeCheckoutSession>(
-          "GET",
-          `/checkout/sessions/${sessionPathId}?expand[]=payment_intent`,
-          undefined,
-          undefined,
-          extractAbortSignal(p),
-        );
+        let session: StripeCheckoutSession;
+        try {
+          session = await this.stripeRequest<StripeCheckoutSession>(
+            "GET",
+            `/checkout/sessions/${sessionPathId}?expand[]=payment_intent`,
+            undefined,
+            undefined,
+            extractAbortSignal(p),
+          );
+        } catch (error) {
+          const failed = stripeNotFoundFailed(error);
+          if (failed) {
+            return failed;
+          }
+          throw error;
+        }
         const sessionId = isNonEmptyStripeString(session.id)
           ? session.id
           : undefined;
@@ -2796,7 +2896,7 @@ export class StripeGateway extends BaseGateway {
           snapshot.paymentStatus = paymentStatus;
         }
         if (currency !== undefined) {
-          snapshot.currency = currency;
+          snapshot.currency = currency.toUpperCase();
           if (amount !== undefined) {
             snapshot.amount = amount;
           }
@@ -2960,6 +3060,14 @@ export class StripeGateway extends BaseGateway {
         }
         if (isNonEmptyStripeString(response.payment_status)) {
           session.paymentStatus = response.payment_status;
+        }
+        const currency = stripeCurrencyCode(response.currency);
+        const amountMinor = finiteStripeMinor(response.amount_total);
+        if (currency !== undefined) {
+          session.currency = currency.toUpperCase();
+          if (amountMinor !== undefined) {
+            session.amount = fromStripeAmount(amountMinor, currency);
+          }
         }
 
         return {
@@ -3287,11 +3395,14 @@ export class StripeGateway extends BaseGateway {
           idempotencyKey,
           extractAbortSignal(p),
         );
-        const paymentLink = mapStripePaymentLink(response);
-        const major = fromStripeAmount(unitAmount, p.currency);
-        if (major !== undefined) {
-          paymentLink.amount = major;
-          paymentLink.currency = p.currency.toUpperCase();
+        const paymentLink = mapStripePaymentLinkAfterSubmit(response);
+        // Request copy is fallback when the create response has no line items.
+        if (paymentLink.amount === undefined) {
+          const major = fromStripeAmount(unitAmount, p.currency);
+          if (major !== undefined) {
+            paymentLink.amount = major;
+            paymentLink.currency = p.currency.toUpperCase();
+          }
         }
         return {
           outcome: "succeeded" as const,
@@ -3309,7 +3420,7 @@ export class StripeGateway extends BaseGateway {
       try {
         const response = await this.stripeRequest<StripePaymentLinkObject>(
           "GET",
-          `/payment_links/${pathId}`,
+          `/payment_links/${pathId}?expand[]=line_items`,
           undefined,
           undefined,
           extractAbortSignal(p),
@@ -3350,7 +3461,7 @@ export class StripeGateway extends BaseGateway {
         );
         return {
           outcome: "succeeded" as const,
-          paymentLink: mapStripePaymentLink(response),
+          paymentLink: mapStripePaymentLinkAfterSubmit(response),
         };
       },
     );

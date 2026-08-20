@@ -3553,6 +3553,67 @@ describe("StripeGateway", () => {
         "10000",
       ); // 100 * 100
       expect(params.get("line_items[0][quantity]")).toBe("1");
+      // No amount_total on the 200 body — do not invent major 0.
+      expect(result.session.amount).toBeUndefined();
+      expect(result.session.amount).not.toBe(0);
+    });
+
+    it("P22-CKO-CREATE-AMOUNT: HTTP 200 with amount_total and currency publishes major amount", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_amount_total",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/test",
+          status: "open",
+          payment_status: "unpaid",
+          amount_total: 10000,
+          currency: "usd",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
+      });
+
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.amount).toBe(100);
+      expect(result.session.currency).toBe("USD");
+    });
+
+    it("P22-CKO-CREATE-AMOUNT: amount_total without currency omits amount", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_amount_no_currency",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/test",
+          status: "open",
+          payment_status: "unpaid",
+          amount_total: 10000,
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
+      });
+
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.currency).toBeUndefined();
+      expect(result.session.amount).toBeUndefined();
+      expect(result.session.amount).not.toBe(0);
     });
 
     it("NEW-STRIPE-CKO-200 / S19-CKO-TIMEOUT: empty HTTP 200 on createCheckoutSession is checkout-shaped indeterminate, not success:true", async () => {
@@ -5644,7 +5705,7 @@ describe("StripeGateway", () => {
         "pi_from_session",
       );
       expect(result.session.amount).toBe(10);
-      expect(result.session.currency).toBe("usd");
+      expect(result.session.currency).toBe("USD");
       // Id-only expanded PI has no charge snapshot — fail-closed (S19-CKO-GET).
       expect(result.session.paymentStatus).toBe("processing");
       expect(result.session.paymentStatus).not.toBe("paid");
@@ -5690,7 +5751,7 @@ describe("StripeGateway", () => {
       );
       expect(result.session.amount).toBe(60);
       expect(result.session.amount).not.toBe(100);
-      expect(result.session.currency).toBe("usd");
+      expect(result.session.currency).toBe("USD");
       expect(result.session.paymentStatus).toBe("partially_captured");
       expect(result.session.paymentStatus).not.toBe("paid");
     });
@@ -5735,7 +5796,7 @@ describe("StripeGateway", () => {
       expect(result.session.paymentStatus).not.toBe("paid");
       expect(result.session.amount).toBe(100);
       expect(result.session.refundedAmount).toBe(100);
-      expect(result.session.currency).toBe("usd");
+      expect(result.session.currency).toBe("USD");
     });
 
     it("S19-CKO-TIMEOUT: getCheckoutSession GET timeout still throws", async () => {
@@ -5782,7 +5843,7 @@ describe("StripeGateway", () => {
       if (omitted.outcome !== "succeeded") {
         expect.unreachable("getCheckoutSession must succeed");
       }
-      expect(omitted.session.currency).toBe("usd");
+      expect(omitted.session.currency).toBe("USD");
       expect(omitted.session.amount).toBeUndefined();
       expect(omitted.session.amount).not.toBe(0);
 
@@ -5808,9 +5869,33 @@ describe("StripeGateway", () => {
       if (nulled.outcome !== "succeeded") {
         expect.unreachable("getCheckoutSession must succeed");
       }
-      expect(nulled.session.currency).toBe("usd");
+      expect(nulled.session.currency).toBe("USD");
       expect(nulled.session.amount).toBeUndefined();
       expect(nulled.session.amount).not.toBe(0);
+    });
+
+    it("getCheckoutSession 404 is a failed outcome, not a throw", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse(
+          {
+            error: {
+              message: "No such checkout session: cs_missing",
+              type: "invalid_request_error",
+            },
+          },
+          false,
+          404,
+        ),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getCheckoutSession({
+        sessionId: "cs_missing",
+      });
+      expect(result.outcome).toBe("failed");
+      if (result.outcome !== "failed") {
+        expect.unreachable("404 must be failed");
+      }
+      expect(result.error.code).toBe("GATEWAY_API_ERROR");
     });
 
     it("NEW-STRIPE-CKO-200: HTTP 200 {} on getCheckoutSession is not success:true", async () => {

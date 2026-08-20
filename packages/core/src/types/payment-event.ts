@@ -1031,6 +1031,9 @@ function expandableRawId(value: unknown): string | undefined {
   return undefined;
 }
 
+/** Same charge-id rule as StripeGateway `STRIPE_CHARGE_ID_PATTERN` (do not import — cycle). */
+const STRIPE_CHARGE_ID_PATTERN = /^ch_[A-Za-z0-9_]+$/;
+
 function disputeFromWebhookEvent(event: WebhookEvent): Dispute {
   const native = event.status;
   const status = mapNativeDisputeStatus(native);
@@ -1077,7 +1080,7 @@ function disputeFromWebhookEvent(event: WebhookEvent): Dispute {
         ? "https://dashboard.stripe.com"
         : "https://dashboard.stripe.com/test";
     snapshot.dashboardUrl =
-      chargeId !== undefined && chargeId.startsWith("ch_")
+      chargeId !== undefined && STRIPE_CHARGE_ID_PATTERN.test(chargeId)
         ? `${host}/payments/${chargeId}`
         : `${host}/disputes/${disputeId}`;
   }

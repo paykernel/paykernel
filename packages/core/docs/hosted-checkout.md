@@ -30,6 +30,6 @@ if (result.outcome === "succeeded") {
 
 `CreateCheckoutSessionParams` remains the Stripe-extended input (`mode`, `lineItems`, `paymentMethodTypes`, `customerEmail`). `mode: "subscription"` does **not** set `providerRecurring`. Subscription billing stays out of core.
 
-Stripe create requires a caller `idempotencyKey`. Empty/missing session id on HTTP 200 is **indeterminate** (lookup id is the idempotency key on `session.references`). `getCheckoutSession` still **throws** `NetworkError` on transport failure.
+Stripe create requires a caller `idempotencyKey`. Empty/missing session id on HTTP 200 is **indeterminate**. The lookup id lives on `session.references.providerObjectId` (caller idempotency key, or `"unknown"`). `getCheckoutSession` HTTP 404 is `outcome: "failed"` (same contract as `getCustomer`). GET transport failures still throw `NetworkError`.
 
 Related PaymentIntent id (when Stripe expands it) is `session.references.relatedIds.paymentIntentId`.

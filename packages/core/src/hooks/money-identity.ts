@@ -59,9 +59,11 @@ const MONEY_IDENTITY_KEYS = [
  * Nested money/identity object keys that must be fully detached (deep-cloned)
  * from the hook-visible clone and freeze snapshot so nested rewrites
  * (`nextAction.redirectUrl`, `nextAction.redirect_to_url.url`,
- * `references.providerObjectId`, `decline.code` / `decline.softDecline`) cannot
- * poison freeze — including when the gateway aliases `nextAction` into
- * `rawResponse` (e.g. Stripe).
+ * `references.providerObjectId`, `decline.code` / `decline.softDecline`,
+ * `disputes[0].amount`, `paymentMethods[0].id`) cannot poison freeze —
+ * including when the gateway aliases `nextAction` into `rawResponse`
+ * (e.g. Stripe). Arrays of identity objects (`disputes`, `paymentMethods`)
+ * are deep-cloned by `deepClonePlain`.
  */
 const NESTED_IDENTITY_KEYS = [
     'nextAction',
@@ -70,7 +72,9 @@ const NESTED_IDENTITY_KEYS = [
     'session',
     'customer',
     'paymentMethod',
+    'paymentMethods',
     'dispute',
+    'disputes',
     'paymentLink',
 ] as const;
 
