@@ -3539,9 +3539,12 @@ describe("StripeGateway", () => {
       });
 
       const params = new URLSearchParams(capturedBody);
-      expect(result.success).toBe(true);
-      expect(result.sessionId).toBe("cs_test_123");
-      expect(result.url).toBe("https://checkout.stripe.com/test");
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.references.providerObjectId).toBe("cs_test_123");
+      expect(result.session.url).toBe("https://checkout.stripe.com/test");
 
       expect(params.get("mode")).toBe("payment");
       expect(params.get("success_url")).toBe("https://success");
@@ -3565,15 +3568,20 @@ describe("StripeGateway", () => {
         idempotencyKey: "idem_stripe_test_key",
       });
 
-      expect(result.success).not.toBe(true);
       expect(result.outcome).toBe("indeterminate");
       expect(result.reconciliationRequired).toBe(true);
-      expect(result.sessionId).toBe("idem_stripe_test_key");
+      expect(result.session?.references.providerObjectId).toBe(
+        "idem_stripe_test_key",
+      );
+      expect(result.session?.status).not.toBe("open");
       expect(result).not.toEqual(
         expect.objectContaining({ status: "processing" }),
       );
       expect(result).not.toEqual(
         expect.objectContaining({ gatewayId: "idem_stripe_test_key" }),
+      );
+      expect(result).not.toEqual(
+        expect.objectContaining({ success: true }),
       );
     });
 
@@ -3590,7 +3598,6 @@ describe("StripeGateway", () => {
         idempotencyKey: "idem_stripe_test_key",
       });
 
-      expect(result.success).not.toBe(true);
       expect(result.outcome).toBe("indeterminate");
       expect(result.reconciliationRequired).toBe(true);
       expect(result).not.toEqual(expect.objectContaining({ success: true }));
@@ -3618,10 +3625,13 @@ describe("StripeGateway", () => {
         idempotencyKey: "idem_stripe_test_key",
       });
 
-      expect(result.success).toBe(true);
-      expect(result.sessionId).toBe("cs_no_url");
-      expect(typeof result.url).not.toBe("string");
-      expect(result.url).toBeUndefined();
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.references.providerObjectId).toBe("cs_no_url");
+      expect(typeof result.session.url).not.toBe("string");
+      expect(result.session.url).toBeUndefined();
     });
 
     it("should accept Money amount input for simple createCheckoutSession", async () => {
@@ -3646,8 +3656,11 @@ describe("StripeGateway", () => {
       });
 
       const params = new URLSearchParams(capturedBody);
-      expect(result.success).toBe(true);
-      expect(result.sessionId).toBe("cs_money_simple");
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.references.providerObjectId).toBe("cs_money_simple");
       expect(params.get("line_items[0][price_data][unit_amount]")).toBe("10000");
       expect(params.get("line_items[0][price_data][currency]")).toBe("usd");
     });
@@ -3806,10 +3819,12 @@ describe("StripeGateway", () => {
         idempotencyKey: "idem_cko_timeout",
       });
 
-      expect(result.success).not.toBe(true);
       expect(result.outcome).toBe("indeterminate");
       expect(result.reconciliationRequired).toBe(true);
-      expect(result.sessionId).toBe("idem_cko_timeout");
+      expect(result.session?.references.providerObjectId).toBe(
+        "idem_cko_timeout",
+      );
+      expect(result.session?.status).not.toBe("open");
       expect(result).not.toEqual(
         expect.objectContaining({ status: "failed" }),
       );
@@ -5621,12 +5636,18 @@ describe("StripeGateway", () => {
 
       expect(requestedUrl).toContain("/checkout/sessions/cs_test_session_1");
       expect(requestedUrl).toContain("expand[]=payment_intent");
-      expect(result.paymentIntentId).toBe("pi_from_session");
-      expect(result.amount).toBe(10);
-      expect(result.currency).toBe("usd");
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(result.session.references.relatedIds?.paymentIntentId).toBe(
+        "pi_from_session",
+      );
+      expect(result.session.amount).toBe(10);
+      expect(result.session.currency).toBe("usd");
       // Id-only expanded PI has no charge snapshot — fail-closed (S19-CKO-GET).
-      expect(result.paymentStatus).toBe("processing");
-      expect(result.paymentStatus).not.toBe("paid");
+      expect(result.session.paymentStatus).toBe("processing");
+      expect(result.session.paymentStatus).not.toBe("paid");
     });
 
     it("S19-CKO-GET: expanded PI amount_received is published, not amount_total", async () => {
@@ -5660,12 +5681,18 @@ describe("StripeGateway", () => {
         sessionId: "cs_expanded_received",
       });
 
-      expect(result.paymentIntentId).toBe("pi_expanded_received");
-      expect(result.amount).toBe(60);
-      expect(result.amount).not.toBe(100);
-      expect(result.currency).toBe("usd");
-      expect(result.paymentStatus).toBe("partially_captured");
-      expect(result.paymentStatus).not.toBe("paid");
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(result.session.references.relatedIds?.paymentIntentId).toBe(
+        "pi_expanded_received",
+      );
+      expect(result.session.amount).toBe(60);
+      expect(result.session.amount).not.toBe(100);
+      expect(result.session.currency).toBe("usd");
+      expect(result.session.paymentStatus).toBe("partially_captured");
+      expect(result.session.paymentStatus).not.toBe("paid");
     });
 
     it("S19-CKO-GET: expanded PI with amount_refunded is not paid", async () => {
@@ -5700,11 +5727,15 @@ describe("StripeGateway", () => {
         sessionId: "cs_expanded_refunded",
       });
 
-      expect(result.paymentStatus).toBe("refunded");
-      expect(result.paymentStatus).not.toBe("paid");
-      expect(result.amount).toBe(100);
-      expect(result.refundedAmount).toBe(100);
-      expect(result.currency).toBe("usd");
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(result.session.paymentStatus).toBe("refunded");
+      expect(result.session.paymentStatus).not.toBe("paid");
+      expect(result.session.amount).toBe(100);
+      expect(result.session.refundedAmount).toBe(100);
+      expect(result.session.currency).toBe("usd");
     });
 
     it("S19-CKO-TIMEOUT: getCheckoutSession GET timeout still throws", async () => {
@@ -5747,9 +5778,13 @@ describe("StripeGateway", () => {
         sessionId: "cs_missing_amount",
       });
 
-      expect(omitted.currency).toBe("usd");
-      expect(omitted.amount).toBeUndefined();
-      expect(omitted.amount).not.toBe(0);
+      expect(omitted.outcome).toBe("succeeded");
+      if (omitted.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(omitted.session.currency).toBe("usd");
+      expect(omitted.session.amount).toBeUndefined();
+      expect(omitted.session.amount).not.toBe(0);
 
       globalThis.fetch = mock(async () =>
         createMockResponse({
@@ -5769,9 +5804,13 @@ describe("StripeGateway", () => {
         sessionId: "cs_null_amount",
       });
 
-      expect(nulled.currency).toBe("usd");
-      expect(nulled.amount).toBeUndefined();
-      expect(nulled.amount).not.toBe(0);
+      expect(nulled.outcome).toBe("succeeded");
+      if (nulled.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(nulled.session.currency).toBe("usd");
+      expect(nulled.session.amount).toBeUndefined();
+      expect(nulled.session.amount).not.toBe(0);
     });
 
     it("NEW-STRIPE-CKO-200: HTTP 200 {} on getCheckoutSession is not success:true", async () => {

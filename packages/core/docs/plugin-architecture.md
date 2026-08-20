@@ -91,7 +91,11 @@ gateway.capabilities;
 ```
 
 - Keys are stable strings in `GATEWAY_CAPABILITY_KEYS` (e.g. `payments`,
-  `partialCapture`, `hostedCheckout`, `providerRecurring`).
+  `partialCapture`, `hostedCheckout`, `customers`, `disputes`, `paymentLinks`,
+  `providerRecurring`). Higher-level surfaces (Phase 22) are optional methods
+  gated by those keys — see [customers.md](./customers.md),
+  [hosted-checkout.md](./hosted-checkout.md), [disputes.md](./disputes.md),
+  [marketplace.md](./marketplace.md), [payment-links.md](./payment-links.md).
 - Claims are **explicit and fail-closed**: omitted keys default to `false`.
   The SDK does **not** infer `true` from optional method presence alone.
 - Built-in factories set conservative claims (shared constants in

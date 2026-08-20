@@ -24,7 +24,8 @@ import type { GatewayManifest } from "./gateway-manifest";
 export const BUILTIN_ADAPTER_VERSION = "0.1.0-next.0";
 
 /**
- * Stripe PaymentIntent + Checkout Session + Customer / PaymentMethod surface.
+ * Stripe PaymentIntent + Checkout Session + Customer / PaymentMethod +
+ * Disputes + Payment Links surface.
  * hostedCheckout = createCheckoutSession only (not every redirect).
  * providerRecurring stays false: Checkout `mode: subscription` alone is not a
  * first-class recurring billing adapter surface.
@@ -43,8 +44,8 @@ export const STRIPE_CAPABILITIES: GatewayCapabilities = freezeCapabilities(
     customers: true,
     paymentMethods: true,
     marketplaceSplits: false,
-    disputes: false,
-    paymentLinks: false,
+    disputes: true,
+    paymentLinks: true,
     providerRecurring: false,
   }),
 );

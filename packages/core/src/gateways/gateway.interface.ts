@@ -20,6 +20,24 @@ import type {
     ListPaymentMethodsResult,
     PaymentMethodOperationResult,
 } from '../types/customer.types';
+import type {
+    CommonCheckoutSessionInput,
+    CheckoutSessionOperationResult,
+    GetCheckoutSessionParams,
+} from '../types/checkout.types';
+import type {
+    GetDisputeParams,
+    ListDisputesParams,
+    ListDisputesResult,
+    DisputeOperationResult,
+    SubmitDisputeEvidenceParams,
+} from '../types/dispute.types';
+import type {
+    CreatePaymentLinkParams,
+    DeactivatePaymentLinkParams,
+    GetPaymentLinkParams,
+    PaymentLinkOperationResult,
+} from '../types/payment-link.types';
 import type { WebhookEvent } from '../types/webhook.types';
 import type {
     GatewayCapabilities,
@@ -134,11 +152,19 @@ export interface PaymentGateway<TName extends string = string> {
     getPaymentStatus?(gatewayId: string): Promise<PaymentStatus>;
 
     /**
-     * Create a hosted checkout session.
-     * Implementation varies by gateway (Stripe, etc.)
-     * Use gateway-specific methods for typed access.
+     * Create a hosted checkout session (capability `hostedCheckout`).
+     * Not every provider redirect URL — first-class Checkout Session product.
      */
-    createCheckoutSession?(params: unknown): Promise<unknown>;
+    createCheckoutSession?(
+        params: CommonCheckoutSessionInput,
+    ): Promise<CheckoutSessionOperationResult>;
+
+    /**
+     * Retrieve a hosted checkout session (capability `hostedCheckout`).
+     */
+    getCheckoutSession?(
+        params: GetCheckoutSessionParams,
+    ): Promise<CheckoutSessionOperationResult>;
 
     // ═══════════════════════════════════════════════════════════════════════════
     // Customers and stored payment methods (Phase 22.1)
@@ -160,4 +186,32 @@ export interface PaymentGateway<TName extends string = string> {
     detachPaymentMethod?(
         params: DetachPaymentMethodParams,
     ): Promise<PaymentMethodOperationResult>;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Disputes (Phase 22.3) — capability `disputes`
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    getDispute?(params: GetDisputeParams): Promise<DisputeOperationResult>;
+
+    listDisputes?(params: ListDisputesParams): Promise<ListDisputesResult>;
+
+    submitDisputeEvidence?(
+        params: SubmitDisputeEvidenceParams,
+    ): Promise<DisputeOperationResult>;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Payment links (Phase 22.5) — capability `paymentLinks`
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    createPaymentLink?(
+        params: CreatePaymentLinkParams,
+    ): Promise<PaymentLinkOperationResult>;
+
+    getPaymentLink?(
+        params: GetPaymentLinkParams,
+    ): Promise<PaymentLinkOperationResult>;
+
+    deactivatePaymentLink?(
+        params: DeactivatePaymentLinkParams,
+    ): Promise<PaymentLinkOperationResult>;
 }

@@ -835,8 +835,8 @@ describe("mockGateway", () => {
       "mock",
     );
     expect(unpaidAlias.status).toBe("authorized");
-    expect(unpaidAlias.stableType).toBe("payment.processing");
-    expect(unpaidAlias.event?.type).toBe("payment.processing");
+    expect(unpaidAlias.stableType).toBe("payment.authorized");
+    expect(unpaidAlias.event?.type).toBe("payment.authorized");
 
     const partialAlias = mockPayloadToWebhookEvent(
       createMockWebhookPayload({

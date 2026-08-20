@@ -2,7 +2,15 @@
 
 ## Unreleased
 
+### Major Changes
+
+- **Phase 22 hosted checkout:** `createCheckoutSession` / `getCheckoutSession` now return a Phase 6 `outcome` union (`session` + `references`) instead of `{ success, sessionId, url }`. Create success is not paid settlement. Prefer `PaymentClient.createCheckoutSession` (capability `hostedCheckout`).
+- **Phase 22 disputes / payment links:** Stripe claims `disputes` and `paymentLinks` with first-class get/list/evidence and Payment Links APIs.
+
 ### Behavior (0.x)
+
+- **Phase 22.1 docs:** customers / stored payment methods / off-session vault surface is documented (`docs/customers.md`). Raw PAN/CVC remains rejected before adapters.
+- **Phase 22.4:** marketplace stays a capability group in core (Moyasar create-time `splits`); no Stripe Connect package.
 
 - **NEW-PAYPAL-7:** `capturePayment` maps `paid` only when the **response** `final_capture === true` (same as GET / webhook). Omitted / `false` is `partially_captured` + `requires_action` — no request-intent fallback. Sale/order captures still do not send `final_capture`.
 - **NEW-STRIPE-REFUND-0 / NEW-STRIPE-0:** empty / pending-only refund lists omit `totalRefunded` (not major `0`). `fromStripeAmount(undefined|null)` returns `undefined`. Charge `amount_refunded` recovery only when finite and `> 0`.

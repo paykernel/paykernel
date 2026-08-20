@@ -28,6 +28,24 @@ import type {
   ListPaymentMethodsResult,
   PaymentMethodOperationResult,
 } from "./types/customer.types";
+import type {
+  CheckoutSessionOperationResult,
+  CommonCheckoutSessionInput,
+  GetCheckoutSessionParams,
+} from "./types/checkout.types";
+import type {
+  DisputeOperationResult,
+  GetDisputeParams,
+  ListDisputesParams,
+  ListDisputesResult,
+  SubmitDisputeEvidenceParams,
+} from "./types/dispute.types";
+import type {
+  CreatePaymentLinkParams,
+  DeactivatePaymentLinkParams,
+  GetPaymentLinkParams,
+  PaymentLinkOperationResult,
+} from "./types/payment-link.types";
 import type { WebhookEvent } from "./types/webhook.types";
 import {
   attachPaymentEvent,
@@ -40,7 +58,10 @@ import type {
   CreatePaymentClientOptions,
   PaymentClientConfig,
 } from "./types/config.types";
-import type { StripeCreatePaymentParams } from "./types/validation";
+import type {
+  CreateCheckoutSessionParams,
+  StripeCreatePaymentParams,
+} from "./types/validation";
 import type { PaymentHooks } from "./hooks/hooks.types";
 import { HooksManager } from "./hooks/hooks.manager";
 import { MoyasarGateway } from "./gateways/moyasar/moyasar.gateway";
@@ -904,6 +925,50 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Hosted checkout (Phase 22.2)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Create a hosted checkout session. Gated on capability `hostedCheckout`.
+   * Success is not paid settlement — redirect to `session.url` when present.
+   */
+  async createCheckoutSession(
+    params: CreateCheckoutSessionParams,
+    gateway: "stripe" & (keyof TGateways & string),
+  ): Promise<CheckoutSessionOperationResult>;
+  async createCheckoutSession(
+    params: CommonCheckoutSessionInput,
+    gateway?: keyof TGateways & string,
+  ): Promise<CheckoutSessionOperationResult>;
+  async createCheckoutSession(
+    params: CommonCheckoutSessionInput | CreateCheckoutSessionParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<CheckoutSessionOperationResult> {
+    assertNoRawCardMaterial(params);
+    return this.invokeOptionalGated(
+      "createCheckoutSession",
+      params,
+      gateway,
+      (gw) => gw.createCheckoutSession?.bind(gw),
+    );
+  }
+
+  /**
+   * Retrieve a hosted checkout session. Gated on capability `hostedCheckout`.
+   */
+  async getCheckoutSession(
+    params: GetCheckoutSessionParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<CheckoutSessionOperationResult> {
+    return this.invokeOptionalGated(
+      "getCheckoutSession",
+      params,
+      gateway,
+      (gw) => gw.getCheckoutSession?.bind(gw),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Customers and stored payment methods (Phase 22.1)
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -984,6 +1049,92 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       params,
       gateway,
       (gw) => gw.detachPaymentMethod?.bind(gw),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Disputes (Phase 22.3)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async getDispute(
+    params: GetDisputeParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<DisputeOperationResult> {
+    return this.invokeOptionalGated(
+      "getDispute",
+      params,
+      gateway,
+      (gw) => gw.getDispute?.bind(gw),
+    );
+  }
+
+  async listDisputes(
+    params: ListDisputesParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<ListDisputesResult> {
+    return this.invokeOptionalGated(
+      "listDisputes",
+      params,
+      gateway,
+      (gw) => gw.listDisputes?.bind(gw),
+    );
+  }
+
+  async submitDisputeEvidence(
+    params: SubmitDisputeEvidenceParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<DisputeOperationResult> {
+    assertNoRawCardMaterial(params);
+    assertNoRawCardMaterial(params.evidence);
+    if (params.evidence.stripeEvidence !== undefined) {
+      assertNoRawCardMaterial(params.evidence.stripeEvidence);
+    }
+    return this.invokeOptionalGated(
+      "submitDisputeEvidence",
+      params,
+      gateway,
+      (gw) => gw.submitDisputeEvidence?.bind(gw),
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Payment links (Phase 22.5)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async createPaymentLink(
+    params: CreatePaymentLinkParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<PaymentLinkOperationResult> {
+    assertNoRawCardMaterial(params);
+    return this.invokeOptionalGated(
+      "createPaymentLink",
+      params,
+      gateway,
+      (gw) => gw.createPaymentLink?.bind(gw),
+    );
+  }
+
+  async getPaymentLink(
+    params: GetPaymentLinkParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.invokeOptionalGated(
+      "getPaymentLink",
+      params,
+      gateway,
+      (gw) => gw.getPaymentLink?.bind(gw),
+    );
+  }
+
+  async deactivatePaymentLink(
+    params: DeactivatePaymentLinkParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.invokeOptionalGated(
+      "deactivatePaymentLink",
+      params,
+      gateway,
+      (gw) => gw.deactivatePaymentLink?.bind(gw),
     );
   }
 

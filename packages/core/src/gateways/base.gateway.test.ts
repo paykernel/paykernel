@@ -104,44 +104,40 @@ class TestGateway extends BaseGateway {
     amount?: number;
     currency?: string;
     idempotencyKey?: string;
-  }): Promise<{
-    success: boolean;
-    sessionId: string;
-    url?: string;
-    rawResponse: unknown;
-    outcome?: string;
-    reconciliationRequired?: boolean;
-  }> {
+  }) {
     return this.executeWithHooks("createCheckoutSession", params, async () => {
       if (this.failWith) throw this.failWith;
       return {
-        success: true,
-        sessionId: "cs_ok",
-        url: "https://checkout.test/pay",
-        rawResponse: {},
+        outcome: "succeeded" as const,
+        session: {
+          status: "open" as const,
+          url: "https://checkout.test/pay",
+          references: {
+            providerObjectId: "cs_ok",
+            normalizedStatus: "open",
+            gateway: this.name,
+          },
+          rawResponse: {},
+        },
       };
     });
   }
 
-  async getCheckoutSession(params: { sessionId: string }): Promise<{
-    success: boolean;
-    sessionId: string;
-    paymentIntentId: string | undefined;
-    url: string | null;
-    status: string;
-    paymentStatus: string;
-    rawResponse: unknown;
-  }> {
+  async getCheckoutSession(params: { sessionId: string }) {
     return this.executeWithHooks("getCheckoutSession", params, async () => {
       if (this.failWith) throw this.failWith;
       return {
-        success: true,
-        sessionId: params.sessionId,
-        paymentIntentId: undefined,
-        url: null,
-        status: "open",
-        paymentStatus: "unpaid",
-        rawResponse: {},
+        outcome: "succeeded" as const,
+        session: {
+          status: "open" as const,
+          references: {
+            providerObjectId: params.sessionId,
+            normalizedStatus: "open",
+            gateway: this.name,
+          },
+          paymentStatus: "unpaid",
+          rawResponse: {},
+        },
       };
     });
   }
@@ -257,15 +253,18 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
       currency: "USD",
       idempotencyKey: "idem_cko_timeout",
     });
-    expect(result.success).not.toBe(true);
     expect(result.outcome).toBe("indeterminate");
     expect(result.reconciliationRequired).toBe(true);
-    expect(result.sessionId).toBe("idem_cko_timeout");
+    expect(result.session?.references.providerObjectId).toBe("idem_cko_timeout");
+    expect(result.session?.status).not.toBe("open");
     expect(result).not.toEqual(
       expect.objectContaining({ status: "processing" }),
     );
     expect(result).not.toEqual(
       expect.objectContaining({ gatewayId: "idem_cko_timeout" }),
+    );
+    expect(result).not.toEqual(
+      expect.objectContaining({ sessionId: "idem_cko_timeout" }),
     );
   });
 

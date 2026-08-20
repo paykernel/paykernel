@@ -33,6 +33,11 @@ Type-safe payment orchestration for TypeScript: Moyasar, PayPal, Paymob, Stripe,
   - [Custom Gateways / plugins](./docs/custom-gateways.md)
   - [Plugin architecture](./docs/plugin-architecture.md)
   - [Gateway capabilities matrix](./docs/gateway-capabilities.md) (generated from code)
+  - [Customers and stored payment methods](./docs/customers.md) (Phase 22.1)
+  - [Hosted checkout](./docs/hosted-checkout.md) (Phase 22.2)
+  - [Disputes](./docs/disputes.md) (Phase 22.3)
+  - [Marketplace splits](./docs/marketplace.md) (Phase 22.4)
+  - [Payment links](./docs/payment-links.md) (Phase 22.5)
 - **Testing (separate package)**
   - [`@paykernel/testkit`](../testkit/README.md) — `mockGateway`, `runGatewayConformanceSuite`, store harnesses, fixture safety (core does **not** depend on testkit)
 - **Storage adapters (app-layer; core does not depend on them)**

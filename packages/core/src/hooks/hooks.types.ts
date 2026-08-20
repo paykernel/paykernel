@@ -29,7 +29,13 @@ export type OperationType =
     | 'getCustomer'
     | 'attachPaymentMethod'
     | 'listPaymentMethods'
-    | 'detachPaymentMethod';
+    | 'detachPaymentMethod'
+    | 'getDispute'
+    | 'listDisputes'
+    | 'submitDisputeEvidence'
+    | 'createPaymentLink'
+    | 'getPaymentLink'
+    | 'deactivatePaymentLink';
 
 /**
  * Context passed to all lifecycle hooks

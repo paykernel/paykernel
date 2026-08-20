@@ -16,6 +16,7 @@
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
+  buildProviderReferences,
   CardDeclinedError,
   createRedactingLogger,
   defineGatewayCapabilities,
@@ -37,19 +38,39 @@ import {
   redact,
   toMinorUnits,
   type AmountInput,
+  type AttachPaymentMethodParams,
   type CaptureParams,
+  type CheckoutSessionOperationResult,
+  type CommonCheckoutSessionInput,
+  type CreateCustomerParams,
+  type CreatePaymentLinkParams,
   type CreatePaymentParams,
+  type CustomerOperationResult,
+  type DeactivatePaymentLinkParams,
+  type DetachPaymentMethodParams,
+  type DisputeOperationResult,
   type GatewayCapabilities,
   type GatewayCapabilityKey,
   type GatewayPaymentResult,
   type GatewayRefundResult,
+  type GetCheckoutSessionParams,
+  type GetCustomerParams,
+  type GetDisputeParams,
+  type GetPaymentLinkParams,
   type GetPaymentParams,
+  type ListDisputesParams,
+  type ListDisputesResult,
+  type ListPaymentMethodsParams,
+  type ListPaymentMethodsResult,
   type Logger,
   type Money,
   type PaymentGateway,
+  type PaymentLinkOperationResult,
+  type PaymentMethodOperationResult,
   type PaymentOperationOutcome,
   type PaymentStatus,
   type RefundParams,
+  type SubmitDisputeEvidenceParams,
   type VoidParams,
   type WebhookEvent,
 } from "@paykernel/core";
@@ -100,10 +121,7 @@ const CONVERSION_OPTS = {
  * Accepts deprecated `number` majors or {@link Money}. Excess precision is
  * rejected (same default as `@paykernel/core` money model).
  */
-export function majorToMinor(
-  amount: number | Money,
-  currency: string,
-): number {
+export function majorToMinor(amount: number | Money, currency: string): number {
   const code = isMoney(amount) ? amount.currency : currency;
   const m = normalizeAmountInput(amount, code, CONVERSION_OPTS);
   return minorAmountToNumber(toMinorUnits(m, CONVERSION_OPTS));
@@ -143,9 +161,7 @@ function resolveChargeAmount(
  */
 function isCapturableMockStatus(status: PaymentStatus): boolean {
   return (
-    status === "authorized" ||
-    status === "partially_captured" ||
-    status === "partially_refunded"
+    status === "authorized" || status === "partially_captured" || status === "partially_refunded"
   );
 }
 
@@ -157,9 +173,7 @@ function isCapturableMockStatus(status: PaymentStatus): boolean {
  * (NEW-TESTKIT-7) plus stripeSetupFutureUsage / paymobIframeId
  * (NEW-TESTKIT-FP-1).
  */
-function createPaymentIdentityFields(
-  params: CreatePaymentParams,
-): Record<string, unknown> {
+function createPaymentIdentityFields(params: CreatePaymentParams): Record<string, unknown> {
   const identity: Record<string, unknown> = {};
   if (params.orderId !== undefined) identity.orderId = params.orderId;
   if (params.stripePaymentMethodId !== undefined) {
@@ -210,10 +224,7 @@ function resolveMutationMinor(
   paymentCurrency: string,
 ): number {
   const expected = paymentCurrency.toUpperCase();
-  if (
-    callerCurrency !== undefined &&
-    callerCurrency.toUpperCase() !== expected
-  ) {
+  if (callerCurrency !== undefined && callerCurrency.toUpperCase() !== expected) {
     throw new InvalidRequestError(
       `Mock ${operation} currency ${callerCurrency.toUpperCase()} does not match payment currency ${expected}`,
     );
@@ -320,12 +331,7 @@ export type MockGateway = PaymentGateway & {
   remainingOutcomes(): Record<string, number>;
   /** Push additional outcomes at runtime. */
   enqueue(
-    operation:
-      | "createPayment"
-      | "capturePayment"
-      | "refundPayment"
-      | "voidPayment"
-      | "getPayment",
+    operation: "createPayment" | "capturePayment" | "refundPayment" | "voidPayment" | "getPayment",
     outcome: ScriptedPaymentOutcome | ScriptedRefundOutcome,
   ): void;
   /**
@@ -599,9 +605,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       callbackUrl: params.callbackUrl,
       ...createPaymentIdentityFields(params),
       ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
-      ...(params.description !== undefined
-        ? { description: params.description }
-        : {}),
+      ...(params.description !== undefined ? { description: params.description } : {}),
     });
   }
 
@@ -627,10 +631,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
    * Chains settle independently of success/failure so a rejected op never
    * deadlocks subsequent work on the same payment.
    */
-  function withPaymentLedgerLock<T>(
-    paymentId: string,
-    fn: () => Promise<T>,
-  ): Promise<T> {
+  function withPaymentLedgerLock<T>(paymentId: string, fn: () => Promise<T>): Promise<T> {
     const prev = paymentLedgerChains.get(paymentId) ?? Promise.resolve();
     const run = prev.then(fn, fn);
     paymentLedgerChains.set(
@@ -849,13 +850,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     // leftover outcome succeeded). Explicit step.result.outcome wins.
     const statusOverridden =
       (step.status !== undefined && step.status !== base.status) ||
-      ("result" in step &&
-        step.result?.status !== undefined &&
-        step.result.status !== base.status);
+      ("result" in step && step.result?.status !== undefined && step.result.status !== base.status);
     const outcomeExplicit =
-      "result" in step && step.result?.outcome !== undefined
-        ? step.result.outcome
-        : undefined;
+      "result" in step && step.result?.outcome !== undefined ? step.result.outcome : undefined;
     const sealedOutcome =
       outcomeExplicit ??
       (statusOverridden
@@ -864,9 +861,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     const sealed = withPhase6Outcome(
       next,
       sealedOutcome,
-      next.reconciliationRequired === true
-        ? { reconciliationRequired: true }
-        : undefined,
+      next.reconciliationRequired === true ? { reconciliationRequired: true } : undefined,
     );
     if (next.reconciliationRequired === true) {
       sealed.reconciliationRequired = true;
@@ -893,20 +888,14 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         // TESTKIT-4: clamp scripted captured to charge total
         state.capturedAmountMinor = Math.max(
           0,
-          Math.min(
-            majorToMinor(result.capturedAmount, currency),
-            state.amountMinor,
-          ),
+          Math.min(majorToMinor(result.capturedAmount, currency), state.amountMinor),
         );
       }
       if (result.refundedAmount !== undefined) {
         // TESTKIT-4: clamp scripted refunded to captured total
         state.refundedAmountMinor = Math.max(
           0,
-          Math.min(
-            majorToMinor(result.refundedAmount, currency),
-            state.capturedAmountMinor,
-          ),
+          Math.min(majorToMinor(result.refundedAmount, currency), state.capturedAmountMinor),
         );
       }
       return;
@@ -931,9 +920,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     // TESTKIT-4: never let scripted captured/refunded exceed charge / captured.
     capturedMinor = Math.max(0, Math.min(capturedMinor, amountMinor));
     let refundedMinor =
-      result.refundedAmount !== undefined
-        ? majorToMinor(result.refundedAmount, currency)
-        : 0;
+      result.refundedAmount !== undefined ? majorToMinor(result.refundedAmount, currency) : 0;
     refundedMinor = Math.max(0, Math.min(refundedMinor, capturedMinor));
     payments.set(key, {
       amountMinor,
@@ -979,27 +966,21 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       case "declined":
         throw new CardDeclinedError(outcome.message ?? "Card declined (mock)");
       case "insufficient_funds":
-        throw new InsufficientFundsError(
-          outcome.message ?? "Insufficient funds (mock)",
-        );
+        throw new InsufficientFundsError(outcome.message ?? "Insufficient funds (mock)");
       case "network_error":
         throw new NetworkError(outcome.message ?? "Network error (mock)");
       case "timeout":
         // Transport-level indeterminate: never map to definitive failure at provider
         throw new NetworkError(outcome.message ?? "Request timed out (mock)");
       case "gateway_api_error":
-        throw new GatewayApiError(
-          outcome.message ?? "Gateway API error (mock)",
-          name,
-        );
+        throw new GatewayApiError(outcome.message ?? "Gateway API error (mock)", name);
       case "provider_ok_client_timeout":
       case "provider_success_client_timeout": {
         // Provider ledger settles success; client still times out.
         // Auth-only creates (fallback status authorized) stay authorized —
         // do not force a full paid capture (TESTKIT-2).
         const fb = fallback();
-        const providerStatus: PaymentStatus =
-          fb.status === "authorized" ? "authorized" : "paid";
+        const providerStatus: PaymentStatus = fb.status === "authorized" ? "authorized" : "paid";
         const providerBase = { ...fb, status: providerStatus };
         const providerResult = applyResultOverrides(
           withPhase6Outcome(providerBase, "succeeded"),
@@ -1040,10 +1021,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       }
       case "failed":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "failed" },
-            "failed",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "failed" }, "failed"),
           outcome,
         );
       case "succeeded": {
@@ -1051,26 +1029,17 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         // authorized + capturedAmount 0; capture/void keep their fallback status.
         const fb = fallback();
         const succeeded: GatewayPaymentResult = { ...fb };
-        if (
-          succeeded.status === "authorized" &&
-          succeeded.capturedAmount === undefined
-        ) {
+        if (succeeded.status === "authorized" && succeeded.capturedAmount === undefined) {
           succeeded.capturedAmount = 0;
           if (succeeded.currency === undefined && fb.currency !== undefined) {
             succeeded.currency = fb.currency;
           }
         }
-        return applyResultOverrides(
-          withPhase6Outcome(succeeded, "succeeded"),
-          outcome,
-        );
+        return applyResultOverrides(withPhase6Outcome(succeeded, "succeeded"), outcome);
       }
       case "authorized":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "authorized" },
-            "succeeded",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "authorized" }, "succeeded"),
           outcome,
         );
       case "requires_action": {
@@ -1094,44 +1063,29 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       }
       case "pending":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "pending" },
-            "requires_action",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "pending" }, "requires_action"),
           outcome,
         );
       case "processing":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "processing" },
-            "requires_action",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "processing" }, "requires_action"),
           outcome,
         );
       case "partial_capture":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "partially_captured" },
-            "succeeded",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "partially_captured" }, "succeeded"),
           outcome,
         );
       case "voided":
         return applyResultOverrides(
-          withPhase6Outcome(
-            { ...fallback(), status: "cancelled" },
-            "succeeded",
-          ),
+          withPhase6Outcome({ ...fallback(), status: "cancelled" }, "succeeded"),
           outcome,
         );
       default: {
         // Exhaustiveness: dualTimeout already handled; seal fallback with Phase 6
         void dualTimeout;
         const fb = fallback();
-        return withPhase6Outcome(
-          fb,
-          fb.outcome ?? paymentStatusToOperationOutcome(fb.status),
-        );
+        return withPhase6Outcome(fb, fb.outcome ?? paymentStatusToOperationOutcome(fb.status));
       }
     }
   }
@@ -1162,8 +1116,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     },
 
     setLogger(next: Logger) {
-      logger =
-        next && next !== noopLogger ? createRedactingLogger(next) : noopLogger;
+      logger = next && next !== noopLogger ? createRedactingLogger(next) : noopLogger;
     },
 
     get history() {
@@ -1296,9 +1249,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         const minor = resolved.minor;
 
         const idemKey =
-          honorIdempotencyKey && params.idempotencyKey
-            ? params.idempotencyKey
-            : undefined;
+          honorIdempotencyKey && params.idempotencyKey ? params.idempotencyKey : undefined;
         const requestFingerprint = idemKey
           ? createPaymentFingerprint(params, { minor })
           : undefined;
@@ -1362,18 +1313,10 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               () => {
                 const status: PaymentStatus =
                   !capture && capabilities.authorization ? "authorized" : "paid";
-                const base = defaultPaymentResult(
-                  id,
-                  status,
-                  major,
-                  name,
-                  currencyCode,
-                );
+                const base = defaultPaymentResult(id, status, major, name, currencyCode);
                 return {
                   ...base,
-                  ...(status === "authorized"
-                    ? { capturedAmount: 0, currency: currencyCode }
-                    : {}),
+                  ...(status === "authorized" ? { capturedAmount: 0, currency: currencyCode } : {}),
                   rawResponse: {
                     mock: true,
                     amountMinor: minor,
@@ -1393,10 +1336,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 const dualMajor = withId.amount ?? major;
                 const dualMinor = majorToMinor(dualMajor, params.currency);
                 const dualStatus =
-                  withId.status ??
-                  (!capture && capabilities.authorization
-                    ? "authorized"
-                    : "paid");
+                  withId.status ?? (!capture && capabilities.authorization ? "authorized" : "paid");
                 // TESTKIT-3: settle capture money from paid-domain status /
                 // explicit capturedAmount — not bare outcome===succeeded.
                 // Auth-only / non-paid → 0 capture. Partial without amount → 0.
@@ -1404,10 +1344,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 if (withId.capturedAmount !== undefined) {
                   dualCapturedMinor = Math.max(
                     0,
-                    Math.min(
-                      majorToMinor(withId.capturedAmount, params.currency),
-                      dualMinor,
-                    ),
+                    Math.min(majorToMinor(withId.capturedAmount, params.currency), dualMinor),
                   );
                 } else if (isPaidLikePaymentStatus(dualStatus)) {
                   dualCapturedMinor = dualMinor;
@@ -1429,9 +1366,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
 
             // Prefer stable id from fallback when scripted result omitted gatewayId.
             // Always publish currency with major-unit amounts (incomplete-money fail-closed).
-            const withId = !result.gatewayId
-              ? { ...result, gatewayId: id }
-              : result;
+            const withId = !result.gatewayId ? { ...result, gatewayId: id } : result;
             const finalResult: GatewayPaymentResult =
               withId.currency === undefined &&
               (withId.amount !== undefined ||
@@ -1530,8 +1465,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   `Cannot capture payment ${params.gatewayPaymentId} in status ${state.status} (mock)`,
                 );
               }
-              const remainingMinor =
-                state.amountMinor - state.capturedAmountMinor;
+              const remainingMinor = state.amountMinor - state.capturedAmountMinor;
               if (remainingMinor <= 0) {
                 throw new InvalidRequestError(
                   `Payment ${params.gatewayPaymentId} has no capturable amount remaining (mock)`,
@@ -1566,12 +1500,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   claimedSupport: false,
                 });
               }
-              const nextCapturedMinor =
-                state.capturedAmountMinor + captureMinor;
+              const nextCapturedMinor = state.capturedAmountMinor + captureMinor;
               const fullyCaptured = nextCapturedMinor >= state.amountMinor;
-              const finalCapturedMinor = fullyCaptured
-                ? state.amountMinor
-                : nextCapturedMinor;
+              const finalCapturedMinor = fullyCaptured ? state.amountMinor : nextCapturedMinor;
               // Refunded captured funds do not close remaining hold
               // (NEW-TESTKIT-2). Full capture with prior refund stays
               // partially_refunded — not a silent paid rewrite.
@@ -1582,14 +1513,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 : state.refundedAmountMinor > 0
                   ? "partially_refunded"
                   : "partially_captured";
-              const amountMajor = minorToMajor(
-                state.amountMinor,
-                state.currency,
-              );
-              const capturedMajor = minorToMajor(
-                finalCapturedMinor,
-                state.currency,
-              );
+              const amountMajor = minorToMajor(state.amountMinor, state.currency);
+              const capturedMajor = minorToMajor(finalCapturedMinor, state.currency);
               applyLedger = () => {
                 state.capturedAmountMinor = finalCapturedMinor;
                 state.authorized = false;
@@ -1631,9 +1556,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 refundedAmount: publicState.refundedAmount,
               },
               paymentStatusToOperationOutcome(publicState.status),
-              result.reconciliationRequired === true
-                ? { reconciliationRequired: true }
-                : undefined,
+              result.reconciliationRequired === true ? { reconciliationRequired: true } : undefined,
             );
           }
           return result;
@@ -1663,17 +1586,11 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             if (outcome.error) throw outcome.error;
             if (outcome.result) return outcome.result;
           }
-          if (
-            outcome?.outcome === "network_error" ||
-            outcome?.outcome === "timeout"
-          ) {
+          if (outcome?.outcome === "network_error" || outcome?.outcome === "timeout") {
             throw new NetworkError(outcome.message ?? "Network error (mock)");
           }
           if (outcome?.outcome === "gateway_api_error") {
-            throw new GatewayApiError(
-              outcome.message ?? "Gateway API error (mock)",
-              name,
-            );
+            throw new GatewayApiError(outcome.message ?? "Gateway API error (mock)", name);
           }
           if (outcome?.outcome === "indeterminate") {
             return applyOutcomeToGatewayRefundResult(
@@ -1702,13 +1619,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
 
           const state = payments.get(params.gatewayPaymentId);
           if (!state) {
-            throw new GatewayApiError(
-              `Payment ${params.gatewayPaymentId} not found (mock)`,
-              name,
-            );
+            throw new GatewayApiError(`Payment ${params.gatewayPaymentId} not found (mock)`, name);
           }
-          const remainingMinor =
-            state.capturedAmountMinor - state.refundedAmountMinor;
+          const remainingMinor = state.capturedAmountMinor - state.refundedAmountMinor;
           if (remainingMinor <= 0) {
             throw new InvalidRequestError(
               `Payment ${params.gatewayPaymentId} has no refundable amount remaining (mock)`,
@@ -1772,8 +1685,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   success: base.success,
                   outcome: base.outcome,
                   gatewayRefundId:
-                    ((outcome.result ?? {}) as Partial<GatewayRefundResult>)
-                      .gatewayRefundId ?? base.gatewayRefundId,
+                    ((outcome.result ?? {}) as Partial<GatewayRefundResult>).gatewayRefundId ??
+                    base.gatewayRefundId,
                 }
               : base;
           if (
@@ -1849,9 +1762,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 currency: state?.currency ?? result.currency,
               },
               "succeeded",
-              result.reconciliationRequired === true
-                ? { reconciliationRequired: true }
-                : undefined,
+              result.reconciliationRequired === true ? { reconciliationRequired: true } : undefined,
             );
           }
           return result;
@@ -1867,10 +1778,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         const ledgerSnapshot = (): GatewayPaymentResult => {
           const state = payments.get(params.gatewayPaymentId);
           if (!state) {
-            throw new GatewayApiError(
-              `Payment ${params.gatewayPaymentId} not found (mock)`,
-              name,
-            );
+            throw new GatewayApiError(`Payment ${params.gatewayPaymentId} not found (mock)`, name);
           }
           const publicState = toPublicPaymentState(state);
           return {
@@ -1914,10 +1822,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       return track("getPaymentStatus", { gatewayId }, async () => {
         const state = payments.get(gatewayId);
         if (!state) {
-          throw new GatewayApiError(
-            `Payment ${gatewayId} not found (mock)`,
-            name,
-          );
+          throw new GatewayApiError(`Payment ${gatewayId} not found (mock)`, name);
         }
         return state.status;
       });
@@ -1927,7 +1832,9 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
      * Hosted checkout session (capability `hostedCheckout`).
      * Present so claim_method_presence passes when caps claim hostedCheckout.
      */
-    async createCheckoutSession(params: unknown): Promise<unknown> {
+    async createCheckoutSession(
+      params: CommonCheckoutSessionInput,
+    ): Promise<CheckoutSessionOperationResult> {
       return track("createCheckoutSession", params, async () => {
         if (!capabilities.hostedCheckout) {
           throw new OperationNotSupportedError(name, "createCheckoutSession", {
@@ -1937,10 +1844,287 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         }
         const sessionId = nextId("cs");
         return {
-          id: sessionId,
-          url: `https://mock.test/checkout/${sessionId}`,
-          status: "open",
-          mock: true,
+          outcome: "succeeded" as const,
+          session: {
+            status: "open",
+            url: `https://mock.test/checkout/${sessionId}`,
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: sessionId,
+              status: "open",
+            }),
+          },
+        };
+      });
+    },
+
+    async getCheckoutSession(
+      params: GetCheckoutSessionParams,
+    ): Promise<CheckoutSessionOperationResult> {
+      return track("getCheckoutSession", params, async () => {
+        if (!capabilities.hostedCheckout) {
+          throw new OperationNotSupportedError(name, "getCheckoutSession", {
+            capability: "hostedCheckout",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          session: {
+            status: "open",
+            url: `https://mock.test/checkout/${params.sessionId}`,
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.sessionId,
+              status: "open",
+            }),
+          },
+        };
+      });
+    },
+
+    async createCustomer(params: CreateCustomerParams): Promise<CustomerOperationResult> {
+      return track("createCustomer", params, async () => {
+        if (!capabilities.customers) {
+          throw new OperationNotSupportedError(name, "createCustomer", {
+            capability: "customers",
+            claimedSupport: false,
+          });
+        }
+        const id = nextId("cus");
+        return {
+          outcome: "succeeded" as const,
+          customer: {
+            status: "active",
+            ...(typeof params.email === "string" ? { email: params.email } : {}),
+            ...(typeof params.name === "string" ? { name: params.name } : {}),
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: id,
+              status: "active",
+              customerId: id,
+            }),
+          },
+        };
+      });
+    },
+
+    async getCustomer(params: GetCustomerParams): Promise<CustomerOperationResult> {
+      return track("getCustomer", params, async () => {
+        if (!capabilities.customers) {
+          throw new OperationNotSupportedError(name, "getCustomer", {
+            capability: "customers",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          customer: {
+            status: "active",
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.customerId,
+              status: "active",
+              customerId: params.customerId,
+            }),
+          },
+        };
+      });
+    },
+
+    async attachPaymentMethod(
+      params: AttachPaymentMethodParams,
+    ): Promise<PaymentMethodOperationResult> {
+      return track("attachPaymentMethod", params, async () => {
+        if (!capabilities.paymentMethods) {
+          throw new OperationNotSupportedError(name, "attachPaymentMethod", {
+            capability: "paymentMethods",
+            claimedSupport: false,
+          });
+        }
+        const id = params.paymentMethodId ?? nextId("pm");
+        return {
+          outcome: "succeeded" as const,
+          paymentMethod: {
+            id,
+            customerId: params.customerId,
+            type: "card",
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: id,
+              status: "active",
+              customerId: params.customerId,
+            }),
+          },
+        };
+      });
+    },
+
+    async listPaymentMethods(params: ListPaymentMethodsParams): Promise<ListPaymentMethodsResult> {
+      return track("listPaymentMethods", params, async () => {
+        if (!capabilities.paymentMethods) {
+          throw new OperationNotSupportedError(name, "listPaymentMethods", {
+            capability: "paymentMethods",
+            claimedSupport: false,
+          });
+        }
+        return { outcome: "succeeded" as const, paymentMethods: [] };
+      });
+    },
+
+    async detachPaymentMethod(
+      params: DetachPaymentMethodParams,
+    ): Promise<PaymentMethodOperationResult> {
+      return track("detachPaymentMethod", params, async () => {
+        if (!capabilities.paymentMethods) {
+          throw new OperationNotSupportedError(name, "detachPaymentMethod", {
+            capability: "paymentMethods",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          paymentMethod: {
+            id: params.paymentMethodId,
+            customerId: params.customerId ?? "",
+            type: "card",
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.paymentMethodId,
+              status: "active",
+              ...(params.customerId !== undefined ? { customerId: params.customerId } : {}),
+            }),
+          },
+        };
+      });
+    },
+
+    async getDispute(params: GetDisputeParams): Promise<DisputeOperationResult> {
+      return track("getDispute", params, async () => {
+        if (!capabilities.disputes) {
+          throw new OperationNotSupportedError(name, "getDispute", {
+            capability: "disputes",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          dispute: {
+            status: "needs_response",
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.disputeId,
+              status: "needs_response",
+            }),
+          },
+        };
+      });
+    },
+
+    async listDisputes(params: ListDisputesParams): Promise<ListDisputesResult> {
+      return track("listDisputes", params, async () => {
+        if (!capabilities.disputes) {
+          throw new OperationNotSupportedError(name, "listDisputes", {
+            capability: "disputes",
+            claimedSupport: false,
+          });
+        }
+        return { outcome: "succeeded" as const, disputes: [] };
+      });
+    },
+
+    async submitDisputeEvidence(
+      params: SubmitDisputeEvidenceParams,
+    ): Promise<DisputeOperationResult> {
+      return track("submitDisputeEvidence", params, async () => {
+        if (!capabilities.disputes) {
+          throw new OperationNotSupportedError(name, "submitDisputeEvidence", {
+            capability: "disputes",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          dispute: {
+            status: "under_review",
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.disputeId,
+              status: "under_review",
+            }),
+          },
+        };
+      });
+    },
+
+    async createPaymentLink(params: CreatePaymentLinkParams): Promise<PaymentLinkOperationResult> {
+      return track("createPaymentLink", params, async () => {
+        if (!capabilities.paymentLinks) {
+          throw new OperationNotSupportedError(name, "createPaymentLink", {
+            capability: "paymentLinks",
+            claimedSupport: false,
+          });
+        }
+        const id = nextId("plink");
+        return {
+          outcome: "succeeded" as const,
+          paymentLink: {
+            status: "active",
+            url: `https://mock.test/pay/${id}`,
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: id,
+              status: "active",
+            }),
+          },
+        };
+      });
+    },
+
+    async getPaymentLink(params: GetPaymentLinkParams): Promise<PaymentLinkOperationResult> {
+      return track("getPaymentLink", params, async () => {
+        if (!capabilities.paymentLinks) {
+          throw new OperationNotSupportedError(name, "getPaymentLink", {
+            capability: "paymentLinks",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          paymentLink: {
+            status: "active",
+            url: `https://mock.test/pay/${params.paymentLinkId}`,
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.paymentLinkId,
+              status: "active",
+            }),
+          },
+        };
+      });
+    },
+
+    async deactivatePaymentLink(
+      params: DeactivatePaymentLinkParams,
+    ): Promise<PaymentLinkOperationResult> {
+      return track("deactivatePaymentLink", params, async () => {
+        if (!capabilities.paymentLinks) {
+          throw new OperationNotSupportedError(name, "deactivatePaymentLink", {
+            capability: "paymentLinks",
+            claimedSupport: false,
+          });
+        }
+        return {
+          outcome: "succeeded" as const,
+          paymentLink: {
+            status: "inactive",
+            url: `https://mock.test/pay/${params.paymentLinkId}`,
+            references: buildProviderReferences({
+              gateway: name,
+              gatewayId: params.paymentLinkId,
+              status: "inactive",
+            }),
+          },
         };
       });
     },
@@ -1999,8 +2183,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         }
         // TESTKIT-3: never invent payment_paid / payment.succeeded for a
         // typeless payload. Missing type is malformed, not a paid event.
-        const type =
-          typeof body.type === "string" ? body.type.trim() : "";
+        const type = typeof body.type === "string" ? body.type.trim() : "";
         if (!type) {
           throw new GatewayApiError("Malformed webhook payload (mock)", name);
         }

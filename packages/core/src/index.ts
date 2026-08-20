@@ -111,6 +111,50 @@ export type {
   ListPaymentMethodsResult,
 } from "./types/customer.types";
 
+// Phase 22.2 — hosted checkout
+export type {
+  CheckoutSessionStatus,
+  CommonCheckoutSessionInput,
+  GetCheckoutSessionParams,
+  CheckoutSession,
+  CheckoutSessionOperationOutcome,
+  CheckoutSessionOperationResult,
+} from "./types/checkout.types";
+export {
+  isHostedCheckoutRedirect,
+  applyIndeterminateCheckoutSessionOutcome,
+} from "./types/checkout.types";
+
+// Phase 22.3 — disputes
+export type {
+  GetDisputeParams,
+  ListDisputesParams,
+  DisputeEvidenceInput,
+  SubmitDisputeEvidenceParams,
+  DisputeOperationOutcome,
+  DisputeOperationResult,
+  ListDisputesResult,
+} from "./types/dispute.types";
+
+// Phase 22.5 — payment links
+export type {
+  PaymentLinkStatus,
+  CommonPaymentLinkInput,
+  CreatePaymentLinkParams,
+  GetPaymentLinkParams,
+  DeactivatePaymentLinkParams,
+  PaymentLink,
+  PaymentLinkOperationOutcome,
+  PaymentLinkOperationResult,
+} from "./types/payment-link.types";
+
+// Phase 22.4 — marketplace vocabulary
+export type {
+  MarketplaceSplit,
+  Transfer,
+  Payout,
+} from "./types/marketplace.types";
+
 // Phase 6 — domain statuses, provider refs, operation outcomes
 export type {
   PaymentDomainStatus,
@@ -125,8 +169,11 @@ export type {
 export {
   isPaymentDomainStatus,
   isPaidLikePaymentStatus,
+  isDisputeStatus,
+  mapNativeDisputeStatus,
   PAYMENT_DOMAIN_STATUSES,
   PAID_LIKE_PAYMENT_STATUSES,
+  DISPUTE_STATUSES,
 } from "./types/domain-status";
 export type {
   ProviderReferences,

@@ -202,6 +202,8 @@ describe("gateway capabilities foundation", () => {
         hostedCheckout: "createCheckoutSession",
         customers: "createCustomer",
         paymentMethods: "attachPaymentMethod",
+        disputes: "getDispute",
+        paymentLinks: "createPaymentLink",
       };
       for (const key of GATEWAY_CAPABILITY_KEYS) {
         expect(CAPABILITY_OPERATION_MAP[key]).toBe(mapped[key]);
@@ -235,6 +237,15 @@ describe("gateway capabilities foundation", () => {
       expect(
         requiredCapabilitiesForOperation("createCheckoutSession", {}),
       ).toEqual(["hostedCheckout"]);
+      expect(
+        requiredCapabilitiesForOperation("getCheckoutSession", {}),
+      ).toEqual(["hostedCheckout"]);
+      expect(requiredCapabilitiesForOperation("getDispute", {})).toEqual([
+        "disputes",
+      ]);
+      expect(
+        requiredCapabilitiesForOperation("createPaymentLink", {}),
+      ).toEqual(["paymentLinks"]);
       expect(requiredCapabilitiesForOperation("createCustomer", {})).toEqual([
         "customers",
       ]);

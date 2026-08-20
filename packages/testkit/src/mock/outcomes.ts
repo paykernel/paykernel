@@ -154,7 +154,19 @@ export type MockRequestRecord = {
     | "getPaymentStatus"
     | "verifyWebhook"
     | "parseWebhookEvent"
-    | "createCheckoutSession";
+    | "createCheckoutSession"
+    | "getCheckoutSession"
+    | "createCustomer"
+    | "getCustomer"
+    | "attachPaymentMethod"
+    | "listPaymentMethods"
+    | "detachPaymentMethod"
+    | "getDispute"
+    | "listDisputes"
+    | "submitDisputeEvidence"
+    | "createPaymentLink"
+    | "getPaymentLink"
+    | "deactivatePaymentLink";
   /** Params after {@link redact} (secrets/PII scrubbed). */
   params: unknown;
   /** Successful result after redact, when the call returned. */

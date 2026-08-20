@@ -46,6 +46,13 @@ const MONEY_IDENTITY_KEYS = [
     'sessionId',
     'paymentIntentId',
     'paymentStatus',
+    'session',
+    'customer',
+    'paymentMethod',
+    'paymentMethods',
+    'dispute',
+    'disputes',
+    'paymentLink',
 ] as const;
 
 /**
@@ -56,7 +63,16 @@ const MONEY_IDENTITY_KEYS = [
  * poison freeze — including when the gateway aliases `nextAction` into
  * `rawResponse` (e.g. Stripe).
  */
-const NESTED_IDENTITY_KEYS = ['nextAction', 'references', 'decline'] as const;
+const NESTED_IDENTITY_KEYS = [
+    'nextAction',
+    'references',
+    'decline',
+    'session',
+    'customer',
+    'paymentMethod',
+    'dispute',
+    'paymentLink',
+] as const;
 
 /**
  * Deep-clone plain objects / arrays (own enumerable props). Used for nested

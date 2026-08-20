@@ -1,6 +1,6 @@
 # Operation results & outcomes (Phase 6)
 
-Prefer **`outcome`** discrimination over the legacy **`success: boolean`** field when deciding what to do after `createPayment` / `capturePayment` / `getPayment`.
+Prefer **`outcome`** discrimination over the legacy **`success: boolean`** field when deciding what to do after `createPayment` / `capturePayment` / `getPayment`. Hosted checkout, customers, disputes, and payment links (Phase 22) are outcome-only — they have no `success` boolean. Checkout create success is **not** paid; use `isHostedCheckoutRedirect` then fulfill from payment settlement.
 
 ## Why not `success` alone?
 

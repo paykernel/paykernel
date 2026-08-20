@@ -17,12 +17,14 @@
 
 import { InvalidRequestError } from "../errors";
 import { sha256Hex } from "../runtime/crypto-portable";
+import { unixSecondsToIso } from "../runtime/clock";
 import type {
   CaptureStatus,
-  DisputeStatus,
   RefundDomainStatus,
   SetupTokenStatus,
 } from "./domain-status";
+import { mapNativeDisputeStatus } from "./domain-status";
+import type { Dispute } from "./dispute.types";
 import type { PaymentDecline, Payment } from "./operation-result";
 import type { GatewayId, PaymentStatus } from "./payment.types";
 import type { ProviderReferences } from "./provider-refs";
@@ -105,15 +107,7 @@ export type Capture = {
   references: ProviderReferences;
 };
 
-/**
- * Dispute entity embedded on `dispute.*` arms.
- */
-export type Dispute = {
-  status: DisputeStatus | string;
-  amount?: number;
-  currency?: string;
-  references: ProviderReferences;
-};
+export type { Dispute } from "./dispute.types";
 
 /**
  * Payment-method setup entity on `payment_method.setup_completed`.
@@ -982,12 +976,112 @@ function captureFromWebhookEvent(event: WebhookEvent): Capture {
   };
 }
 
+function stripeDisputeObjectFromRaw(raw: unknown): {
+  id?: unknown;
+  object?: unknown;
+  status?: unknown;
+  reason?: unknown;
+  charge?: unknown;
+  payment_intent?: unknown;
+  evidence_details?: { due_by?: unknown };
+  livemode?: unknown;
+} | undefined {
+  if (raw === null || typeof raw !== "object") {
+    return undefined;
+  }
+  const root = raw as Record<string, unknown>;
+  const data = root.data;
+  if (data !== null && typeof data === "object") {
+    const object = (data as { object?: unknown }).object;
+    if (
+      object !== null &&
+      typeof object === "object" &&
+      (object as { object?: unknown }).object === "dispute"
+    ) {
+      return object as {
+        id?: unknown;
+        object?: unknown;
+        status?: unknown;
+        reason?: unknown;
+        charge?: unknown;
+        payment_intent?: unknown;
+        evidence_details?: { due_by?: unknown };
+        livemode?: unknown;
+      };
+    }
+  }
+  if ((root as { object?: unknown }).object === "dispute") {
+    return root;
+  }
+  return undefined;
+}
+
+function expandableRawId(value: unknown): string | undefined {
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { id?: unknown }).id === "string"
+  ) {
+    const id = (value as { id: string }).id;
+    return id.length > 0 ? id : undefined;
+  }
+  return undefined;
+}
+
 function disputeFromWebhookEvent(event: WebhookEvent): Dispute {
-  return {
-    status: event.status,
-    references: referencesFromWebhookEvent(event),
+  const native = event.status;
+  const status = mapNativeDisputeStatus(native);
+  const stripeObject = stripeDisputeObjectFromRaw(event.rawPayload);
+  const disputeId =
+    expandableRawId(stripeObject?.id) ?? event.gatewayObjectId;
+  const chargeId = expandableRawId(stripeObject?.charge);
+  const paymentIntentId = expandableRawId(stripeObject?.payment_intent);
+  const livemode =
+    typeof stripeObject?.livemode === "boolean"
+      ? stripeObject.livemode
+      : event.livemode;
+  const providerObjectId =
+    disputeId !== undefined && disputeId.startsWith("dp_")
+      ? disputeId
+      : event.gatewayPaymentId;
+  const snapshot: Dispute = {
+    status,
+    providerStatus: native,
+    references: buildProviderReferences({
+      gateway: event.gateway,
+      gatewayId: providerObjectId,
+      status,
+      providerNativeStatus: native,
+      relatedIds: {
+        ...(chargeId !== undefined ? { chargeId } : {}),
+        ...(paymentIntentId !== undefined
+          ? { paymentIntentId }
+          : {}),
+      },
+    }),
     ...moneyFieldsFromWebhook(event),
   };
+  if (typeof stripeObject?.reason === "string" && stripeObject.reason.length > 0) {
+    snapshot.reason = stripeObject.reason;
+  }
+  const due = unixSecondsToIso(stripeObject?.evidence_details?.due_by);
+  if (due !== undefined) {
+    snapshot.evidenceDueBy = due;
+  }
+  if (disputeId !== undefined && disputeId.startsWith("dp_")) {
+    const host =
+      livemode === true
+        ? "https://dashboard.stripe.com"
+        : "https://dashboard.stripe.com/test";
+    snapshot.dashboardUrl =
+      chargeId !== undefined && chargeId.startsWith("ch_")
+        ? `${host}/payments/${chargeId}`
+        : `${host}/disputes/${disputeId}`;
+  }
+  return snapshot;
 }
 
 function setupFromWebhookEvent(event: WebhookEvent): PaymentMethodSetup {

@@ -95,12 +95,15 @@ export function isGatewayCapabilityKey(
  * - `partialCapture` → `capturePayment` (capture with a partial `amount`)
  * - `refunds` / `partialRefunds` → `refundPayment`
  * - `voids` → `voidPayment`
- * - `hostedCheckout` → `createCheckoutSession` (hosted session API, not any redirect)
+ * - `hostedCheckout` → `createCheckoutSession` (hosted session API, not any redirect;
+ *   getCheckoutSession shares the same capability)
  * - `customers` → `createCustomer` (getCustomer shares the same capability)
  * - `paymentMethods` → `attachPaymentMethod` (list/detach share the same capability)
+ * - `disputes` → `getDispute` (list/submit share the same capability)
+ * - `paymentLinks` → `createPaymentLink` (get/deactivate share the same capability)
  *
  * Keys without a single primary client/gateway method (tokenization,
- * marketplaceSplits, disputes, paymentLinks, providerRecurring)
+ * marketplaceSplits, providerRecurring)
  * are omitted — they are extension / multi-method surfaces, not one operation.
  *
  * `providerRecurring` is extension-only: claim only when the adapter exposes
@@ -120,6 +123,8 @@ export const CAPABILITY_OPERATION_MAP: Readonly<
   hostedCheckout: "createCheckoutSession",
   customers: "createCustomer",
   paymentMethods: "attachPaymentMethod",
+  disputes: "getDispute",
+  paymentLinks: "createPaymentLink",
 });
 
 /**
@@ -157,6 +162,7 @@ export function requiredCapabilitiesForOperation(
     case "voidPayment":
       return ["voids"];
     case "createCheckoutSession":
+    case "getCheckoutSession":
       return ["hostedCheckout"];
     case "capturePayment":
       return bag.amount !== undefined ? ["partialCapture"] : [];
@@ -167,6 +173,14 @@ export function requiredCapabilitiesForOperation(
     case "listPaymentMethods":
     case "detachPaymentMethod":
       return ["paymentMethods"];
+    case "getDispute":
+    case "listDisputes":
+    case "submitDisputeEvidence":
+      return ["disputes"];
+    case "createPaymentLink":
+    case "getPaymentLink":
+    case "deactivatePaymentLink":
+      return ["paymentLinks"];
     default:
       return [];
   }

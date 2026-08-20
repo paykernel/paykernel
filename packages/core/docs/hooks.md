@@ -167,6 +167,9 @@ not for “business rule said stop” before aborts or after-hook noise.
 | `getCheckoutSession` | _(global hooks only)_ | Stripe Checkout session lookup |
 | `confirmStcPayOtp` | _(global hooks only)_ | Moyasar STC Pay OTP confirm |
 | `createCheckoutSession` | _(global hooks only)_ | Stripe Checkout (and similar) |
+| `createCustomer` / `getCustomer` / `attachPaymentMethod` / `listPaymentMethods` / `detachPaymentMethod` | _(global hooks only)_ | Phase 22.1 vault |
+| `getDispute` / `listDisputes` / `submitDisputeEvidence` | _(global hooks only)_ | Phase 22.3 |
+| `createPaymentLink` / `getPaymentLink` / `deactivatePaymentLink` | _(global hooks only)_ | Phase 22.5 |
 | `verifyWebhook` | _(not used by `handleWebhook`)_ | Reserved operation name; client webhook flow uses the webhook hooks below |
 
 ### Webhook path (client-level, not `executeWithHooks`)

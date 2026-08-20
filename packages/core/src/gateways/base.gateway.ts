@@ -24,6 +24,10 @@ import {
     applyIndeterminatePaymentOutcome,
     applyIndeterminateRefundOutcome,
 } from '../types/operation-result';
+import {
+    applyIndeterminateCheckoutSessionOutcome,
+    type CheckoutSessionOperationResult,
+} from '../types/checkout.types';
 import { createRedactingLogger, noopLogger, type Logger } from '../utils/logger';
 import type { Clock } from '../runtime/clock';
 import type {
@@ -374,7 +378,10 @@ function isPostSubmitCustomerMutation(operation: OperationType): boolean {
     return (
         operation === "createCustomer" ||
         operation === "attachPaymentMethod" ||
-        operation === "detachPaymentMethod"
+        operation === "detachPaymentMethod" ||
+        operation === "submitDisputeEvidence" ||
+        operation === "createPaymentLink" ||
+        operation === "deactivatePaymentLink"
     );
 }
 
@@ -403,6 +410,8 @@ const POST_SUBMIT_ID_KEYS = [
     "idempotencyKey",
     "customerId",
     "paymentMethodId",
+    "disputeId",
+    "paymentLinkId",
 ] as const;
 
 function providerObjectIdFromParams(params: unknown): string {
@@ -420,42 +429,11 @@ function providerObjectIdFromParams(params: unknown): string {
 }
 
 /**
- * Checkout-shaped post-submit unknown (S19-CKO-TIMEOUT).
- * Must not reuse {@link applyIndeterminatePaymentOutcome} — that snapshot has
- * `gatewayId` / payment `status` and is the wrong result shape for
- * `createCheckoutSession`. `getCheckoutSession` stays a thrown NetworkError.
- */
-function applyIndeterminateCheckoutSessionOutcome(input: {
-    sessionId: string;
-    message: string;
-    errorName: string;
-}): {
-    success: false;
-    sessionId: string;
-    outcome: "indeterminate";
-    reconciliationRequired: true;
-    rawResponse: {
-        indeterminate: true;
-        message: string;
-        name: string;
-    };
-} {
-    return {
-        success: false,
-        sessionId: input.sessionId,
-        outcome: "indeterminate",
-        reconciliationRequired: true,
-        rawResponse: {
-            indeterminate: true,
-            message: input.message,
-            name: input.errorName,
-        },
-    };
-}
-
-/**
  * Convert a post-submit NetworkError on a money mutation into the Phase 6
  * indeterminate result. Returns undefined for queries, aborts, and non-network errors.
+ *
+ * `createCheckoutSession` uses {@link applyIndeterminateCheckoutSessionOutcome}
+ * (S19-CKO-TIMEOUT). `getCheckoutSession` stays a thrown NetworkError.
  */
 function tryIndeterminateFromNetworkError(
     operation: OperationType,
@@ -465,7 +443,7 @@ function tryIndeterminateFromNetworkError(
 ):
     | GatewayPaymentResult
     | GatewayRefundResult
-    | ReturnType<typeof applyIndeterminateCheckoutSessionOutcome>
+    | CheckoutSessionOperationResult
     | {
           outcome: "indeterminate";
           reconciliationRequired: true;
@@ -491,6 +469,7 @@ function tryIndeterminateFromNetworkError(
             sessionId: providerObjectId,
             message: error.message,
             errorName: error.name,
+            gateway,
         });
     }
     if (operation === "refundPayment") {

@@ -24,7 +24,7 @@ Shared retry helper: `withRetry` in `src/utils/retry.ts` (default up to **3** at
 | **createPayment** | Auto-retry **only if** `idempotencyKey` set (`given_id`) | Sends `PayPal-Request-Id` (caller key, or ephemeral UUID + warn) → auto-retry enabled | **Not** auto-retried via `withRetry`; optional `idempotencyKey` + in-memory/store guard | Sends `Idempotency-Key` (caller key, or ephemeral UUID + warn) → auto-retry enabled |
 | **capture / refund / void** | **Never** auto-retried (`withRetry` not used). **Requires** `moyasar.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded) | **Requires** caller `idempotencyKey` (throws before POST). Sends `PayPal-Request-Id` → auto-retry enabled | **Never** auto-retried. **Requires** `paymob.idempotencyStore.reserve` + `idempotencyKey` (throws `InvalidRequestError` if missing; never unguarded — I2) | **Requires** caller `idempotencyKey` (throws before POST). Sends `Idempotency-Key` → auto-retry enabled |
 | **authorizePayment** (PayPal) | N/A | **Requires** caller `idempotencyKey` (throws before POST) | N/A | N/A |
-| **createCheckoutSession** (Stripe) | N/A | N/A | N/A | **Requires** caller `idempotencyKey` (throws before POST) |
+| **createCheckoutSession** (Stripe) | N/A | N/A | N/A | **Requires** caller `idempotencyKey` (throws before POST). Returns Phase 6 `outcome` union (`session`), not `{ success, sessionId, url }` |
 
 Transient classes generally treated as retryable where auto-retry is enabled: `NetworkError` (including abort/timeouts), provider 5xx, and 429 / `RateLimitError`. PayPal also retries certain `409 RESOURCE_CONFLICT` / `PREVIOUS_REQUEST_IN_PROGRESS` responses. Definite 4xx validation / business declines are **not** retried.
 

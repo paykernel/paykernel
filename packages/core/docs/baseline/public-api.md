@@ -5,12 +5,12 @@
 
 ## Generation metadata
 
-- **Generated at (UTC)**: 2026-08-18T11:25:53.394Z
+- **Generated at (UTC)**: 2026-08-20T08:15:46.507Z
 - **Command**: `bun run scripts/generate-api-baseline.ts`
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 424089 bytes, sha256 `47614693dfd9576efa436f2001761969a58e907e45483f7c973cc0b6ea394a40`
+- **Bundle**: `dist/index.js` — 483222 bytes, sha256 `c4ff43629d37da5a9fb782959e36ab1d90273716de7eaeb269cf6e552e2980db`
 
 ## Package
 
@@ -38,6 +38,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 
 | Name | Kind |
 | --- | --- |
+| `applyIndeterminateCheckoutSessionOutcome` | function |
 | `applyIndeterminatePaymentOutcome` | function |
 | `applyIndeterminateRefundOutcome` | function |
 | `applyOutcomeToGatewayRefundResult` | function |
@@ -71,6 +72,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `DEFAULT_GATEWAY_CAPABILITIES` | const |
 | `DEFAULT_RETRY_CONFIG` | const |
 | `defineGatewayCapabilities` | function |
+| `DISPUTE_STATUSES` | const |
 | `encryptRawWebhookPayload` | function |
 | `extractAbortSignal` | function |
 | `finalizeOperationContext` | function |
@@ -100,8 +102,10 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `isApplePaySource` | function |
 | `isCardTokenSource` | function |
 | `isCreditCardSource` | function |
+| `isDisputeStatus` | function |
 | `isGatewayCapabilityKey` | function |
 | `isGatewayPaymentResult` | function |
+| `isHostedCheckoutRedirect` | function |
 | `isIndeterminateOutcome` | function |
 | `isKnownCurrencyCode` | function |
 | `isMoney` | function |
@@ -120,6 +124,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `mapGatewayRefundToOperationResult` | function |
 | `mapGatewayResultToOperationResult` | function |
 | `mapHttpAbortError` | function |
+| `mapNativeDisputeStatus` | function |
 | `mapProviderEventTypeToStable` | function |
 | `mergePaymentRuntime` | function |
 | `minorAmountToNumber` | function |
@@ -190,7 +195,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `withAbortSignal` | function |
 | `withRetry` | function |
 
-**Count**: 151
+**Count**: 156
 
 ## Type-only exports
 
@@ -207,6 +212,7 @@ These exist only in the TypeScript declaration surface.
 | `ApplyOutcomeGatewayBase` |
 | `ApplyOutcomeGatewayRefundBase` |
 | `AttachPaymentEventOptions` |
+| `AttachPaymentMethodParams` |
 | `AuthorizationStatus` |
 | `BeforeHook` |
 | `BeforeHookResult` |
@@ -219,19 +225,37 @@ These exist only in the TypeScript declaration surface.
 | `CaptureParams` |
 | `CaptureStatus` |
 | `CardTokenSource` |
+| `CheckoutSession` |
+| `CheckoutSessionOperationOutcome` |
+| `CheckoutSessionOperationResult` |
+| `CheckoutSessionStatus` |
 | `Clock` |
+| `CommonCheckoutSessionInput` |
+| `CommonCustomerInput` |
 | `CommonPaymentInput` |
+| `CommonPaymentLinkInput` |
 | `CreateCheckoutSessionParams` |
+| `CreateCustomerParams` |
 | `CreateDefaultGatewayContextOptions` |
 | `CreateOperationContextInput` |
 | `CreatePaymentClientOptions` |
+| `CreatePaymentLinkParams` |
 | `CreatePaymentParams` |
 | `CreditCardSource` |
 | `CryptoProvider` |
 | `CurrencyCode` |
 | `CurrencyExponentOverrides` |
+| `Customer` |
+| `CustomerOperationOutcome` |
+| `CustomerOperationResult` |
+| `CustomerStatus` |
+| `DeactivatePaymentLinkParams` |
 | `DecimalString` |
+| `DetachPaymentMethodParams` |
 | `Dispute` |
+| `DisputeEvidenceInput` |
+| `DisputeOperationOutcome` |
+| `DisputeOperationResult` |
 | `DisputeStatus` |
 | `EncryptedRawPayloadRecord` |
 | `ErrorHook` |
@@ -250,7 +274,11 @@ These exist only in the TypeScript declaration surface.
 | `GatewayRefundResult` |
 | `GatewayRegistryBuilder` |
 | `GatewayRuntimeDeps` |
+| `GetCheckoutSessionParams` |
 | `GetCurrencyExponentOptions` |
+| `GetCustomerParams` |
+| `GetDisputeParams` |
+| `GetPaymentLinkParams` |
 | `GetPaymentParams` |
 | `HookContext` |
 | `IdempotencyRecord` |
@@ -258,9 +286,14 @@ These exist only in the TypeScript declaration surface.
 | `IdempotencyStore` |
 | `ImmutableGatewayRegistry` |
 | `InferGatewayMapFromAdapters` |
+| `ListDisputesParams` |
+| `ListDisputesResult` |
+| `ListPaymentMethodsParams` |
+| `ListPaymentMethodsResult` |
 | `Logger` |
 | `LogLevel` |
 | `MappedStableEventType` |
+| `MarketplaceSplit` |
 | `MinorAmount` |
 | `Money` |
 | `MoneyFailureKind` |
@@ -292,7 +325,12 @@ These exist only in the TypeScript declaration surface.
 | `PaymentFailure` |
 | `PaymentGateway` |
 | `PaymentHooks` |
+| `PaymentLink` |
+| `PaymentLinkOperationOutcome` |
+| `PaymentLinkOperationResult` |
+| `PaymentLinkStatus` |
 | `PaymentMetadata` |
+| `PaymentMethodOperationResult` |
 | `PaymentMethodSetup` |
 | `PaymentNextAction` |
 | `PaymentOperationOutcome` |
@@ -307,6 +345,7 @@ These exist only in the TypeScript declaration surface.
 | `PaymobIdempotencyStore` |
 | `PaymobRedirectWebhookPayload` |
 | `PaymobWebhookPayload` |
+| `Payout` |
 | `PayoutStatus` |
 | `PayPalConfig` |
 | `PayPalCreatePaymentParams` |
@@ -329,12 +368,16 @@ These exist only in the TypeScript declaration surface.
 | `SetupTokenStatus` |
 | `StablePaymentEventType` |
 | `StcPaySource` |
+| `StoredPaymentMethod` |
+| `StoredPaymentMethodType` |
 | `StripeConfig` |
 | `StripeCreatePaymentParams` |
 | `StripeWebhookPayload` |
+| `SubmitDisputeEvidenceParams` |
 | `TelemetrySink` |
 | `TimeoutSignalHandle` |
 | `ToPersistedEnvelopeOptions` |
+| `Transfer` |
 | `TransferStatus` |
 | `UnmappedPaymentEventType` |
 | `VoidParams` |
@@ -345,14 +388,14 @@ These exist only in the TypeScript declaration surface.
 | `WebhookVerifiedHook` |
 | `WithRetryOptions` |
 
-**Count**: 145
+**Count**: 183
 
 ## Cross-checks
 
 - Parsed value exports present on runtime module: **yes**
 - Runtime keys not listed in `src/index.ts` value exports: _none_
 - Type-only names that also exist as runtime values: _none_
-- Total distinct public names (runtime + type-only): **296**
+- Total distinct public names (runtime + type-only): **339**
 
 ## Declaration output tree (`dist/**/*.d.ts`)
 
@@ -387,11 +430,16 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `runtime/index.d.ts`
 - `runtime/operation-context.d.ts`
 - `runtime/payment-runtime.d.ts`
+- `types/checkout.types.d.ts`
 - `types/config.types.d.ts`
+- `types/customer.types.d.ts`
+- `types/dispute.types.d.ts`
 - `types/domain-status.d.ts`
+- `types/marketplace.types.d.ts`
 - `types/moyasar-source.types.d.ts`
 - `types/operation-result.d.ts`
 - `types/payment-event.d.ts`
+- `types/payment-link.types.d.ts`
 - `types/payment.types.d.ts`
 - `types/provider-refs.d.ts`
 - `types/stable-payment-event-types.d.ts`
@@ -402,9 +450,10 @@ Relative paths under `dist/`, sorted. Source maps (`.d.ts.map`) are omitted.
 - `utils/idempotency.d.ts`
 - `utils/logger.d.ts`
 - `utils/money.d.ts`
+- `utils/raw-card.d.ts`
 - `utils/retry.d.ts`
 
-**Count**: 45
+**Count**: 51
 
 ## Notes
 

@@ -15,3 +15,14 @@ export const systemClock: Clock = {
   now: () => new Date(),
   nowMs: () => Date.now(),
 };
+
+/**
+ * Convert a Unix epoch in seconds to an ISO-8601 string.
+ * Non-finite, non-positive, and non-number values are omitted (no invented epoch).
+ */
+export function unixSecondsToIso(value: unknown): string | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return new Date(value * 1000).toISOString();
+}

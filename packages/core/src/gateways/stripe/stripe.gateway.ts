@@ -26,6 +26,28 @@ import type {
   StoredPaymentMethod,
   StoredPaymentMethodType,
 } from "../../types/customer.types";
+import type {
+  CheckoutSession,
+  CheckoutSessionOperationResult,
+  CheckoutSessionStatus,
+  GetCheckoutSessionParams,
+} from "../../types/checkout.types";
+import type {
+  Dispute,
+  DisputeOperationResult,
+  GetDisputeParams,
+  ListDisputesParams,
+  ListDisputesResult,
+  SubmitDisputeEvidenceParams,
+} from "../../types/dispute.types";
+import type {
+  CreatePaymentLinkParams,
+  DeactivatePaymentLinkParams,
+  GetPaymentLinkParams,
+  PaymentLink,
+  PaymentLinkOperationResult,
+} from "../../types/payment-link.types";
+import { mapNativeDisputeStatus } from "../../types/domain-status";
 import { buildProviderReferences } from "../../types/provider-refs";
 import {
   applyOutcomeToGatewayResult,
@@ -66,6 +88,7 @@ import {
   isMutatingHttpMethod,
   mapHttpAbortError,
 } from "../../runtime/abort";
+import { unixSecondsToIso } from "../../runtime/clock";
 import {
   concatBytes,
   hmacSha256Hex,
@@ -247,6 +270,9 @@ const STRIPE_CUSTOMER_ID_PATTERN = /^cus_[A-Za-z0-9_]+$/;
 const STRIPE_PAYMENT_METHOD_ID_PATTERN = /^pm_[A-Za-z0-9_]+$/;
 const STRIPE_CARD_TOKEN_PATTERN = /^tok_[A-Za-z0-9_]+$/;
 const STRIPE_CHECKOUT_SESSION_ID_PATTERN = /^cs_[A-Za-z0-9_]+$/;
+const STRIPE_DISPUTE_ID_PATTERN = /^dp_[A-Za-z0-9_]+$/;
+const STRIPE_PAYMENT_LINK_ID_PATTERN = /^plink_[A-Za-z0-9_]+$/;
+const STRIPE_CHARGE_ID_PATTERN = /^ch_[A-Za-z0-9_]+$/;
 
 function stripeCurrencyExponent(currency: string): number {
   const normalized = currency.toLowerCase();
@@ -1576,9 +1602,19 @@ function mapStripePaymentMethod(
   return snapshot;
 }
 
-function stripeMissingResourceFailed(
+function stripeNotFoundFailed(
   error: unknown,
-): CustomerOperationResult | undefined {
+):
+  | {
+      outcome: "failed";
+      error: {
+        name: string;
+        message: string;
+        code: string;
+        statusCode: number;
+      };
+    }
+  | undefined {
   if (!(error instanceof GatewayApiError)) {
     return undefined;
   }
@@ -1594,6 +1630,166 @@ function stripeMissingResourceFailed(
       code: error.code,
       statusCode: 404,
     },
+  };
+}
+
+type StripeDisputeObject = {
+  id?: unknown;
+  object?: unknown;
+  amount?: unknown;
+  currency?: unknown;
+  status?: unknown;
+  reason?: unknown;
+  charge?: unknown;
+  payment_intent?: unknown;
+  livemode?: unknown;
+  evidence_details?: { due_by?: unknown };
+};
+
+type StripePaymentLinkObject = {
+  id?: unknown;
+  object?: unknown;
+  url?: unknown;
+  active?: unknown;
+};
+
+function checkoutSessionStatus(status: unknown): CheckoutSessionStatus | string {
+  if (status === "open" || status === "complete" || status === "expired") {
+    return status;
+  }
+  if (typeof status === "string" && status.trim().length > 0) {
+    return status;
+  }
+  return "unknown";
+}
+
+function stripeDashboardBase(livemode: boolean | undefined): string {
+  return livemode === true
+    ? "https://dashboard.stripe.com"
+    : "https://dashboard.stripe.com/test";
+}
+
+function stripeDisputeDashboardUrl(input: {
+  livemode?: boolean;
+  chargeId?: string;
+  disputeId: string;
+}): string {
+  if (input.chargeId && STRIPE_CHARGE_ID_PATTERN.test(input.chargeId)) {
+    return `${stripeDashboardBase(input.livemode)}/payments/${input.chargeId}`;
+  }
+  return `${stripeDashboardBase(input.livemode)}/disputes/${input.disputeId}`;
+}
+
+function stripeDisputePathId(disputeId: string): string {
+  if (!STRIPE_DISPUTE_ID_PATTERN.test(disputeId)) {
+    throw new InvalidRequestError(
+      "Stripe Dispute ID must start with dp_ and contain only letters, numbers, or underscores",
+    );
+  }
+  return encodeURIComponent(disputeId);
+}
+
+function stripePaymentLinkPathId(paymentLinkId: string): string {
+  if (!STRIPE_PAYMENT_LINK_ID_PATTERN.test(paymentLinkId)) {
+    throw new InvalidRequestError(
+      "Stripe Payment Link ID must start with plink_ and contain only letters, numbers, or underscores",
+    );
+  }
+  return encodeURIComponent(paymentLinkId);
+}
+
+function mapStripeDispute(object: StripeDisputeObject): Dispute {
+  const id = requireStripeMutationId(
+    object.id,
+    "Stripe Dispute response missing id",
+    object,
+  );
+  const native =
+    typeof object.status === "string" && object.status.trim().length > 0
+      ? object.status
+      : "needs_response";
+  const status = mapNativeDisputeStatus(native);
+  const chargeId = expandableId(
+    object.charge as string | { id?: string } | null | undefined,
+  );
+  const paymentIntentId = expandableId(
+    object.payment_intent as string | { id?: string } | null | undefined,
+  );
+  const currency =
+    typeof object.currency === "string" && object.currency.trim().length > 0
+      ? object.currency.toUpperCase()
+      : undefined;
+  const amountMinor =
+    typeof object.amount === "number" && Number.isFinite(object.amount)
+      ? object.amount
+      : undefined;
+  const amount =
+    currency !== undefined && amountMinor !== undefined
+      ? fromStripeAmount(amountMinor, currency)
+      : undefined;
+  const snapshot: Dispute = {
+    status,
+    providerStatus: native,
+    dashboardUrl: stripeDisputeDashboardUrl({
+      livemode: object.livemode === true,
+      ...(chargeId !== undefined ? { chargeId } : {}),
+      disputeId: id,
+    }),
+    references: buildProviderReferences({
+      gateway: "stripe",
+      gatewayId: id,
+      status,
+      providerNativeStatus: native,
+      relatedIds: {
+        ...(chargeId !== undefined ? { chargeId } : {}),
+        ...(paymentIntentId !== undefined ? { paymentIntentId } : {}),
+      },
+    }),
+    rawResponse: object,
+  };
+  if (typeof object.reason === "string" && object.reason.length > 0) {
+    snapshot.reason = object.reason;
+  }
+  const due = unixSecondsToIso(object.evidence_details?.due_by);
+  if (due !== undefined) {
+    snapshot.evidenceDueBy = due;
+  }
+  if (currency !== undefined) {
+    snapshot.currency = currency;
+    if (amount !== undefined) {
+      snapshot.amount = amount;
+    }
+  }
+  return snapshot;
+}
+
+function mapStripePaymentLink(object: StripePaymentLinkObject): PaymentLink {
+  const id = requireStripeMutationId(
+    object.id,
+    "Stripe Payment Link response missing id",
+    object,
+  );
+  const url = isNonEmptyStripeString(object.url)
+    ? object.url
+    : undefined;
+  if (url === undefined) {
+    throwStripeIndeterminateResponse(
+      "Stripe Payment Link response missing url",
+      object,
+    );
+  }
+  // Fail-closed: omitted `active` is not a live shareable link.
+  const status = object.active === true ? "active" : "inactive";
+  return {
+    status,
+    url,
+    references: buildProviderReferences({
+      gateway: "stripe",
+      gatewayId: id,
+      status,
+      providerNativeStatus: status,
+    }),
+    rawResponse: object,
   };
 }
 
@@ -2525,21 +2721,9 @@ export class StripeGateway extends BaseGateway {
    * Retrieve Checkout Session details and expose the related PaymentIntent ID
    * for legacy rows that stored cs_* before normalizing to pi_*.
    */
-  async getCheckoutSession(params: {
-    sessionId: string;
-    signal?: AbortSignal;
-  }): Promise<{
-    success: boolean;
-    sessionId: string;
-    paymentIntentId: string | undefined;
-    url: string | null;
-    status: string;
-    paymentStatus: string;
-    amount?: number | undefined;
-    currency?: string | undefined;
-    refundedAmount?: number | undefined;
-    rawResponse: unknown;
-  }> {
+  async getCheckoutSession(
+    params: GetCheckoutSessionParams,
+  ): Promise<CheckoutSessionOperationResult> {
     return this.executeWithHooks(
       "getCheckoutSession",
       params,
@@ -2587,24 +2771,40 @@ export class StripeGateway extends BaseGateway {
           currency !== undefined && refundedMinor !== undefined
             ? fromStripeAmount(refundedMinor, currency)
             : undefined;
-
-        return {
-          success: true,
-          sessionId,
-          paymentIntentId: expandableId(session.payment_intent),
-          url: session.url,
-          status: session.status,
-          paymentStatus,
-          ...(amount !== undefined && currency !== undefined
-            ? { amount, currency }
-            : currency !== undefined
-              ? { currency }
-              : {}),
-          ...(refundedAmount !== undefined && currency !== undefined
-            ? { refundedAmount }
-            : {}),
+        const paymentIntentId = expandableId(session.payment_intent);
+        const status = checkoutSessionStatus(session.status);
+        const snapshot: CheckoutSession = {
+          status,
+          references: buildProviderReferences({
+            gateway: "stripe",
+            gatewayId: sessionId,
+            status,
+            relatedIds:
+              paymentIntentId !== undefined
+                ? { paymentIntentId }
+                : undefined,
+          }),
           rawResponse: session,
         };
+        const url = isNonEmptyStripeString(session.url)
+          ? session.url
+          : undefined;
+        if (url !== undefined) {
+          snapshot.url = url;
+        }
+        if (typeof paymentStatus === "string" && paymentStatus.length > 0) {
+          snapshot.paymentStatus = paymentStatus;
+        }
+        if (currency !== undefined) {
+          snapshot.currency = currency;
+          if (amount !== undefined) {
+            snapshot.amount = amount;
+          }
+          if (refundedAmount !== undefined) {
+            snapshot.refundedAmount = refundedAmount;
+          }
+        }
+        return { outcome: "succeeded" as const, session: snapshot };
       },
     );
   }
@@ -2621,14 +2821,9 @@ export class StripeGateway extends BaseGateway {
    * Create a Stripe Checkout Session for hosted payment page
    * @see https://stripe.com/docs/api/checkout/sessions/create
    */
-  async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<{
-    success: boolean;
-    sessionId: string;
-    url?: string;
-    outcome?: PaymentOperationOutcome;
-    reconciliationRequired?: boolean;
-    rawResponse: unknown;
-  }> {
+  async createCheckoutSession(
+    params: CreateCheckoutSessionParams,
+  ): Promise<CheckoutSessionOperationResult> {
     return this.executeWithHooks(
       "createCheckoutSession",
       params,
@@ -2746,12 +2941,30 @@ export class StripeGateway extends BaseGateway {
         const url = isNonEmptyStripeString(response.url)
           ? response.url
           : undefined;
+        const status = checkoutSessionStatus(response.status);
+        const session: CheckoutSession = {
+          status,
+          references: buildProviderReferences({
+            gateway: "stripe",
+            gatewayId: sessionId,
+            status,
+            ...(typeof p.idempotencyKey === "string" &&
+            p.idempotencyKey.length > 0
+              ? { internalReference: p.idempotencyKey }
+              : {}),
+          }),
+          rawResponse: response,
+        };
+        if (url !== undefined) {
+          session.url = url;
+        }
+        if (isNonEmptyStripeString(response.payment_status)) {
+          session.paymentStatus = response.payment_status;
+        }
 
         return {
-          success: true,
-          sessionId,
-          ...(url !== undefined ? { url } : {}),
-          rawResponse: response,
+          outcome: "succeeded" as const,
+          session,
         };
       },
       CreateCheckoutSessionParamsSchema,
@@ -2810,7 +3023,7 @@ export class StripeGateway extends BaseGateway {
           customer: mapStripeCustomer(response),
         };
       } catch (error) {
-        const failed = stripeMissingResourceFailed(error);
+        const failed = stripeNotFoundFailed(error);
         if (failed) {
           return failed;
         }
@@ -2916,6 +3129,231 @@ export class StripeGateway extends BaseGateway {
         paymentMethod: mapStripePaymentMethod(response, p.customerId),
       };
     });
+  }
+
+  async getDispute(
+    params: GetDisputeParams,
+  ): Promise<DisputeOperationResult> {
+    return this.executeWithHooks("getDispute", params, async (p) => {
+      const pathId = stripeDisputePathId(p.disputeId);
+      try {
+        const response = await this.stripeRequest<StripeDisputeObject>(
+          "GET",
+          `/disputes/${pathId}`,
+          undefined,
+          undefined,
+          extractAbortSignal(p),
+        );
+        return {
+          outcome: "succeeded" as const,
+          dispute: mapStripeDispute(response),
+        };
+      } catch (error) {
+        const failed = stripeNotFoundFailed(error);
+        if (failed) {
+          return failed;
+        }
+        throw error;
+      }
+    });
+  }
+
+  async listDisputes(
+    params: ListDisputesParams,
+  ): Promise<ListDisputesResult> {
+    return this.executeWithHooks("listDisputes", params, async (p) => {
+      if (p.paymentId === undefined || p.paymentId.trim().length === 0) {
+        throw new InvalidRequestError(
+          "Stripe listDisputes requires paymentId (pi_… or ch_…) to bound the list",
+        );
+      }
+      const paymentId = p.paymentId.trim();
+      const query = new URLSearchParams();
+      if (STRIPE_PAYMENT_INTENT_ID_PATTERN.test(paymentId)) {
+        query.set("payment_intent", paymentId);
+      } else if (STRIPE_CHARGE_ID_PATTERN.test(paymentId)) {
+        query.set("charge", paymentId);
+      } else {
+        throw new InvalidRequestError(
+          "Stripe listDisputes paymentId must be a PaymentIntent (pi_) or Charge (ch_) id",
+        );
+      }
+      const response = await this.stripeRequest<{
+        data?: StripeDisputeObject[];
+      }>(
+        "GET",
+        `/disputes?${query.toString()}`,
+        undefined,
+        undefined,
+        extractAbortSignal(p),
+      );
+      const data = Array.isArray(response.data) ? response.data : [];
+      return {
+        outcome: "succeeded" as const,
+        disputes: data.map((item) => mapStripeDispute(item)),
+      };
+    });
+  }
+
+  async submitDisputeEvidence(
+    params: SubmitDisputeEvidenceParams,
+  ): Promise<DisputeOperationResult> {
+    return this.executeWithHooks(
+      "submitDisputeEvidence",
+      params,
+      async (p) => {
+        const pathId = stripeDisputePathId(p.disputeId);
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "submitDisputeEvidence", policy: "require-caller" },
+        );
+        const evidence = p.evidence;
+        const evidenceBag: Record<string, string> = {
+          ...(evidence.stripeEvidence ?? {}),
+        };
+        if (evidence.uncategorizedText) {
+          evidenceBag.uncategorized_text = evidence.uncategorizedText;
+        }
+        if (evidence.customerName) {
+          evidenceBag.customer_name = evidence.customerName;
+        }
+        if (evidence.customerEmail) {
+          evidenceBag.customer_email_address = evidence.customerEmail;
+        }
+        if (evidence.productDescription) {
+          evidenceBag.product_description = evidence.productDescription;
+        }
+        const body: Record<string, unknown> = { submit: true };
+        if (Object.keys(evidenceBag).length > 0) {
+          body.evidence = evidenceBag;
+        }
+        const response = await this.stripeRequest<StripeDisputeObject>(
+          "POST",
+          `/disputes/${pathId}`,
+          body,
+          idempotencyKey,
+          extractAbortSignal(p),
+        );
+        return {
+          outcome: "succeeded" as const,
+          dispute: mapStripeDispute(response),
+        };
+      },
+    );
+  }
+
+  async createPaymentLink(
+    params: CreatePaymentLinkParams,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.executeWithHooks(
+      "createPaymentLink",
+      params,
+      async (p) => {
+        if (p.amount === undefined || p.currency === undefined) {
+          throw new InvalidRequestError(
+            "Stripe payment links require amount and currency",
+          );
+        }
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "createPaymentLink", policy: "require-caller" },
+        );
+        const currency = p.currency.toLowerCase();
+        const unitAmount = toStripeAmount(p.amount, p.currency, {
+          enforceChargeLimits: true,
+        });
+        const metadata = sanitizedStripeMetadata(p.metadata);
+        const body: Record<string, unknown> = {
+          line_items: [
+            {
+              quantity: 1,
+              price_data: {
+                currency,
+                unit_amount: unitAmount,
+                product_data: { name: p.description ?? "Payment" },
+              },
+            },
+          ],
+        };
+        if (metadata) {
+          body.metadata = metadata;
+        }
+        const response = await this.stripeRequest<StripePaymentLinkObject>(
+          "POST",
+          "/payment_links",
+          body,
+          idempotencyKey,
+          extractAbortSignal(p),
+        );
+        const paymentLink = mapStripePaymentLink(response);
+        const major = fromStripeAmount(unitAmount, p.currency);
+        if (major !== undefined) {
+          paymentLink.amount = major;
+          paymentLink.currency = p.currency.toUpperCase();
+        }
+        return {
+          outcome: "succeeded" as const,
+          paymentLink,
+        };
+      },
+    );
+  }
+
+  async getPaymentLink(
+    params: GetPaymentLinkParams,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.executeWithHooks("getPaymentLink", params, async (p) => {
+      const pathId = stripePaymentLinkPathId(p.paymentLinkId);
+      try {
+        const response = await this.stripeRequest<StripePaymentLinkObject>(
+          "GET",
+          `/payment_links/${pathId}`,
+          undefined,
+          undefined,
+          extractAbortSignal(p),
+        );
+        return {
+          outcome: "succeeded" as const,
+          paymentLink: mapStripePaymentLink(response),
+        };
+      } catch (error) {
+        const failed = stripeNotFoundFailed(error);
+        if (failed) {
+          return failed;
+        }
+        throw error;
+      }
+    });
+  }
+
+  async deactivatePaymentLink(
+    params: DeactivatePaymentLinkParams,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.executeWithHooks(
+      "deactivatePaymentLink",
+      params,
+      async (p) => {
+        const pathId = stripePaymentLinkPathId(p.paymentLinkId);
+        const idempotencyKey = resolveStripeIdempotencyKey(
+          p.idempotencyKey,
+          () => this.runtime.randomUUID(),
+          { operation: "deactivatePaymentLink", policy: "require-caller" },
+        );
+        const response = await this.stripeRequest<StripePaymentLinkObject>(
+          "POST",
+          `/payment_links/${pathId}`,
+          { active: false },
+          idempotencyKey,
+          extractAbortSignal(p),
+        );
+        return {
+          outcome: "succeeded" as const,
+          paymentLink: mapStripePaymentLink(response),
+        };
+      },
+    );
   }
 
   /**

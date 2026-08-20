@@ -97,6 +97,12 @@ import type {
   PaymentMethodSetup,
   EncryptedRawPayloadRecord,
   RequestLocalWebhookContext,
+  CommonCheckoutSessionInput,
+  GetCheckoutSessionParams,
+  CheckoutSessionOperationResult,
+  GetDisputeParams,
+  CreatePaymentLinkParams,
+  MarketplaceSplit,
   // Phase 22.1
   CreateCustomerParams,
   GetCustomerParams,
@@ -880,6 +886,8 @@ expectType<CaptureStatus>("partially_completed");
 expectType<RefundDomainStatus>("completed");
 expectType<SetupTokenStatus>("requires_action");
 expectType<DisputeStatus>("needs_response");
+expectType<DisputeStatus>("warning_needs_response");
+expectType<DisputeStatus>("warning_under_review");
 expectType<TransferStatus>("reversed");
 expectType<PayoutStatus>("in_transit");
 
@@ -1597,6 +1605,46 @@ function _phase22GatewayOptionalMethods(gateway: PaymentGateway): void {
   );
 }
 void _phase22GatewayOptionalMethods;
+
+function _phase22HigherLevelClientSurface(client: PaymentClient): void {
+  expectType<Promise<CheckoutSessionOperationResult>>(
+    client.createCheckoutSession(
+      {
+        successUrl: "https://example.com/success",
+        lineItems: [{ price: "price_1", quantity: 1 }],
+        idempotencyKey: "idem_cko",
+      },
+      "stripe",
+    ),
+  );
+  expectType<Promise<CheckoutSessionOperationResult>>(
+    client.createCheckoutSession({
+      successUrl: "https://example.com/success",
+    }),
+  );
+  expectType<Promise<CheckoutSessionOperationResult>>(
+    client.getCheckoutSession({ sessionId: "cs_1" }),
+  );
+  expectType<Promise<unknown>>(
+    client.getDispute({ disputeId: "dp_1" }),
+  );
+  expectType<Promise<unknown>>(
+    client.createPaymentLink({ amount: 10, currency: "USD" }),
+  );
+}
+void _phase22HigherLevelClientSurface;
+
+const _marketplaceSplit: MarketplaceSplit = {
+  amount: 10,
+  destination: "acc_1",
+};
+expectType<MarketplaceSplit>(_marketplaceSplit);
+expectType<CommonCheckoutSessionInput>({
+  successUrl: "https://example.com/success",
+});
+expectType<GetCheckoutSessionParams>({ sessionId: "cs_1" });
+expectType<GetDisputeParams>({ disputeId: "dp_1" });
+expectType<CreatePaymentLinkParams>({ amount: 10, currency: "USD" });
 
 function noopLikeLogger(): Logger {
   return {

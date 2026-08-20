@@ -171,8 +171,13 @@ describe("public API runtime surface", () => {
         ["buildProviderReferences", sdk.buildProviderReferences],
         ["isPaymentDomainStatus", sdk.isPaymentDomainStatus],
         ["isPaidLikePaymentStatus", sdk.isPaidLikePaymentStatus],
+        ["isDisputeStatus", sdk.isDisputeStatus],
+        ["mapNativeDisputeStatus", sdk.mapNativeDisputeStatus],
         ["PAYMENT_DOMAIN_STATUSES", sdk.PAYMENT_DOMAIN_STATUSES],
         ["PAID_LIKE_PAYMENT_STATUSES", sdk.PAID_LIKE_PAYMENT_STATUSES],
+        ["DISPUTE_STATUSES", sdk.DISPUTE_STATUSES],
+        ["isHostedCheckoutRedirect", sdk.isHostedCheckoutRedirect],
+        ["applyIndeterminateCheckoutSessionOutcome", sdk.applyIndeterminateCheckoutSessionOutcome],
         ["successFromRefundOutcome", sdk.successFromRefundOutcome],
         ["inferRefundOperationOutcome", sdk.inferRefundOperationOutcome],
         ["mapGatewayRefundToOperationResult", sdk.mapGatewayRefundToOperationResult],
@@ -209,7 +214,7 @@ describe("public API runtime surface", () => {
         ["operationContextToTelemetryData", sdk.operationContextToTelemetryData],
       ];
 
-      expect(runtimeExports).toHaveLength(151);
+      expect(runtimeExports).toHaveLength(156);
       for (const [exportName, value] of runtimeExports) {
         expect(value, exportName).toBeDefined();
         expect(sdk).toHaveProperty(exportName);
@@ -491,12 +496,16 @@ describe("public API runtime surface", () => {
         expect(gw.supports("refunds")).toBe(true);
         expect(gw.supports("voids")).toBe(true);
         expect(gw.supports("providerRecurring")).toBe(false);
-        expect(gw.supports("disputes")).toBe(false);
-        expect(gw.supports("paymentLinks")).toBe(false);
       }
       expect(stripe.supports("hostedCheckout")).toBe(true);
       expect(stripe.supports("customers")).toBe(true);
       expect(stripe.supports("paymentMethods")).toBe(true);
+      expect(stripe.supports("disputes")).toBe(true);
+      expect(stripe.supports("paymentLinks")).toBe(true);
+      expect(moyasar.supports("disputes")).toBe(false);
+      expect(paypal.supports("disputes")).toBe(false);
+      expect(paymob.supports("disputes")).toBe(false);
+      expect(moyasar.supports("paymentLinks")).toBe(false);
       expect(moyasar.supports("customers")).toBe(false);
       expect(moyasar.supports("paymentMethods")).toBe(false);
       expect(moyasar.supports("hostedCheckout")).toBe(false);

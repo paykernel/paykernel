@@ -149,10 +149,16 @@ describe("capability claim validation (Phase 3.4)", () => {
       expect(PAYMOB_CAPABILITIES.marketplaceSplits).toBe(false);
     });
 
-    it("all built-ins deny disputes, paymentLinks, providerRecurring", () => {
+    it("only Stripe claims disputes and paymentLinks; all deny providerRecurring", () => {
+      expect(STRIPE_CAPABILITIES.disputes).toBe(true);
+      expect(STRIPE_CAPABILITIES.paymentLinks).toBe(true);
+      expect(MOYASAR_CAPABILITIES.disputes).toBe(false);
+      expect(PAYPAL_CAPABILITIES.disputes).toBe(false);
+      expect(PAYMOB_CAPABILITIES.disputes).toBe(false);
+      expect(MOYASAR_CAPABILITIES.paymentLinks).toBe(false);
+      expect(PAYPAL_CAPABILITIES.paymentLinks).toBe(false);
+      expect(PAYMOB_CAPABILITIES.paymentLinks).toBe(false);
       for (const caps of Object.values(BUILTIN_GATEWAY_CAPABILITIES)) {
-        expect(caps.disputes).toBe(false);
-        expect(caps.paymentLinks).toBe(false);
         expect(caps.providerRecurring).toBe(false);
         expect(caps.tokenization).toBe(false);
       }

@@ -1,6 +1,6 @@
 # Stripe Gateway
 
-The Stripe gateway supports PaymentIntents, hosted Checkout Sessions, manual capture, refunds, void/cancel, payment lookup, and signed webhooks.
+The Stripe gateway supports PaymentIntents, hosted Checkout Sessions, customers and stored payment methods, disputes, payment links, manual capture, refunds, void/cancel, payment lookup, and signed webhooks.
 
 ## Configuration
 
@@ -83,9 +83,11 @@ const session = await stripe.createCheckoutSession({
     ],
 });
 
-// Redirect the customer to session.url when present.
+// Phase 22.2: outcome union. Redirect `session.url` when `outcome === "succeeded"`.
+// Create success is not paid settlement — see hosted-checkout.md.
 // `url` is omitted when Stripe returns null/empty after a successful create
-// (session id is still required). Do not invent a hosted Checkout URL.
+// (session id is still on `session.references.providerObjectId`).
+// Do not invent a hosted Checkout URL.
 ```
 
 For a simple one-item payment, you can provide `amount` and `currency` instead of `lineItems`.
@@ -163,6 +165,16 @@ const session = await stripe.createCheckoutSession({
 Setup mode requires either `currency` or `paymentMethodTypes`, and does not accept `lineItems` or `amount`. Payment and subscription Checkout Sessions must use either `lineItems` or the simple `amount`/`currency` form, not both.
 The SDK validates Stripe's Checkout line item caps: payment mode accepts up to 100 line items, and subscription mode accepts up to 40 total line items with at most 20 known recurring inline price items. Existing `price_...` IDs are accepted but their recurring/one-time type is ultimately validated by Stripe.
 Unsupported Checkout fields are rejected instead of silently ignored. Add SDK support before relying on additional Stripe Checkout Session create parameters.
+
+Create returns `{ outcome: "succeeded", session }` (or `indeterminate`). Prefer `client.createCheckoutSession` (capability-gated). See [hosted-checkout.md](./hosted-checkout.md).
+
+## Customers and payment methods
+
+Stripe claims `customers` and `paymentMethods`. Create/attach/detach require a caller `idempotencyKey`. Off-session PaymentIntents use common `customerId` / `paymentMethodId` / `offSession` (see [customers.md](./customers.md)).
+
+## Disputes and payment links
+
+Stripe claims `disputes` (get/list/evidence) and `paymentLinks`. List disputes requires a `pi_…` or `ch_…` bound. See [disputes.md](./disputes.md) and [payment-links.md](./payment-links.md).
 
 ## Manual Capture
 
@@ -330,7 +342,7 @@ Subscription-related webhooks are normalized for common billing flows. `checkout
 
 Unhandled / unknown event types do **not** run non-`payment_intent` object statuses through the PaymentIntent status map (which fails closed as `failed` for unmapped PI states). Foreign statuses such as subscription/tax `active` on an unmapped event type normalize as `pending`.
 
-**`charge.dispute.*`:** envelope `status` is the Stripe dispute lifecycle (`needs_response`, `under_review`, `won`, `lost`, …) — **never generic payment `pending`**. Last-write persist of `event.status` must not move a paid payment to pending. Phase 7 dual-write is `dispute.opened` / `dispute.updated` / `dispute.closed` (`capabilities.disputes` stays `false`). Handle the dispute arm; do not treat these as payment lifecycle. `gatewayPaymentId` prefers `payment_intent` when present.
+**`charge.dispute.*`:** envelope `status` is the Stripe dispute lifecycle (`needs_response`, `under_review`, `won`, `lost`, …) — **never generic payment `pending`**. Last-write persist of `event.status` must not move a paid payment to pending. Phase 7 dual-write is `dispute.opened` / `dispute.updated` / `dispute.closed`. Stripe claims `disputes: true` with get/list/submit evidence — see [disputes.md](./disputes.md). Handle the dispute arm; do not treat these as payment lifecycle. `gatewayPaymentId` prefers `payment_intent` when present.
 
 ### Subscription status mapping
 

@@ -69,14 +69,54 @@ export type SetupTokenStatus =
 
 /**
  * Dispute / chargeback lifecycle (normalized).
+ *
+ * Includes Stripe early-fraud-warning (`warning_*`) arms. Native provider
+ * strings stay on `providerStatus` when they are not in this union.
  */
 export type DisputeStatus =
     | "needs_response"
     | "under_review"
     | "won"
     | "lost"
+    | "warning_needs_response"
+    | "warning_under_review"
     | "warning_closed"
     | "charge_refunded";
+
+export const DISPUTE_STATUSES = [
+    "needs_response",
+    "under_review",
+    "won",
+    "lost",
+    "warning_needs_response",
+    "warning_under_review",
+    "warning_closed",
+    "charge_refunded",
+] as const satisfies readonly DisputeStatus[];
+
+const DISPUTE_STATUS_SET: ReadonlySet<string> = new Set(DISPUTE_STATUSES);
+
+export function isDisputeStatus(value: string): value is DisputeStatus {
+    return DISPUTE_STATUS_SET.has(value);
+}
+
+/**
+ * Map a provider-native dispute lifecycle string onto {@link DisputeStatus}.
+ * Unknown values are returned unchanged (stay on `providerStatus`).
+ * Stripe `prevented` (early fraud warning closed without a dispute) maps to
+ * `warning_closed` — never paid.
+ */
+export function mapNativeDisputeStatus(
+    native: string,
+): DisputeStatus | string {
+    if (isDisputeStatus(native)) {
+        return native;
+    }
+    if (native === "prevented") {
+        return "warning_closed";
+    }
+    return native;
+}
 
 /**
  * Transfer (marketplace / Connect) lifecycle.
