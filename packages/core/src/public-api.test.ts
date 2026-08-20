@@ -495,6 +495,10 @@ describe("public API runtime surface", () => {
         expect(gw.supports("paymentLinks")).toBe(false);
       }
       expect(stripe.supports("hostedCheckout")).toBe(true);
+      expect(stripe.supports("customers")).toBe(true);
+      expect(stripe.supports("paymentMethods")).toBe(true);
+      expect(moyasar.supports("customers")).toBe(false);
+      expect(moyasar.supports("paymentMethods")).toBe(false);
       expect(moyasar.supports("hostedCheckout")).toBe(false);
       expect(paypal.supports("hostedCheckout")).toBe(false);
       expect(paymob.supports("hostedCheckout")).toBe(false);

@@ -97,6 +97,19 @@ import type {
   PaymentMethodSetup,
   EncryptedRawPayloadRecord,
   RequestLocalWebhookContext,
+  // Phase 22.1
+  CreateCustomerParams,
+  GetCustomerParams,
+  AttachPaymentMethodParams,
+  ListPaymentMethodsParams,
+  DetachPaymentMethodParams,
+  Customer,
+  CustomerStatus,
+  CustomerOperationResult,
+  CustomerOperationOutcome,
+  StoredPaymentMethod,
+  PaymentMethodOperationResult,
+  ListPaymentMethodsResult,
 } from "./index";
 import {
   createGatewayRegistry,
@@ -1425,6 +1438,165 @@ expectType<GatewayAdapter<"paypal", PayPalGateway>>(
 expectType<GatewayAdapter<"paymob", PaymobGateway>>(
   paymobGateway({ secretKey: "sk" }),
 );
+
+// ─── Phase 22.1 customers and stored payment methods ─────────────────────────
+
+const createCustomerParams: CreateCustomerParams = {
+  email: "buyer@example.com",
+  name: "Buyer",
+  metadata: { userId: "u_1" },
+  idempotencyKey: "cus_idem_1",
+};
+expectType<CreateCustomerParams>(createCustomerParams);
+
+const createCustomerWithSignal: CreateCustomerParams = {
+  email: "buyer@example.com",
+  signal: new AbortController().signal,
+};
+expectType<CreateCustomerParams>(createCustomerWithSignal);
+
+const getCustomerParams: GetCustomerParams = { customerId: "cus_1" };
+expectType<GetCustomerParams>(getCustomerParams);
+
+const attachPaymentMethodParams: AttachPaymentMethodParams = {
+  customerId: "cus_1",
+  paymentMethodId: "pm_1",
+  idempotencyKey: "pm_idem_1",
+};
+expectType<AttachPaymentMethodParams>(attachPaymentMethodParams);
+
+const attachWithToken: AttachPaymentMethodParams = {
+  customerId: "cus_1",
+  token: "tok_visa",
+};
+expectType<AttachPaymentMethodParams>(attachWithToken);
+
+expectType<ListPaymentMethodsParams>({ customerId: "cus_1" });
+expectType<DetachPaymentMethodParams>({ paymentMethodId: "pm_1" });
+expectType<DetachPaymentMethodParams>({
+  paymentMethodId: "pm_1",
+  customerId: "cus_1",
+});
+
+expectType<CustomerStatus>("active");
+expectType<CustomerStatus>("deleted");
+const customerSnapshot: Customer = {
+  status: "active",
+  email: "buyer@example.com",
+  references: buildProviderReferences({
+    gateway: "vault",
+    gatewayId: "cus_1",
+    status: "active",
+    customerId: "cus_1",
+  }),
+};
+expectType<Customer>(customerSnapshot);
+
+expectType<StoredPaymentMethod>({
+  id: "pm_1",
+  customerId: "cus_1",
+  type: "card",
+  brand: "visa",
+  last4: "4242",
+  references: buildProviderReferences({
+    gateway: "vault",
+    gatewayId: "pm_1",
+    status: "active",
+    customerId: "cus_1",
+  }),
+});
+
+const succeededCustomer: CustomerOperationResult = {
+  outcome: "succeeded",
+  customer: customerSnapshot,
+};
+expectType<CustomerOperationResult>(succeededCustomer);
+expectType<CustomerOperationOutcome>(succeededCustomer.outcome);
+
+const failedCustomer: CustomerOperationResult = {
+  outcome: "failed",
+  error: { name: "PaymentError", message: "nope", code: "FAILED" },
+};
+expectType<CustomerOperationResult>(failedCustomer);
+
+const indeterminateCustomer: CustomerOperationResult = {
+  outcome: "indeterminate",
+  reconciliationRequired: true,
+};
+expectType<CustomerOperationResult>(indeterminateCustomer);
+
+expectType<PaymentMethodOperationResult>({
+  outcome: "succeeded",
+  paymentMethod: {
+    id: "pm_1",
+    customerId: "cus_1",
+    type: "card",
+    references: buildProviderReferences({
+      gateway: "vault",
+      gatewayId: "pm_1",
+      status: "active",
+      customerId: "cus_1",
+    }),
+  },
+});
+expectType<ListPaymentMethodsResult>({
+  outcome: "succeeded",
+  paymentMethods: [],
+});
+
+const offSessionCreate: CreatePaymentParams = {
+  amount: 10,
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+  customerId: "cus_1",
+  paymentMethodId: "pm_1",
+  offSession: true,
+};
+expectType<CreatePaymentParams>(offSessionCreate);
+
+function _phase22CustomerClientSurface(client: PaymentClient): void {
+  expectType<Promise<CustomerOperationResult>>(
+    client.createCustomer({ email: "buyer@example.com" }),
+  );
+  expectType<Promise<CustomerOperationResult>>(
+    client.getCustomer({ customerId: "cus_1" }),
+  );
+  expectType<Promise<PaymentMethodOperationResult>>(
+    client.attachPaymentMethod({
+      customerId: "cus_1",
+      paymentMethodId: "pm_1",
+    }),
+  );
+  expectType<Promise<ListPaymentMethodsResult>>(
+    client.listPaymentMethods({ customerId: "cus_1" }),
+  );
+  expectType<Promise<PaymentMethodOperationResult>>(
+    client.detachPaymentMethod({ paymentMethodId: "pm_1" }),
+  );
+}
+void _phase22CustomerClientSurface;
+
+function _phase22GatewayOptionalMethods(gateway: PaymentGateway): void {
+  expectType<
+    Promise<CustomerOperationResult> | undefined
+  >(gateway.createCustomer?.({ email: "buyer@example.com" }));
+  expectType<Promise<CustomerOperationResult> | undefined>(
+    gateway.getCustomer?.({ customerId: "cus_1" }),
+  );
+  expectType<Promise<PaymentMethodOperationResult> | undefined>(
+    gateway.attachPaymentMethod?.({
+      customerId: "cus_1",
+      paymentMethodId: "pm_1",
+    }),
+  );
+  expectType<Promise<ListPaymentMethodsResult> | undefined>(
+    gateway.listPaymentMethods?.({ customerId: "cus_1" }),
+  );
+  expectType<Promise<PaymentMethodOperationResult> | undefined>(
+    gateway.detachPaymentMethod?.({ paymentMethodId: "pm_1" }),
+  );
+}
+void _phase22GatewayOptionalMethods;
 
 function noopLikeLogger(): Logger {
   return {

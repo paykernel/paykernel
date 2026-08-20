@@ -96,9 +96,11 @@ export function isGatewayCapabilityKey(
  * - `refunds` / `partialRefunds` → `refundPayment`
  * - `voids` → `voidPayment`
  * - `hostedCheckout` → `createCheckoutSession` (hosted session API, not any redirect)
+ * - `customers` → `createCustomer` (getCustomer shares the same capability)
+ * - `paymentMethods` → `attachPaymentMethod` (list/detach share the same capability)
  *
- * Keys without a single primary client/gateway method (tokenization, customers,
- * paymentMethods, marketplaceSplits, disputes, paymentLinks, providerRecurring)
+ * Keys without a single primary client/gateway method (tokenization,
+ * marketplaceSplits, disputes, paymentLinks, providerRecurring)
  * are omitted — they are extension / multi-method surfaces, not one operation.
  *
  * `providerRecurring` is extension-only: claim only when the adapter exposes
@@ -116,6 +118,8 @@ export const CAPABILITY_OPERATION_MAP: Readonly<
   partialRefunds: "refundPayment",
   voids: "voidPayment",
   hostedCheckout: "createCheckoutSession",
+  customers: "createCustomer",
+  paymentMethods: "attachPaymentMethod",
 });
 
 /**
@@ -156,6 +160,13 @@ export function requiredCapabilitiesForOperation(
       return ["hostedCheckout"];
     case "capturePayment":
       return bag.amount !== undefined ? ["partialCapture"] : [];
+    case "createCustomer":
+    case "getCustomer":
+      return ["customers"];
+    case "attachPaymentMethod":
+    case "listPaymentMethods":
+    case "detachPaymentMethod":
+      return ["paymentMethods"];
     default:
       return [];
   }

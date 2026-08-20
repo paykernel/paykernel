@@ -13,6 +13,20 @@ import type {
   RefundParams,
   VoidParams,
 } from "../../types/payment.types";
+import type {
+  AttachPaymentMethodParams,
+  CreateCustomerParams,
+  Customer,
+  CustomerOperationResult,
+  DetachPaymentMethodParams,
+  GetCustomerParams,
+  ListPaymentMethodsParams,
+  ListPaymentMethodsResult,
+  PaymentMethodOperationResult,
+  StoredPaymentMethod,
+  StoredPaymentMethodType,
+} from "../../types/customer.types";
+import { buildProviderReferences } from "../../types/provider-refs";
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
@@ -229,6 +243,9 @@ const STRIPE_MAX_METADATA_KEY_LENGTH = 40;
 const STRIPE_MAX_METADATA_VALUE_LENGTH = 500;
 const STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 const STRIPE_PAYMENT_INTENT_ID_PATTERN = /^pi_[A-Za-z0-9_]+$/;
+const STRIPE_CUSTOMER_ID_PATTERN = /^cus_[A-Za-z0-9_]+$/;
+const STRIPE_PAYMENT_METHOD_ID_PATTERN = /^pm_[A-Za-z0-9_]+$/;
+const STRIPE_CARD_TOKEN_PATTERN = /^tok_[A-Za-z0-9_]+$/;
 const STRIPE_CHECKOUT_SESSION_ID_PATTERN = /^cs_[A-Za-z0-9_]+$/;
 
 function stripeCurrencyExponent(currency: string): number {
@@ -1345,6 +1362,241 @@ function stripeCheckoutSessionPathId(sessionId: string): string {
   return encodeURIComponent(sessionId);
 }
 
+function assertStripeCustomerId(customerId: string): string {
+  if (!STRIPE_CUSTOMER_ID_PATTERN.test(customerId)) {
+    throw new InvalidRequestError(
+      "Stripe Customer ID must start with cus_ and contain only letters, numbers, or underscores",
+    );
+  }
+  return customerId;
+}
+
+function stripeCustomerPathId(customerId: string): string {
+  return encodeURIComponent(assertStripeCustomerId(customerId));
+}
+
+function assertStripePaymentMethodId(paymentMethodId: string): string {
+  if (!STRIPE_PAYMENT_METHOD_ID_PATTERN.test(paymentMethodId)) {
+    throw new InvalidRequestError(
+      "Stripe PaymentMethod ID must start with pm_ and contain only letters, numbers, or underscores",
+    );
+  }
+  return paymentMethodId;
+}
+
+function stripePaymentMethodPathId(paymentMethodId: string): string {
+  return encodeURIComponent(assertStripePaymentMethodId(paymentMethodId));
+}
+
+function stripeStepIdempotencyKey(base: string, step: string): string {
+  const suffix = `:${step}`;
+  if (base.length + suffix.length <= STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH) {
+    return `${base}${suffix}`;
+  }
+  return `${base.slice(0, STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH - suffix.length)}${suffix}`;
+}
+
+type StripeAttachSource =
+  | { kind: "pm"; id: string }
+  | { kind: "tok"; token: string };
+
+function resolveStripeAttachSource(params: {
+  paymentMethodId?: string | undefined;
+  token?: string | undefined;
+}): StripeAttachSource {
+  const paymentMethodId = nonEmptyStripeParam(params.paymentMethodId);
+  if (paymentMethodId) {
+    return { kind: "pm", id: assertStripePaymentMethodId(paymentMethodId) };
+  }
+  const token = nonEmptyStripeParam(params.token);
+  if (token && STRIPE_PAYMENT_METHOD_ID_PATTERN.test(token)) {
+    return { kind: "pm", id: token };
+  }
+  if (token && STRIPE_CARD_TOKEN_PATTERN.test(token)) {
+    return { kind: "tok", token };
+  }
+  throw new InvalidRequestError(
+    "Stripe attachPaymentMethod requires a PaymentMethod id (pm_…) or a card token (tok_…)",
+  );
+}
+
+function nonEmptyStripeParam(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function pickExclusiveStripeId(
+  common: string | undefined,
+  prefixed: string | undefined,
+  commonName: string,
+  prefixedName: string,
+): string | undefined {
+  const resolvedCommon = nonEmptyStripeParam(common);
+  const resolvedPrefixed = nonEmptyStripeParam(prefixed);
+  if (resolvedCommon && resolvedPrefixed && resolvedCommon !== resolvedPrefixed) {
+    throw new InvalidRequestError(
+      `Stripe createPayment cannot include both ${commonName} and ${prefixedName} when they differ`,
+    );
+  }
+  return resolvedCommon ?? resolvedPrefixed;
+}
+
+function resolveStripeCustomerRef(params: {
+  customerId?: string | undefined;
+  stripeCustomerId?: string | undefined;
+}): string | undefined {
+  return pickExclusiveStripeId(
+    params.customerId,
+    params.stripeCustomerId,
+    "customerId",
+    "stripeCustomerId",
+  );
+}
+
+function resolveStripePaymentMethodRef(params: {
+  paymentMethodId?: string | undefined;
+  stripePaymentMethodId?: string | undefined;
+}): string | undefined {
+  return pickExclusiveStripeId(
+    params.paymentMethodId,
+    params.stripePaymentMethodId,
+    "paymentMethodId",
+    "stripePaymentMethodId",
+  );
+}
+
+type StripeCustomerObject = {
+  id?: unknown;
+  email?: unknown;
+  name?: unknown;
+  deleted?: unknown;
+  metadata?: unknown;
+};
+
+type StripePaymentMethodObject = {
+  id?: unknown;
+  customer?: unknown;
+  type?: unknown;
+  card?: { brand?: unknown; last4?: unknown; wallet?: unknown };
+  us_bank_account?: { last4?: unknown };
+  sepa_debit?: { last4?: unknown };
+};
+
+function mapStripeStoredPaymentMethodType(
+  pm: StripePaymentMethodObject,
+): StoredPaymentMethodType {
+  if (pm.type === "card") {
+    return pm.card?.wallet ? "wallet" : "card";
+  }
+  if (
+    pm.type === "link" ||
+    pm.type === "paypal" ||
+    pm.type === "apple_pay"
+  ) {
+    return "wallet";
+  }
+  if (
+    pm.type === "us_bank_account" ||
+    pm.type === "sepa_debit" ||
+    pm.type === "acss_debit" ||
+    pm.type === "bacs_debit"
+  ) {
+    return "bank";
+  }
+  return "other";
+}
+
+function mapStripeCustomer(
+  customer: StripeCustomerObject,
+): Customer {
+  const id = requireStripeMutationId(
+    customer.id,
+    "Stripe Customer response missing id",
+    customer,
+  );
+  const snapshot: Customer = {
+    status: customer.deleted === true ? "deleted" : "active",
+    references: buildProviderReferences({
+      gateway: "stripe",
+      gatewayId: id,
+      status: customer.deleted === true ? "deleted" : "active",
+      customerId: id,
+    }),
+    rawResponse: customer,
+  };
+  if (typeof customer.email === "string" && customer.email.length > 0) {
+    snapshot.email = customer.email;
+  }
+  if (typeof customer.name === "string" && customer.name.length > 0) {
+    snapshot.name = customer.name;
+  }
+  return snapshot;
+}
+
+function mapStripePaymentMethod(
+  pm: StripePaymentMethodObject,
+  fallbackCustomerId?: string,
+): StoredPaymentMethod {
+  const id = requireStripeMutationId(
+    pm.id,
+    "Stripe PaymentMethod response missing id",
+    pm,
+  );
+  const customerId =
+    typeof pm.customer === "string" && pm.customer.length > 0
+      ? pm.customer
+      : (fallbackCustomerId ?? "");
+  const snapshot: StoredPaymentMethod = {
+    id,
+    customerId,
+    type: mapStripeStoredPaymentMethodType(pm),
+    references: buildProviderReferences({
+      gateway: "stripe",
+      gatewayId: id,
+      status: "active",
+      customerId,
+    }),
+  };
+  const brand = pm.card?.brand;
+  if (typeof brand === "string" && brand.length > 0) {
+    snapshot.brand = brand;
+  }
+  const last4 =
+    (typeof pm.card?.last4 === "string" ? pm.card.last4 : undefined) ??
+    (typeof pm.us_bank_account?.last4 === "string"
+      ? pm.us_bank_account.last4
+      : undefined) ??
+    (typeof pm.sepa_debit?.last4 === "string" ? pm.sepa_debit.last4 : undefined);
+  if (last4 !== undefined) {
+    snapshot.last4 = last4;
+  }
+  return snapshot;
+}
+
+function stripeMissingResourceFailed(
+  error: unknown,
+): CustomerOperationResult | undefined {
+  if (!(error instanceof GatewayApiError)) {
+    return undefined;
+  }
+  const raw = error.rawError as { statusCode?: number } | undefined;
+  if (raw?.statusCode !== 404) {
+    return undefined;
+  }
+  return {
+    outcome: "failed",
+    error: {
+      name: error.name,
+      message: error.message,
+      code: error.code,
+      statusCode: 404,
+    },
+  };
+}
+
 function stripeExpectedWebhookApiVersion(
   config: StripeConfig,
 ): string | undefined {
@@ -1728,18 +1980,34 @@ export class StripeGateway extends BaseGateway {
           body.capture_method = "manual";
         }
 
-        if (p.stripeCustomerId) {
-          body.customer = p.stripeCustomerId;
+        const customerId = resolveStripeCustomerRef(p);
+        const paymentMethodId = resolveStripePaymentMethodRef(p);
+
+        if (customerId) {
+          body.customer = assertStripeCustomerId(customerId);
         }
 
-        if (p.stripePaymentMethodId) {
-          body.payment_method = p.stripePaymentMethodId;
-          body.confirm = true; // Confirm immediately if method provided
-          if (p.callbackUrl) {
+        if (paymentMethodId) {
+          body.payment_method = assertStripePaymentMethodId(paymentMethodId);
+          body.confirm = true;
+          // Off-session cannot complete a redirect; omit return_url so Stripe
+          // does not advertise a customer-present next_action.
+          if (p.callbackUrl && p.offSession !== true) {
             body.return_url = p.callbackUrl;
           } else {
             body.automatic_payment_methods.allow_redirects = "never";
           }
+        }
+
+        if (p.offSession === true) {
+          if (!paymentMethodId) {
+            throw new InvalidRequestError(
+              "off-session createPayment requires a stored payment method id",
+            );
+          }
+          body.off_session = true;
+          body.confirm = true;
+          body.automatic_payment_methods.allow_redirects = "never";
         }
 
         if (p.stripeSetupFutureUsage) {
@@ -2488,6 +2756,166 @@ export class StripeGateway extends BaseGateway {
       },
       CreateCheckoutSessionParamsSchema,
     );
+  }
+
+  async createCustomer(
+    params: CreateCustomerParams,
+  ): Promise<CustomerOperationResult> {
+    return this.executeWithHooks("createCustomer", params, async (p) => {
+      const idempotencyKey = resolveStripeIdempotencyKey(
+        p.idempotencyKey,
+        () => this.runtime.randomUUID(),
+        { operation: "createCustomer", policy: "require-caller" },
+      );
+      const body: Record<string, unknown> = {};
+      if (p.email) {
+        body.email = p.email;
+      }
+      if (p.name) {
+        body.name = p.name;
+      }
+      const metadata = sanitizedStripeMetadata(p.metadata);
+      if (metadata) {
+        body.metadata = metadata;
+      }
+      const response = await this.stripeRequest<StripeCustomerObject>(
+        "POST",
+        "/customers",
+        body,
+        idempotencyKey,
+        extractAbortSignal(p),
+      );
+      return {
+        outcome: "succeeded" as const,
+        customer: mapStripeCustomer(response),
+      };
+    });
+  }
+
+  async getCustomer(
+    params: GetCustomerParams,
+  ): Promise<CustomerOperationResult> {
+    return this.executeWithHooks("getCustomer", params, async (p) => {
+      const pathId = stripeCustomerPathId(p.customerId);
+      try {
+        const response = await this.stripeRequest<StripeCustomerObject>(
+          "GET",
+          `/customers/${pathId}`,
+          undefined,
+          undefined,
+          extractAbortSignal(p),
+        );
+        return {
+          outcome: "succeeded" as const,
+          customer: mapStripeCustomer(response),
+        };
+      } catch (error) {
+        const failed = stripeMissingResourceFailed(error);
+        if (failed) {
+          return failed;
+        }
+        throw error;
+      }
+    });
+  }
+
+  async attachPaymentMethod(
+    params: AttachPaymentMethodParams,
+  ): Promise<PaymentMethodOperationResult> {
+    return this.executeWithHooks("attachPaymentMethod", params, async (p) => {
+      const source = resolveStripeAttachSource(p);
+      const customerId = assertStripeCustomerId(p.customerId);
+      const idempotencyKey = resolveStripeIdempotencyKey(
+        p.idempotencyKey,
+        () => this.runtime.randomUUID(),
+        { operation: "attachPaymentMethod", policy: "require-caller" },
+      );
+      const signal = extractAbortSignal(p);
+
+      let paymentMethodId: string;
+      if (source.kind === "tok") {
+        const created = await this.stripeRequest<StripePaymentMethodObject>(
+          "POST",
+          "/payment_methods",
+          { type: "card", card: { token: source.token } },
+          stripeStepIdempotencyKey(idempotencyKey, "create"),
+          signal,
+        );
+        paymentMethodId = requireStripeMutationId(
+          created.id,
+          "Stripe PaymentMethod response missing id",
+          created,
+        );
+      } else {
+        paymentMethodId = source.id;
+      }
+
+      const pathId = stripePaymentMethodPathId(paymentMethodId);
+      const attachKey =
+        source.kind === "tok"
+          ? stripeStepIdempotencyKey(idempotencyKey, "attach")
+          : idempotencyKey;
+      const response = await this.stripeRequest<StripePaymentMethodObject>(
+        "POST",
+        `/payment_methods/${pathId}/attach`,
+        { customer: customerId },
+        attachKey,
+        signal,
+      );
+      return {
+        outcome: "succeeded" as const,
+        paymentMethod: mapStripePaymentMethod(response, customerId),
+      };
+    });
+  }
+
+  async listPaymentMethods(
+    params: ListPaymentMethodsParams,
+  ): Promise<ListPaymentMethodsResult> {
+    return this.executeWithHooks("listPaymentMethods", params, async (p) => {
+      const customerId = assertStripeCustomerId(p.customerId);
+      const query = new URLSearchParams({ customer: customerId });
+      const response = await this.stripeRequest<{
+        data?: StripePaymentMethodObject[];
+      }>(
+        "GET",
+        `/payment_methods?${query.toString()}`,
+        undefined,
+        undefined,
+        extractAbortSignal(p),
+      );
+      const data = Array.isArray(response.data) ? response.data : [];
+      return {
+        outcome: "succeeded" as const,
+        paymentMethods: data.map((pm) =>
+          mapStripePaymentMethod(pm, customerId),
+        ),
+      };
+    });
+  }
+
+  async detachPaymentMethod(
+    params: DetachPaymentMethodParams,
+  ): Promise<PaymentMethodOperationResult> {
+    return this.executeWithHooks("detachPaymentMethod", params, async (p) => {
+      const pathId = stripePaymentMethodPathId(p.paymentMethodId);
+      const idempotencyKey = resolveStripeIdempotencyKey(
+        p.idempotencyKey,
+        () => this.runtime.randomUUID(),
+        { operation: "detachPaymentMethod", policy: "require-caller" },
+      );
+      const response = await this.stripeRequest<StripePaymentMethodObject>(
+        "POST",
+        `/payment_methods/${pathId}/detach`,
+        {},
+        idempotencyKey,
+        extractAbortSignal(p),
+      );
+      return {
+        outcome: "succeeded" as const,
+        paymentMethod: mapStripePaymentMethod(response, p.customerId),
+      };
+    });
   }
 
   /**

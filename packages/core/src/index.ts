@@ -93,6 +93,24 @@ export type {
   MoyasarNextAction,
 } from "./types/payment.types";
 
+// Phase 22.1 — customers and stored payment methods
+export type {
+  CommonCustomerInput,
+  CreateCustomerParams,
+  GetCustomerParams,
+  AttachPaymentMethodParams,
+  ListPaymentMethodsParams,
+  DetachPaymentMethodParams,
+  Customer,
+  CustomerStatus,
+  CustomerOperationOutcome,
+  CustomerOperationResult,
+  StoredPaymentMethod,
+  StoredPaymentMethodType,
+  PaymentMethodOperationResult,
+  ListPaymentMethodsResult,
+} from "./types/customer.types";
+
 // Phase 6 — domain statuses, provider refs, operation outcomes
 export type {
   PaymentDomainStatus,

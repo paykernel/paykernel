@@ -24,7 +24,12 @@ export type OperationType =
     | 'verifyWebhook'
     | 'getPayment'
     | 'getCheckoutSession'
-    | 'createCheckoutSession';
+    | 'createCheckoutSession'
+    | 'createCustomer'
+    | 'getCustomer'
+    | 'attachPaymentMethod'
+    | 'listPaymentMethods'
+    | 'detachPaymentMethod';
 
 /**
  * Context passed to all lifecycle hooks

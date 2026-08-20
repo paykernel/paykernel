@@ -189,7 +189,7 @@ describe("gateway capabilities foundation", () => {
   });
 
   describe("CAPABILITY_OPERATION_MAP", () => {
-    it("maps every client-gated capability to a method name; extension keys stay unmapped", () => {
+    it("maps every client-gated capability to a method name; remaining extension keys stay unmapped", () => {
       // Drift guard: claim-validation harness uses this map for method presence.
       const mapped: Partial<Record<GatewayCapabilityKey, string>> = {
         payments: "createPayment",
@@ -200,6 +200,8 @@ describe("gateway capabilities foundation", () => {
         partialRefunds: "refundPayment",
         voids: "voidPayment",
         hostedCheckout: "createCheckoutSession",
+        customers: "createCustomer",
+        paymentMethods: "attachPaymentMethod",
       };
       for (const key of GATEWAY_CAPABILITY_KEYS) {
         expect(CAPABILITY_OPERATION_MAP[key]).toBe(mapped[key]);
@@ -233,6 +235,21 @@ describe("gateway capabilities foundation", () => {
       expect(
         requiredCapabilitiesForOperation("createCheckoutSession", {}),
       ).toEqual(["hostedCheckout"]);
+      expect(requiredCapabilitiesForOperation("createCustomer", {})).toEqual([
+        "customers",
+      ]);
+      expect(requiredCapabilitiesForOperation("getCustomer", {})).toEqual([
+        "customers",
+      ]);
+      expect(
+        requiredCapabilitiesForOperation("attachPaymentMethod", {}),
+      ).toEqual(["paymentMethods"]);
+      expect(requiredCapabilitiesForOperation("listPaymentMethods", {})).toEqual(
+        ["paymentMethods"],
+      );
+      expect(
+        requiredCapabilitiesForOperation("detachPaymentMethod", {}),
+      ).toEqual(["paymentMethods"]);
     });
   });
 

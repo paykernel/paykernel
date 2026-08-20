@@ -10,6 +10,16 @@ import type {
     GatewayPaymentResult,
     GatewayRefundResult,
 } from '../types/payment.types';
+import type {
+    AttachPaymentMethodParams,
+    CreateCustomerParams,
+    CustomerOperationResult,
+    DetachPaymentMethodParams,
+    GetCustomerParams,
+    ListPaymentMethodsParams,
+    ListPaymentMethodsResult,
+    PaymentMethodOperationResult,
+} from '../types/customer.types';
 import type { WebhookEvent } from '../types/webhook.types';
 import type {
     GatewayCapabilities,
@@ -129,4 +139,25 @@ export interface PaymentGateway<TName extends string = string> {
      * Use gateway-specific methods for typed access.
      */
     createCheckoutSession?(params: unknown): Promise<unknown>;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Customers and stored payment methods (Phase 22.1)
+    // Capability-gated: `customers` / `paymentMethods`. Never persist PAN/CVC.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    createCustomer?(params: CreateCustomerParams): Promise<CustomerOperationResult>;
+
+    getCustomer?(params: GetCustomerParams): Promise<CustomerOperationResult>;
+
+    attachPaymentMethod?(
+        params: AttachPaymentMethodParams,
+    ): Promise<PaymentMethodOperationResult>;
+
+    listPaymentMethods?(
+        params: ListPaymentMethodsParams,
+    ): Promise<ListPaymentMethodsResult>;
+
+    detachPaymentMethod?(
+        params: DetachPaymentMethodParams,
+    ): Promise<PaymentMethodOperationResult>;
 }

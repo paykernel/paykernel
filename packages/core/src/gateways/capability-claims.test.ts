@@ -155,9 +155,15 @@ describe("capability claim validation (Phase 3.4)", () => {
         expect(caps.paymentLinks).toBe(false);
         expect(caps.providerRecurring).toBe(false);
         expect(caps.tokenization).toBe(false);
-        expect(caps.customers).toBe(false);
-        expect(caps.paymentMethods).toBe(false);
       }
+      expect(STRIPE_CAPABILITIES.customers).toBe(true);
+      expect(STRIPE_CAPABILITIES.paymentMethods).toBe(true);
+      expect(MOYASAR_CAPABILITIES.customers).toBe(false);
+      expect(MOYASAR_CAPABILITIES.paymentMethods).toBe(false);
+      expect(PAYPAL_CAPABILITIES.customers).toBe(false);
+      expect(PAYPAL_CAPABILITIES.paymentMethods).toBe(false);
+      expect(PAYMOB_CAPABILITIES.customers).toBe(false);
+      expect(PAYMOB_CAPABILITIES.paymentMethods).toBe(false);
     });
 
     it("BUILTIN_GATEWAY_MANIFESTS names match factory adapters", () => {

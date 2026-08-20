@@ -44,6 +44,8 @@ describe("generateGatewayCapabilitiesMarkdown", () => {
 
     // Stripe hostedCheckout true → ✓ in stripe column (first data column)
     expect(md).toMatch(/\| hostedCheckout \| ✓ \|/);
+    expect(md).toMatch(/\| customers \| ✓ \| ✗ \| ✗ \| ✗ \|/);
+    expect(md).toMatch(/\| paymentMethods \| ✓ \| ✗ \| ✗ \| ✗ \|/);
     // All deny providerRecurring
     expect(md).toMatch(
       /\| providerRecurring \| ✗ \| ✗ \| ✗ \| ✗ \|/,

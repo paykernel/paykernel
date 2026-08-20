@@ -18,6 +18,16 @@ import type {
   PayPalCreatePaymentParams,
   PaymentStatus,
 } from "./types/payment.types";
+import type {
+  AttachPaymentMethodParams,
+  CreateCustomerParams,
+  CustomerOperationResult,
+  DetachPaymentMethodParams,
+  GetCustomerParams,
+  ListPaymentMethodsParams,
+  ListPaymentMethodsResult,
+  PaymentMethodOperationResult,
+} from "./types/customer.types";
 import type { WebhookEvent } from "./types/webhook.types";
 import {
   attachPaymentEvent,
@@ -55,6 +65,7 @@ import {
   OperationNotSupportedError,
 } from "./errors";
 import { createRedactingLogger, noopLogger, type Logger } from "./utils/logger";
+import { assertNoRawCardMaterial } from "./utils/raw-card";
 
 /** True when `value` looks like a thenable (Promise). A Promise is truthy — never treat it as verified. */
 function isThenable(value: unknown): value is Promise<unknown> {
@@ -346,6 +357,22 @@ function hasCapabilitySurface(gw: PaymentGateway): boolean {
     typeof gw.supports === "function" &&
     gw.capabilities != null &&
     typeof gw.capabilities === "object"
+  );
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Stored method id for off-session create — common field or Stripe convenience field. */
+function storedPaymentMethodRef(params: CreatePaymentParams): string | undefined {
+  return (
+    nonEmptyString(params.paymentMethodId) ??
+    nonEmptyString(params.stripePaymentMethodId)
   );
 }
 
@@ -754,6 +781,13 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     )) {
       this.assertCapability(gw, capability, "createPayment");
     }
+    const create = params as CreatePaymentParams;
+    if (create.offSession === true && storedPaymentMethodRef(create) === undefined) {
+      throw new InvalidRequestError(
+        "off-session createPayment requires a stored payment method id",
+      );
+    }
+    assertNoRawCardMaterial(params);
     return gw.createPayment(params as CreatePaymentParams);
   }
 
@@ -867,6 +901,90 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       throw new OperationNotSupportedError(gw.name, "getPaymentStatus");
     }
     return gw.getPaymentStatus(gatewayId);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Customers and stored payment methods (Phase 22.1)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Create a provider customer. Gated on capability `customers`.
+   * Raw PAN/CVC is rejected before the adapter runs.
+   */
+  async createCustomer(
+    params: CreateCustomerParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<CustomerOperationResult> {
+    assertNoRawCardMaterial(params);
+    return this.invokeOptionalGated(
+      "createCustomer",
+      params,
+      gateway,
+      (gw) => gw.createCustomer?.bind(gw),
+    );
+  }
+
+  /**
+   * Retrieve a provider customer. Gated on capability `customers`.
+   */
+  async getCustomer(
+    params: GetCustomerParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<CustomerOperationResult> {
+    return this.invokeOptionalGated(
+      "getCustomer",
+      params,
+      gateway,
+      (gw) => gw.getCustomer?.bind(gw),
+    );
+  }
+
+  /**
+   * Attach a tokenized payment method to a customer.
+   * Gated on capability `paymentMethods`. Raw PAN/CVC is rejected.
+   */
+  async attachPaymentMethod(
+    params: AttachPaymentMethodParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<PaymentMethodOperationResult> {
+    assertNoRawCardMaterial(params);
+    return this.invokeOptionalGated(
+      "attachPaymentMethod",
+      params,
+      gateway,
+      (gw) => gw.attachPaymentMethod?.bind(gw),
+    );
+  }
+
+  /**
+   * List stored payment methods for a customer.
+   * Gated on capability `paymentMethods`.
+   */
+  async listPaymentMethods(
+    params: ListPaymentMethodsParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<ListPaymentMethodsResult> {
+    return this.invokeOptionalGated(
+      "listPaymentMethods",
+      params,
+      gateway,
+      (gw) => gw.listPaymentMethods?.bind(gw),
+    );
+  }
+
+  /**
+   * Detach a stored payment method. Gated on capability `paymentMethods`.
+   */
+  async detachPaymentMethod(
+    params: DetachPaymentMethodParams,
+    gateway?: keyof TGateways & string,
+  ): Promise<PaymentMethodOperationResult> {
+    return this.invokeOptionalGated(
+      "detachPaymentMethod",
+      params,
+      gateway,
+      (gw) => gw.detachPaymentMethod?.bind(gw),
+    );
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1044,6 +1162,37 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
   // ═══════════════════════════════════════════════════════════════════════════
   // Private Helpers
   // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Capability-gate an optional adapter method. Claims are authoritative.
+   */
+  private async invokeOptionalGated<T>(
+    operation: string,
+    params: unknown,
+    gateway: (keyof TGateways & string) | undefined,
+    pick: (gw: PaymentGateway) => ((params: never) => Promise<T>) | undefined,
+  ): Promise<T> {
+    const gw = this.resolveGateway(gateway);
+    const required = requiredCapabilitiesForOperation(operation, params);
+    for (const capability of required) {
+      this.assertCapability(gw, capability, operation);
+    }
+    const method = pick(gw);
+    if (typeof method !== "function") {
+      const capability = required[0];
+      throw new OperationNotSupportedError(
+        gw.name,
+        operation,
+        hasCapabilitySurface(gw) && capability !== undefined
+          ? {
+              capability,
+              claimedSupport: gw.supports(capability),
+            }
+          : undefined,
+      );
+    }
+    return method(params as never);
+  }
 
   /**
    * Throw {@link OperationNotSupportedError} with capability metadata when the

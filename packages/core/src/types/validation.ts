@@ -368,6 +368,9 @@ const CreatePaymentParamsObjectSchema = z.object({
     metadata: z.record(z.unknown()).optional(),
     capture: z.boolean().default(true),
     idempotencyKey: OptionalIdempotencyKeySchema,
+    customerId: z.string().min(1).optional(),
+    paymentMethodId: z.string().min(1).optional(),
+    offSession: z.boolean().optional(),
 
     // Stripe specific
     stripePaymentMethodId: z.string().startsWith('pm_', 'Stripe Payment Method ID must start with pm_').optional(),

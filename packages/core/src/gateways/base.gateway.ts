@@ -370,6 +370,14 @@ function isPostSubmitMoneyMutation(operation: OperationType): boolean {
     );
 }
 
+function isPostSubmitCustomerMutation(operation: OperationType): boolean {
+    return (
+        operation === "createCustomer" ||
+        operation === "attachPaymentMethod" ||
+        operation === "detachPaymentMethod"
+    );
+}
+
 /**
  * Best-effort provider object id for post-submit indeterminate results
  * (CORE-7). Prefer a real payment / order / OTP identity over `"unknown"` so
@@ -393,6 +401,8 @@ const POST_SUBMIT_ID_KEYS = [
     "refundId",
     "transactionUrl",
     "idempotencyKey",
+    "customerId",
+    "paymentMethodId",
 ] as const;
 
 function providerObjectIdFromParams(params: unknown): string {
@@ -456,9 +466,21 @@ function tryIndeterminateFromNetworkError(
     | GatewayPaymentResult
     | GatewayRefundResult
     | ReturnType<typeof applyIndeterminateCheckoutSessionOutcome>
+    | {
+          outcome: "indeterminate";
+          reconciliationRequired: true;
+          message: string;
+      }
     | undefined {
     if (!(error instanceof NetworkError) || error.afterProviderSubmit !== true) {
         return undefined;
+    }
+    if (isPostSubmitCustomerMutation(operation)) {
+        return {
+            outcome: "indeterminate" as const,
+            reconciliationRequired: true as const,
+            message: error.message,
+        };
     }
     if (!isPostSubmitMoneyMutation(operation)) {
         return undefined;

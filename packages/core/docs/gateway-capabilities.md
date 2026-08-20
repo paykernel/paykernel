@@ -33,8 +33,8 @@ Claims are conservative: method presence alone does not imply `true`.
 | voids | ✓ | ✓ | ✓ | ✓ |
 | hostedCheckout | ✓ | ✗ | ✗ | ✗ |
 | tokenization | ✗ | ✗ | ✗ | ✗ |
-| customers | ✗ | ✗ | ✗ | ✗ |
-| paymentMethods | ✗ | ✗ | ✗ | ✗ |
+| customers | ✓ | ✗ | ✗ | ✗ |
+| paymentMethods | ✓ | ✗ | ✗ | ✗ |
 | marketplaceSplits | ✗ | ✓ | ✗ | ✗ |
 | disputes | ✗ | ✗ | ✗ | ✗ |
 | paymentLinks | ✗ | ✗ | ✗ | ✗ |
@@ -55,9 +55,11 @@ Claims are conservative: method presence alone does not imply `true`.
   `splits`).
 - **providerRecurring**: extension-only; default `false`. Checkout
   subscription mode alone does not force `true`.
-- **disputes** / **paymentLinks** / **customers** / **tokenization** /
-  **paymentMethods**: claimed only when the adapter exposes first-class
-  APIs for those products.
+- **customers** / **paymentMethods**: Stripe implements first-class
+  Customer create/get and PaymentMethod attach/list/detach. Other
+  built-ins stay false until they expose the same surface.
+- **disputes** / **paymentLinks** / **tokenization**: claimed only when
+  the adapter exposes first-class APIs for those products.
 
 ## Inspecting support at runtime
 

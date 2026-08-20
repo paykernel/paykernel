@@ -171,6 +171,22 @@ export interface CreatePaymentParams extends CommonPaymentInput, OperationReques
      */
     idempotencyKey?: string;
 
+    /**
+     * Stored provider customer id (Phase 22.1). Distinct from the 0.x
+     * Stripe convenience field {@link stripeCustomerId}.
+     */
+    customerId?: string;
+    /**
+     * Tokenized stored payment-method id (never a PAN). Distinct from
+     * {@link stripePaymentMethodId}.
+     */
+    paymentMethodId?: string;
+    /**
+     * Charge a stored payment method without a customer present.
+     * Requires {@link paymentMethodId} or {@link stripePaymentMethodId}.
+     */
+    offSession?: boolean;
+
     // ═══════════════════════════════════════════════════════════════════════════
     // Stripe-specific fields (0.x convenience — prefer StripeCreatePaymentParams)
     // ═══════════════════════════════════════════════════════════════════════════
