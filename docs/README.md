@@ -19,6 +19,7 @@ Read in this order. Package guides stay next to the code they describe.
 | `@paykernel/webhooks` | [README](../packages/webhooks/README.md) · [inbox](../packages/webhooks/docs/webhook-inbox.md) |
 | `@paykernel/reconciliation` | [README](../packages/reconciliation/README.md) · [overview](../packages/reconciliation/docs/overview.md) |
 | `@paykernel/routing` | [README](../packages/routing/README.md) · [overview](../packages/routing/docs/overview.md) |
+| `@paykernel/gateway-tap` | [README](../packages/gateway-tap/README.md) · [overview](../packages/gateway-tap/docs/overview.md) |
 | `@paykernel/opentelemetry` | [README](../packages/observability/README.md) · [overview](../packages/observability/docs/overview.md) |
 | `@paykernel/store-contracts` | [README](../packages/store-contracts/README.md) · [contracts](../packages/store-contracts/docs/contracts.md) |
 | `@paykernel/sql-foundation` | [README](../packages/sql-foundation/README.md) · [relational foundation](../packages/sql-foundation/docs/relational-foundation.md) |
@@ -36,7 +37,7 @@ Folder `packages/observability` publishes as **`@paykernel/opentelemetry`**.
 | [Releases](./releases.md) | Changesets, provenance, prerelease |
 | [Core baseline](../packages/core/docs/baseline/README.md) | Generated public-api / pack inventory (not a product guide) |
 
-`roadmap.md` at the repo root is a **completed phase log** (0–21 shipped) plus leftover product work (22–23). It is not the consumer index.
+`roadmap.md` at the repo root is a **completed phase log** (0–22 shipped; Phase 23 started with `@paykernel/gateway-tap`) plus leftover product work. It is not the consumer index.
 
 ## Honesty (always)
 

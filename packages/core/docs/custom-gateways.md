@@ -153,6 +153,22 @@ payments.gateway('example');  // ExampleGateway
 // payments.gateway('adyen'); // compile-time error — not registered
 ```
 
+First-party extra adapters (Phase 23) use the same shape from their own packages — they are **not** `BuiltInGatewayName` values:
+
+```typescript
+import { createPaymentClient } from '@paykernel/core';
+import { tapGateway } from '@paykernel/gateway-tap';
+
+const payments = createPaymentClient({
+  gateways: {
+    tap: tapGateway({ secretKey: process.env.TAP_SECRET_KEY! }),
+  },
+  defaultGateway: 'tap',
+});
+```
+
+See [`@paykernel/gateway-tap`](../../gateway-tap/README.md).
+
 ## Registry builder (same adapters)
 
 ```typescript

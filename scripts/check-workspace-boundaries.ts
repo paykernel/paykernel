@@ -308,6 +308,11 @@ export function isAdapterPackageName(name: string): boolean {
   );
 }
 
+/** First-party extra gateway packages (`@paykernel/gateway-tap`, …). */
+export function isGatewayPackageName(name: string): boolean {
+  return /^@paykernel\/gateway-/.test(name);
+}
+
 export function isInternalPackagePath(relDir: string): boolean {
   const n = relDir.replace(/\\/g, "/");
   return (
@@ -325,6 +330,12 @@ export function isPortablePackage(pkg: WorkspacePackage): boolean {
   }
   if (pkg.manifest.paymentsSdk?.portable === false) {
     return false;
+  }
+  // Explicit portable:true wins, including @paykernel/gateway-* HTTP adapters
+  // (Phase 23). Without this, the gateway-* name exclusion below would skip
+  // the Node-builtin ban for packages that declare themselves portable.
+  if (pkg.manifest.paymentsSdk?.portable === true) {
+    return true;
   }
   // Core is always portable.
   if (pkg.name === CORE_PACKAGE_NAME) return true;
@@ -480,6 +491,100 @@ export function checkCoreDependencies(pkg: WorkspacePackage): Violation[] {
         rule: "a/core-no-opentelemetry",
         package: pkg.name,
         message: `core must not depend on OpenTelemetry package "${name}" (${field}: "${version}"). Optional OTEL bridge lives in @paykernel/opentelemetry only.`,
+      });
+    }
+  });
+
+  return violations;
+}
+
+function isRedisClientPackageName(name: string): boolean {
+  return (
+    name === "ioredis" ||
+    name === "redis" ||
+    name === "@redis/client" ||
+    /^@upstash\/redis$/.test(name)
+  );
+}
+
+/**
+ * Phase 23 — extra gateway packages (`@paykernel/gateway-*`).
+ *
+ * Runtime workspace deps: `@paykernel/core` only.
+ * `@paykernel/testkit` is allowed in `devDependencies` (conformance).
+ * Must not depend on webhooks / reconciliation / routing / observability /
+ * store adapters / sql-foundation / other gateway packages / Redis clients.
+ */
+export function checkGatewayPackageDependencies(
+  pkg: WorkspacePackage,
+): Violation[] {
+  if (!isGatewayPackageName(pkg.name)) return [];
+  const violations: Violation[] = [];
+  const runtimeDeps = pkg.manifest.dependencies ?? {};
+
+  if (runtimeDeps[TESTKIT_PACKAGE_NAME]) {
+    violations.push({
+      rule: "a/gateway-no-runtime-testkit",
+      package: pkg.name,
+      message: `gateway package must not list "${TESTKIT_PACKAGE_NAME}" in dependencies (testkit only in devDependencies for conformance).`,
+    });
+  }
+
+  eachDep(pkg.manifest, (field, name, version) => {
+    const isDevTestkit =
+      field === "devDependencies" && name === TESTKIT_PACKAGE_NAME;
+    if (isDevTestkit) {
+      return;
+    }
+
+    if (name === TESTKIT_PACKAGE_NAME) {
+      violations.push({
+        rule: "a/gateway-no-runtime-testkit",
+        package: pkg.name,
+        message: `gateway package must not depend on testkit in ${field} (${field}: "${version}"). Use devDependencies only.`,
+      });
+    }
+
+    if (
+      name === WEBHOOKS_PACKAGE_NAME ||
+      name === RECONCILIATION_PACKAGE_NAME ||
+      name === OBSERVABILITY_PACKAGE_NAME ||
+      name === ROUTING_PACKAGE_NAME ||
+      name === STORE_CONTRACTS_PACKAGE_NAME ||
+      isSqlFoundationOrInternal(name) ||
+      isAdapterPackageName(name) ||
+      (isGatewayPackageName(name) && name !== pkg.name)
+    ) {
+      violations.push({
+        rule: "a/gateway-core-only",
+        package: pkg.name,
+        message: `gateway package must depend only on @paykernel/core among workspace packages (found "${name}" in ${field}: "${version}").`,
+      });
+    }
+
+    if (isRedisClientPackageName(name)) {
+      violations.push({
+        rule: "a/gateway-no-redis",
+        package: pkg.name,
+        message: `gateway package must not depend on Redis client "${name}" (${field}).`,
+      });
+    }
+
+    const pathVersion = version.replace(/\\/g, "/");
+    if (
+      /packages\/webhooks/.test(pathVersion) ||
+      /packages\/reconciliation/.test(pathVersion) ||
+      /packages\/observability/.test(pathVersion) ||
+      /packages\/routing/.test(pathVersion) ||
+      /packages\/store-contracts/.test(pathVersion) ||
+      /packages\/sql-foundation/.test(pathVersion) ||
+      /internal\/sql-store/.test(pathVersion) ||
+      /packages\/(adapter|store)-/.test(pathVersion)
+    ) {
+      violations.push({
+        rule: "a/gateway-core-only",
+        package: pkg.name,
+        message: `gateway package must not path-depend into domain/adapter packages (${field}: "${name}": "${version}").`,
       });
     }
   });
@@ -939,6 +1044,10 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
       });
     }
   }
+
+  // Phase 23: extra gateway packages depend on core only among workspace
+  // runtime packages. @paykernel/testkit is allowed in devDependencies.
+  violations.push(...checkGatewayPackageDependencies(pkg));
 
   // store-contracts: zero workspace runtime deps (portable contracts only).
   if (pkg.name === STORE_CONTRACTS_PACKAGE_NAME) {

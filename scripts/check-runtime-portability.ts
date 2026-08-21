@@ -35,6 +35,7 @@ export const PORTABLE_PACKAGE_DIRS = [
   "packages/core",
   "packages/webhooks",
   "packages/store-contracts",
+  "packages/gateway-tap",
 ] as const;
 
 // ---------------------------------------------------------------------------

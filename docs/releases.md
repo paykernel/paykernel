@@ -12,6 +12,7 @@ How this monorepo versions packages, generates release notes, publishes to npm w
 | Reconciliation    | `packages/reconciliation`   | `@paykernel/reconciliation`     | Public; Phase 19 domain primitives (portable; core-only dep)          |
 | Observability     | `packages/observability`    | `@paykernel/opentelemetry`      | Public; Phase 20 metrics/spans/redacting telemetry (portable; core-only; optional peer `@opentelemetry/api`) |
 | Routing           | `packages/routing`          | `@paykernel/routing`            | Public; Phase 21 select-only gateway routing + restricted post-attempt fallback eligibility (portable; core-only) |
+| Tap gateway       | `packages/gateway-tap`      | `@paykernel/gateway-tap`        | Public; Phase 23 extra Tap Payments adapter (portable; core-only; **not** a core built-in) |
 | Postgres adapter  | `packages/store-postgres` | `@paykernel/store-postgres`   | Public; Phase 12 durable stores — **may publish separately** from core |
 | Redis adapter     | `packages/store-redis`    | `@paykernel/store-redis`      | Public; Phase 13 optional Redis/Valkey — **may publish separately** from core |
 | SQLite adapter    | `packages/store-sqlite`   | `@paykernel/store-sqlite`     | Public; Phase 14 single-host SQLite — **may publish separately** from core |

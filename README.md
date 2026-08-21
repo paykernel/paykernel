@@ -159,6 +159,7 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 | Inbox | [`packages/webhooks/README.md`](./packages/webhooks/README.md) · [webhook-inbox.md](./packages/webhooks/docs/webhook-inbox.md) |
 | Reconciliation | [`packages/reconciliation/README.md`](./packages/reconciliation/README.md) |
 | Routing | [`packages/routing/README.md`](./packages/routing/README.md) |
+| Extra gateways | [Tap Payments](./packages/gateway-tap/README.md) (`@paykernel/gateway-tap`, Phase 23; not a core built-in) |
 | Observability | [`packages/observability/README.md`](./packages/observability/README.md) (`@paykernel/opentelemetry`) |
 | Contracts | [`packages/store-contracts/README.md`](./packages/store-contracts/README.md) · [contracts.md](./packages/store-contracts/docs/contracts.md) |
 | SQL foundation | [`packages/sql-foundation/README.md`](./packages/sql-foundation/README.md) · [relational-foundation.md](./packages/sql-foundation/docs/relational-foundation.md) |
@@ -166,7 +167,7 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 | Stores | [postgres](./packages/store-postgres/README.md) · [redis](./packages/store-redis/README.md) · [sqlite](./packages/store-sqlite/README.md) · [turso](./packages/store-turso/README.md) · [d1](./packages/store-d1/README.md) · [durable objects](./packages/store-durable-objects/README.md) |
 | Contributors | [`docs/monorepo.md`](./docs/monorepo.md) · [`docs/workspace-boundaries.md`](./docs/workspace-boundaries.md) · [`docs/releases.md`](./docs/releases.md) |
 
-`roadmap.md` is a completed phase log (0–21 shipped) plus leftover product work (22–23). It is not the consumer index.
+`roadmap.md` is a completed phase log (0–22 shipped, Phase 23 started with `@paykernel/gateway-tap`) plus leftover product work. It is not the consumer index.
 
 ## License
 

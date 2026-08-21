@@ -32,6 +32,7 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── package.json              # paymentsSdk.portable: true; optional peer @opentelemetry/api
 │   │   └── README.md
 │   ├── routing/                      # @paykernel/routing (Phase 21; portable; publishable)
+│   ├── gateway-tap/                  # @paykernel/gateway-tap (Phase 23; portable Tap adapter; not a built-in)
 │   │   ├── src/                      # router, route builder, matchers, safe fallback eligibility
 │   │   ├── dist/
 │   │   ├── docs/                     # overview, routing-inputs, selection, safe-fallback, telemetry

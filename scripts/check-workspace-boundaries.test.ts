@@ -11,6 +11,7 @@ import {
   buildWorkspaceDepGraph,
   checkAdapterRootEntry,
   checkCoreDependencies,
+  checkGatewayPackageDependencies,
   checkInternalPrivate,
   checkPhase10DependencyMatrix,
   checkPortableSourceImports,
@@ -19,6 +20,7 @@ import {
   extractImportSpecifiers,
   findCycles,
   isAdapterPackageName,
+  isGatewayPackageName,
   isInternalPackagePath,
   isPortablePackage,
   isTestFile,
@@ -76,6 +78,15 @@ describe("path classification helpers", () => {
     ["@paykernel/webhooks", false],
   ] as const)("isAdapterPackageName(%s) → %s", (name, expected) => {
     expect(isAdapterPackageName(name)).toBe(expected);
+  });
+
+  it.each([
+    ["@paykernel/gateway-tap", true],
+    ["@paykernel/gateway-myfatoorah", true],
+    ["@paykernel/core", false],
+    ["@paykernel/store-sqlite", false],
+  ] as const)("isGatewayPackageName(%s) → %s", (name, expected) => {
+    expect(isGatewayPackageName(name)).toBe(expected);
   });
 
   it.each([
@@ -1008,6 +1019,81 @@ describe("on-disk fixture packages", () => {
   });
 });
 
+describe("Phase 23 gateway packages", () => {
+  it("treats @paykernel/gateway-* with paymentsSdk.portable:true as portable", () => {
+    const pkg = makePackage({
+      name: "@paykernel/gateway-tap",
+      relDir: "packages/gateway-tap",
+      manifest: {
+        name: "@paykernel/gateway-tap",
+        paymentsSdk: { portable: true },
+      },
+    });
+    expect(isPortablePackage(pkg)).toBe(true);
+  });
+
+  it("does not treat unmarked @paykernel/gateway-* as portable", () => {
+    const pkg = makePackage({
+      name: "@paykernel/gateway-other",
+      relDir: "packages/gateway-other",
+      manifest: { name: "@paykernel/gateway-other" },
+    });
+    expect(isPortablePackage(pkg)).toBe(false);
+  });
+
+  it("allows core runtime dep and testkit in devDependencies", () => {
+    const pkg = makePackage({
+      name: "@paykernel/gateway-tap",
+      relDir: "packages/gateway-tap",
+      manifest: {
+        name: "@paykernel/gateway-tap",
+        paymentsSdk: { portable: true },
+        dependencies: { "@paykernel/core": "workspace:*" },
+        devDependencies: { "@paykernel/testkit": "workspace:*" },
+      },
+    });
+    expect(checkGatewayPackageDependencies(pkg)).toEqual([]);
+  });
+
+  it("rejects testkit in runtime dependencies", () => {
+    const pkg = makePackage({
+      name: "@paykernel/gateway-tap",
+      relDir: "packages/gateway-tap",
+      manifest: {
+        name: "@paykernel/gateway-tap",
+        dependencies: {
+          "@paykernel/core": "workspace:*",
+          "@paykernel/testkit": "workspace:*",
+        },
+      },
+    });
+    const violations = checkGatewayPackageDependencies(pkg);
+    expect(violations.some((v) => v.rule === "a/gateway-no-runtime-testkit")).toBe(
+      true,
+    );
+  });
+
+  it("rejects webhooks / store / sibling gateway runtime deps", () => {
+    const pkg = makePackage({
+      name: "@paykernel/gateway-tap",
+      relDir: "packages/gateway-tap",
+      manifest: {
+        name: "@paykernel/gateway-tap",
+        dependencies: {
+          "@paykernel/core": "workspace:*",
+          "@paykernel/webhooks": "workspace:*",
+          "@paykernel/store-sqlite": "workspace:*",
+          "@paykernel/gateway-other": "workspace:*",
+        },
+      },
+    });
+    const violations = checkGatewayPackageDependencies(pkg);
+    expect(violations.filter((v) => v.rule === "a/gateway-core-only").length).toBe(
+      3,
+    );
+  });
+});
+
 describe("live monorepo packages", () => {
   it("discovers core, webhooks, reconciliation, observability, routing, testkit, sql-store, adapters and passes the full boundary suite", () => {
     const root = join(import.meta.dir, "..");
@@ -1018,6 +1104,7 @@ describe("live monorepo packages", () => {
     expect(names.has("@paykernel/reconciliation")).toBe(true);
     expect(names.has("@paykernel/opentelemetry")).toBe(true);
     expect(names.has("@paykernel/routing")).toBe(true);
+    expect(names.has("@paykernel/gateway-tap")).toBe(true);
     expect(names.has("@paykernel/testkit")).toBe(true);
     expect(names.has("@paykernel/internal-sql-store")).toBe(true);
     expect(names.has("@paykernel/store-postgres")).toBe(true);
@@ -1026,6 +1113,8 @@ describe("live monorepo packages", () => {
     expect(isPortablePackage(observability)).toBe(true);
     const routing = packages.find((p) => p.name === "@paykernel/routing")!;
     expect(isPortablePackage(routing)).toBe(true);
+    const tap = packages.find((p) => p.name === "@paykernel/gateway-tap")!;
+    expect(isPortablePackage(tap)).toBe(true);
     expect(runChecks(packages, root)).toEqual([]);
   });
 });
