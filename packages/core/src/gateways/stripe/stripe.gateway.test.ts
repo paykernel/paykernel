@@ -11,6 +11,7 @@ import {
   toPersistedPaymentEventEnvelope,
 } from "../../types/payment-event";
 import { money } from "../../utils/money";
+import { isHostedCheckoutRedirect } from "../../types/checkout.types";
 import {
   AuthenticationError,
   InvalidRequestError,
@@ -2217,6 +2218,31 @@ describe("StripeGateway", () => {
       }
     });
 
+    it("P22R3-PLINK-WH: payment_link.updated is not pending and not a paid payment", () => {
+      const event = gateway.parseWebhookEvent({
+        id: "evt_plink_updated",
+        type: "payment_link.updated",
+        created: 1623456789,
+        data: {
+          object: {
+            id: "plink_updated",
+            object: "payment_link",
+            active: true,
+            url: "https://buy.stripe.com/test",
+          },
+        },
+        livemode: false,
+      });
+
+      expect(event.status).not.toBe("pending");
+      expect(event.status).not.toBe("paid");
+      expect(event.status).toBe("processing");
+      expect(event.stableType).toBeUndefined();
+      expect(event.event?.type).toBe("provider.unmapped");
+      expect(event.event?.type).not.toBe("payment.succeeded");
+      expect(event.event?.type).not.toBe("payment.processing");
+    });
+
     it("S19-STRIPE-DISPUTE: charge.dispute.closed lost is not pending", () => {
       const event = gateway.parseWebhookEvent({
         id: "evt_dispute_lost",
@@ -3751,6 +3777,33 @@ describe("StripeGateway", () => {
       expect(result.session.url).toBeUndefined();
     });
 
+    it("P22R3-URL-SCHEME: javascript: session url is omitted", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_js_url",
+          object: "checkout.session",
+          url: "javascript:alert(1)",
+          status: "open",
+          payment_status: "unpaid",
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_test_key",
+      });
+
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(result.session.url).toBeUndefined();
+      expect(isHostedCheckoutRedirect(result)).toBe(false);
+    });
+
     it("should accept Money amount input for simple createCheckoutSession", async () => {
       let capturedBody: string = "";
       globalThis.fetch = mock(async (url, opts: RequestInit) => {
@@ -3808,29 +3861,22 @@ describe("StripeGateway", () => {
       expect(params.get("line_items[0][price_data][unit_amount]")).toBe("5000");
     });
 
-    it("should allow checkout sessions without cancelUrl because Stripe makes cancel_url optional", async () => {
-      let capturedBody: string = "";
-      globalThis.fetch = mock(async (url, opts: RequestInit) => {
-        capturedBody = opts.body as string;
-        return createMockResponse({
-          id: "cs_no_cancel",
-          object: "checkout.session",
-          url: "https://checkout.stripe.com/no-cancel",
-          status: "open",
-          payment_status: "unpaid",
-        });
+    it("payment-mode createCheckoutSession without cancelUrl is rejected before fetch", async () => {
+      let fetchCalls = 0;
+      globalThis.fetch = mock(async () => {
+        fetchCalls += 1;
+        return createMockResponse({});
       }) as unknown as typeof fetch;
 
-      await gateway.createCheckoutSession({
-        amount: 20,
-        currency: "USD",
-        successUrl: "https://success",
-        idempotencyKey: "idem_stripe_test_key",
-      });
-
-      const params = new URLSearchParams(capturedBody);
-      expect(params.get("success_url")).toBe("https://success");
-      expect(params.get("cancel_url")).toBeNull();
+      await expect(
+        gateway.createCheckoutSession({
+          amount: 20,
+          currency: "USD",
+          successUrl: "https://success",
+          idempotencyKey: "idem_stripe_test_key",
+        }),
+      ).rejects.toBeInstanceOf(InvalidRequestError);
+      expect(fetchCalls).toBe(0);
     });
 
     it("should create checkout session with line items and customer email", async () => {
@@ -3896,6 +3942,7 @@ describe("StripeGateway", () => {
           amount: 20,
           currency: "USD",
           successUrl: "https://success",
+          cancelUrl: "https://cancel",
         }),
       ).rejects.toThrow(/requires idempotencyKey/i);
       expect(fetchCalls).toBe(0);
@@ -3907,6 +3954,7 @@ describe("StripeGateway", () => {
           amount: 20,
           currency: "USD",
           successUrl: "https://success",
+          cancelUrl: "https://cancel",
           idempotencyKey: "   ",
         }),
       ).rejects.toThrow(/idempotencyKey|Validation failed/i);
@@ -3933,6 +3981,7 @@ describe("StripeGateway", () => {
         amount: 10,
         currency: "USD",
         successUrl: "https://success",
+        cancelUrl: "https://cancel",
         idempotencyKey: "idem_cko_timeout",
       });
 

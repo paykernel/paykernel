@@ -12,13 +12,14 @@ import type {
   GatewayPaymentResult,
   GatewayRefundResult,
 } from "../types/payment.types";
-import type {
-  AttachPaymentMethodParams,
-  CreateCustomerParams,
-  CustomerOperationResult,
-  DetachPaymentMethodParams,
-  GetCustomerParams,
-  PaymentMethodOperationResult,
+import {
+  applyIndeterminatePaymentMethodOutcome,
+  type AttachPaymentMethodParams,
+  type CreateCustomerParams,
+  type CustomerOperationResult,
+  type DetachPaymentMethodParams,
+  type GetCustomerParams,
+  type PaymentMethodOperationResult,
 } from "../types/customer.types";
 import type {
   DisputeOperationResult,
@@ -491,6 +492,7 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
     expect(result.message).toBe("timed out after 30000ms");
     expect(result.paymentMethod?.references.providerObjectId).toBe("pm_1");
     expect(result.paymentMethod?.id).toBe("pm_1");
+    expect(result.paymentMethod?.customerId).toBe("cus_lookup");
     expect(result.paymentMethod?.references.normalizedStatus).toBe("unknown");
     expect(result.paymentMethod?.references.normalizedStatus).not.toBe("active");
   });
@@ -505,7 +507,29 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
     expect(result.reconciliationRequired).toBe(true);
     expect(result.paymentMethod?.references.providerObjectId).toBe("pm_detach_1");
     expect(result.paymentMethod?.id).toBe("pm_detach_1");
+    expect(result.paymentMethod?.customerId).toBeUndefined();
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        result.paymentMethod ?? {},
+        "customerId",
+      ),
+    ).toBe(false);
+    expect(result.paymentMethod?.customerId).not.toBe("unknown");
     expect(result.paymentMethod?.references.normalizedStatus).not.toBe("active");
+  });
+
+  it("P22R3-DETACH-IND: detach timeout omits request customerId", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.detachPaymentMethod({
+      paymentMethodId: "pm_detach_2",
+      customerId: "cus_should_omit",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.paymentMethod?.customerId).toBeUndefined();
+    expect(
+      result.paymentMethod?.references.relatedIds?.customerId,
+    ).toBeUndefined();
   });
 
   it("P22-IND-LOOKUP: submitDisputeEvidence timeout is dispute-shaped unknown, not open/won", async () => {
@@ -589,6 +613,53 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
         paymentMethodId: "pm_1",
       }),
     ).rejects.toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("P22R3-IND-UNKNOWN-CUS: applyIndeterminatePaymentMethodOutcome omits missing/empty customerId", () => {
+    const missing = applyIndeterminatePaymentMethodOutcome({
+      paymentMethodId: "pm_lookup",
+      message: "timeout",
+      errorName: "NetworkError",
+      gateway: "test",
+    });
+    expect(missing.paymentMethod?.id).toBe("pm_lookup");
+    expect(missing.paymentMethod?.customerId).toBeUndefined();
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        missing.paymentMethod ?? {},
+        "customerId",
+      ),
+    ).toBe(false);
+    expect(missing.paymentMethod?.customerId).not.toBe("unknown");
+
+    const empty = applyIndeterminatePaymentMethodOutcome({
+      paymentMethodId: "pm_lookup",
+      customerId: "",
+      message: "timeout",
+      errorName: "NetworkError",
+      gateway: "test",
+    });
+    expect(empty.paymentMethod?.id).toBe("pm_lookup");
+    expect(empty.paymentMethod?.customerId).toBeUndefined();
+    expect(empty.paymentMethod?.customerId).not.toBe("unknown");
+  });
+
+  it("P22R3-PCI-HOOK-ORDER: inbound PAN is rejected before before-hooks run", async () => {
+    let beforeRan = false;
+    const hooks = new HooksManager({
+      onBefore: () => {
+        beforeRan = true;
+        return { proceed: true };
+      },
+    });
+    const gw = new TestGateway(hooks);
+    await expect(
+      gw.attachPaymentMethod({
+        customerId: "cus_1",
+        paymentMethodId: "4242424242424242",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(beforeRan).toBe(false);
   });
 
   it("P22-PCI: before-hooks cannot inject metadata PAN on createPayment", async () => {

@@ -27,6 +27,8 @@ export const BUILTIN_ADAPTER_VERSION = "0.1.0-next.0";
  * Stripe PaymentIntent + Checkout Session + Customer / PaymentMethod +
  * Disputes + Payment Links surface.
  * hostedCheckout = createCheckoutSession only (not every redirect).
+ * tokenization stays false: attachPaymentMethod may accept a Stripe `tok_…`
+ * as a paymentMethods convenience; that is not a SetupIntent / save-card API.
  * providerRecurring stays false: Checkout `mode: subscription` alone is not a
  * first-class recurring billing adapter surface.
  */

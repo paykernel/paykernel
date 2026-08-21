@@ -822,6 +822,9 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
           "off-session createPayment requires a customer id",
         );
       }
+      // Stored-method charge: fail closed when the adapter claims a Phase 3
+      // surface but not paymentMethods (PayPal / Moyasar / Paymob).
+      this.assertCapability(gw, "paymentMethods", "createPayment");
     }
     assertNoRawCardMaterial(params);
     return gw.createPayment(params as CreatePaymentParams);
@@ -975,6 +978,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: GetCheckoutSessionParams,
     gateway?: keyof TGateways & string,
   ): Promise<CheckoutSessionOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "getCheckoutSession",
       params,
@@ -1011,6 +1015,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: GetCustomerParams,
     gateway?: keyof TGateways & string,
   ): Promise<CustomerOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "getCustomer",
       params,
@@ -1044,6 +1049,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: ListPaymentMethodsParams,
     gateway?: keyof TGateways & string,
   ): Promise<ListPaymentMethodsResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "listPaymentMethods",
       params,
@@ -1059,6 +1065,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: DetachPaymentMethodParams,
     gateway?: keyof TGateways & string,
   ): Promise<PaymentMethodOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "detachPaymentMethod",
       params,
@@ -1075,6 +1082,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: GetDisputeParams,
     gateway?: keyof TGateways & string,
   ): Promise<DisputeOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "getDispute",
       params,
@@ -1087,6 +1095,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: ListDisputesParams,
     gateway?: keyof TGateways & string,
   ): Promise<ListDisputesResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "listDisputes",
       params,
@@ -1133,6 +1142,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: GetPaymentLinkParams,
     gateway?: keyof TGateways & string,
   ): Promise<PaymentLinkOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "getPaymentLink",
       params,
@@ -1145,6 +1155,7 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: DeactivatePaymentLinkParams,
     gateway?: keyof TGateways & string,
   ): Promise<PaymentLinkOperationResult> {
+    assertNoRawCardMaterial(params);
     return this.invokeOptionalGated(
       "deactivatePaymentLink",
       params,

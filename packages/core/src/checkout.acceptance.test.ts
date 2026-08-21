@@ -177,8 +177,12 @@ describe("Phase 22.2 hosted checkout", () => {
     if (created.outcome !== "succeeded") {
       expect.unreachable("createCheckoutSession must succeed");
     }
+    // Create success is a hosted redirect, not paid settlement.
     expect(isHostedCheckoutRedirect(created)).toBe(true);
     expect(created.session.status).toBe("open");
+    expect(created.session.paymentStatus).not.toBe("paid");
+    expect((created as { success?: unknown }).success).not.toBe(true);
+    expect("success" in created).toBe(false);
     expect(created.session.references.providerObjectId).toMatch(/^cs_/);
     expect(created.session.url).toContain("https://hosted.test/checkout/");
 

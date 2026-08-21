@@ -44,6 +44,7 @@ import {
   type CheckoutSessionOperationResult,
   type CommonCheckoutSessionInput,
   type CreateCustomerParams,
+  type Customer,
   type CreatePaymentLinkParams,
   type CreatePaymentParams,
   type CustomerOperationResult,
@@ -177,6 +178,11 @@ function isCapturableMockStatus(status: PaymentStatus): boolean {
 function createPaymentIdentityFields(params: CreatePaymentParams): Record<string, unknown> {
   const identity: Record<string, unknown> = {};
   if (params.orderId !== undefined) identity.orderId = params.orderId;
+  if (params.customerId !== undefined) identity.customerId = params.customerId;
+  if (params.paymentMethodId !== undefined) {
+    identity.paymentMethodId = params.paymentMethodId;
+  }
+  if (params.offSession !== undefined) identity.offSession = params.offSession;
   if (params.stripePaymentMethodId !== undefined) {
     identity.stripePaymentMethodId = params.stripePaymentMethodId;
   }
@@ -610,6 +616,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
 
   const history: MockRequestRecord[] = [];
   const payments = new Map<string, PaymentStateInternal>();
+  const customers = new Map<string, Customer>();
   /**
    * Idempotency key → completed createPayment result + request fingerprint
    * (process-local). Includes provider-side dual-timeout successes so retries
@@ -2101,19 +2108,21 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
           };
         }
         const id = nextId("cus");
+        const customer: Customer = {
+          status: "active",
+          ...(typeof params.email === "string" ? { email: params.email } : {}),
+          ...(typeof params.name === "string" ? { name: params.name } : {}),
+          references: buildProviderReferences({
+            gateway: name,
+            gatewayId: id,
+            status: "active",
+            customerId: id,
+          }),
+        };
+        customers.set(id, customer);
         return {
           outcome: "succeeded" as const,
-          customer: {
-            status: "active",
-            ...(typeof params.email === "string" ? { email: params.email } : {}),
-            ...(typeof params.name === "string" ? { name: params.name } : {}),
-            references: buildProviderReferences({
-              gateway: name,
-              gatewayId: id,
-              status: "active",
-              customerId: id,
-            }),
-          },
+          customer,
         };
       });
     },
@@ -2133,16 +2142,20 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             error: scriptedFailedError(step, "Get customer failed (mock)"),
           };
         }
+        const stored = customers.get(params.customerId);
+        if (stored !== undefined) {
+          return {
+            outcome: "succeeded" as const,
+            customer: stored,
+          };
+        }
         return {
-          outcome: "succeeded" as const,
-          customer: {
-            status: "active",
-            references: buildProviderReferences({
-              gateway: name,
-              gatewayId: params.customerId,
-              status: "active",
-              customerId: params.customerId,
-            }),
+          outcome: "failed" as const,
+          error: {
+            name: "GatewayApiError",
+            message: `Customer ${params.customerId} not found (mock)`,
+            code: "GATEWAY_API_ERROR",
+            statusCode: 404,
           },
         };
       });
@@ -2236,25 +2249,16 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             error: scriptedFailedError(step, "Detach payment method failed (mock)"),
           };
         }
-        const detachedCustomerId =
-          typeof params.customerId === "string" && params.customerId.length > 0
-            ? params.customerId
-            : undefined;
+        // Detached methods omit customerId even if params.customerId was set.
         return {
           outcome: "succeeded" as const,
           paymentMethod: {
             id: params.paymentMethodId,
-            ...(detachedCustomerId !== undefined
-              ? { customerId: detachedCustomerId }
-              : {}),
             type: "card",
             references: buildProviderReferences({
               gateway: name,
               gatewayId: params.paymentMethodId,
-              status: "active",
-              ...(detachedCustomerId !== undefined
-                ? { customerId: detachedCustomerId }
-                : {}),
+              status: "detached",
             }),
           },
         };

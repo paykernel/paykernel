@@ -221,6 +221,11 @@ describe("gateway capabilities foundation", () => {
           splits: [{ amount: 1 }],
         }),
       ).toEqual(["payments", "marketplaceSplits"]);
+      expect(
+        requiredCapabilitiesForOperation("createPayment", {
+          offSession: true,
+        }),
+      ).toEqual(["payments", "paymentMethods"]);
       expect(requiredCapabilitiesForOperation("refundPayment", {})).toEqual([
         "refunds",
       ]);

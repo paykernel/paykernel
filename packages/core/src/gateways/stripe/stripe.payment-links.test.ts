@@ -218,6 +218,23 @@ describe("StripeGateway payment links", () => {
     expect(result.paymentLink.currency).toBeUndefined();
   });
 
+  it("P22R3-URL-SCHEME: javascript: payment link url is omitted", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "plink_js",
+        url: "javascript:alert(1)",
+        active: true,
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.getPaymentLink({ paymentLinkId: "plink_js" });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("getPaymentLink must succeed");
+    }
+    expect(result.paymentLink.url).toBeUndefined();
+  });
+
   it("deactivatePaymentLink sets active=false", async () => {
     let capturedBody = "";
     globalThis.fetch = mock(async (_url, opts: RequestInit) => {

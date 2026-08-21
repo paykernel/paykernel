@@ -175,15 +175,15 @@ export function applyIndeterminatePaymentMethodOutcome(input: {
   const customerId =
     input.customerId !== undefined && input.customerId.length > 0
       ? input.customerId
-      : "unknown";
+      : undefined;
   const paymentMethod: StoredPaymentMethod = {
     id: lookupId,
-    customerId,
+    ...(customerId !== undefined ? { customerId } : {}),
     type: "other",
     references: indeterminateLookupRefs({
       gateway: input.gateway,
       lookupId,
-      ...(customerId !== "unknown" ? { customerId } : {}),
+      ...(customerId !== undefined ? { customerId } : {}),
     }),
   };
   return {

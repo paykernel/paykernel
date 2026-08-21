@@ -22,6 +22,8 @@ if (gateway.supports("paymentLinks")) {
 }
 ```
 
-Stripe create/deactivate require a caller `idempotencyKey` and `amount`+`currency` on create. Results are outcome unions; post-submit timeouts are indeterminate. Raw card material on create params is rejected before the adapter.
+Stripe create/deactivate require a caller `idempotencyKey` and `amount`+`currency` on create. Results are outcome unions; post-submit timeouts are indeterminate. Raw card material on create params is rejected before the adapter. Hosted link URLs and any checkout/link return URLs must be http(s) (`javascript:` / `data:` / `file:` rejected).
 
 Create may copy request `amount`/`currency` onto the succeeded snapshot. `getPaymentLink` publishes `amount`/`currency` only from an expanded single line item and omits them otherwise (unexpanded links, zero items, or more than one item).
+
+Payment-link webhook envelopes must **not** last-write onto a payment row as `pending` or `paid`. Persist the link snapshot; do not treat create/deactivate as payment settlement.

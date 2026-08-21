@@ -11,9 +11,13 @@
 
 - **P22-CKO-GET-ZERO:** `getCheckoutSession` amount is session `amount_total` while unpaid; captured rematch only after paid. Do not fulfill on GET checkout amount.
 - **List paging:** Stripe refund lists follow `has_more` / `starting_after`. Payment-link `line_items.has_more` omits amount rather than inventing major `0`.
-- **P22-PCI:** PCI fence walks nested `metadata` / `evidence` / CVC, not only top-level PAN keys.
+- **P22-PCI:** PCI fence walks nested `metadata` / `evidence` / CVC, not only top-level PAN keys. Allows numeric order ids / timestamps and Moyasar AFT `sender.account.number` that is not a Luhn PAN; rejects Luhn-valid PAN, embedded PAN text, and CVC aliases including `cvv2`. Does not claim every 13-digit leaf is blocked. Stripe `tok_…` attach is `paymentMethods`, not capability `tokenization`.
 - **P22-PP-DISPUTE:** PayPal `CUSTOMER.DISPUTE.CREATED` / `UPDATED` / `RESOLVED` parse without throw; dual-write `dispute.opened` / `updated` / `closed`. Envelope status is dispute lifecycle (`needs_response` / `under_review` / `won` / `lost` / `processing`), never `paid` or generic payment `pending`. IDs are the dispute resource id.
-- **Off-session customer:** `createPayment({ offSession: true })` requires a stored payment-method id **and** a customer id (see `docs/customers.md`).
+- **Off-session customer:** `createPayment({ offSession: true })` requires a stored payment-method id **and** a customer id (see `docs/customers.md`). Fail-closed unless the gateway claims `paymentMethods`.
+- **Detach omit customerId:** detach snapshots omit `customerId` even when the request passed one (detached). Mock gateway matches. Mock `getCustomer` looks up created customers; unknown ids are `outcome: failed` with statusCode 404 (not invented `active`).
+- **Dispute unknown status:** missing Stripe dispute `status` is `unknown`, not `needs_response`. Empty evidence submit is rejected. `listDisputes` pages (`has_more` / `starting_after`) with a page cap.
+- **Hosted cancelUrl:** Stripe hosted Checkout payment/subscription modes require `cancelUrl`. Setup may omit. Checkout/link URLs must be http(s).
+- **Payment-link envelope:** payment_link webhook envelopes must not last-write a payment as `pending`/`paid`.
 - **Checkout create paymentIntentId:** Checkout session `references.relatedIds.paymentIntentId` when Stripe expands a PaymentIntent (`getCheckoutSession`; use that `pi_*` for capture/refund/void).
 - **README outcome sample:** Stripe Checkout README sample uses the outcome union (`result.outcome === "succeeded"`, `result.session.url`, `references.providerObjectId`) and requires `idempotencyKey`.
 

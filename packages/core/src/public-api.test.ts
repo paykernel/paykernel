@@ -178,6 +178,10 @@ describe("public API runtime surface", () => {
         ["DISPUTE_STATUSES", sdk.DISPUTE_STATUSES],
         ["isHostedCheckoutRedirect", sdk.isHostedCheckoutRedirect],
         ["applyIndeterminateCheckoutSessionOutcome", sdk.applyIndeterminateCheckoutSessionOutcome],
+        ["applyIndeterminateCustomerOutcome", sdk.applyIndeterminateCustomerOutcome],
+        ["applyIndeterminatePaymentMethodOutcome", sdk.applyIndeterminatePaymentMethodOutcome],
+        ["applyIndeterminateDisputeOutcome", sdk.applyIndeterminateDisputeOutcome],
+        ["applyIndeterminatePaymentLinkOutcome", sdk.applyIndeterminatePaymentLinkOutcome],
         ["successFromRefundOutcome", sdk.successFromRefundOutcome],
         ["inferRefundOperationOutcome", sdk.inferRefundOperationOutcome],
         ["mapGatewayRefundToOperationResult", sdk.mapGatewayRefundToOperationResult],
@@ -214,7 +218,7 @@ describe("public API runtime surface", () => {
         ["operationContextToTelemetryData", sdk.operationContextToTelemetryData],
       ];
 
-      expect(runtimeExports).toHaveLength(156);
+      expect(runtimeExports).toHaveLength(160);
       for (const [exportName, value] of runtimeExports) {
         expect(value, exportName).toBeDefined();
         expect(sdk).toHaveProperty(exportName);

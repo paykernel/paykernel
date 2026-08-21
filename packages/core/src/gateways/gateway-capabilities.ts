@@ -150,6 +150,9 @@ export function requiredCapabilitiesForOperation(
       if (Array.isArray(bag.splits) && bag.splits.length > 0) {
         required.push("marketplaceSplits");
       }
+      if (bag.offSession === true) {
+        required.push("paymentMethods");
+      }
       return required;
     }
     case "refundPayment": {
@@ -216,7 +219,8 @@ export function freezeCapabilities(
  * - **hostedCheckout**: Adapter implements `createCheckoutSession` for a
  *   provider-hosted Checkout Session product (not every redirect URL).
  * - **tokenization**: First-class setup / save-payment-method / token APIs on
- *   the adapter (beyond ad-hoc source fields on create).
+ *   the adapter (beyond ad-hoc source fields on create). Stripe `tok_…` on
+ *   `attachPaymentMethod` is the `paymentMethods` surface, not this key.
  * - **customers**: First-class customer create/retrieve surface on the adapter.
  * - **paymentMethods**: First-class stored payment-method CRUD on the adapter.
  * - **marketplaceSplits**: Marketplace split / transfer params as a supported

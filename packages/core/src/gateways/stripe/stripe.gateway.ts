@@ -92,6 +92,7 @@ import { unixSecondsToIso } from "../../runtime/clock";
 import {
   concatBytes,
   hmacSha256Hex,
+  sha256Hex,
   timingSafeEqualHex,
   utf8Encode,
 } from "../../runtime/crypto-portable";
@@ -265,7 +266,11 @@ const STRIPE_MAX_METADATA_KEYS = 50;
 const STRIPE_MAX_METADATA_KEY_LENGTH = 40;
 const STRIPE_MAX_METADATA_VALUE_LENGTH = 500;
 const STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH = 255;
+/** Stripe list pages are 100 items; cap at 20 pages (2000 items). */
+const STRIPE_LIST_PAGE_SIZE = 100;
+const STRIPE_LIST_MAX_PAGES = 20;
 const STRIPE_PAYMENT_INTENT_ID_PATTERN = /^pi_[A-Za-z0-9_]+$/;
+const STRIPE_PUBLISHED_LAST4_PATTERN = /^\d{2,4}$/;
 const STRIPE_CUSTOMER_ID_PATTERN = /^cus_[A-Za-z0-9_]+$/;
 const STRIPE_PAYMENT_METHOD_ID_PATTERN = /^pm_[A-Za-z0-9_]+$/;
 const STRIPE_CARD_TOKEN_PATTERN = /^tok_[A-Za-z0-9_]+$/;
@@ -977,6 +982,79 @@ function isNonEmptyStripeString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function stripePublishedHttpUrl(value: unknown): string | undefined {
+  if (!isNonEmptyStripeString(value)) {
+    return undefined;
+  }
+  try {
+    const protocol = new URL(value).protocol;
+    if (protocol === "http:" || protocol === "https:") {
+      return value;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function stripePublishedLast4(value: unknown): string | undefined {
+  return typeof value === "string" && STRIPE_PUBLISHED_LAST4_PATTERN.test(value)
+    ? value
+    : undefined;
+}
+
+function mapStripeInboundStringMetadata(
+  raw: unknown,
+): Record<string, string> | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return undefined;
+  }
+  const metadata: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value !== "string" || value.length === 0) {
+      continue;
+    }
+    if (
+      key.length === 0 ||
+      key.length > STRIPE_MAX_METADATA_KEY_LENGTH ||
+      key.includes("[") ||
+      key.includes("]") ||
+      value.length > STRIPE_MAX_METADATA_VALUE_LENGTH
+    ) {
+      continue;
+    }
+    metadata[key] = value;
+    if (Object.keys(metadata).length >= STRIPE_MAX_METADATA_KEYS) {
+      break;
+    }
+  }
+  return Object.keys(metadata).length > 0 ? metadata : undefined;
+}
+
+function stripeListContinuationId(
+  page: { data: Array<{ id?: unknown }>; has_more?: unknown },
+  pagesFetched: number,
+  resourceLabel: string,
+): string | undefined {
+  if (page.has_more !== true) {
+    return undefined;
+  }
+  const lastId = page.data.at(-1)?.id;
+  if (!isNonEmptyStripeString(lastId)) {
+    throw new NetworkError(
+      `Stripe ${resourceLabel} list page missing cursor id`,
+      page,
+    );
+  }
+  if (pagesFetched >= STRIPE_LIST_MAX_PAGES) {
+    throw new NetworkError(
+      `Stripe ${resourceLabel} list truncated after ${STRIPE_LIST_MAX_PAGES} pages`,
+      page,
+    );
+  }
+  return lastId;
+}
+
 function isUnexpandedStripeChargeId(value: unknown): boolean {
   return isNonEmptyStripeString(value);
 }
@@ -1282,6 +1360,10 @@ function isStripeChargeDisputeEventType(type: string): boolean {
   return type.startsWith("charge.dispute.");
 }
 
+function isStripePaymentLinkEventType(type: string): boolean {
+  return type.startsWith("payment_link.");
+}
+
 /**
  * Dispute envelope status is the Stripe dispute lifecycle string, never generic
  * payment `pending` (S19-STRIPE-DISPUTE). Last-write persist of `event.status`
@@ -1439,7 +1521,9 @@ function stripeStepIdempotencyKey(base: string, step: string): string {
   if (base.length + suffix.length <= STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH) {
     return `${base}${suffix}`;
   }
-  return `${base.slice(0, STRIPE_MAX_IDEMPOTENCY_KEY_LENGTH - suffix.length)}${suffix}`;
+  // Truncating the caller key collides values that differ only in the tail.
+  // Hash the full base; UUID-length keys stay on the readable suffix form above.
+  return `${sha256Hex(base)}${suffix}`;
 }
 
 type StripeAttachSource =
@@ -1451,10 +1535,20 @@ function resolveStripeAttachSource(params: {
   token?: string | undefined;
 }): StripeAttachSource {
   const paymentMethodId = nonEmptyStripeParam(params.paymentMethodId);
+  const token = nonEmptyStripeParam(params.token);
+  if (paymentMethodId && token) {
+    const tokenAsPm = STRIPE_PAYMENT_METHOD_ID_PATTERN.test(token)
+      ? token
+      : undefined;
+    if (tokenAsPm !== paymentMethodId) {
+      throw new InvalidRequestError(
+        "Stripe attachPaymentMethod cannot include both paymentMethodId and token when they differ",
+      );
+    }
+  }
   if (paymentMethodId) {
     return { kind: "pm", id: assertStripePaymentMethodId(paymentMethodId) };
   }
-  const token = nonEmptyStripeParam(params.token);
   if (token && STRIPE_PAYMENT_METHOD_ID_PATTERN.test(token)) {
     return { kind: "pm", id: token };
   }
@@ -1579,6 +1673,10 @@ function mapStripeCustomer(
   if (typeof customer.name === "string" && customer.name.length > 0) {
     snapshot.name = customer.name;
   }
+  const metadata = mapStripeInboundStringMetadata(customer.metadata);
+  if (metadata !== undefined) {
+    snapshot.metadata = metadata;
+  }
   return snapshot;
 }
 
@@ -1612,13 +1710,14 @@ function mapStripePaymentMethod(
     (typeof fallbackCustomerId === "string" && fallbackCustomerId.length > 0
       ? fallbackCustomerId
       : undefined);
+  const status = resolvedCustomerId !== undefined ? "active" : "detached";
   const snapshot: StoredPaymentMethod = {
     id,
     type: mapStripeStoredPaymentMethodType(pm),
     references: buildProviderReferences({
       gateway: "stripe",
       gatewayId: id,
-      status: "active",
+      status,
       ...(resolvedCustomerId !== undefined
         ? { customerId: resolvedCustomerId }
         : {}),
@@ -1632,11 +1731,9 @@ function mapStripePaymentMethod(
     snapshot.brand = brand;
   }
   const last4 =
-    (typeof pm.card?.last4 === "string" ? pm.card.last4 : undefined) ??
-    (typeof pm.us_bank_account?.last4 === "string"
-      ? pm.us_bank_account.last4
-      : undefined) ??
-    (typeof pm.sepa_debit?.last4 === "string" ? pm.sepa_debit.last4 : undefined);
+    stripePublishedLast4(pm.card?.last4) ??
+    stripePublishedLast4(pm.us_bank_account?.last4) ??
+    stripePublishedLast4(pm.sepa_debit?.last4);
   if (last4 !== undefined) {
     snapshot.last4 = last4;
   }
@@ -1842,8 +1939,9 @@ function mapStripeDispute(
   const native =
     typeof object.status === "string" && object.status.trim().length > 0
       ? object.status
-      : "needs_response";
-  const status = mapNativeDisputeStatus(native);
+      : undefined;
+  const status =
+    native !== undefined ? mapNativeDisputeStatus(native) : "unknown";
   const chargeId = expandableId(
     object.charge as string | { id?: string } | null | undefined,
   );
@@ -1864,7 +1962,6 @@ function mapStripeDispute(
       : undefined;
   const snapshot: Dispute = {
     status,
-    providerStatus: native,
     dashboardUrl: stripeDisputeDashboardUrl({
       livemode: object.livemode === true,
       ...(chargeId !== undefined ? { chargeId } : {}),
@@ -1874,7 +1971,7 @@ function mapStripeDispute(
       gateway: "stripe",
       gatewayId: id,
       status,
-      providerNativeStatus: native,
+      ...(native !== undefined ? { providerNativeStatus: native } : {}),
       relatedIds: {
         ...(chargeId !== undefined ? { chargeId } : {}),
         ...(paymentIntentId !== undefined ? { paymentIntentId } : {}),
@@ -1882,6 +1979,9 @@ function mapStripeDispute(
     }),
     rawResponse: object,
   };
+  if (native !== undefined) {
+    snapshot.providerStatus = native;
+  }
   if (typeof object.reason === "string" && object.reason.length > 0) {
     snapshot.reason = object.reason;
   }
@@ -1932,15 +2032,14 @@ function buildStripePaymentLink(
   if (id === undefined) {
     missingIdentity("Stripe Payment Link response missing id", object);
   }
-  const url = isNonEmptyStripeString(object.url) ? object.url : undefined;
-  if (url === undefined) {
+  if (!isNonEmptyStripeString(object.url)) {
     missingIdentity("Stripe Payment Link response missing url", object);
   }
+  const url = stripePublishedHttpUrl(object.url);
   // Fail-closed: omitted `active` is not a live shareable link.
   const status = object.active === true ? "active" : "inactive";
   const snapshot: PaymentLink = {
     status,
-    url,
     references: buildProviderReferences({
       gateway: "stripe",
       gatewayId: id,
@@ -1949,6 +2048,9 @@ function buildStripePaymentLink(
     }),
     rawResponse: object,
   };
+  if (url !== undefined) {
+    snapshot.url = url;
+  }
   const money = stripePaymentLinkPublishedMoney(object);
   if (money !== undefined) {
     snapshot.amount = money.amount;
@@ -2965,9 +3067,7 @@ export class StripeGateway extends BaseGateway {
           }),
           rawResponse: session,
         };
-        const url = isNonEmptyStripeString(session.url)
-          ? session.url
-          : undefined;
+        const url = stripePublishedHttpUrl(session.url);
         if (url !== undefined) {
           snapshot.url = url;
         }
@@ -3117,9 +3217,7 @@ export class StripeGateway extends BaseGateway {
           "Stripe Checkout Session response missing id",
           response,
         );
-        const url = isNonEmptyStripeString(response.url)
-          ? response.url
-          : undefined;
+        const url = stripePublishedHttpUrl(response.url);
         const status = checkoutSessionStatus(response.status);
         const paymentIntentId = expandableId(response.payment_intent);
         const session: CheckoutSession = {
@@ -3281,41 +3379,44 @@ export class StripeGateway extends BaseGateway {
       const pathId = stripeCustomerPathId(customerId);
       const paymentMethods: StoredPaymentMethod[] = [];
       let startingAfter: string | undefined;
+      let pagesFetched = 0;
       const signal = extractAbortSignal(p);
 
-      do {
-        const query = new URLSearchParams({
-          limit: "100",
-        });
-        if (startingAfter) {
-          query.set("starting_after", startingAfter);
-        }
-        const page = await this.stripeRequest<
-          StripeListResponse<StripePaymentMethodObject>
-        >(
-          "GET",
-          `/customers/${pathId}/payment_methods?${query.toString()}`,
-          undefined,
-          undefined,
-          signal,
-        );
-        const data = Array.isArray(page.data) ? page.data : [];
-        for (const pm of data) {
-          paymentMethods.push(mapStripePaymentMethodFromGet(pm, customerId));
-        }
-        if (page.has_more === true) {
-          const lastId = data.at(-1)?.id;
-          if (!isNonEmptyStripeString(lastId)) {
-            throw new NetworkError(
-              "Stripe PaymentMethod list page missing cursor id",
-              page,
-            );
+      try {
+        do {
+          const query = new URLSearchParams({
+            limit: String(STRIPE_LIST_PAGE_SIZE),
+          });
+          if (startingAfter) {
+            query.set("starting_after", startingAfter);
           }
-          startingAfter = lastId;
-        } else {
-          startingAfter = undefined;
+          const page = await this.stripeRequest<
+            StripeListResponse<StripePaymentMethodObject>
+          >(
+            "GET",
+            `/customers/${pathId}/payment_methods?${query.toString()}`,
+            undefined,
+            undefined,
+            signal,
+          );
+          const data = Array.isArray(page.data) ? page.data : [];
+          for (const pm of data) {
+            paymentMethods.push(mapStripePaymentMethodFromGet(pm, customerId));
+          }
+          pagesFetched += 1;
+          startingAfter = stripeListContinuationId(
+            { data, has_more: page.has_more },
+            pagesFetched,
+            "PaymentMethod",
+          );
+        } while (startingAfter);
+      } catch (error) {
+        const failed = stripeNotFoundFailed(error);
+        if (failed) {
+          return failed;
         }
-      } while (startingAfter);
+        throw error;
+      }
 
       return {
         outcome: "succeeded" as const,
@@ -3343,7 +3444,7 @@ export class StripeGateway extends BaseGateway {
       );
       return {
         outcome: "succeeded" as const,
-        paymentMethod: mapStripePaymentMethodAfterSubmit(response, p.customerId),
+        paymentMethod: mapStripePaymentMethodAfterSubmit(response),
       };
     });
   }
@@ -3385,32 +3486,57 @@ export class StripeGateway extends BaseGateway {
         );
       }
       const paymentId = p.paymentId.trim();
-      const query = new URLSearchParams();
+      const boundQuery = new URLSearchParams();
       if (STRIPE_PAYMENT_INTENT_ID_PATTERN.test(paymentId)) {
-        query.set("payment_intent", paymentId);
+        boundQuery.set("payment_intent", paymentId);
       } else if (STRIPE_CHARGE_ID_PATTERN.test(paymentId)) {
-        query.set("charge", paymentId);
+        boundQuery.set("charge", paymentId);
       } else {
         throw new InvalidRequestError(
           "Stripe listDisputes paymentId must be a PaymentIntent (pi_) or Charge (ch_) id",
         );
       }
-      // PI/charge-bound dispute lists are expected tiny (typically 0–1
-      // dispute per charge). Payment-method listing must page (limit=100
-      // + starting_after); disputes stay a single request.
-      const response = await this.stripeRequest<{
-        data?: StripeDisputeObject[];
-      }>(
-        "GET",
-        `/disputes?${query.toString()}`,
-        undefined,
-        undefined,
-        extractAbortSignal(p),
-      );
-      const data = Array.isArray(response.data) ? response.data : [];
+      const disputes: Dispute[] = [];
+      let startingAfter: string | undefined;
+      let pagesFetched = 0;
+      const signal = extractAbortSignal(p);
+      try {
+        do {
+          const query = new URLSearchParams(boundQuery);
+          query.set("limit", String(STRIPE_LIST_PAGE_SIZE));
+          if (startingAfter) {
+            query.set("starting_after", startingAfter);
+          }
+          const page = await this.stripeRequest<
+            StripeListResponse<StripeDisputeObject>
+          >(
+            "GET",
+            `/disputes?${query.toString()}`,
+            undefined,
+            undefined,
+            signal,
+          );
+          const data = Array.isArray(page.data) ? page.data : [];
+          for (const item of data) {
+            disputes.push(mapStripeDisputeFromGet(item));
+          }
+          pagesFetched += 1;
+          startingAfter = stripeListContinuationId(
+            { data, has_more: page.has_more },
+            pagesFetched,
+            "Dispute",
+          );
+        } while (startingAfter);
+      } catch (error) {
+        const failed = stripeNotFoundFailed(error);
+        if (failed) {
+          return failed;
+        }
+        throw error;
+      }
       return {
         outcome: "succeeded" as const,
-        disputes: data.map((item) => mapStripeDisputeFromGet(item)),
+        disputes,
       };
     });
   }
@@ -3444,10 +3570,15 @@ export class StripeGateway extends BaseGateway {
         if (evidence.productDescription) {
           evidenceBag.product_description = evidence.productDescription;
         }
-        const body: Record<string, unknown> = { submit: true };
-        if (Object.keys(evidenceBag).length > 0) {
-          body.evidence = evidenceBag;
+        if (Object.keys(evidenceBag).length === 0) {
+          throw new InvalidRequestError(
+            "Stripe submitDisputeEvidence requires at least one evidence field",
+          );
         }
+        const body: Record<string, unknown> = {
+          submit: true,
+          evidence: evidenceBag,
+        };
         const response = await this.stripeRequest<StripeDisputeObject>(
           "POST",
           `/disputes/${pathId}`,
@@ -4026,6 +4157,11 @@ export class StripeGateway extends BaseGateway {
         // envelope as generic pending. Dual-write is dispute.* (catalog map).
         if (isStripeChargeDisputeEventType(raw.type)) {
           status = stripeDisputeEnvelopeStatus(object);
+          break;
+        }
+        // P22R3-PLINK-WH: payment_link.* must not last-write payment pending.
+        if (isStripePaymentLinkEventType(raw.type)) {
+          status = "processing";
           break;
         }
         // Only map PaymentIntent statuses via mapStatus (fail-closed for

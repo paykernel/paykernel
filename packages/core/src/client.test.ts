@@ -17,7 +17,11 @@ import { createPaymentClient } from './create-payment-client';
 import { BaseGateway } from './gateways/base.gateway';
 import type { GatewayAdapter } from './gateways/gateway-adapter';
 import type { GatewayContext } from './gateways/gateway-context';
-import type { GatewayCapabilities } from './gateways/gateway-capabilities';
+import {
+    defineGatewayCapabilities,
+    type GatewayCapabilities,
+    type GatewayCapabilityKey,
+} from './gateways/gateway-capabilities';
 import { HooksManager } from './hooks/hooks.manager';
 import type {
     CreatePaymentParams,
@@ -3159,5 +3163,73 @@ describe('PaymentClient handleWebhook safety-net (P610-SAFE-1)', () => {
         expect(event.event?.type).not.toBe('payment.succeeded');
         expect(event.event?.type).toBe('payment.processing');
         expect(event.stableType).toBe('payment.processing');
+    });
+});
+
+const TEST_PAN = '4242424242424242';
+
+describe('PaymentClient off-session and PCI call-site fences (P22R3)', () => {
+    it('P22R3-PCI-HOOK-ORDER: detachPaymentMethod with PAN-like paymentMethodId is rejected at the client before a non-BaseGateway adapter', async () => {
+        let detachCalls = 0;
+        const capabilities = defineGatewayCapabilities({
+            payments: true,
+            paymentMethods: true,
+        });
+        const client = createPaymentClient({
+            gateways: {
+                bare: {
+                    name: 'bare',
+                    manifest: { name: 'bare', displayName: 'Bare PCI test' },
+                    create() {
+                        return {
+                            name: 'bare',
+                            capabilities,
+                            supports(capability: GatewayCapabilityKey) {
+                                return capabilities[capability] === true;
+                            },
+                            async createPayment() {
+                                throw new Error('unused');
+                            },
+                            async capturePayment() {
+                                throw new Error('unused');
+                            },
+                            async refundPayment() {
+                                throw new Error('unused');
+                            },
+                            verifyWebhook() {
+                                return true;
+                            },
+                            parseWebhookEvent() {
+                                throw new Error('unused');
+                            },
+                            async detachPaymentMethod() {
+                                detachCalls += 1;
+                                return {
+                                    outcome: 'succeeded' as const,
+                                    paymentMethod: {
+                                        id: 'pm_should_not_run',
+                                        type: 'other' as const,
+                                        references: {
+                                            providerObjectId: 'pm_should_not_run',
+                                            normalizedStatus: 'active',
+                                            gateway: 'bare',
+                                        },
+                                    },
+                                };
+                            },
+                        };
+                    },
+                },
+            },
+            defaultGateway: 'bare',
+        });
+
+        try {
+            await client.detachPaymentMethod({ paymentMethodId: TEST_PAN });
+            expect.unreachable('PAN-like paymentMethodId must throw at the client');
+        } catch (error) {
+            expect(error).toBeInstanceOf(InvalidRequestError);
+        }
+        expect(detachCalls).toBe(0);
     });
 });

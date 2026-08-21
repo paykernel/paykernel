@@ -1914,6 +1914,52 @@ describe("mockGateway", () => {
     expect(replay.gatewayId).toBe(a.gatewayId);
   });
 
+  it("same idempotencyKey with different customerId/paymentMethodId/offSession is fingerprint_conflict", async () => {
+    const g = mockGateway();
+    const a = await g.createPayment({
+      ...baseCreate,
+      customerId: "cus_1",
+      paymentMethodId: "pm_1",
+      offSession: true,
+      idempotencyKey: "identity-fp-vault",
+    });
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        customerId: "cus_2",
+        paymentMethodId: "pm_1",
+        offSession: true,
+        idempotencyKey: "identity-fp-vault",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        customerId: "cus_1",
+        paymentMethodId: "pm_2",
+        offSession: true,
+        idempotencyKey: "identity-fp-vault",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    await expect(
+      g.createPayment({
+        ...baseCreate,
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+        offSession: false,
+        idempotencyKey: "identity-fp-vault",
+      }),
+    ).rejects.toThrow(/fingerprint_conflict/);
+    const replay = await g.createPayment({
+      ...baseCreate,
+      customerId: "cus_1",
+      paymentMethodId: "pm_1",
+      offSession: true,
+      idempotencyKey: "identity-fp-vault",
+    });
+    expect(replay.gatewayId).toBe(a.gatewayId);
+  });
+
   const phase22Caps = defineGatewayCapabilities({
     payments: true,
     hostedCheckout: true,
@@ -2006,5 +2052,54 @@ describe("mockGateway", () => {
     }
     expect(result.paymentMethod.customerId).toBeUndefined();
     expect(result.paymentMethod.id).toBe("pm_detached");
+    expect(result.paymentMethod.references.normalizedStatus).toBe("detached");
+  });
+
+  it("P22R3-MOCK-GET: detach with customerId does not publish customerId", async () => {
+    const g = mockGateway({ capabilities: phase22Caps });
+    const result = await g.detachPaymentMethod!({
+      paymentMethodId: "pm_detached_cus",
+      customerId: "cus_should_not_publish",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("detach must succeed");
+    }
+    expect(result.paymentMethod.customerId).toBeUndefined();
+    expect(
+      result.paymentMethod.references.relatedIds?.customerId,
+    ).toBeUndefined();
+    expect(result.paymentMethod.id).toBe("pm_detached_cus");
+  });
+
+  it("P22R3-MOCK-GET: getCustomer unknown id is failed 404, not invented active", async () => {
+    const g = mockGateway({ capabilities: phase22Caps });
+    const missing = await g.getCustomer!({ customerId: "cus_never" });
+    expect(missing.outcome).toBe("failed");
+    if (missing.outcome !== "failed") {
+      expect.unreachable("unknown customer must fail");
+    }
+    expect(missing.error.statusCode).toBe(404);
+    expect(missing.customer).toBeUndefined();
+  });
+
+  it("P22R3-MOCK-GET: getCustomer after create returns the stored snapshot", async () => {
+    const g = mockGateway({ capabilities: phase22Caps });
+    const created = await g.createCustomer!({
+      email: "buyer@example.com",
+      name: "Buyer",
+    });
+    expect(created.outcome).toBe("succeeded");
+    if (created.outcome !== "succeeded") {
+      expect.unreachable("create must succeed");
+    }
+    const id = created.customer.references.providerObjectId;
+    const fetched = await g.getCustomer!({ customerId: id });
+    expect(fetched.outcome).toBe("succeeded");
+    if (fetched.outcome !== "succeeded") {
+      expect.unreachable("stored customer must succeed");
+    }
+    expect(fetched.customer.email).toBe("buyer@example.com");
+    expect(fetched.customer.references.providerObjectId).toBe(id);
   });
 });

@@ -604,6 +604,10 @@ export const CreateCheckoutSessionParamsSchema = z.object({
     amount: OptionalPositiveAmountInputSchema,
     currency: z.string().length(3, "Currency must be 3-letter ISO code").optional(),
     successUrl: HttpOrHttpsUrlSchema("Success URL must be valid"),
+    /**
+     * Required at runtime for `payment` and `subscription` hosted Checkout.
+     * Setup mode may omit it. Always http(s) when present.
+     */
     cancelUrl: HttpOrHttpsUrlSchema("Cancel URL must be valid").optional(),
     mode: z.enum(['payment', 'subscription', 'setup']).default('payment'),
     lineItems: z.array(StripeCheckoutLineItemSchema).min(1).optional(),
@@ -621,6 +625,17 @@ export const CreateCheckoutSessionParamsSchema = z.object({
     const hasCurrency = params.currency !== undefined;
     const hasSimpleAmount = hasAmount && hasCurrency;
     const hasPaymentMethodTypes = Boolean(params.paymentMethodTypes?.length);
+    const hasCancelUrl =
+        typeof params.cancelUrl === 'string' && params.cancelUrl.length > 0;
+
+    if ((mode === 'payment' || mode === 'subscription') && !hasCancelUrl) {
+        ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message:
+                "Payment and subscription Checkout Sessions require cancelUrl",
+            path: ["cancelUrl"],
+        });
+    }
 
     if (hasLineItems && (hasAmount || hasCurrency)) {
         ctx.addIssue({

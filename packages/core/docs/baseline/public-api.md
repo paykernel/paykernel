@@ -5,12 +5,12 @@
 
 ## Generation metadata
 
-- **Generated at (UTC)**: 2026-08-20T08:15:46.507Z
+- **Generated at (UTC)**: 2026-08-21T05:11:23.338Z
 - **Command**: `bun run scripts/generate-api-baseline.ts`
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 483222 bytes, sha256 `c4ff43629d37da5a9fb782959e36ab1d90273716de7eaeb269cf6e552e2980db`
+- **Bundle**: `dist/index.js` — 505923 bytes, sha256 `10d31afcc5f2ef84bb51a5309987ff9530c74eb598f3ddb41cf44df63cc5d448`
 
 ## Package
 
@@ -39,6 +39,10 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | Name | Kind |
 | --- | --- |
 | `applyIndeterminateCheckoutSessionOutcome` | function |
+| `applyIndeterminateCustomerOutcome` | function |
+| `applyIndeterminateDisputeOutcome` | function |
+| `applyIndeterminatePaymentLinkOutcome` | function |
+| `applyIndeterminatePaymentMethodOutcome` | function |
 | `applyIndeterminatePaymentOutcome` | function |
 | `applyIndeterminateRefundOutcome` | function |
 | `applyOutcomeToGatewayRefundResult` | function |
@@ -195,7 +199,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `withAbortSignal` | function |
 | `withRetry` | function |
 
-**Count**: 156
+**Count**: 160
 
 ## Type-only exports
 
@@ -395,7 +399,7 @@ These exist only in the TypeScript declaration surface.
 - Parsed value exports present on runtime module: **yes**
 - Runtime keys not listed in `src/index.ts` value exports: _none_
 - Type-only names that also exist as runtime values: _none_
-- Total distinct public names (runtime + type-only): **339**
+- Total distinct public names (runtime + type-only): **343**
 
 ## Declaration output tree (`dist/**/*.d.ts`)
 

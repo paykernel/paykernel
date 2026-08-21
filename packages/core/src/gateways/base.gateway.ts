@@ -215,6 +215,12 @@ export abstract class BaseGateway implements PaymentGateway {
             validatedParams = withAbortSignal(validatedParams, initialSignal);
         }
 
+        // Fence inbound params before before-hooks so CHD never reaches hooks.
+        if (isPciFencedOperation(operation)) {
+            assertNoRawCardMaterial(paramsForValidation);
+            assertNoRawCardMaterial(validatedParams);
+        }
+
         const ctx: HookContext<T> = {
             gateway: this.name,
             operation,
@@ -551,14 +557,19 @@ function tryIndeterminateFromNetworkError(
                 gateway,
             });
         }
-        if (
-            operation === "attachPaymentMethod" ||
-            operation === "detachPaymentMethod"
-        ) {
+        if (operation === "attachPaymentMethod") {
             const customerId = optionalParamString(params, "customerId");
             return applyIndeterminatePaymentMethodOutcome({
                 paymentMethodId: providerObjectId,
                 ...(customerId !== undefined ? { customerId } : {}),
+                message,
+                errorName,
+                gateway,
+            });
+        }
+        if (operation === "detachPaymentMethod") {
+            return applyIndeterminatePaymentMethodOutcome({
+                paymentMethodId: providerObjectId,
                 message,
                 errorName,
                 gateway,

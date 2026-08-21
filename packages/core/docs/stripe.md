@@ -193,7 +193,7 @@ Create returns `{ outcome: "succeeded", session }` (or `indeterminate`). Prefer 
 
 ## Customers and payment methods
 
-Stripe claims `customers` and `paymentMethods`. Create/attach/detach require a caller `idempotencyKey`. Off-session PaymentIntents use common `customerId` / `paymentMethodId` / `offSession` (see [customers.md](./customers.md)).
+Stripe claims `customers` and `paymentMethods`. Create/attach/detach require a caller `idempotencyKey`. Off-session PaymentIntents use common `customerId` / `paymentMethodId` / `offSession` (see [customers.md](./customers.md)). `attachPaymentMethod` may take a Stripe card token (`tok_…`) and convert it to a PaymentMethod; that is still `paymentMethods`. Capability `tokenization` stays `false` — this adapter does not expose SetupIntent / save-card CRUD.
 
 ## Disputes and payment links
 

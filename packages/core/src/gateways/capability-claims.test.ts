@@ -160,6 +160,7 @@ describe("capability claim validation (Phase 3.4)", () => {
       expect(PAYMOB_CAPABILITIES.paymentLinks).toBe(false);
       for (const caps of Object.values(BUILTIN_GATEWAY_CAPABILITIES)) {
         expect(caps.providerRecurring).toBe(false);
+        // tok_ on Stripe attach is paymentMethods, not this key.
         expect(caps.tokenization).toBe(false);
       }
       expect(STRIPE_CAPABILITIES.customers).toBe(true);

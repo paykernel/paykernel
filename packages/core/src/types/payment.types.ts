@@ -182,8 +182,11 @@ export interface CreatePaymentParams extends CommonPaymentInput, OperationReques
      */
     paymentMethodId?: string;
     /**
-     * Charge a stored payment method without a customer present.
-     * Requires {@link paymentMethodId} or {@link stripePaymentMethodId}.
+     * Charge a stored payment method off-session (customer not present).
+     * Requires a stored payment-method id ({@link paymentMethodId} or
+     * {@link stripePaymentMethodId}) **and** a customer id ({@link customerId}
+     * or {@link stripeCustomerId}). Fail-closed unless the gateway claims
+     * `paymentMethods`.
      */
     offSession?: boolean;
 

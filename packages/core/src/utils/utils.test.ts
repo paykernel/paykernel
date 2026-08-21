@@ -7,6 +7,7 @@ import {
 import { redact, createRedactingLogger, type Logger } from "./logger";
 import {
   CaptureParamsSchema,
+  CreateCheckoutSessionParamsSchema,
   CreatePaymentParamsSchema,
   RefundParamsSchema,
 } from "../types/validation";
@@ -658,12 +659,10 @@ describe("redact", () => {
 });
 
 describe("CreateCheckoutSession image URL schemes (CORE-3)", () => {
-  it("rejects non-http(s) product image URLs", async () => {
-    const { CreateCheckoutSessionParamsSchema } = await import(
-      "../types/validation"
-    );
+  it("rejects non-http(s) product image URLs", () => {
     const base = {
       successUrl: "https://example.com/ok",
+      cancelUrl: "https://example.com/cancel",
       lineItems: [
         {
           quantity: 1,
@@ -699,6 +698,97 @@ describe("CreateCheckoutSession image URL schemes (CORE-3)", () => {
         ],
       }).success,
     ).toBe(true);
+  });
+});
+
+describe("CreateCheckoutSessionParamsSchema cancelUrl (P22R3-CANCEL-URL)", () => {
+  const paymentBase = {
+    successUrl: "https://example.com/ok",
+    amount: 10,
+    currency: "USD",
+  };
+  const subscriptionBase = {
+    mode: "subscription" as const,
+    successUrl: "https://example.com/ok",
+    lineItems: [{ price: "price_1", quantity: 1 }],
+  };
+
+  it("requires cancelUrl for payment mode (default)", () => {
+    const parsed = CreateCheckoutSessionParamsSchema.safeParse(paymentBase);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) {
+      expect.unreachable("payment mode without cancelUrl must fail");
+    }
+    expect(
+      parsed.error.issues.some((issue) => issue.path[0] === "cancelUrl"),
+    ).toBe(true);
+  });
+
+  it("requires cancelUrl for explicit mode payment", () => {
+    const parsed = CreateCheckoutSessionParamsSchema.safeParse({
+      ...paymentBase,
+      mode: "payment",
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) {
+      expect.unreachable("explicit payment mode without cancelUrl must fail");
+    }
+    expect(
+      parsed.error.issues.some((issue) => issue.path[0] === "cancelUrl"),
+    ).toBe(true);
+  });
+
+  it("requires cancelUrl for subscription mode", () => {
+    const parsed =
+      CreateCheckoutSessionParamsSchema.safeParse(subscriptionBase);
+    expect(parsed.success).toBe(false);
+    if (parsed.success) {
+      expect.unreachable("subscription mode without cancelUrl must fail");
+    }
+    expect(
+      parsed.error.issues.some((issue) => issue.path[0] === "cancelUrl"),
+    ).toBe(true);
+  });
+
+  it("allows omitting cancelUrl in setup mode", () => {
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        mode: "setup",
+        successUrl: "https://example.com/ok",
+        currency: "USD",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts http(s) cancelUrl for payment and subscription", () => {
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        ...paymentBase,
+        cancelUrl: "https://example.com/cancel",
+      }).success,
+    ).toBe(true);
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        ...subscriptionBase,
+        cancelUrl: "http://merchant.example/cancel",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects javascript: cancelUrl and successUrl", () => {
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        ...paymentBase,
+        cancelUrl: "javascript:void(0)",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateCheckoutSessionParamsSchema.safeParse({
+        ...paymentBase,
+        successUrl: "javascript:alert(1)",
+        cancelUrl: "https://example.com/cancel",
+      }).success,
+    ).toBe(false);
   });
 });
 

@@ -24,11 +24,13 @@ if (result.outcome === "succeeded") {
 }
 ```
 
-`isHostedCheckoutRedirect(result)` is true when `outcome === "succeeded"` and `session.url` is a non-empty string. **Never fulfill on checkout create.** Fulfill from webhooks / `getPayment` when `isPaidOutcome` / `status === "paid"`.
+`isHostedCheckoutRedirect(result)` is true when `outcome === "succeeded"` and `session.url` is a non-empty string. **Never fulfill on checkout create.** Fulfill from webhooks / `getPayment` when `isPaidOutcome` / `status === "paid"`. Create success is not paid settlement (`session.status` stays `open`; `paymentStatus` is not `paid`; the result has no `success: true`).
 
 ## Stripe-only extras
 
 `CreateCheckoutSessionParams` remains the Stripe-extended input (`mode`, `lineItems`, `paymentMethodTypes`, `customerEmail`). `mode: "subscription"` does **not** set `providerRecurring`. Subscription billing stays out of core.
+
+Stripe hosted Checkout **`mode: "payment"` and `mode: "subscription"` require `cancelUrl`**. Setup mode may omit it. `successUrl` / `cancelUrl` must be http or https (`javascript:` / `data:` / `file:` are rejected).
 
 Stripe create requires a caller `idempotencyKey`. Empty/missing session id on HTTP 200 is **indeterminate**. The lookup id lives on `session.references.providerObjectId` (caller idempotency key, or `"unknown"`). `getCheckoutSession` HTTP 404 is `outcome: "failed"` (same contract as `getCustomer`). GET transport failures still throw `NetworkError`.
 

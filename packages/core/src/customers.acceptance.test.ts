@@ -569,4 +569,45 @@ describe("Phase 22.1 customers and stored payment methods", () => {
     }
     expect(gateway.lastCreatePayment).toBeUndefined();
   });
+
+  it("createPayment with metadata.orderId 13-digit timestamp is not rejected by the PCI fence", async () => {
+    const { payments, gateway } = vaultClient();
+    const orderId = String(Date.now());
+    expect(orderId).toHaveLength(13);
+
+    const result = await payments.createPayment({
+      amount: 10,
+      currency: "SAR",
+      callbackUrl: "https://merchant.example/callback",
+      metadata: { orderId },
+    });
+
+    expect(result.success).toBe(true);
+    expect(gateway.lastCreatePayment?.metadata?.orderId).toBe(orderId);
+  });
+
+  it("off-session createPayment on a payments-only adapter throws OperationNotSupportedError before createPayment", async () => {
+    const { payments, gateway } = vaultClient({
+      payments: true,
+      paymentMethods: false,
+    });
+    expect(gateway.supports("payments")).toBe(true);
+    expect(gateway.supports("paymentMethods")).toBe(false);
+
+    await expectUnsupported(
+      () =>
+        payments.createPayment({
+          amount: 10,
+          currency: "SAR",
+          callbackUrl: "https://merchant.example/callback",
+          customerId: "cus_1",
+          paymentMethodId: "pm_1",
+          offSession: true,
+        }),
+      "createPayment",
+      "paymentMethods",
+      "vault",
+    );
+    expect(gateway.lastCreatePayment).toBeUndefined();
+  });
 });

@@ -104,6 +104,26 @@ describe("StripeGateway disputes", () => {
     },
   );
 
+  it("P22R3-DSP-INVENT: GET body without status is not needs_response", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "dp_nostatus",
+        object: "dispute",
+        currency: "usd",
+        amount: 1000,
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.getDispute({ disputeId: "dp_nostatus" });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("getDispute must succeed");
+    }
+    expect(result.dispute.status).toBe("unknown");
+    expect(result.dispute.status).not.toBe("needs_response");
+    expect(result.dispute.providerStatus).toBeUndefined();
+  });
+
   it("P22-GET-FLAG-2: GET 200 dispute body without id is not afterProviderSubmit", async () => {
     globalThis.fetch = mock(async () =>
       createMockResponse({
@@ -145,7 +165,98 @@ describe("StripeGateway disputes", () => {
     const result = await gateway.listDisputes({ paymentId });
     expect(capturedUrl).toContain("/disputes?");
     expect(capturedUrl).toContain(query);
+    expect(capturedUrl).toContain("limit=100");
     expect(result.outcome).toBe("succeeded");
+  });
+
+  it("P22R3-LIST-DSP: listDisputes pages while has_more is true", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = mock(async (url) => {
+      urls.push(String(url));
+      if (String(url).includes("starting_after=dp_1")) {
+        return createMockResponse({
+          object: "list",
+          data: [
+            {
+              id: "dp_2",
+              object: "dispute",
+              status: "under_review",
+              currency: "usd",
+              amount: 500,
+            },
+          ],
+          has_more: false,
+        });
+      }
+      return createMockResponse({
+        object: "list",
+        data: [
+          {
+            id: "dp_1",
+            object: "dispute",
+            status: "needs_response",
+            currency: "usd",
+            amount: 1000,
+          },
+        ],
+        has_more: true,
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await gateway.listDisputes({ paymentId: "pi_abc" });
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("/disputes?");
+    expect(urls[0]).toContain("payment_intent=pi_abc");
+    expect(urls[0]).toContain("limit=100");
+    expect(urls[0]).not.toContain("starting_after");
+    expect(urls[1]).toContain("limit=100");
+    expect(urls[1]).toContain("starting_after=dp_1");
+    expect(urls[1]).toContain("payment_intent=pi_abc");
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("paged list must succeed");
+    }
+    expect(result.disputes.map((d) => d.references.providerObjectId)).toEqual([
+      "dp_1",
+      "dp_2",
+    ]);
+  });
+
+  it("P22R3-LIST-DSP: has_more without a last id throws NetworkError", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        object: "list",
+        data: [{ object: "dispute", status: "needs_response" }],
+        has_more: true,
+      }),
+    ) as unknown as typeof fetch;
+
+    await expect(
+      gateway.listDisputes({ paymentId: "pi_abc" }),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("P22R3-LIST-404: listDisputes 404 is failed", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse(
+        {
+          error: {
+            message: "No such payment_intent: pi_missing",
+            type: "invalid_request_error",
+          },
+        },
+        false,
+        404,
+      ),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.listDisputes({ paymentId: "pi_missing" });
+    expect(result.outcome).toBe("failed");
+    if (result.outcome !== "failed") {
+      expect.unreachable("404 must be failed");
+    }
+    expect(result.error.code).toBe("GATEWAY_API_ERROR");
+    expect(result).not.toEqual(expect.objectContaining({ disputes: [] }));
   });
 
   it("submitDisputeEvidence requires a caller idempotencyKey", async () => {
@@ -192,6 +303,23 @@ describe("StripeGateway disputes", () => {
     expect(body.get("evidence[uncategorized_text]")).toBe("receipt attached");
     expect(body.get("evidence[receipt]")).toBe("file_123");
     expect(result.outcome).toBe("succeeded");
+  });
+
+  it("P22R3-EVIDENCE-EMPTY: empty evidence {} does not fetch", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = mock(async () => {
+      fetchCalls += 1;
+      return createMockResponse({ id: "dp_123" });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      gateway.submitDisputeEvidence({
+        disputeId: "dp_123",
+        evidence: {},
+        idempotencyKey: "idem_ev_empty",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(fetchCalls).toBe(0);
   });
 
   it("rejects malformed dispute ids before fetch", async () => {

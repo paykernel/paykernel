@@ -16,11 +16,11 @@ if (gateway.supports("disputes")) {
 }
 ```
 
-`listDisputes` on Stripe **requires** `paymentId` (`pi_…` or `ch_…`) so the SDK does not list the whole Stripe account.
+`listDisputes` on Stripe **requires** `paymentId` (`pi_…` or `ch_…`) so the SDK does not list the whole Stripe account. The adapter pages `has_more` / `starting_after` (limit 100) with a page cap. Missing Stripe dispute `status` on get/list maps to **`unknown`**, not `needs_response`.
 
 ## Evidence
 
-Small common fields (`uncategorizedText`, `customerName`, `customerEmail`, `productDescription`) plus `stripeEvidence` for remaining Stripe hashes (file ids / strings). Never PAN/CVC. Stripe submit requires `idempotencyKey`. Post-submit timeout is indeterminate.
+Small common fields (`uncategorizedText`, `customerName`, `customerEmail`, `productDescription`) plus `stripeEvidence` for remaining Stripe hashes (file ids / strings). Never PAN/CVC. Stripe submit requires `idempotencyKey`. Empty evidence (no common fields and no `stripeEvidence` entries) is **rejected** — the SDK does not POST `{ submit: true }` with an empty bag. Post-submit timeout is indeterminate.
 
 ## Webhooks
 

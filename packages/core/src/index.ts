@@ -110,6 +110,10 @@ export type {
   PaymentMethodOperationResult,
   ListPaymentMethodsResult,
 } from "./types/customer.types";
+export {
+  applyIndeterminateCustomerOutcome,
+  applyIndeterminatePaymentMethodOutcome,
+} from "./types/customer.types";
 
 // Phase 22.2 — hosted checkout
 export type {
@@ -135,6 +139,7 @@ export type {
   DisputeOperationResult,
   ListDisputesResult,
 } from "./types/dispute.types";
+export { applyIndeterminateDisputeOutcome } from "./types/dispute.types";
 
 // Phase 22.5 — payment links
 export type {
@@ -147,6 +152,7 @@ export type {
   PaymentLinkOperationOutcome,
   PaymentLinkOperationResult,
 } from "./types/payment-link.types";
+export { applyIndeterminatePaymentLinkOutcome } from "./types/payment-link.types";
 
 // Phase 22.4 — marketplace vocabulary
 export type {

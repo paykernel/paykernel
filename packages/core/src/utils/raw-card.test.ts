@@ -72,6 +72,7 @@ describe("assertNoRawCardMaterial", () => {
   it("rejects spaced and dashed PAN leaves", () => {
     expectRejected({ metadata: { pan: "4242 4242 4242 4242" } });
     expectRejected({ metadata: { cardNumber: "4242-4242-4242-4242" } });
+    expectRejected({ description: "4242-4242-4242-4242" });
   });
 
   it("keeps source.type === creditcard as raw card material", () => {
@@ -119,5 +120,73 @@ describe("assertNoRawCardMaterial", () => {
       moyasarSource: { type: "token", token: "token_abc" },
       metadata: { pan: TEST_PAN },
     });
+  });
+
+  it("allows millisecond timestamps on orderId and metadata.orderId", () => {
+    expectAllowed({ orderId: 1724123456789 });
+    expectAllowed({ orderId: "1724123456789" });
+    expectAllowed({ metadata: { orderId: 1724123456789 } });
+    expectAllowed({ metadata: { orderId: "1724123456789" } });
+    expectAllowed({ orderId: Date.now() });
+  });
+
+  it("allows a 13-digit non-Luhn account-ish value on metadata.orderId", () => {
+    expectAllowed({ metadata: { orderId: "1234567890123" } });
+  });
+
+  it("rejects an embedded Luhn PAN in free text", () => {
+    expectRejected({ metadata: { note: "card 4242424242424242 expired" } });
+    expectRejected({ metadata: { note: `1724123456789 ${TEST_PAN}` } });
+  });
+
+  it("rejects track2 data with a leading semicolon and PAN", () => {
+    expectRejected({ metadata: { note: `;${TEST_PAN}=` } });
+  });
+
+  it("does not treat a semicolon plus millisecond timestamp as track data", () => {
+    expectAllowed({ metadata: { note: "updated;1724123456789" } });
+  });
+
+  it("rejects cvv2 and cvc2 as CVC-shaped keys", () => {
+    expectRejected({ cvv2: "123" });
+    expectRejected({ cvc2: "123" });
+    expectRejected({ cardcvc: "123" });
+    expectRejected({ card_cvc: "123" });
+    expectRejected({ card_cvv: "123" });
+  });
+
+  it("allows Moyasar AFT sender.account.number that is not a Luhn PAN", () => {
+    expectAllowed({
+      sender: {
+        account: { funds_source: "CREDIT", number: "1234567890123" },
+        first_name: "A",
+        last_name: "B",
+        address: "Riyadh",
+        country_code: "SA",
+        id_type: "NTID",
+        id: "1",
+        phone_number: "0500000000",
+      },
+    });
+    expectAllowed({
+      account: { number: "1234567890123456" },
+    });
+  });
+
+  it("still rejects a Luhn PAN in sender.account.number", () => {
+    expectRejected({
+      sender: { account: { funds_source: "CREDIT", number: TEST_PAN } },
+    });
+  });
+
+  it("allows grouped non-Luhn AFT account.number", () => {
+    expectAllowed({
+      sender: { account: { funds_source: "CREDIT", number: "1234-5678-9012-3" } },
+    });
+  });
+
+  it("walks moyasarSource when type is missing or unknown", () => {
+    expectRejected({ moyasarSource: { number: TEST_PAN } });
+    expectRejected({ moyasarSource: { type: "mystery", pan: TEST_PAN } });
   });
 });

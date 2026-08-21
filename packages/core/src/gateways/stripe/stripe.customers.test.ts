@@ -78,6 +78,7 @@ describe("StripeGateway customers and payment methods", () => {
     expect(result.customer.references.providerObjectId).toBe("cus_123");
     expect(result.customer.references.gateway).toBe("stripe");
     expect(result.customer.references.relatedIds?.customerId).toBe("cus_123");
+    expect(result.customer.metadata).toEqual({ userId: "u_1" });
   });
 
   it("createCustomer requires a caller idempotencyKey before POST", async () => {
@@ -134,6 +135,7 @@ describe("StripeGateway customers and payment methods", () => {
         object: "customer",
         email: "buyer@example.com",
         name: "Buyer",
+        metadata: { userId: "u_1" },
       });
     }) as unknown as typeof fetch;
 
@@ -144,6 +146,7 @@ describe("StripeGateway customers and payment methods", () => {
       expect.unreachable("getCustomer must succeed");
     }
     expect(result.customer.references.providerObjectId).toBe("cus_abc");
+    expect(result.customer.metadata).toEqual({ userId: "u_1" });
   });
 
   it("getCustomer maps deleted customers", async () => {
@@ -329,6 +332,79 @@ describe("StripeGateway customers and payment methods", () => {
     expect(result.outcome).toBe("succeeded");
   });
 
+  it("P22R3-ATTACH-XOR: paymentMethodId and token that differ do not fetch", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = mock(async () => {
+      fetchCalls += 1;
+      return createMockResponse({});
+    }) as unknown as typeof fetch;
+
+    await expect(
+      gateway.attachPaymentMethod({
+        customerId: "cus_123",
+        paymentMethodId: "pm_card_1",
+        token: "tok_visa",
+        idempotencyKey: "idem_pm_xor",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it("P22R3-IDEM-TRUNC: 255-char keys that differ only in the tail produce different step keys", async () => {
+    const capturedKeys: string[] = [];
+    globalThis.fetch = mock(async (_url, opts: RequestInit) => {
+      capturedKeys.push(new Headers(opts.headers).get("Idempotency-Key") ?? "");
+      if (String(_url).endsWith("/payment_methods")) {
+        return createMockResponse({
+          id: "pm_from_tok",
+          object: "payment_method",
+          type: "card",
+          card: { brand: "visa", last4: "4242" },
+        });
+      }
+      return createMockResponse({
+        id: "pm_from_tok",
+        object: "payment_method",
+        customer: "cus_123",
+        type: "card",
+        card: { brand: "visa", last4: "4242" },
+      });
+    }) as unknown as typeof fetch;
+
+    const prefix = "k".repeat(254);
+    const keyA = `${prefix}a`;
+    const keyB = `${prefix}b`;
+    expect(keyA).toHaveLength(255);
+    expect(keyB).toHaveLength(255);
+    expect(keyA.slice(0, 254)).toBe(keyB.slice(0, 254));
+
+    await gateway.attachPaymentMethod({
+      customerId: "cus_123",
+      token: "tok_visa",
+      idempotencyKey: keyA,
+    });
+    const createA = capturedKeys[0];
+    const attachA = capturedKeys[1];
+    capturedKeys.length = 0;
+
+    await gateway.attachPaymentMethod({
+      customerId: "cus_123",
+      token: "tok_visa",
+      idempotencyKey: keyB,
+    });
+    const createB = capturedKeys[0];
+    const attachB = capturedKeys[1];
+
+    expect(createA).toBeTruthy();
+    expect(createB).toBeTruthy();
+    expect(createA).not.toBe(createB);
+    expect(attachA).not.toBe(attachB);
+    expect(createA!.length).toBeLessThanOrEqual(255);
+    expect(createB!.length).toBeLessThanOrEqual(255);
+    expect(attachA!.length).toBeLessThanOrEqual(255);
+    expect(attachB!.length).toBeLessThanOrEqual(255);
+  });
+
   it("attachPaymentMethod rejects unknown token prefixes before fetch", async () => {
     let fetchCalls = 0;
     globalThis.fetch = mock(async () => {
@@ -450,6 +526,79 @@ describe("StripeGateway customers and payment methods", () => {
     expect(result.paymentMethods.map((pm) => pm.id)).toEqual(["pm_1", "pm_2"]);
   });
 
+  it("P22R3-LIST-PM-CAP: listPaymentMethods throws NetworkError after 20 pages if has_more", async () => {
+    let pages = 0;
+    globalThis.fetch = mock(async () => {
+      pages += 1;
+      return createMockResponse({
+        object: "list",
+        data: [
+          {
+            id: `pm_${pages}`,
+            object: "payment_method",
+            customer: "cus_123",
+            type: "card",
+            card: { brand: "visa", last4: "4242" },
+          },
+        ],
+        has_more: true,
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      gateway.listPaymentMethods({ customerId: "cus_123" }),
+    ).rejects.toBeInstanceOf(NetworkError);
+    expect(pages).toBe(20);
+  });
+
+  it("P22R3-LIST-404: listPaymentMethods 404 is failed", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse(
+        {
+          error: {
+            message: "No such customer: cus_missing",
+            type: "invalid_request_error",
+          },
+        },
+        false,
+        404,
+      ),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.listPaymentMethods({
+      customerId: "cus_missing",
+    });
+    expect(result.outcome).toBe("failed");
+    if (result.outcome !== "failed") {
+      expect.unreachable("404 must be failed");
+    }
+    expect(result.error.code).toBe("GATEWAY_API_ERROR");
+    expect(result).not.toEqual(expect.objectContaining({ paymentMethods: [] }));
+  });
+
+  it("P22R3-LAST4: last4 is published only when it is 2-4 digits", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "pm_bad_last4",
+        object: "payment_method",
+        customer: "cus_123",
+        type: "card",
+        card: { brand: "visa", last4: "xx42" },
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.attachPaymentMethod({
+      customerId: "cus_123",
+      paymentMethodId: "pm_bad_last4",
+      idempotencyKey: "idem_pm_last4",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("attach must succeed");
+    }
+    expect(result.paymentMethod.last4).toBeUndefined();
+  });
+
   it("detachPaymentMethod POSTs /v1/payment_methods/:id/detach", async () => {
     let capturedUrl = "";
     globalThis.fetch = mock(async (url) => {
@@ -476,7 +625,10 @@ describe("StripeGateway customers and payment methods", () => {
       expect.unreachable("detach must succeed");
     }
     expect(result.paymentMethod.id).toBe("pm_card_1");
-    expect(result.paymentMethod.customerId).toBe("cus_123");
+    expect(result.paymentMethod.customerId).toBeUndefined();
+    expect(result.paymentMethod.references.relatedIds?.customerId).toBeUndefined();
+    expect(result.paymentMethod.references.normalizedStatus).not.toBe("active");
+    expect(result.paymentMethod.references.normalizedStatus).toBe("detached");
   });
 
   it("P22-EMPTY-CUS: detach without customerId does not publish empty customerId", async () => {

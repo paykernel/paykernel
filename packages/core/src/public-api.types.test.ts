@@ -159,6 +159,10 @@ import {
   toPersistedPaymentEventEnvelope,
   hashWebhookPayload,
   mapProviderEventTypeToStable,
+  applyIndeterminateCustomerOutcome,
+  applyIndeterminatePaymentMethodOutcome,
+  applyIndeterminateDisputeOutcome,
+  applyIndeterminatePaymentLinkOutcome,
 } from "./index";
 
 /** Compile-time assignability assertion (erased at runtime). */
@@ -1561,6 +1565,39 @@ const offSessionCreate: CreatePaymentParams = {
   offSession: true,
 };
 expectType<CreatePaymentParams>(offSessionCreate);
+
+expectType<CustomerOperationResult>(
+  applyIndeterminateCustomerOutcome({
+    customerId: "cus_1",
+    message: "timeout",
+    errorName: "NetworkError",
+    gateway: "vault",
+  }),
+);
+expectType<PaymentMethodOperationResult>(
+  applyIndeterminatePaymentMethodOutcome({
+    paymentMethodId: "pm_1",
+    message: "timeout",
+    errorName: "NetworkError",
+    gateway: "vault",
+  }),
+);
+expectType<unknown>(
+  applyIndeterminateDisputeOutcome({
+    disputeId: "dp_1",
+    message: "timeout",
+    errorName: "NetworkError",
+    gateway: "stripe",
+  }),
+);
+expectType<unknown>(
+  applyIndeterminatePaymentLinkOutcome({
+    paymentLinkId: "plink_1",
+    message: "timeout",
+    errorName: "NetworkError",
+    gateway: "stripe",
+  }),
+);
 
 function _phase22CustomerClientSurface(client: PaymentClient): void {
   expectType<Promise<CustomerOperationResult>>(
