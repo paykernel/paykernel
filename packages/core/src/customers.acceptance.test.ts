@@ -6,7 +6,7 @@
  * - attach / list / detach gated on `paymentMethods` (claim beats method presence)
  * - create + get + attach + list + detach through a claiming adapter
  * - raw PAN / CVC rejected before the adapter runs
- * - off-session createPayment requires a stored method id and still rejects PAN
+ * - off-session createPayment requires a customer id and a stored method id and still rejects PAN
  *
  * No live provider calls.
  */
@@ -409,6 +409,21 @@ describe("Phase 22.1 customers and stored payment methods", () => {
         },
       },
     },
+    {
+      label: "metadata pan",
+      params: {
+        email: "buyer@example.com",
+        metadata: { pan: "4242424242424242" },
+      },
+    },
+    {
+      label: "cvc only",
+      params: { email: "buyer@example.com", cvc: "123" },
+    },
+    {
+      label: "numeric number",
+      params: { email: "buyer@example.com", number: 4242424242424 },
+    },
   ])(
     "createCustomer rejects raw card material ($label) before the adapter runs",
     async ({ params }) => {
@@ -432,6 +447,7 @@ describe("Phase 22.1 customers and stored payment methods", () => {
       label: "nested card",
       extra: { card: { number: "4242424242424242", cvc: "123" } },
     },
+    { label: "token pan", extra: { token: "4242424242424242" } },
   ])(
     "attachPaymentMethod rejects raw card material ($label) before the adapter runs",
     async ({ extra }) => {
@@ -487,6 +503,52 @@ describe("Phase 22.1 customers and stored payment methods", () => {
     }
     expect(gateway.lastCreatePayment).toBeUndefined();
   });
+
+  it("off-session createPayment accepts stripeCustomerId as the customer id", async () => {
+    const { payments, gateway } = vaultClient();
+    const result = await payments.createPayment({
+      amount: 10,
+      currency: "SAR",
+      callbackUrl: "https://merchant.example/callback",
+      stripeCustomerId: "cus_1",
+      paymentMethodId: "pm_1",
+      offSession: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(gateway.lastCreatePayment).toMatchObject({
+      stripeCustomerId: "cus_1",
+      paymentMethodId: "pm_1",
+      offSession: true,
+    });
+  });
+
+  it.each([
+    { label: "omitted", extra: {} },
+    { label: "blank", extra: { customerId: "   " } },
+  ])(
+    "off-session createPayment without a customer id throws InvalidRequestError ($label)",
+    async ({ extra }) => {
+      const { payments, gateway } = vaultClient();
+      try {
+        await payments.createPayment({
+          amount: 10,
+          currency: "SAR",
+          callbackUrl: "https://merchant.example/callback",
+          paymentMethodId: "pm_1",
+          offSession: true,
+          ...extra,
+        });
+        expect.unreachable("off-session without a customer must throw");
+      } catch (error) {
+        expect(error).toBeInstanceOf(InvalidRequestError);
+        expect((error as InvalidRequestError).message.toLowerCase()).toMatch(
+          /customer|off.?session/,
+        );
+      }
+      expect(gateway.lastCreatePayment).toBeUndefined();
+    },
+  );
 
   it("off-session createPayment with raw PAN is rejected before the adapter runs", async () => {
     const { payments, gateway } = vaultClient();

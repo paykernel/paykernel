@@ -14,6 +14,7 @@
  */
 
 import {
+  applyIndeterminateCheckoutSessionOutcome,
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
   buildProviderReferences,
@@ -246,6 +247,19 @@ export type MockGatewayOptions = {
   refundPayment?: ScriptedRefundOutcome[];
   voidPayment?: ScriptedPaymentOutcome[];
   getPayment?: ScriptedPaymentOutcome[];
+  createCheckoutSession?: ScriptedPaymentOutcome[];
+  getCheckoutSession?: ScriptedPaymentOutcome[];
+  createCustomer?: ScriptedPaymentOutcome[];
+  getCustomer?: ScriptedPaymentOutcome[];
+  attachPaymentMethod?: ScriptedPaymentOutcome[];
+  listPaymentMethods?: ScriptedPaymentOutcome[];
+  detachPaymentMethod?: ScriptedPaymentOutcome[];
+  getDispute?: ScriptedPaymentOutcome[];
+  listDisputes?: ScriptedPaymentOutcome[];
+  submitDisputeEvidence?: ScriptedPaymentOutcome[];
+  createPaymentLink?: ScriptedPaymentOutcome[];
+  getPaymentLink?: ScriptedPaymentOutcome[];
+  deactivatePaymentLink?: ScriptedPaymentOutcome[];
   /**
    * Outcome used when a queue is empty and no last step was consumed.
    * When omitted, empty queues fall back to last-step replay or synthetic success.
@@ -331,7 +345,25 @@ export type MockGateway = PaymentGateway & {
   remainingOutcomes(): Record<string, number>;
   /** Push additional outcomes at runtime. */
   enqueue(
-    operation: "createPayment" | "capturePayment" | "refundPayment" | "voidPayment" | "getPayment",
+    operation:
+      | "createPayment"
+      | "capturePayment"
+      | "refundPayment"
+      | "voidPayment"
+      | "getPayment"
+      | "createCheckoutSession"
+      | "getCheckoutSession"
+      | "createCustomer"
+      | "getCustomer"
+      | "attachPaymentMethod"
+      | "listPaymentMethods"
+      | "detachPaymentMethod"
+      | "getDispute"
+      | "listDisputes"
+      | "submitDisputeEvidence"
+      | "createPaymentLink"
+      | "getPaymentLink"
+      | "deactivatePaymentLink",
     outcome: ScriptedPaymentOutcome | ScriptedRefundOutcome,
   ): void;
   /**
@@ -540,6 +572,19 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     refundPayment: [...(options.refundPayment ?? [])] as ScriptedRefundOutcome[],
     voidPayment: [...(options.voidPayment ?? [])] as ScriptedPaymentOutcome[],
     getPayment: [...(options.getPayment ?? [])] as ScriptedPaymentOutcome[],
+    createCheckoutSession: [...(options.createCheckoutSession ?? [])] as ScriptedPaymentOutcome[],
+    getCheckoutSession: [...(options.getCheckoutSession ?? [])] as ScriptedPaymentOutcome[],
+    createCustomer: [...(options.createCustomer ?? [])] as ScriptedPaymentOutcome[],
+    getCustomer: [...(options.getCustomer ?? [])] as ScriptedPaymentOutcome[],
+    attachPaymentMethod: [...(options.attachPaymentMethod ?? [])] as ScriptedPaymentOutcome[],
+    listPaymentMethods: [...(options.listPaymentMethods ?? [])] as ScriptedPaymentOutcome[],
+    detachPaymentMethod: [...(options.detachPaymentMethod ?? [])] as ScriptedPaymentOutcome[],
+    getDispute: [...(options.getDispute ?? [])] as ScriptedPaymentOutcome[],
+    listDisputes: [...(options.listDisputes ?? [])] as ScriptedPaymentOutcome[],
+    submitDisputeEvidence: [...(options.submitDisputeEvidence ?? [])] as ScriptedPaymentOutcome[],
+    createPaymentLink: [...(options.createPaymentLink ?? [])] as ScriptedPaymentOutcome[],
+    getPaymentLink: [...(options.getPaymentLink ?? [])] as ScriptedPaymentOutcome[],
+    deactivatePaymentLink: [...(options.deactivatePaymentLink ?? [])] as ScriptedPaymentOutcome[],
   };
 
   const lastStep: {
@@ -548,6 +593,19 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
     refundPayment?: ScriptedRefundOutcome;
     voidPayment?: ScriptedPaymentOutcome;
     getPayment?: ScriptedPaymentOutcome;
+    createCheckoutSession?: ScriptedPaymentOutcome;
+    getCheckoutSession?: ScriptedPaymentOutcome;
+    createCustomer?: ScriptedPaymentOutcome;
+    getCustomer?: ScriptedPaymentOutcome;
+    attachPaymentMethod?: ScriptedPaymentOutcome;
+    listPaymentMethods?: ScriptedPaymentOutcome;
+    detachPaymentMethod?: ScriptedPaymentOutcome;
+    getDispute?: ScriptedPaymentOutcome;
+    listDisputes?: ScriptedPaymentOutcome;
+    submitDisputeEvidence?: ScriptedPaymentOutcome;
+    createPaymentLink?: ScriptedPaymentOutcome;
+    getPaymentLink?: ScriptedPaymentOutcome;
+    deactivatePaymentLink?: ScriptedPaymentOutcome;
   } = {};
 
   const history: MockRequestRecord[] = [];
@@ -769,6 +827,99 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       throw new NetworkError("Request aborted (scripted)");
     }
     throw step.throw;
+  }
+
+  /**
+   * Phase 22 ops honor the same throw/timeout/network_error arms as createPayment.
+   * Do not fall through to a silent succeeded snapshot.
+   */
+  function throwIfScriptedFault(step: ScriptedPaymentOutcome | undefined): void {
+    if (!step) return;
+    if (isThrowStep(step)) {
+      handleThrowStep(step);
+    }
+    switch (step.outcome) {
+      case "declined":
+        throw new CardDeclinedError(step.message ?? "Card declined (mock)");
+      case "insufficient_funds":
+        throw new InsufficientFundsError(step.message ?? "Insufficient funds (mock)");
+      case "network_error":
+        throw new NetworkError(step.message ?? "Network error (mock)");
+      case "timeout":
+        throw new NetworkError(step.message ?? "Request timed out (mock)");
+      case "gateway_api_error":
+        throw new GatewayApiError(step.message ?? "Gateway API error (mock)", name);
+      case "custom":
+        if (step.error) throw step.error;
+        return;
+      case "provider_ok_client_timeout":
+      case "provider_success_client_timeout":
+        throw new NetworkError(
+          step.message ??
+            "Client timeout after provider-side success (mock; reconcile via getLastProviderSideSuccess)",
+        );
+      default:
+        return;
+    }
+  }
+
+  function isScriptedFailed(
+    step: ScriptedPaymentOutcome | undefined,
+  ): step is Exclude<ScriptedPaymentOutcome, ScriptedThrowStep> & { outcome: "failed" } {
+    return !!step && !isThrowStep(step) && step.outcome === "failed";
+  }
+
+  function isScriptedIndeterminate(
+    step: ScriptedPaymentOutcome | undefined,
+  ): step is Exclude<ScriptedPaymentOutcome, ScriptedThrowStep> & {
+    outcome: "indeterminate";
+  } {
+    return !!step && !isThrowStep(step) && step.outcome === "indeterminate";
+  }
+
+  function scriptedFailedError(
+    step: Exclude<ScriptedPaymentOutcome, ScriptedThrowStep> & { outcome: "failed" },
+    fallback: string,
+  ): { name: string; message: string; code: string } {
+    return {
+      name: "Error",
+      message: step.message ?? fallback,
+      code: "FAILED",
+    };
+  }
+
+  async function consumePhase22Step(
+    op: Exclude<keyof typeof lastStep, "refundPayment">,
+    params: unknown,
+  ): Promise<ScriptedPaymentOutcome | undefined> {
+    const step = takePaymentStep(op);
+    await applyLatency(step, getSignal(params));
+    throwIfScriptedFault(step);
+    return step;
+  }
+
+  function paramLookup(params: unknown, keys: readonly string[]): string {
+    if (params === null || typeof params !== "object") {
+      return "unknown";
+    }
+    const record = params as Record<string, unknown>;
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "string" && value.length > 0) {
+        return value;
+      }
+    }
+    return "unknown";
+  }
+
+  function unknownRefs(lookupId: string) {
+    return buildProviderReferences({
+      gateway: name,
+      gatewayId: lookupId,
+      status: "unknown",
+      providerNativeStatus: "indeterminate",
+      ...(lookupId !== "unknown" ? { internalReference: lookupId } : {}),
+    });
   }
 
   /**
@@ -1177,6 +1328,19 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         refundPayment: queues.refundPayment.length,
         voidPayment: queues.voidPayment.length,
         getPayment: queues.getPayment.length,
+        createCheckoutSession: queues.createCheckoutSession.length,
+        getCheckoutSession: queues.getCheckoutSession.length,
+        createCustomer: queues.createCustomer.length,
+        getCustomer: queues.getCustomer.length,
+        attachPaymentMethod: queues.attachPaymentMethod.length,
+        listPaymentMethods: queues.listPaymentMethods.length,
+        detachPaymentMethod: queues.detachPaymentMethod.length,
+        getDispute: queues.getDispute.length,
+        listDisputes: queues.listDisputes.length,
+        submitDisputeEvidence: queues.submitDisputeEvidence.length,
+        createPaymentLink: queues.createPaymentLink.length,
+        getPaymentLink: queues.getPaymentLink.length,
+        deactivatePaymentLink: queues.deactivatePaymentLink.length,
       };
     },
 
@@ -1842,6 +2006,25 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("createCheckoutSession", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Checkout session failed (mock)"),
+          };
+        }
+        if (isScriptedIndeterminate(step)) {
+          const lookupId =
+            typeof params.idempotencyKey === "string" && params.idempotencyKey.length > 0
+              ? params.idempotencyKey
+              : "unknown";
+          return applyIndeterminateCheckoutSessionOutcome({
+            sessionId: lookupId,
+            message: step.message ?? "Checkout session outcome indeterminate (mock)",
+            errorName: "NetworkError",
+            gateway: name,
+          });
+        }
         const sessionId = nextId("cs");
         return {
           outcome: "succeeded" as const,
@@ -1868,6 +2051,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("getCheckoutSession", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Get checkout session failed (mock)"),
+          };
+        }
         return {
           outcome: "succeeded" as const,
           session: {
@@ -1890,6 +2080,25 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "customers",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("createCustomer", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Create customer failed (mock)"),
+          };
+        }
+        if (isScriptedIndeterminate(step)) {
+          const lookupId = paramLookup(params, ["idempotencyKey", "customerId"]);
+          return {
+            outcome: "indeterminate" as const,
+            reconciliationRequired: true as const,
+            message: step.message ?? "Create customer indeterminate (mock)",
+            customer: {
+              status: "unknown",
+              references: unknownRefs(lookupId),
+            },
+          };
         }
         const id = nextId("cus");
         return {
@@ -1917,6 +2126,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("getCustomer", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Get customer failed (mock)"),
+          };
+        }
         return {
           outcome: "succeeded" as const,
           customer: {
@@ -1941,6 +2157,30 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "paymentMethods",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("attachPaymentMethod", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Attach payment method failed (mock)"),
+          };
+        }
+        if (isScriptedIndeterminate(step)) {
+          const lookupId = paramLookup(params, [
+            "paymentMethodId",
+            "token",
+            "idempotencyKey",
+          ]);
+          return {
+            outcome: "indeterminate" as const,
+            reconciliationRequired: true as const,
+            message: step.message ?? "Attach payment method indeterminate (mock)",
+            paymentMethod: {
+              id: lookupId,
+              type: "other" as const,
+              references: unknownRefs(lookupId),
+            },
+          };
         }
         const id = params.paymentMethodId ?? nextId("pm");
         return {
@@ -1968,6 +2208,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("listPaymentMethods", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "List payment methods failed (mock)"),
+          };
+        }
         return { outcome: "succeeded" as const, paymentMethods: [] };
       });
     },
@@ -1982,17 +2229,32 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("detachPaymentMethod", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Detach payment method failed (mock)"),
+          };
+        }
+        const detachedCustomerId =
+          typeof params.customerId === "string" && params.customerId.length > 0
+            ? params.customerId
+            : undefined;
         return {
           outcome: "succeeded" as const,
           paymentMethod: {
             id: params.paymentMethodId,
-            customerId: params.customerId ?? "",
+            ...(detachedCustomerId !== undefined
+              ? { customerId: detachedCustomerId }
+              : {}),
             type: "card",
             references: buildProviderReferences({
               gateway: name,
               gatewayId: params.paymentMethodId,
               status: "active",
-              ...(params.customerId !== undefined ? { customerId: params.customerId } : {}),
+              ...(detachedCustomerId !== undefined
+                ? { customerId: detachedCustomerId }
+                : {}),
             }),
           },
         };
@@ -2006,6 +2268,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "disputes",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("getDispute", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Get dispute failed (mock)"),
+          };
         }
         return {
           outcome: "succeeded" as const,
@@ -2029,6 +2298,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("listDisputes", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "List disputes failed (mock)"),
+          };
+        }
         return { outcome: "succeeded" as const, disputes: [] };
       });
     },
@@ -2042,6 +2318,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "disputes",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("submitDisputeEvidence", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Submit dispute evidence failed (mock)"),
+          };
         }
         return {
           outcome: "succeeded" as const,
@@ -2064,6 +2347,25 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "paymentLinks",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("createPaymentLink", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Create payment link failed (mock)"),
+          };
+        }
+        if (isScriptedIndeterminate(step)) {
+          const lookupId = paramLookup(params, ["idempotencyKey", "paymentLinkId"]);
+          return {
+            outcome: "indeterminate" as const,
+            reconciliationRequired: true as const,
+            message: step.message ?? "Create payment link indeterminate (mock)",
+            paymentLink: {
+              status: "unknown",
+              references: unknownRefs(lookupId),
+            },
+          };
         }
         const id = nextId("plink");
         return {
@@ -2089,6 +2391,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             claimedSupport: false,
           });
         }
+        const step = await consumePhase22Step("getPaymentLink", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Get payment link failed (mock)"),
+          };
+        }
         return {
           outcome: "succeeded" as const,
           paymentLink: {
@@ -2113,6 +2422,13 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             capability: "paymentLinks",
             claimedSupport: false,
           });
+        }
+        const step = await consumePhase22Step("deactivatePaymentLink", params);
+        if (isScriptedFailed(step)) {
+          return {
+            outcome: "failed" as const,
+            error: scriptedFailedError(step, "Deactivate payment link failed (mock)"),
+          };
         }
         return {
           outcome: "succeeded" as const,

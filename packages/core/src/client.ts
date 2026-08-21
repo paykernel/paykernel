@@ -397,6 +397,14 @@ function storedPaymentMethodRef(params: CreatePaymentParams): string | undefined
   );
 }
 
+/** Customer id for off-session create — common field or Stripe convenience field. */
+function storedCustomerRef(params: CreatePaymentParams): string | undefined {
+  return (
+    nonEmptyString(params.customerId) ??
+    nonEmptyString(params.stripeCustomerId)
+  );
+}
+
 /**
  * Default map for legacy `new PaymentClient(...)` typing: all four first-party
  * gateway classes. Runtime only holds gateways that were configured.
@@ -803,10 +811,17 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
       this.assertCapability(gw, capability, "createPayment");
     }
     const create = params as CreatePaymentParams;
-    if (create.offSession === true && storedPaymentMethodRef(create) === undefined) {
-      throw new InvalidRequestError(
-        "off-session createPayment requires a stored payment method id",
-      );
+    if (create.offSession === true) {
+      if (storedPaymentMethodRef(create) === undefined) {
+        throw new InvalidRequestError(
+          "off-session createPayment requires a stored payment method id",
+        );
+      }
+      if (storedCustomerRef(create) === undefined) {
+        throw new InvalidRequestError(
+          "off-session createPayment requires a customer id",
+        );
+      }
     }
     assertNoRawCardMaterial(params);
     return gw.createPayment(params as CreatePaymentParams);

@@ -165,13 +165,15 @@ await client.createPayment({ ... });
 // Specify gateway explicitly
 await client.createPayment({ ... }, 'paypal');
 
-// Stripe Checkout Example
+// Stripe Checkout Example — Phase 6 outcome union (see hosted-checkout.md).
+// Create success is not paid settlement. Caller idempotencyKey is required.
 const stripe = client.gateway('stripe');
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
   successUrl: 'https://example.com/success',
   cancelUrl: 'https://example.com/cancel',
   mode: 'payment',
   metadata: { paymentId: 'order_123' },
+  idempotencyKey: crypto.randomUUID(),
   lineItems: [
     {
       priceData: {
@@ -185,6 +187,12 @@ const session = await stripe.createCheckoutSession({
     }
   ]
 });
+if (result.outcome === 'succeeded') {
+  if (result.session.url) {
+    redirect(result.session.url);
+  }
+  const sessionId = result.session.references.providerObjectId;
+}
 ```
 
 ### Multi-gateway: refund IDs and `capture: false`

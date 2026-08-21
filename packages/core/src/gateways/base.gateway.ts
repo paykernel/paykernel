@@ -28,6 +28,21 @@ import {
     applyIndeterminateCheckoutSessionOutcome,
     type CheckoutSessionOperationResult,
 } from '../types/checkout.types';
+import {
+    applyIndeterminateCustomerOutcome,
+    applyIndeterminatePaymentMethodOutcome,
+    type CustomerOperationResult,
+    type PaymentMethodOperationResult,
+} from '../types/customer.types';
+import {
+    applyIndeterminateDisputeOutcome,
+    type DisputeOperationResult,
+} from '../types/dispute.types';
+import {
+    applyIndeterminatePaymentLinkOutcome,
+    type PaymentLinkOperationResult,
+} from '../types/payment-link.types';
+import { assertNoRawCardMaterial } from '../utils/raw-card';
 import { createRedactingLogger, noopLogger, type Logger } from '../utils/logger';
 import type { Clock } from '../runtime/clock';
 import type {
@@ -216,6 +231,12 @@ export abstract class BaseGateway implements PaymentGateway {
 
         // Use modified params if provided by hooks; re-validate so defaults/transforms apply
         let finalParams = beforeResult.params ?? validatedParams;
+        // Re-assert the PCI fence after before-hooks so hooks cannot inject CHD
+        // past the client-layer check. Moyasar applepay DPAN / token CVC are
+        // allowlisted inside assertNoRawCardMaterial (skipped moyasarSource).
+        if (isPciFencedOperation(operation)) {
+            assertNoRawCardMaterial(finalParams);
+        }
         const hookSignal =
             extractAbortSignal(finalParams) ?? initialSignal;
         if (schema) {
@@ -385,6 +406,25 @@ function isPostSubmitCustomerMutation(operation: OperationType): boolean {
     );
 }
 
+function isPciFencedOperation(operation: OperationType): boolean {
+    return (
+        operation === "createPayment" ||
+        operation === "createCustomer" ||
+        operation === "getCustomer" ||
+        operation === "attachPaymentMethod" ||
+        operation === "detachPaymentMethod" ||
+        operation === "listPaymentMethods" ||
+        operation === "createCheckoutSession" ||
+        operation === "getCheckoutSession" ||
+        operation === "getDispute" ||
+        operation === "listDisputes" ||
+        operation === "submitDisputeEvidence" ||
+        operation === "createPaymentLink" ||
+        operation === "getPaymentLink" ||
+        operation === "deactivatePaymentLink"
+    );
+}
+
 /**
  * Best-effort provider object id for post-submit indeterminate results
  * (CORE-7). Prefer a real payment / order / OTP identity over `"unknown"` so
@@ -414,12 +454,12 @@ const POST_SUBMIT_ID_KEYS = [
     "paymentLinkId",
 ] as const;
 
-function providerObjectIdFromParams(params: unknown): string {
+function firstParamId(params: unknown, keys: readonly string[]): string {
     if (params === null || typeof params !== "object") {
         return "unknown";
     }
     const record = params as Record<string, unknown>;
-    for (const key of POST_SUBMIT_ID_KEYS) {
+    for (const key of keys) {
         const value = record[key];
         if (typeof value === "string" && value.length > 0) {
             return value;
@@ -428,13 +468,57 @@ function providerObjectIdFromParams(params: unknown): string {
     return "unknown";
 }
 
+function providerObjectIdFromParams(params: unknown): string {
+    return firstParamId(params, POST_SUBMIT_ID_KEYS);
+}
+
+/** Prefer the mutated object id; fall back to idempotencyKey / unknown. */
+function lookupIdForCustomerMutation(
+    operation: string,
+    params: unknown,
+): string {
+    switch (operation) {
+        case "createCustomer":
+            return firstParamId(params, ["idempotencyKey", "customerId"]);
+        case "attachPaymentMethod":
+        case "detachPaymentMethod":
+            return firstParamId(params, [
+                "paymentMethodId",
+                "token",
+                "idempotencyKey",
+            ]);
+        case "submitDisputeEvidence":
+            return firstParamId(params, ["disputeId", "idempotencyKey"]);
+        case "createPaymentLink":
+            return firstParamId(params, ["idempotencyKey", "paymentLinkId"]);
+        case "deactivatePaymentLink":
+            return firstParamId(params, ["paymentLinkId", "idempotencyKey"]);
+        default:
+            return providerObjectIdFromParams(params);
+    }
+}
+
 /**
- * Convert a post-submit NetworkError on a money mutation into the Phase 6
- * indeterminate result. Returns undefined for queries, aborts, and non-network errors.
+ * Convert a post-submit NetworkError on a money or Phase 22 mutation into the
+ * matching indeterminate result. Returns undefined for queries, aborts, and
+ * non-network errors.
  *
  * `createCheckoutSession` uses {@link applyIndeterminateCheckoutSessionOutcome}
- * (S19-CKO-TIMEOUT). `getCheckoutSession` stays a thrown NetworkError.
+ * (S19-CKO-TIMEOUT). Customer / payment-method / dispute / payment-link
+ * mutations use typed helpers with a lookup identity from params.
+ * `getCheckoutSession` stays a thrown NetworkError.
  */
+function optionalParamString(params: unknown, key: string): string | undefined {
+    if (params === null || typeof params !== "object") {
+        return undefined;
+    }
+    const value = (params as Record<string, unknown>)[key];
+    if (typeof value === "string" && value.length > 0) {
+        return value;
+    }
+    return undefined;
+}
+
 function tryIndeterminateFromNetworkError(
     operation: OperationType,
     params: unknown,
@@ -444,21 +528,56 @@ function tryIndeterminateFromNetworkError(
     | GatewayPaymentResult
     | GatewayRefundResult
     | CheckoutSessionOperationResult
-    | {
-          outcome: "indeterminate";
-          reconciliationRequired: true;
-          message: string;
-      }
+    | CustomerOperationResult
+    | PaymentMethodOperationResult
+    | DisputeOperationResult
+    | PaymentLinkOperationResult
     | undefined {
     if (!(error instanceof NetworkError) || error.afterProviderSubmit !== true) {
         return undefined;
     }
     if (isPostSubmitCustomerMutation(operation)) {
-        return {
-            outcome: "indeterminate" as const,
-            reconciliationRequired: true as const,
-            message: error.message,
-        };
+        const providerObjectId = lookupIdForCustomerMutation(
+            operation,
+            params,
+        );
+        const message = error.message;
+        const errorName = error.name;
+        if (operation === "createCustomer") {
+            return applyIndeterminateCustomerOutcome({
+                customerId: providerObjectId,
+                message,
+                errorName,
+                gateway,
+            });
+        }
+        if (
+            operation === "attachPaymentMethod" ||
+            operation === "detachPaymentMethod"
+        ) {
+            const customerId = optionalParamString(params, "customerId");
+            return applyIndeterminatePaymentMethodOutcome({
+                paymentMethodId: providerObjectId,
+                ...(customerId !== undefined ? { customerId } : {}),
+                message,
+                errorName,
+                gateway,
+            });
+        }
+        if (operation === "submitDisputeEvidence") {
+            return applyIndeterminateDisputeOutcome({
+                disputeId: providerObjectId,
+                message,
+                errorName,
+                gateway,
+            });
+        }
+        return applyIndeterminatePaymentLinkOutcome({
+            paymentLinkId: providerObjectId,
+            message,
+            errorName,
+            gateway,
+        });
     }
     if (!isPostSubmitMoneyMutation(operation)) {
         return undefined;

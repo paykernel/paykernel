@@ -9,6 +9,14 @@
 
 ### Behavior (0.x)
 
+- **P22-CKO-GET-ZERO:** `getCheckoutSession` amount is session `amount_total` while unpaid; captured rematch only after paid. Do not fulfill on GET checkout amount.
+- **List paging:** Stripe refund lists follow `has_more` / `starting_after`. Payment-link `line_items.has_more` omits amount rather than inventing major `0`.
+- **P22-PCI:** PCI fence walks nested `metadata` / `evidence` / CVC, not only top-level PAN keys.
+- **P22-PP-DISPUTE:** PayPal `CUSTOMER.DISPUTE.CREATED` / `UPDATED` / `RESOLVED` parse without throw; dual-write `dispute.opened` / `updated` / `closed`. Envelope status is dispute lifecycle (`needs_response` / `under_review` / `won` / `lost` / `processing`), never `paid` or generic payment `pending`. IDs are the dispute resource id.
+- **Off-session customer:** `createPayment({ offSession: true })` requires a stored payment-method id **and** a customer id (see `docs/customers.md`).
+- **Checkout create paymentIntentId:** Checkout session `references.relatedIds.paymentIntentId` when Stripe expands a PaymentIntent (`getCheckoutSession`; use that `pi_*` for capture/refund/void).
+- **README outcome sample:** Stripe Checkout README sample uses the outcome union (`result.outcome === "succeeded"`, `result.session.url`, `references.providerObjectId`) and requires `idempotencyKey`.
+
 - **Phase 22 review close:** Stripe `getCheckoutSession` HTTP 404 is `outcome: failed` (same as getCustomer). Checkout session currency is uppercase ISO. Payment-link GET expands `line_items` and publishes amount only for a single quantity-1 item. After-hooks deep-clone `disputes` / `paymentMethods` lists.
 
 - **Phase 22.1 docs:** customers / stored payment methods / off-session vault surface is documented (`docs/customers.md`). Raw PAN/CVC remains rejected before adapters.

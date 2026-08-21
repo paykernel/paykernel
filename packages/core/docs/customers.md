@@ -29,8 +29,8 @@ Results are Phase 6 `outcome` unions (`succeeded` / `failed` / `indeterminate`).
 
 ## Off-session
 
-`offSession: true` requires a stored payment-method id (`paymentMethodId` or Stripe `stripePaymentMethodId`). The client rejects the call before the adapter if that id is missing. Raw card material is rejected with `InvalidRequestError`.
+`offSession: true` requires a stored payment-method id (`paymentMethodId` or Stripe `stripePaymentMethodId`) **and** a customer id (`customerId` or Stripe `stripeCustomerId`). The client rejects the call before the adapter if either is missing. Raw card material is rejected with `InvalidRequestError`.
 
 ## PCI
 
-`PaymentClient` runs `assertNoRawCardMaterial` on create customer, attach, and off-session create. Use a client-side tokenization SDK (Stripe.js, etc.) and pass the resulting id.
+`PaymentClient` runs `assertNoRawCardMaterial` on create customer, attach, off-session create, payment links, and dispute evidence. The fence walks nested `metadata`, `evidence` (including `stripeEvidence`), and CVC fields — not only top-level PAN keys (`number` / `pan` / `cardNumber`). Raw PAN/CVC in those bags is `InvalidRequestError`. Use a client-side tokenization SDK (Stripe.js, etc.) and pass the resulting id.

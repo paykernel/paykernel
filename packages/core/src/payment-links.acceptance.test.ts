@@ -203,4 +203,20 @@ describe("Phase 22.5 payment links", () => {
     ).rejects.toBeInstanceOf(InvalidRequestError);
     expect(gateway.createCalls).toBe(0);
   });
+
+  it("createPaymentLink rejects PAN-like metadata.pan before the adapter runs", async () => {
+    const client = createPaymentClient({
+      gateways: { links: linkAdapter() },
+      defaultGateway: "links",
+    });
+    const gateway = client.gateway("links") as LinkGateway;
+    await expect(
+      client.createPaymentLink({
+        amount: 10,
+        currency: "USD",
+        metadata: { pan: "4242424242424242" },
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(gateway.createCalls).toBe(0);
+  });
 });

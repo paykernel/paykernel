@@ -4,6 +4,7 @@
 import { describe, it, expect } from "bun:test";
 import {
   BaseGateway,
+  InvalidRequestError,
   OperationNotSupportedError,
   buildProviderReferences,
   createPaymentClient,
@@ -25,6 +26,7 @@ import {
 
 class DisputeGateway extends BaseGateway {
   readonly name = "dsp";
+  submitCalls = 0;
 
   constructor(
     hooks: GatewayContext["hooks"],
@@ -105,6 +107,7 @@ class DisputeGateway extends BaseGateway {
   async submitDisputeEvidence(
     params: SubmitDisputeEvidenceParams,
   ): Promise<DisputeOperationResult> {
+    this.submitCalls += 1;
     return this.getDispute({ disputeId: params.disputeId });
   }
 }
@@ -183,5 +186,60 @@ describe("Phase 22.3 disputes", () => {
     expect(event.dispute.evidenceDueBy).toBeDefined();
     expect(event.dispute.dashboardUrl).toContain("/test/payments/ch_1");
     expect(event.dispute.references.providerObjectId).toBe("dp_1");
+  });
+
+  it("submitDisputeEvidence rejects PAN-like uncategorizedText before the adapter runs", async () => {
+    const client = createPaymentClient({
+      gateways: { dsp: disputeAdapter() },
+      defaultGateway: "dsp",
+    });
+    const gateway = client.gateway("dsp") as DisputeGateway;
+    try {
+      await client.submitDisputeEvidence({
+        disputeId: "dp_1",
+        evidence: { uncategorizedText: "4242424242424242" },
+      });
+      expect.unreachable("uncategorizedText PAN must not submit");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidRequestError);
+    }
+    expect(gateway.submitCalls).toBe(0);
+  });
+
+  it("submitDisputeEvidence rejects PAN-like stripeEvidence values before the adapter runs", async () => {
+    const client = createPaymentClient({
+      gateways: { dsp: disputeAdapter() },
+      defaultGateway: "dsp",
+    });
+    const gateway = client.gateway("dsp") as DisputeGateway;
+    try {
+      await client.submitDisputeEvidence({
+        disputeId: "dp_1",
+        evidence: {
+          stripeEvidence: { uncategorized_text: "4242424242424242" },
+        },
+      });
+      expect.unreachable("stripeEvidence PAN must not submit");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidRequestError);
+    }
+    expect(gateway.submitCalls).toBe(0);
+  });
+
+  it("submitDisputeEvidence accepts tokenized file ids", async () => {
+    const client = createPaymentClient({
+      gateways: { dsp: disputeAdapter() },
+      defaultGateway: "dsp",
+    });
+    const gateway = client.gateway("dsp") as DisputeGateway;
+    const result = await client.submitDisputeEvidence({
+      disputeId: "dp_1",
+      evidence: {
+        uncategorizedText: "customer emailed support",
+        stripeEvidence: { receipt: "file_1", uncategorized_file: "file_2" },
+      },
+    });
+    expect(result.outcome).toBe("succeeded");
+    expect(gateway.submitCalls).toBe(1);
   });
 });

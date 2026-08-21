@@ -12,6 +12,7 @@ import type {
   PaymentMetadata,
 } from "./payment.types";
 import type { ProviderReferences } from "./provider-refs";
+import { buildProviderReferences } from "./provider-refs";
 
 export type PaymentLinkStatus = "active" | "inactive";
 
@@ -36,7 +37,8 @@ export type DeactivatePaymentLinkParams = {
 
 export type PaymentLink = {
   status: PaymentLinkStatus | string;
-  url: string;
+  /** Hosted URL. Omitted on post-submit indeterminate snapshots (never invent ""). */
+  url?: string;
   references: ProviderReferences;
   amount?: number;
   currency?: string;
@@ -62,3 +64,37 @@ export type PaymentLinkOperationResult =
       paymentLink?: PaymentLink;
       message?: string;
     };
+
+/**
+ * Post-submit unknown for `createPaymentLink` / `deactivatePaymentLink`.
+ * Must not invent PaymentLink `active` or a hosted URL.
+ */
+export function applyIndeterminatePaymentLinkOutcome(input: {
+  paymentLinkId: string;
+  message: string;
+  errorName: string;
+  gateway: string;
+}): PaymentLinkOperationResult {
+  const lookupId = input.paymentLinkId;
+  const paymentLink: PaymentLink = {
+    status: "unknown",
+    references: buildProviderReferences({
+      gateway: input.gateway,
+      gatewayId: lookupId,
+      status: "unknown",
+      ...(lookupId !== "unknown" ? { internalReference: lookupId } : {}),
+      providerNativeStatus: "indeterminate",
+    }),
+    rawResponse: {
+      indeterminate: true,
+      message: input.message,
+      name: input.errorName,
+    },
+  };
+  return {
+    outcome: "indeterminate",
+    reconciliationRequired: true,
+    message: input.message,
+    paymentLink,
+  };
+}

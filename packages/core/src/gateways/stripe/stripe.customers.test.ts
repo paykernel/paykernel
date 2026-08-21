@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { StripeGateway } from "./stripe.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
 import type { StripeConfig } from "../../types/config.types";
-import { InvalidRequestError, PaymentClient } from "../../index";
+import { InvalidRequestError, NetworkError, PaymentClient } from "../../index";
 
 
 const STRIPE_TEST_CONFIG: StripeConfig = {
@@ -174,6 +174,27 @@ describe("StripeGateway customers and payment methods", () => {
       gateway.getCustomer({ customerId: "not_a_customer" }),
     ).rejects.toBeInstanceOf(InvalidRequestError);
     expect(fetchCalls).toBe(0);
+  });
+
+  it("P22-GET-FLAG-2: GET 200 customer body without id is not afterProviderSubmit", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({ object: "customer", email: "buyer@example.com" }),
+    ) as unknown as typeof fetch;
+
+    let thrown: unknown;
+    try {
+      await gateway.getCustomer({ customerId: "cus_noid" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(NetworkError);
+    if (!(thrown instanceof NetworkError)) {
+      expect.unreachable("GET missing id must throw NetworkError");
+    }
+    expect(thrown.afterProviderSubmit).not.toBe(true);
+    expect(thrown).not.toEqual(
+      expect.objectContaining({ outcome: "indeterminate" }),
+    );
   });
 
   it("getCustomer 404 is a failed outcome, not a throw", async () => {
@@ -348,7 +369,7 @@ describe("StripeGateway customers and payment methods", () => {
     expect(result.reconciliationRequired).toBe(true);
   });
 
-  it("listPaymentMethods GETs /v1/payment_methods?customer=", async () => {
+  it("listPaymentMethods GETs /v1/customers/:id/payment_methods", async () => {
     let capturedUrl = "";
     globalThis.fetch = mock(async (url) => {
       capturedUrl = String(url);
@@ -369,9 +390,9 @@ describe("StripeGateway customers and payment methods", () => {
 
     const result = await gateway.listPaymentMethods({ customerId: "cus_123" });
     expect(capturedUrl).toContain(
-      "https://api.stripe.com/v1/payment_methods?",
+      "https://api.stripe.com/v1/customers/cus_123/payment_methods",
     );
-    expect(capturedUrl).toContain("customer=cus_123");
+    expect(capturedUrl).toContain("limit=100");
     expect(result.outcome).toBe("succeeded");
     if (result.outcome !== "succeeded") {
       expect.unreachable("list must succeed");
@@ -379,6 +400,54 @@ describe("StripeGateway customers and payment methods", () => {
     expect(result.paymentMethods).toHaveLength(1);
     expect(result.paymentMethods[0]?.last4).toBe("4444");
     expect(result.paymentMethods[0]?.brand).toBe("mastercard");
+  });
+
+  it("P22-LIST-TRUNC: listPaymentMethods pages while has_more is true", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = mock(async (url) => {
+      urls.push(String(url));
+      if (String(url).includes("starting_after=pm_1")) {
+        return createMockResponse({
+          object: "list",
+          data: [
+            {
+              id: "pm_2",
+              object: "payment_method",
+              customer: "cus_123",
+              type: "card",
+              card: { brand: "visa", last4: "4242" },
+            },
+          ],
+          has_more: false,
+        });
+      }
+      return createMockResponse({
+        object: "list",
+        data: [
+          {
+            id: "pm_1",
+            object: "payment_method",
+            customer: "cus_123",
+            type: "card",
+            card: { brand: "mastercard", last4: "4444" },
+          },
+        ],
+        has_more: true,
+      });
+    }) as unknown as typeof fetch;
+
+    const result = await gateway.listPaymentMethods({ customerId: "cus_123" });
+    expect(urls).toHaveLength(2);
+    expect(urls[0]).toContain("/customers/cus_123/payment_methods");
+    expect(urls[0]).toContain("limit=100");
+    expect(urls[0]).not.toContain("starting_after");
+    expect(urls[1]).toContain("limit=100");
+    expect(urls[1]).toContain("starting_after=pm_1");
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("paged list must succeed");
+    }
+    expect(result.paymentMethods.map((pm) => pm.id)).toEqual(["pm_1", "pm_2"]);
   });
 
   it("detachPaymentMethod POSTs /v1/payment_methods/:id/detach", async () => {
@@ -408,6 +477,51 @@ describe("StripeGateway customers and payment methods", () => {
     }
     expect(result.paymentMethod.id).toBe("pm_card_1");
     expect(result.paymentMethod.customerId).toBe("cus_123");
+  });
+
+  it("P22-EMPTY-CUS: detach without customerId does not publish empty customerId", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        id: "pm_card_1",
+        object: "payment_method",
+        customer: null,
+        type: "card",
+        card: { brand: "visa", last4: "4242" },
+      }),
+    ) as unknown as typeof fetch;
+
+    const result = await gateway.detachPaymentMethod({
+      paymentMethodId: "pm_card_1",
+      idempotencyKey: "idem_pm_detach_nocust",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("detach must succeed");
+    }
+    expect(result.paymentMethod.customerId).not.toBe("");
+    expect(result.paymentMethod.customerId).toBeUndefined();
+    expect(result.paymentMethod.references.relatedIds?.customerId).not.toBe("");
+    expect(result.paymentMethod.references.relatedIds?.customerId).toBeUndefined();
+  });
+
+  it("P22-OFFSESSION-CUS: off-session without customer does not fetch", async () => {
+    let fetchCalls = 0;
+    globalThis.fetch = mock(async () => {
+      fetchCalls += 1;
+      return createMockResponse({});
+    }) as unknown as typeof fetch;
+
+    await expect(
+      gateway.createPayment({
+        amount: 10,
+        currency: "SAR",
+        callbackUrl: "https://merchant.example/callback",
+        paymentMethodId: "pm_card_1",
+        offSession: true,
+        idempotencyKey: "idem_off_no_cus",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(fetchCalls).toBe(0);
   });
 
   it("createPayment maps customerId and paymentMethodId onto the PaymentIntent", async () => {

@@ -1235,12 +1235,27 @@ function stripeCheckoutPaidSessionStatus(session: {
   return "paid";
 }
 
+function stripeCheckoutPiSucceeded(session: {
+  payment_intent?: unknown;
+}): boolean {
+  const pi = session.payment_intent;
+  return (
+    typeof pi === "object" &&
+    pi !== null &&
+    (pi as { status?: unknown }).status === "succeeded"
+  );
+}
+
 /**
  * Checkout amount prefers settled PI money (`amount_received` →
- * `amount_captured`) when the session is hydrated / expanded. Falls back to
- * `amount_total` when settled fields are missing (classic string PI).
+ * `amount_captured`) only when `payment_status` is paid (or the expanded PI
+ * succeeded) **and** captured is a real settlement (`> 0`). Unpaid/open
+ * sessions must not publish `amount_received: 0`. Falls back to
+ * `amount_total` (omit if missing — never invent 0). Proven `$0`
+ * `no_payment_required` publishes `amount_total: 0` via that fallback.
  */
 function stripeCheckoutPublishedAmountMinor(session: {
+  payment_status?: unknown;
   payment_intent?: unknown;
   latest_charge?: unknown;
   charges?: { data?: Array<StripeChargeSnapshot> };
@@ -1248,11 +1263,16 @@ function stripeCheckoutPublishedAmountMinor(session: {
   amount_total?: unknown;
   amount_received?: unknown;
 }): number | undefined {
-  const hydrated = stripeCheckoutHydratedRefundSource(session);
-  if (hydrated !== undefined) {
-    const settled = resolveStripeCapturedMinor(hydrated);
-    if (settled !== undefined) {
-      return settled;
+  if (
+    session.payment_status === "paid" ||
+    stripeCheckoutPiSucceeded(session)
+  ) {
+    const hydrated = stripeCheckoutHydratedRefundSource(session);
+    if (hydrated !== undefined) {
+      const settled = resolveStripeCapturedMinor(hydrated);
+      if (settled !== undefined && settled > 0) {
+        return settled;
+      }
     }
   }
   return finiteStripeMinor(session.amount_total);
@@ -1537,12 +1557,12 @@ function mapStripeStoredPaymentMethodType(
 
 function mapStripeCustomer(
   customer: StripeCustomerObject,
+  missingIdentity: (message: string, raw: unknown) => never,
 ): Customer {
-  const id = requireStripeMutationId(
-    customer.id,
-    "Stripe Customer response missing id",
-    customer,
-  );
+  const id = isNonEmptyStripeString(customer.id) ? customer.id : undefined;
+  if (id === undefined) {
+    missingIdentity("Stripe Customer response missing id", customer);
+  }
   const snapshot: Customer = {
     status: customer.deleted === true ? "deleted" : "active",
     references: buildProviderReferences({
@@ -1562,30 +1582,51 @@ function mapStripeCustomer(
   return snapshot;
 }
 
+function mapStripeCustomerFromGet(customer: StripeCustomerObject): Customer {
+  return mapStripeCustomer(customer, (message, raw) => {
+    throw new NetworkError(message, raw);
+  });
+}
+
+function mapStripeCustomerAfterSubmit(
+  customer: StripeCustomerObject,
+): Customer {
+  return mapStripeCustomer(customer, (message, raw) => {
+    throwStripeIndeterminateResponse(message, raw);
+  });
+}
+
 function mapStripePaymentMethod(
   pm: StripePaymentMethodObject,
-  fallbackCustomerId?: string,
+  fallbackCustomerId: string | undefined,
+  missingIdentity: (message: string, raw: unknown) => never,
 ): StoredPaymentMethod {
-  const id = requireStripeMutationId(
-    pm.id,
-    "Stripe PaymentMethod response missing id",
-    pm,
-  );
-  const customerId =
-    typeof pm.customer === "string" && pm.customer.length > 0
+  const id = isNonEmptyStripeString(pm.id) ? pm.id : undefined;
+  if (id === undefined) {
+    missingIdentity("Stripe PaymentMethod response missing id", pm);
+  }
+  const resolvedCustomerId =
+    (typeof pm.customer === "string" && pm.customer.length > 0
       ? pm.customer
-      : (fallbackCustomerId ?? "");
+      : undefined) ??
+    (typeof fallbackCustomerId === "string" && fallbackCustomerId.length > 0
+      ? fallbackCustomerId
+      : undefined);
   const snapshot: StoredPaymentMethod = {
     id,
-    customerId,
     type: mapStripeStoredPaymentMethodType(pm),
     references: buildProviderReferences({
       gateway: "stripe",
       gatewayId: id,
       status: "active",
-      customerId,
+      ...(resolvedCustomerId !== undefined
+        ? { customerId: resolvedCustomerId }
+        : {}),
     }),
   };
+  if (resolvedCustomerId !== undefined) {
+    snapshot.customerId = resolvedCustomerId;
+  }
   const brand = pm.card?.brand;
   if (typeof brand === "string" && brand.length > 0) {
     snapshot.brand = brand;
@@ -1600,6 +1641,24 @@ function mapStripePaymentMethod(
     snapshot.last4 = last4;
   }
   return snapshot;
+}
+
+function mapStripePaymentMethodFromGet(
+  pm: StripePaymentMethodObject,
+  fallbackCustomerId?: string,
+): StoredPaymentMethod {
+  return mapStripePaymentMethod(pm, fallbackCustomerId, (message, raw) => {
+    throw new NetworkError(message, raw);
+  });
+}
+
+function mapStripePaymentMethodAfterSubmit(
+  pm: StripePaymentMethodObject,
+  fallbackCustomerId?: string,
+): StoredPaymentMethod {
+  return mapStripePaymentMethod(pm, fallbackCustomerId, (message, raw) => {
+    throwStripeIndeterminateResponse(message, raw);
+  });
 }
 
 function stripeNotFoundFailed(
@@ -1772,12 +1831,14 @@ function stripePaymentLinkPathId(paymentLinkId: string): string {
   return encodeURIComponent(paymentLinkId);
 }
 
-function mapStripeDispute(object: StripeDisputeObject): Dispute {
-  const id = requireStripeMutationId(
-    object.id,
-    "Stripe Dispute response missing id",
-    object,
-  );
+function mapStripeDispute(
+  object: StripeDisputeObject,
+  missingIdentity: (message: string, raw: unknown) => never,
+): Dispute {
+  const id = isNonEmptyStripeString(object.id) ? object.id : undefined;
+  if (id === undefined) {
+    missingIdentity("Stripe Dispute response missing id", object);
+  }
   const native =
     typeof object.status === "string" && object.status.trim().length > 0
       ? object.status
@@ -1835,6 +1896,18 @@ function mapStripeDispute(object: StripeDisputeObject): Dispute {
     }
   }
   return snapshot;
+}
+
+function mapStripeDisputeFromGet(object: StripeDisputeObject): Dispute {
+  return mapStripeDispute(object, (message, raw) => {
+    throw new NetworkError(message, raw);
+  });
+}
+
+function mapStripeDisputeAfterSubmit(object: StripeDisputeObject): Dispute {
+  return mapStripeDispute(object, (message, raw) => {
+    throwStripeIndeterminateResponse(message, raw);
+  });
 }
 
 function mapStripePaymentLink(object: StripePaymentLinkObject): PaymentLink {
@@ -2292,6 +2365,12 @@ export class StripeGateway extends BaseGateway {
               "off-session createPayment requires a stored payment method id",
             );
           }
+          if (!customerId) {
+            throw new InvalidRequestError(
+              "off-session createPayment requires a customer id",
+            );
+          }
+          assertStripeCustomerId(customerId);
           body.off_session = true;
           body.confirm = true;
           body.automatic_payment_methods.allow_redirects = "never";
@@ -2824,7 +2903,7 @@ export class StripeGateway extends BaseGateway {
         try {
           session = await this.stripeRequest<StripeCheckoutSession>(
             "GET",
-            `/checkout/sessions/${sessionPathId}?expand[]=payment_intent`,
+            `/checkout/sessions/${sessionPathId}?expand[]=payment_intent&expand[]=payment_intent.latest_charge`,
             undefined,
             undefined,
             extractAbortSignal(p),
@@ -3042,6 +3121,7 @@ export class StripeGateway extends BaseGateway {
           ? response.url
           : undefined;
         const status = checkoutSessionStatus(response.status);
+        const paymentIntentId = expandableId(response.payment_intent);
         const session: CheckoutSession = {
           status,
           references: buildProviderReferences({
@@ -3051,6 +3131,9 @@ export class StripeGateway extends BaseGateway {
             ...(typeof p.idempotencyKey === "string" &&
             p.idempotencyKey.length > 0
               ? { internalReference: p.idempotencyKey }
+              : {}),
+            ...(paymentIntentId !== undefined
+              ? { relatedIds: { paymentIntentId } }
               : {}),
           }),
           rawResponse: response,
@@ -3108,7 +3191,7 @@ export class StripeGateway extends BaseGateway {
       );
       return {
         outcome: "succeeded" as const,
-        customer: mapStripeCustomer(response),
+        customer: mapStripeCustomerAfterSubmit(response),
       };
     });
   }
@@ -3128,7 +3211,7 @@ export class StripeGateway extends BaseGateway {
         );
         return {
           outcome: "succeeded" as const,
-          customer: mapStripeCustomer(response),
+          customer: mapStripeCustomerFromGet(response),
         };
       } catch (error) {
         const failed = stripeNotFoundFailed(error);
@@ -3185,7 +3268,7 @@ export class StripeGateway extends BaseGateway {
       );
       return {
         outcome: "succeeded" as const,
-        paymentMethod: mapStripePaymentMethod(response, customerId),
+        paymentMethod: mapStripePaymentMethodAfterSubmit(response, customerId),
       };
     });
   }
@@ -3195,22 +3278,48 @@ export class StripeGateway extends BaseGateway {
   ): Promise<ListPaymentMethodsResult> {
     return this.executeWithHooks("listPaymentMethods", params, async (p) => {
       const customerId = assertStripeCustomerId(p.customerId);
-      const query = new URLSearchParams({ customer: customerId });
-      const response = await this.stripeRequest<{
-        data?: StripePaymentMethodObject[];
-      }>(
-        "GET",
-        `/payment_methods?${query.toString()}`,
-        undefined,
-        undefined,
-        extractAbortSignal(p),
-      );
-      const data = Array.isArray(response.data) ? response.data : [];
+      const pathId = stripeCustomerPathId(customerId);
+      const paymentMethods: StoredPaymentMethod[] = [];
+      let startingAfter: string | undefined;
+      const signal = extractAbortSignal(p);
+
+      do {
+        const query = new URLSearchParams({
+          limit: "100",
+        });
+        if (startingAfter) {
+          query.set("starting_after", startingAfter);
+        }
+        const page = await this.stripeRequest<
+          StripeListResponse<StripePaymentMethodObject>
+        >(
+          "GET",
+          `/customers/${pathId}/payment_methods?${query.toString()}`,
+          undefined,
+          undefined,
+          signal,
+        );
+        const data = Array.isArray(page.data) ? page.data : [];
+        for (const pm of data) {
+          paymentMethods.push(mapStripePaymentMethodFromGet(pm, customerId));
+        }
+        if (page.has_more === true) {
+          const lastId = data.at(-1)?.id;
+          if (!isNonEmptyStripeString(lastId)) {
+            throw new NetworkError(
+              "Stripe PaymentMethod list page missing cursor id",
+              page,
+            );
+          }
+          startingAfter = lastId;
+        } else {
+          startingAfter = undefined;
+        }
+      } while (startingAfter);
+
       return {
         outcome: "succeeded" as const,
-        paymentMethods: data.map((pm) =>
-          mapStripePaymentMethod(pm, customerId),
-        ),
+        paymentMethods,
       };
     });
   }
@@ -3234,7 +3343,7 @@ export class StripeGateway extends BaseGateway {
       );
       return {
         outcome: "succeeded" as const,
-        paymentMethod: mapStripePaymentMethod(response, p.customerId),
+        paymentMethod: mapStripePaymentMethodAfterSubmit(response, p.customerId),
       };
     });
   }
@@ -3254,7 +3363,7 @@ export class StripeGateway extends BaseGateway {
         );
         return {
           outcome: "succeeded" as const,
-          dispute: mapStripeDispute(response),
+          dispute: mapStripeDisputeFromGet(response),
         };
       } catch (error) {
         const failed = stripeNotFoundFailed(error);
@@ -3286,6 +3395,9 @@ export class StripeGateway extends BaseGateway {
           "Stripe listDisputes paymentId must be a PaymentIntent (pi_) or Charge (ch_) id",
         );
       }
+      // PI/charge-bound dispute lists are expected tiny (typically 0–1
+      // dispute per charge). Payment-method listing must page (limit=100
+      // + starting_after); disputes stay a single request.
       const response = await this.stripeRequest<{
         data?: StripeDisputeObject[];
       }>(
@@ -3298,7 +3410,7 @@ export class StripeGateway extends BaseGateway {
       const data = Array.isArray(response.data) ? response.data : [];
       return {
         outcome: "succeeded" as const,
-        disputes: data.map((item) => mapStripeDispute(item)),
+        disputes: data.map((item) => mapStripeDisputeFromGet(item)),
       };
     });
   }
@@ -3345,7 +3457,7 @@ export class StripeGateway extends BaseGateway {
         );
         return {
           outcome: "succeeded" as const,
-          dispute: mapStripeDispute(response),
+          dispute: mapStripeDisputeAfterSubmit(response),
         };
       },
     );

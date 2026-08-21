@@ -3587,6 +3587,62 @@ describe("StripeGateway", () => {
       expect(result.session.currency).toBe("USD");
     });
 
+    it("P22-CKO-CREATE-PI: HTTP 200 maps payment_intent onto relatedIds.paymentIntentId", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_with_pi",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/test",
+          status: "open",
+          payment_status: "unpaid",
+          payment_intent: "pi_from_create",
+        }),
+      ) as unknown as typeof fetch;
+
+      const asString = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_create_pi_string",
+      });
+
+      expect(asString.outcome).toBe("succeeded");
+      if (asString.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(asString.session.references.relatedIds?.paymentIntentId).toBe(
+        "pi_from_create",
+      );
+
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_with_pi_obj",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/test",
+          status: "open",
+          payment_status: "unpaid",
+          payment_intent: { id: "pi_from_create_obj" },
+        }),
+      ) as unknown as typeof fetch;
+
+      const asObject = await gateway.createCheckoutSession({
+        amount: 100,
+        currency: "USD",
+        successUrl: "https://success",
+        cancelUrl: "https://cancel",
+        idempotencyKey: "idem_stripe_create_pi_obj",
+      });
+
+      expect(asObject.outcome).toBe("succeeded");
+      if (asObject.outcome !== "succeeded") {
+        expect.unreachable("createCheckoutSession must succeed");
+      }
+      expect(asObject.session.references.relatedIds?.paymentIntentId).toBe(
+        "pi_from_create_obj",
+      );
+    });
+
     it("P22-CKO-CREATE-AMOUNT: amount_total without currency omits amount", async () => {
       globalThis.fetch = mock(async () =>
         createMockResponse({
@@ -5697,6 +5753,7 @@ describe("StripeGateway", () => {
 
       expect(requestedUrl).toContain("/checkout/sessions/cs_test_session_1");
       expect(requestedUrl).toContain("expand[]=payment_intent");
+      expect(requestedUrl).toContain("expand[]=payment_intent.latest_charge");
       expect(result.outcome).toBe("succeeded");
       if (result.outcome !== "succeeded") {
         expect.unreachable("getCheckoutSession must succeed");
@@ -5796,6 +5853,40 @@ describe("StripeGateway", () => {
       expect(result.session.paymentStatus).not.toBe("paid");
       expect(result.session.amount).toBe(100);
       expect(result.session.refundedAmount).toBe(100);
+      expect(result.session.currency).toBe("USD");
+    });
+
+    it("P22-CKO-GET-ZERO: open unpaid GET publishes amount_total, not amount_received 0", async () => {
+      globalThis.fetch = mock(async () =>
+        createMockResponse({
+          id: "cs_open_unpaid",
+          object: "checkout.session",
+          url: "https://checkout.stripe.com/c/session",
+          status: "open",
+          payment_status: "unpaid",
+          amount_total: 1000,
+          currency: "usd",
+          payment_intent: {
+            id: "pi_open_unpaid",
+            amount: 1000,
+            amount_received: 0,
+            currency: "usd",
+          },
+        }),
+      ) as unknown as typeof fetch;
+
+      const result = await gateway.getCheckoutSession({
+        sessionId: "cs_open_unpaid",
+      });
+
+      expect(result.outcome).toBe("succeeded");
+      if (result.outcome !== "succeeded") {
+        expect.unreachable("getCheckoutSession must succeed");
+      }
+      expect(result.session.status).toBe("open");
+      expect(result.session.paymentStatus).toBe("unpaid");
+      expect(result.session.amount).toBe(10);
+      expect(result.session.amount).not.toBe(0);
       expect(result.session.currency).toBe("USD");
     });
 

@@ -1,10 +1,10 @@
 /**
- * BaseGateway post-submit indeterminate identity (CORE-7).
+ * BaseGateway post-submit indeterminate identity (CORE-7 / P22-IND-LOOKUP).
  */
 import { describe, it, expect } from "bun:test";
 import { BaseGateway } from "./base.gateway";
 import { HooksManager } from "../hooks/hooks.manager";
-import { NetworkError } from "../errors";
+import { InvalidRequestError, NetworkError } from "../errors";
 import type {
   CreatePaymentParams,
   CaptureParams,
@@ -12,19 +12,41 @@ import type {
   GatewayPaymentResult,
   GatewayRefundResult,
 } from "../types/payment.types";
+import type {
+  AttachPaymentMethodParams,
+  CreateCustomerParams,
+  CustomerOperationResult,
+  DetachPaymentMethodParams,
+  GetCustomerParams,
+  PaymentMethodOperationResult,
+} from "../types/customer.types";
+import type {
+  DisputeOperationResult,
+  GetDisputeParams,
+  SubmitDisputeEvidenceParams,
+} from "../types/dispute.types";
+import type {
+  CreatePaymentLinkParams,
+  DeactivatePaymentLinkParams,
+  PaymentLinkOperationResult,
+} from "../types/payment-link.types";
 import type { WebhookEvent } from "../types/webhook.types";
 
 class TestGateway extends BaseGateway {
   readonly name = "test";
   failWith: Error | undefined;
 
-  constructor() {
-    super({}, new HooksManager(), undefined, {
+  constructor(hooks: HooksManager = new HooksManager()) {
+    super({}, hooks, undefined, {
       payments: true,
       immediateCapture: true,
       refunds: true,
       voids: true,
       hostedCheckout: true,
+      customers: true,
+      paymentMethods: true,
+      disputes: true,
+      paymentLinks: true,
     });
   }
 
@@ -137,6 +159,160 @@ class TestGateway extends BaseGateway {
           },
           paymentStatus: "unpaid",
           rawResponse: {},
+        },
+      };
+    });
+  }
+
+  async createCustomer(
+    params: CreateCustomerParams,
+  ): Promise<CustomerOperationResult> {
+    return this.executeWithHooks("createCustomer", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        customer: {
+          status: "active" as const,
+          references: {
+            providerObjectId: "cus_ok",
+            normalizedStatus: "active",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async getCustomer(params: GetCustomerParams): Promise<CustomerOperationResult> {
+    return this.executeWithHooks("getCustomer", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        customer: {
+          status: "active" as const,
+          references: {
+            providerObjectId: params.customerId,
+            normalizedStatus: "active",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async attachPaymentMethod(
+    params: AttachPaymentMethodParams,
+  ): Promise<PaymentMethodOperationResult> {
+    return this.executeWithHooks("attachPaymentMethod", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        paymentMethod: {
+          id: params.paymentMethodId ?? "pm_ok",
+          customerId: params.customerId,
+          type: "card" as const,
+          references: {
+            providerObjectId: params.paymentMethodId ?? "pm_ok",
+            normalizedStatus: "active",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async detachPaymentMethod(
+    params: DetachPaymentMethodParams,
+  ): Promise<PaymentMethodOperationResult> {
+    return this.executeWithHooks("detachPaymentMethod", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        paymentMethod: {
+          id: params.paymentMethodId,
+          customerId: params.customerId ?? "unknown",
+          type: "card" as const,
+          references: {
+            providerObjectId: params.paymentMethodId,
+            normalizedStatus: "active",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async submitDisputeEvidence(
+    params: SubmitDisputeEvidenceParams,
+  ): Promise<DisputeOperationResult> {
+    return this.executeWithHooks("submitDisputeEvidence", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        dispute: {
+          status: "under_review",
+          references: {
+            providerObjectId: params.disputeId,
+            normalizedStatus: "under_review",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async getDispute(params: GetDisputeParams): Promise<DisputeOperationResult> {
+    return this.executeWithHooks("getDispute", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        dispute: {
+          status: "needs_response",
+          references: {
+            providerObjectId: params.disputeId,
+            normalizedStatus: "needs_response",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async createPaymentLink(
+    params: CreatePaymentLinkParams,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.executeWithHooks("createPaymentLink", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        paymentLink: {
+          status: "active" as const,
+          url: "https://checkout.test/link",
+          references: {
+            providerObjectId: "plink_ok",
+            normalizedStatus: "active",
+            gateway: this.name,
+          },
+        },
+      };
+    });
+  }
+
+  async deactivatePaymentLink(
+    params: DeactivatePaymentLinkParams,
+  ): Promise<PaymentLinkOperationResult> {
+    return this.executeWithHooks("deactivatePaymentLink", params, async () => {
+      if (this.failWith) throw this.failWith;
+      return {
+        outcome: "succeeded" as const,
+        paymentLink: {
+          status: "inactive" as const,
+          url: "https://checkout.test/link",
+          references: {
+            providerObjectId: params.paymentLinkId,
+            normalizedStatus: "inactive",
+            gateway: this.name,
+          },
         },
       };
     });
@@ -274,5 +450,164 @@ describe("BaseGateway CORE-7 post-submit identity", () => {
     await expect(
       gw.getCheckoutSession({ sessionId: "cs_get_timeout" }),
     ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("P22-IND-LOOKUP: createCustomer POST timeout is customer-shaped indeterminate with lookup identity", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.createCustomer({
+      email: "buyer@example.com",
+      idempotencyKey: "idem_cus_timeout",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.message).toBe("timed out after 30000ms");
+    expect(result.customer?.status).toBe("unknown");
+    expect(result.customer?.status).not.toBe("active");
+    expect(result.customer?.references.providerObjectId).toBe("idem_cus_timeout");
+    expect(result).not.toEqual(expect.objectContaining({ status: "active" }));
+  });
+
+  it("P22-IND-LOOKUP: createCustomer timeout without identity stays unknown", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.createCustomer({ email: "buyer@example.com" });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.customer?.references.providerObjectId).toBe("unknown");
+    expect(result.customer?.status).toBe("unknown");
+  });
+
+  it("P22-IND-LOOKUP: attachPaymentMethod timeout uses providerObjectIdFromParams lookup", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.attachPaymentMethod({
+      customerId: "cus_lookup",
+      paymentMethodId: "pm_1",
+      idempotencyKey: "idem_pm_attach",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.message).toBe("timed out after 30000ms");
+    expect(result.paymentMethod?.references.providerObjectId).toBe("pm_1");
+    expect(result.paymentMethod?.id).toBe("pm_1");
+    expect(result.paymentMethod?.references.normalizedStatus).toBe("unknown");
+    expect(result.paymentMethod?.references.normalizedStatus).not.toBe("active");
+  });
+
+  it("P22-IND-LOOKUP: detachPaymentMethod timeout snapshots paymentMethod lookup id", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.detachPaymentMethod({
+      paymentMethodId: "pm_detach_1",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.paymentMethod?.references.providerObjectId).toBe("pm_detach_1");
+    expect(result.paymentMethod?.id).toBe("pm_detach_1");
+    expect(result.paymentMethod?.references.normalizedStatus).not.toBe("active");
+  });
+
+  it("P22-IND-LOOKUP: submitDisputeEvidence timeout is dispute-shaped unknown, not open/won", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.submitDisputeEvidence({
+      disputeId: "dp_ev_1",
+      evidence: { uncategorizedText: "receipt on file" },
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.message).toBe("timed out after 30000ms");
+    expect(result.dispute?.references.providerObjectId).toBe("dp_ev_1");
+    expect(result.dispute?.status).toBe("unknown");
+    expect(result.dispute?.status).not.toBe("needs_response");
+    expect(result.dispute?.status).not.toBe("under_review");
+  });
+
+  it("P22-IND-LOOKUP: getDispute stays throwing on afterProviderSubmit NetworkError", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    await expect(gw.getDispute({ disputeId: "dp_get_1" })).rejects.toBeInstanceOf(
+      NetworkError,
+    );
+  });
+
+  it("P22-IND-LOOKUP: createPaymentLink timeout uses idempotencyKey lookup and does not invent active", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.createPaymentLink({
+      amount: 10,
+      currency: "USD",
+      idempotencyKey: "idem_plink_timeout",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.message).toBe("timed out after 30000ms");
+    expect(result.paymentLink?.references.providerObjectId).toBe(
+      "idem_plink_timeout",
+    );
+    expect(result.paymentLink?.status).toBe("unknown");
+    expect(result.paymentLink?.status).not.toBe("active");
+    expect(result.paymentLink?.url).toBeUndefined();
+  });
+
+  it("P22-IND-LOOKUP: deactivatePaymentLink timeout uses paymentLinkId lookup", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    const result = await gw.deactivatePaymentLink({
+      paymentLinkId: "plink_deact_1",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.paymentLink?.references.providerObjectId).toBe("plink_deact_1");
+    expect(result.paymentLink?.status).toBe("unknown");
+    expect(result.paymentLink?.status).not.toBe("inactive");
+  });
+
+  it("P22-IND-LOOKUP: getCustomer stays throwing on afterProviderSubmit NetworkError", async () => {
+    const gw = new TestGateway();
+    gw.failWith = postSubmitTimeout();
+    await expect(
+      gw.getCustomer({ customerId: "cus_get_1" }),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("P22-IND-LOOKUP: before-hooks cannot inject raw card material past executeWithHooks", async () => {
+    const hooks = new HooksManager({
+      onBefore: (ctx) => ({
+        proceed: true,
+        params: {
+          ...(ctx.params as object),
+          cardNumber: "4242424242424242",
+        },
+      }),
+    });
+    const gw = new TestGateway(hooks);
+    await expect(
+      gw.attachPaymentMethod({
+        customerId: "cus_1",
+        paymentMethodId: "pm_1",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("P22-PCI: before-hooks cannot inject metadata PAN on createPayment", async () => {
+    const hooks = new HooksManager({
+      onBefore: (ctx) => ({
+        proceed: true,
+        params: {
+          ...(ctx.params as object),
+          metadata: { pan: "4242424242424242" },
+        },
+      }),
+    });
+    const gw = new TestGateway(hooks);
+    await expect(
+      gw.createPayment({
+        amount: 10,
+        currency: "SAR",
+        callbackUrl: "https://merchant.example/callback",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
   });
 });

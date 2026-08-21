@@ -258,6 +258,10 @@ const PAYPAL_WEBHOOK_EVENTS_WITHOUT_AMOUNT = new Set([
   "PAYMENT.CAPTURE.REFUNDED",
   // Publishes 0 remaining when face present; omit is still valid if no money data.
   "PAYMENT.CAPTURE.REVERSED",
+  // Dispute webhooks dual-write dispute.*; amount is optional.
+  "CUSTOMER.DISPUTE.CREATED",
+  "CUSTOMER.DISPUTE.UPDATED",
+  "CUSTOMER.DISPUTE.RESOLVED",
 ]);
 const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_ID = new Set([
   "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
@@ -265,6 +269,72 @@ const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_ID = new Set([
 const PAYPAL_WEBHOOK_EVENTS_WITHOUT_RESOURCE_STATUS = new Set([
   "CHECKOUT.PAYMENT-APPROVAL.REVERSED",
 ]);
+
+function isPayPalCustomerDisputeEventType(eventType: string): boolean {
+  return (
+    eventType === "CUSTOMER.DISPUTE.CREATED" ||
+    eventType === "CUSTOMER.DISPUTE.UPDATED" ||
+    eventType === "CUSTOMER.DISPUTE.RESOLVED"
+  );
+}
+
+/**
+ * Envelope status for PayPal dispute webhooks is the dispute lifecycle —
+ * never `paid`, never generic payment `pending`. Does not widen PaymentStatus;
+ * lifecycle strings are asserted onto the 0.x envelope field (P22-ENVELOPE).
+ */
+function paypalDisputeEnvelopeStatus(
+  eventType: string,
+  resourceStatus?: string,
+  outcomeCode?: string,
+): PaymentStatus {
+  const native = (resourceStatus ?? "").trim().toUpperCase();
+  const outcome = (outcomeCode ?? "").trim().toUpperCase();
+
+  if (native === "WAITING_FOR_SELLER_RESPONSE" || native === "OPEN") {
+    return "needs_response" as PaymentStatus;
+  }
+  if (
+    native === "UNDER_REVIEW" ||
+    native === "WAITING_FOR_BUYER_RESPONSE"
+  ) {
+    return "under_review" as PaymentStatus;
+  }
+  if (native === "RESOLVED" || eventType === "CUSTOMER.DISPUTE.RESOLVED") {
+    if (
+      outcome === "RESOLVED_SELLER" ||
+      outcome === "CANCELED_BY_BUYER" ||
+      outcome === "DENIED"
+    ) {
+      return "won" as PaymentStatus;
+    }
+    if (outcome === "RESOLVED_BUYER" || outcome === "ACCEPTED") {
+      return "lost" as PaymentStatus;
+    }
+    return "processing";
+  }
+  if (eventType === "CUSTOMER.DISPUTE.CREATED") {
+    return "needs_response" as PaymentStatus;
+  }
+  return "processing";
+}
+
+function readPayPalDisputeOutcomeCode(
+  resource: PayPalWebhookPayload["resource"],
+): string | undefined {
+  const outcome = (
+    resource as { dispute_outcome?: { outcome_code?: unknown } }
+  ).dispute_outcome;
+  if (
+    outcome !== null &&
+    typeof outcome === "object" &&
+    typeof outcome.outcome_code === "string" &&
+    outcome.outcome_code.trim().length > 0
+  ) {
+    return outcome.outcome_code;
+  }
+  return undefined;
+}
 
 /**
  * Retry with exponential backoff.
@@ -1214,6 +1284,8 @@ export class PayPalGateway extends BaseGateway {
    *
    * Dual-writes Phase 7 PaymentEvent. Note: `PAYMENT.CAPTURE.COMPLETED` maps to
    * stable `capture.completed` (not `payment.succeeded`) — see webhook-events.md.
+   * `CUSTOMER.DISPUTE.CREATED` / `UPDATED` / `RESOLVED` dual-write `dispute.*`
+   * with dispute-lifecycle envelope status (never `paid` / payment `pending`).
    *
    * NEW-PERF-1: `payloadHash` is a compact identity
    * `{ id, type, create_time, resource }` (resource.id), not the full raw tree.
@@ -1221,6 +1293,10 @@ export class PayPalGateway extends BaseGateway {
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
     const raw = this.validateWebhookPayload(this.coerceWebhookPayload(payload));
+
+    if (isPayPalCustomerDisputeEventType(raw.event_type)) {
+      return this.parseCustomerDisputeWebhookEvent(raw);
+    }
 
     // Extract capture ID if available. Refund webhooks identify the refund as
     // resource.id and link back to the affected capture with rel="up".
@@ -1384,6 +1460,63 @@ export class PayPalGateway extends BaseGateway {
       ),
       captureId,
     );
+  }
+
+  /**
+   * CUSTOMER.DISPUTE.* — dual-write dispute.opened/updated/closed.
+   * Envelope IDs are the dispute resource id (not a capture). Amount optional.
+   */
+  private parseCustomerDisputeWebhookEvent(
+    raw: PayPalWebhookPayload,
+  ): WebhookEvent {
+    const disputeId = raw.resource.id;
+    if (!disputeId) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: missing dispute identifier",
+        "paypal",
+        raw,
+      );
+    }
+
+    const disputeOutcome = readPayPalDisputeOutcomeCode(raw.resource);
+    const status = this.mapWebhookStatus(raw.event_type, raw.resource.status, {
+      ...(disputeOutcome !== undefined ? { disputeOutcome } : {}),
+    });
+    if (!status) {
+      throw new InvalidRequestError(
+        `Unsupported PayPal webhook event: ${raw.event_type}`,
+      );
+    }
+
+    const eventTimestamp = new Date(raw.create_time);
+    if (!Number.isFinite(eventTimestamp.getTime())) {
+      throw new GatewayApiError(
+        "Invalid webhook payload: invalid create_time",
+        "paypal",
+        raw,
+      );
+    }
+
+    const event: WebhookEvent = {
+      id: raw.id,
+      type: raw.event_type,
+      gateway: "paypal",
+      paymentId: this.extractWebhookPaymentId(raw),
+      gatewayPaymentId: disputeId,
+      gatewayObjectId: disputeId,
+      status,
+      timestamp: eventTimestamp,
+      rawPayload: raw,
+    };
+
+    const attached = attachPaymentEvent(event);
+    attached.payloadHash = hashWebhookPayload({
+      id: raw.id,
+      type: raw.event_type,
+      create_time: raw.create_time,
+      resource: raw.resource.id,
+    });
+    return attached;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -3059,8 +3192,17 @@ export class PayPalGateway extends BaseGateway {
       hasCapture?: boolean;
       hasAuthorization?: boolean;
       finalCapture?: boolean;
+      disputeOutcome?: string;
     },
   ): PaymentStatus | undefined {
+    if (isPayPalCustomerDisputeEventType(eventType)) {
+      return paypalDisputeEnvelopeStatus(
+        eventType,
+        resourceStatus,
+        options?.disputeOutcome,
+      );
+    }
+
     if (eventType === "PAYMENT.CAPTURE.REFUNDED") {
       const resourceMappedStatus = resourceStatus
         ? this.mapResourceStatus(resourceStatus)

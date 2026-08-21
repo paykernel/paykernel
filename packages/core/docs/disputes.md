@@ -26,4 +26,6 @@ Small common fields (`uncategorizedText`, `customerName`, `customerEmail`, `prod
 
 `charge.dispute.*` dual-writes `dispute.opened` / `dispute.updated` / `dispute.closed`. Envelope `WebhookEvent.status` is the Stripe dispute lifecycle (or `processing` if missing) — **never** generic payment `pending`. Do not last-write a paid payment to pending. Handle the `PaymentEvent` dispute arm; do not treat these as payment lifecycle.
 
+PayPal `CUSTOMER.DISPUTE.CREATED` / `UPDATED` / `RESOLVED` parse the same way (dual-write `dispute.opened` / `updated` / `closed`; envelope IDs are the dispute resource id). Envelope `event.status` on dispute webhooks is **dispute lifecycle** (`needs_response` / `under_review` / `won` / `lost` / `processing`) — persist `event.event.dispute`, never last-write `event.status` onto a payment row.
+
 Dashboard URLs are constructed (`dashboard.stripe.com` vs `/test` from livemode), not returned by Stripe.

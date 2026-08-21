@@ -11,6 +11,7 @@ import type {
   PaymentMetadata,
 } from "./payment.types";
 import type { ProviderReferences } from "./provider-refs";
+import { buildProviderReferences } from "./provider-refs";
 
 /** Customer object lifecycle on this SDK surface. */
 export type CustomerStatus = "active" | "deleted";
@@ -35,7 +36,8 @@ export interface GetCustomerParams extends OperationRequestOptions {
 }
 
 export type Customer = {
-  status: CustomerStatus;
+  /** `unknown` is reserved for post-submit indeterminate snapshots. */
+  status: CustomerStatus | string;
   email?: string;
   name?: string;
   references: ProviderReferences;
@@ -66,7 +68,8 @@ export type StoredPaymentMethodType = "card" | "wallet" | "bank" | "other";
 
 export type StoredPaymentMethod = {
   id: string;
-  customerId: string;
+  /** Omitted when the provider snapshot has no customer (e.g. detached). */
+  customerId?: string;
   type: StoredPaymentMethodType;
   brand?: string;
   last4?: string;
@@ -110,3 +113,83 @@ export type PaymentMethodOperationResult =
 export type ListPaymentMethodsResult =
   | { outcome: "succeeded"; paymentMethods: StoredPaymentMethod[] }
   | { outcome: "failed"; error: PaymentErrorLike };
+
+function indeterminateLookupRefs(input: {
+  gateway: string;
+  lookupId: string;
+  customerId?: string;
+}): ProviderReferences {
+  return buildProviderReferences({
+    gateway: input.gateway,
+    gatewayId: input.lookupId,
+    status: "unknown",
+    ...(input.lookupId !== "unknown" ? { internalReference: input.lookupId } : {}),
+    ...(input.customerId !== undefined ? { customerId: input.customerId } : {}),
+    providerNativeStatus: "indeterminate",
+  });
+}
+
+/**
+ * Post-submit unknown for `createCustomer`.
+ * Must not invent Customer `active` — the provider may never have created it.
+ */
+export function applyIndeterminateCustomerOutcome(input: {
+  customerId: string;
+  message: string;
+  errorName: string;
+  gateway: string;
+}): CustomerOperationResult {
+  const lookupId = input.customerId;
+  const customer: Customer = {
+    status: "unknown",
+    references: indeterminateLookupRefs({
+      gateway: input.gateway,
+      lookupId,
+    }),
+    rawResponse: {
+      indeterminate: true,
+      message: input.message,
+      name: input.errorName,
+    },
+  };
+  return {
+    outcome: "indeterminate",
+    reconciliationRequired: true,
+    message: input.message,
+    customer,
+  };
+}
+
+/**
+ * Post-submit unknown for `attachPaymentMethod` / `detachPaymentMethod`.
+ * Must not invent `active` stored-method lifecycle.
+ */
+export function applyIndeterminatePaymentMethodOutcome(input: {
+  paymentMethodId: string;
+  customerId?: string;
+  message: string;
+  errorName: string;
+  gateway: string;
+}): PaymentMethodOperationResult {
+  const lookupId = input.paymentMethodId;
+  const customerId =
+    input.customerId !== undefined && input.customerId.length > 0
+      ? input.customerId
+      : "unknown";
+  const paymentMethod: StoredPaymentMethod = {
+    id: lookupId,
+    customerId,
+    type: "other",
+    references: indeterminateLookupRefs({
+      gateway: input.gateway,
+      lookupId,
+      ...(customerId !== "unknown" ? { customerId } : {}),
+    }),
+  };
+  return {
+    outcome: "indeterminate",
+    reconciliationRequired: true,
+    message: input.message,
+    paymentMethod,
+  };
+}

@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { StripeGateway } from "./stripe.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
 import type { StripeConfig } from "../../types/config.types";
-import { InvalidRequestError } from "../../index";
+import { InvalidRequestError, NetworkError } from "../../index";
 
 const STRIPE_TEST_CONFIG: StripeConfig = {
   secretKey: "sk_test_123",
@@ -103,6 +103,29 @@ describe("StripeGateway disputes", () => {
       expect(result.dispute.providerStatus).toBe(providerStatus);
     },
   );
+
+  it("P22-GET-FLAG-2: GET 200 dispute body without id is not afterProviderSubmit", async () => {
+    globalThis.fetch = mock(async () =>
+      createMockResponse({
+        object: "dispute",
+        status: "needs_response",
+        currency: "usd",
+        amount: 1000,
+      }),
+    ) as unknown as typeof fetch;
+
+    let thrown: unknown;
+    try {
+      await gateway.getDispute({ disputeId: "dp_noid" });
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(NetworkError);
+    if (!(thrown instanceof NetworkError)) {
+      expect.unreachable("GET missing id must throw NetworkError");
+    }
+    expect(thrown.afterProviderSubmit).not.toBe(true);
+  });
 
   it("listDisputes requires a pi_ or ch_ bound", async () => {
     await expect(gateway.listDisputes({})).rejects.toBeInstanceOf(

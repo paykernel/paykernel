@@ -61,7 +61,7 @@ Stripe metadata values must be scalar strings, numbers, or booleans. Nested meta
 ```typescript
 const stripe = client.gateway('stripe');
 
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
     mode: 'payment',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
@@ -83,10 +83,15 @@ const session = await stripe.createCheckoutSession({
     ],
 });
 
-// Phase 22.2: outcome union. Redirect `session.url` when `outcome === "succeeded"`.
+if (result.outcome === 'succeeded') {
+    if (result.session.url) {
+        redirect(result.session.url);
+    }
+    const sessionId = result.session.references.providerObjectId;
+}
 // Create success is not paid settlement — see hosted-checkout.md.
 // `url` is omitted when Stripe returns null/empty after a successful create
-// (session id is still on `session.references.providerObjectId`).
+// (session id is still on `result.session.references.providerObjectId`).
 // Do not invent a hosted Checkout URL.
 ```
 
@@ -95,13 +100,17 @@ Both simple-session `amount` and line-item major-unit `priceData.amount` accept
 `AmountInput` (`number | Money`); prefer `money("100.00", "USD")`.
 
 ```typescript
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
     amount: money('100.00', 'USD'),
     currency: 'USD',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
     idempotencyKey: crypto.randomUUID(),
 });
+if (result.outcome === 'succeeded') {
+    result.session.url;
+    result.session.references.providerObjectId;
+}
 ```
 
 If you already store Stripe minor-unit amounts, `priceData.unitAmount` is also supported and is sent directly to Stripe as `unit_amount`. The gateway still runs the **same minor-unit validations** as converted amounts (no skipped money rules on the escape hatch): three-decimal currencies must be divisible by 10, **ISK/UGX (and other whole-unit specials with positive exponent) must be whole major units** (minor divisible by `10^exponent`, e.g. ISK `1000` ok / `1050` rejected), and charge maximums are enforced without re-scaling. **Major-unit `priceData.amount` enforces the same rules** via the shared post-scale path.
@@ -110,7 +119,7 @@ Checkout line-item `priceData.amount` and `priceData.unitAmount` can be zero whe
 ### Subscriptions
 
 ```typescript
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
     mode: 'subscription',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
@@ -122,12 +131,16 @@ const session = await stripe.createCheckoutSession({
         },
     ],
 });
+if (result.outcome === 'succeeded') {
+    result.session.url;
+    result.session.references.providerObjectId;
+}
 ```
 
 Inline `priceData` in subscription mode must include Stripe recurring price settings.
 
 ```typescript
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
     mode: 'subscription',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
@@ -144,6 +157,10 @@ const session = await stripe.createCheckoutSession({
         },
     ],
 });
+if (result.outcome === 'succeeded') {
+    result.session.url;
+    result.session.references.providerObjectId;
+}
 ```
 
 ### Setup Mode
@@ -151,7 +168,7 @@ const session = await stripe.createCheckoutSession({
 Use setup mode to save a payment method without an immediate charge.
 
 ```typescript
-const session = await stripe.createCheckoutSession({
+const result = await stripe.createCheckoutSession({
     mode: 'setup',
     successUrl: 'https://example.com/success',
     cancelUrl: 'https://example.com/cancel',
@@ -159,6 +176,10 @@ const session = await stripe.createCheckoutSession({
     customerId: 'cus_123456789',
     idempotencyKey: crypto.randomUUID(),
 });
+if (result.outcome === 'succeeded') {
+    result.session.url;
+    result.session.references.providerObjectId;
+}
 ```
 
 `cancelUrl` is optional because Stripe's `cancel_url` parameter is optional. Provide it when you want Stripe-hosted cancellation to return customers to a specific page.
@@ -167,6 +188,8 @@ The SDK validates Stripe's Checkout line item caps: payment mode accepts up to 1
 Unsupported Checkout fields are rejected instead of silently ignored. Add SDK support before relying on additional Stripe Checkout Session create parameters.
 
 Create returns `{ outcome: "succeeded", session }` (or `indeterminate`). Prefer `client.createCheckoutSession` (capability-gated). See [hosted-checkout.md](./hosted-checkout.md).
+
+**Subscription-mode IDs:** `checkout.session.completed` with `mode: 'subscription'` may set webhook `gatewayPaymentId` to `sub_*`. `capturePayment` / `refundPayment` / `voidPayment` still require `pi_*`. Resolve via `getCheckoutSession` → `result.session.references.relatedIds.paymentIntentId` or `getPayment`.
 
 ## Customers and payment methods
 
@@ -253,7 +276,7 @@ if (result.outcome === 'succeeded') {
 ```
 
 Signature: `getCheckoutSession(params: { sessionId: string })`. The ID must match Stripe's `cs_...` form. The gateway expands `payment_intent` so `result.session.references.relatedIds.paymentIntentId` is available when the session created one.
-When the expanded `payment_intent` is present, `getCheckoutSession` **does not ignore it**: `amount` prefers settled `amount_received` (then `amount_captured`) over `amount_total`, and `paymentStatus` rematches refunds / partial capture the same way `getPayment` does (`refunded` / `partially_refunded` / `partially_captured` / fail-closed `processing` when the charge snapshot is unobservable). Proven refunds also publish `refundedAmount` together with `currency`. Classic unpaid sessions keep native `payment_status`.
+When the expanded `payment_intent` is present, `getCheckoutSession` **does not ignore it**: `amount` prefers settled `amount_received` (then `amount_captured`) over `amount_total`, and `paymentStatus` rematches refunds / partial capture the same way `getPayment` does (`refunded` / `partially_refunded` / `partially_captured` / fail-closed `processing` when the charge snapshot is unobservable). Proven refunds also publish `refundedAmount` together with `currency`. Classic unpaid sessions keep native `payment_status` and publish session `amount_total` — captured rematch applies **only after** `payment_status: paid`. **Do not fulfill on GET checkout amount.**
 `createCheckoutSession` / `getCheckoutSession` require a non-empty `session.id` after HTTP 200. An empty, non-JSON, or identity-less body is **not** a succeeded checkout result. Create is tagged `afterProviderSubmit`: timeout / empty / non-JSON 200 returns a **checkout-shaped** result with `outcome: 'indeterminate'` and `reconciliationRequired: true` (it is **not** a payment snapshot with `status: 'processing'`). The lookup id lives on `session.references.providerObjectId` (caller idempotency key, or `"unknown"` when Stripe never returned `cs_...`). Do **not** retry as a fresh session. `getCheckoutSession` HTTP 404 is `outcome: 'failed'` (same contract as `getCustomer`) — not a thrown transport error. GET transport failures still throw `NetworkError`.
 When Stripe omits `url` (`null` or empty) after a successful create, `session.url` is **omitted** — it is not a string URL and must not be treated as one. Hosted Checkout can create a session before a customer-facing URL exists (for example some embedded / custom flows).
 
@@ -361,7 +384,7 @@ Unhandled / unknown event types do **not** run non-`payment_intent` object statu
 
 Only `canceled` and `incomplete_expired` map to `cancelled`. **`active` maps to `processing`**, not `paid` — a live subscription is not a settled one-shot charge; fulfill from invoice/PI money events (or Checkout paid) instead of subscription status alone. **`unpaid` maps to `pending`** (not cancelled) so callers can still collect or reactivate. **`trialing` maps to `pending`** (not paid) because no collection has succeeded yet. A Checkout Session with `payment_status: paid` and an unexpanded string `payment_intent` maps to **`processing`** (S19-CKO-UNEXPANDED), including $0 trials — expand `payment_intent` or fulfill from invoice / PaymentIntent money events. `no_payment_required` + `mode: subscription` is `pending`.
 
-> **Warning (STRIPE-5):** subscription lifecycle webhooks and **subscription-mode Checkout** paid events often set `gatewayPaymentId` to `sub_...` (not `pi_...`) and dual-write `provider.unmapped` for pure lifecycle events. Refund/capture/void **require** a `pi_...` PaymentIntent ID and fail closed with `InvalidRequestError` on `sub_*` / `cs_*`. Prefer invoice money events that surface a PaymentIntent, or resolve the PI via `getCheckoutSession` / Stripe before money mutations. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
+> **Warning (STRIPE-5):** subscription lifecycle webhooks and **subscription-mode Checkout** (`checkout.session.completed` with `mode: 'subscription'`) may set `gatewayPaymentId` to `sub_*` (not `pi_*`) and dual-write `provider.unmapped` for pure lifecycle events. Refund/capture/void **require** a `pi_*` PaymentIntent ID and fail closed with `InvalidRequestError` on `sub_*` / `cs_*`. Resolve via `getCheckoutSession` → `result.session.references.relatedIds.paymentIntentId`, or `getPayment` / invoice money events that surface a PaymentIntent. Do not pass `cs_...` or `sub_...` into refund/capture/void. **Never fulfill inventory on subscription domain status alone.**
 
 For `payment_intent.succeeded` (and other succeeded PaymentIntent payloads), webhook `amount` prefers settled money: `amount_received` → `latest_charge.amount_captured` / `charges.data[0].amount_captured` so partial captures report the settled total. When settled is finite and less than authorized `amount`, status is `partially_captured` (not `paid`). When settled fields are **missing**, status is **`processing`** (fail closed) — never map an incomplete snapshot to full `paid` / over-fulfill on auth amount alone. **STRIPE-2 / C1:** Stripe does not decrement `amount_received` on refund and leaves PI status `succeeded`. When expanded `latest_charge` **or** an observable `charges.data[0]` has `amount_refunded > 0` or `refunded: true`, domain status is **`refunded` / `partially_refunded`** (same captured-base rule as `getPayment`) and Phase 7 dual-write is **`refund.completed`** (not `payment.succeeded`). Webhook `amount` then publishes cumulative `amount_refunded`. When `latest_charge` is an **unexpanded id string** (Stripe's default PI webhook shape), there is **no** `charges.data` refund snapshot, and `amount_received` is finite and `> 0`, status stays **`paid`** (C1). Keep **`processing`** only when settled money is missing. **Do not last-write `payment_intent.succeeded` over `charge.refunded`** — a delayed first delivery of PI.succeeded after the charge was refunded would otherwise persist `paid` on top of `refunded`. Prefer `charge.refunded` / refund events, or rematch from `getPayment`, when both arrive. **STRIPE-CHG-1:** observable `charges.data[0]` refunds are honored even when `latest_charge` is an unexpanded string id. **STRIPE-CKO-1:** the same refund rematch applies to hydrated Checkout `payment_status: paid` / `async_payment_succeeded` snapshots (see hydrate note above). **Phase 7 dual-write** for both the **partial** (`partially_captured`) and **incomplete-settled** (`processing`) cases sets `stableType` / `event.type` to **`payment.processing`**, not `payment.succeeded` — aligned with Paymob and with `isPaidOutcome` (neither partial nor incomplete settled is paid-like). Full success (status `paid`) dual-writes `payment.succeeded`. Fulfill only when status is `paid` or `isPaidOutcome(...)` is true; do not ship on type-only `payment.succeeded` handlers without checking status. Amount is only set from real money fields on the event object; it is not defaulted to `0` when Stripe omits amount data. Currency is only set when Stripe includes it — missing currency is left undefined rather than defaulted to `USD`. **Amount conversion is also skipped when currency is missing** (invoice/checkout and any incomplete snapshot): the gateway never invents a USD exponent to scale minor units, because that mis-scales zero-decimal and three-decimal currencies.
 

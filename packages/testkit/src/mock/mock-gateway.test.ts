@@ -1913,4 +1913,98 @@ describe("mockGateway", () => {
     });
     expect(replay.gatewayId).toBe(a.gatewayId);
   });
+
+  const phase22Caps = defineGatewayCapabilities({
+    payments: true,
+    hostedCheckout: true,
+    customers: true,
+    paymentMethods: true,
+    disputes: true,
+    paymentLinks: true,
+  });
+
+  it("P22-MOCK: defaultOutcome timeout on createCheckoutSession is not a silent succeeded session", async () => {
+    const g = mockGateway({
+      capabilities: phase22Caps,
+      defaultOutcome: { outcome: "timeout" },
+    });
+    await expect(
+      g.createCheckoutSession!({
+        successUrl: "https://ex.test/ok",
+        amount: 10,
+        currency: "USD",
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("P22-MOCK: defaultOutcome throw fails createCustomer/getDispute/createPaymentLink/listPaymentMethods", async () => {
+    const boom = new Error("scripted boom");
+    const g = mockGateway({
+      capabilities: phase22Caps,
+      defaultOutcome: { throw: boom },
+    });
+    await expect(g.createCustomer!({})).rejects.toBe(boom);
+    await expect(g.getDispute!({ disputeId: "dp_1" })).rejects.toBe(boom);
+    await expect(g.createPaymentLink!({})).rejects.toBe(boom);
+    await expect(
+      g.listPaymentMethods!({ customerId: "cus_1" }),
+    ).rejects.toBe(boom);
+  });
+
+  it("P22-MOCK: listPaymentMethods does not always return [] when defaultOutcome is timeout", async () => {
+    const g = mockGateway({
+      capabilities: phase22Caps,
+      defaultOutcome: { outcome: "timeout" },
+    });
+    await expect(
+      g.listPaymentMethods!({ customerId: "cus_1" }),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("P22-MOCK: enqueue createCheckoutSession timeout is not succeeded", async () => {
+    const g = mockGateway({ capabilities: phase22Caps });
+    g.enqueue("createCheckoutSession", { outcome: "timeout" });
+    await expect(
+      g.createCheckoutSession!({
+        successUrl: "https://ex.test/ok",
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+    g.enqueue("createCheckoutSession", { outcome: "succeeded" });
+    const ok = await g.createCheckoutSession!({
+      successUrl: "https://ex.test/ok",
+    });
+    expect(ok.outcome).toBe("succeeded");
+    expect(ok.session.status).toBe("open");
+  });
+
+  it("P22-MOCK: scripted indeterminate on createCustomer is not succeeded", async () => {
+    const g = mockGateway({
+      capabilities: phase22Caps,
+      defaultOutcome: { outcome: "indeterminate" },
+    });
+    const result = await g.createCustomer!({
+      email: "buyer@example.com",
+      idempotencyKey: "idem_cus_ind",
+    });
+    expect(result.outcome).toBe("indeterminate");
+    if (result.outcome !== "indeterminate") {
+      expect.unreachable("must be indeterminate");
+    }
+    expect(result.reconciliationRequired).toBe(true);
+    expect(result.customer?.status).toBe("unknown");
+    expect(result.customer?.references.providerObjectId).toBe("idem_cus_ind");
+  });
+
+  it("P22-EMPTY-CUS: mock detach omits empty customerId", async () => {
+    const g = mockGateway({ capabilities: phase22Caps });
+    const result = await g.detachPaymentMethod!({
+      paymentMethodId: "pm_detached",
+    });
+    expect(result.outcome).toBe("succeeded");
+    if (result.outcome !== "succeeded") {
+      expect.unreachable("detach must succeed");
+    }
+    expect(result.paymentMethod.customerId).toBeUndefined();
+    expect(result.paymentMethod.id).toBe("pm_detached");
+  });
 });

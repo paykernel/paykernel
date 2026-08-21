@@ -10,6 +10,7 @@ import type { DisputeStatus } from "./domain-status";
 import type { PaymentErrorLike } from "./operation-result";
 import type { OperationRequestOptions } from "./payment.types";
 import type { ProviderReferences } from "./provider-refs";
+import { buildProviderReferences } from "./provider-refs";
 
 /**
  * Normalized dispute snapshot (API results and `PaymentEvent.dispute`).
@@ -82,3 +83,37 @@ export type DisputeOperationResult =
 export type ListDisputesResult =
   | { outcome: "succeeded"; disputes: Dispute[] }
   | { outcome: "failed"; error: PaymentErrorLike };
+
+/**
+ * Post-submit unknown for `submitDisputeEvidence`.
+ * Must not invent `needs_response` / `under_review` / won / lost.
+ */
+export function applyIndeterminateDisputeOutcome(input: {
+  disputeId: string;
+  message: string;
+  errorName: string;
+  gateway: string;
+}): DisputeOperationResult {
+  const lookupId = input.disputeId;
+  const dispute: Dispute = {
+    status: "unknown",
+    references: buildProviderReferences({
+      gateway: input.gateway,
+      gatewayId: lookupId,
+      status: "unknown",
+      ...(lookupId !== "unknown" ? { internalReference: lookupId } : {}),
+      providerNativeStatus: "indeterminate",
+    }),
+    rawResponse: {
+      indeterminate: true,
+      message: input.message,
+      name: input.errorName,
+    },
+  };
+  return {
+    outcome: "indeterminate",
+    reconciliationRequired: true,
+    message: input.message,
+    dispute,
+  };
+}

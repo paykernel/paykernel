@@ -33,3 +33,7 @@ if (result.outcome === "succeeded") {
 Stripe create requires a caller `idempotencyKey`. Empty/missing session id on HTTP 200 is **indeterminate**. The lookup id lives on `session.references.providerObjectId` (caller idempotency key, or `"unknown"`). `getCheckoutSession` HTTP 404 is `outcome: "failed"` (same contract as `getCustomer`). GET transport failures still throw `NetworkError`.
 
 Related PaymentIntent id (when Stripe expands it) is `session.references.relatedIds.paymentIntentId`.
+
+`getCheckoutSession` **amount** is Stripe session `amount_total` while the session is unpaid. Captured rematch (`amount_received` / charge capture, refunds) applies **only after** `payment_status: paid`. **Do not fulfill on GET checkout amount.**
+
+**Subscription-mode IDs:** `checkout.session.completed` with `mode: "subscription"` may set webhook `gatewayPaymentId` to `sub_*`. `capturePayment` / `refundPayment` / `voidPayment` still require `pi_*`. Resolve the PaymentIntent via `getCheckoutSession` → `session.references.relatedIds.paymentIntentId` or `getPayment`.

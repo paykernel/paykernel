@@ -647,7 +647,7 @@ describe('PayPalGateway', () => {
             expect(event.rawPayload).toEqual(payload);
         });
 
-        it('should reject unsupported non-payment events instead of mapping them to pending USD 0', () => {
+        it('P22-PP-DISPUTE: CUSTOMER.DISPUTE.CREATED dual-writes dispute.opened (not payment.succeeded, not throw)', () => {
             const payload = {
                 id: 'WH-dispute-456',
                 event_type: 'CUSTOMER.DISPUTE.CREATED',
@@ -656,6 +656,117 @@ describe('PayPalGateway', () => {
                 resource: {
                     id: 'dispute-xyz789',
                     status: 'PENDING',
+                },
+            };
+
+            const event = gateway.parseWebhookEvent(payload);
+
+            expect(event.id).toBe('WH-dispute-456');
+            expect(event.type).toBe('CUSTOMER.DISPUTE.CREATED');
+            expect(event.gateway).toBe('paypal');
+            expect(event.gatewayPaymentId).toBe('dispute-xyz789');
+            expect(event.gatewayObjectId).toBe('dispute-xyz789');
+            expect(event.status).not.toBe('paid');
+            expect(event.status).not.toBe('pending');
+            expect(event.stableType).toBe('dispute.opened');
+            expect(event.stableType).not.toBe('payment.succeeded');
+            expect(event.event?.type).toBe('dispute.opened');
+            expect(event.event?.type).not.toBe('payment.succeeded');
+            if (event.event?.type === 'dispute.opened') {
+                expect(event.event.dispute.status).toBe('needs_response');
+                expect(event.event.dispute.references.providerObjectId).toBe(
+                    'dispute-xyz789',
+                );
+            }
+            expect(isPaidOutcome({
+                success: true,
+                gatewayId: event.gatewayPaymentId,
+                status: event.status,
+                rawResponse: {},
+            })).toBe(false);
+        });
+
+        it('P22-PP-DISPUTE: CUSTOMER.DISPUTE.UPDATED / RESOLVED parse as dispute lifecycle dual-write', () => {
+            const updated = gateway.parseWebhookEvent({
+                id: 'WH-dispute-updated',
+                event_type: 'CUSTOMER.DISPUTE.UPDATED',
+                create_time: '2024-06-15T15:00:00Z',
+                resource_type: 'dispute',
+                resource: {
+                    id: 'dispute-updated-1',
+                    status: 'UNDER_REVIEW',
+                },
+            });
+            expect(updated.status).toBe('under_review');
+            expect(updated.status).not.toBe('pending');
+            expect(updated.status).not.toBe('paid');
+            expect(updated.stableType).toBe('dispute.updated');
+            expect(updated.event?.type).toBe('dispute.updated');
+            expect(updated.gatewayPaymentId).toBe('dispute-updated-1');
+            expect(updated.gatewayObjectId).toBe('dispute-updated-1');
+
+            const won = gateway.parseWebhookEvent({
+                id: 'WH-dispute-resolved-won',
+                event_type: 'CUSTOMER.DISPUTE.RESOLVED',
+                create_time: '2024-06-15T15:00:00Z',
+                resource_type: 'dispute',
+                resource: {
+                    id: 'dispute-won-1',
+                    status: 'RESOLVED',
+                    dispute_outcome: { outcome_code: 'RESOLVED_SELLER' },
+                },
+            });
+            expect(won.status).toBe('won');
+            expect(won.status).not.toBe('paid');
+            expect(won.stableType).toBe('dispute.closed');
+            expect(won.event?.type).toBe('dispute.closed');
+            expect(won.gatewayPaymentId).toBe('dispute-won-1');
+            expect(won.gatewayObjectId).toBe('dispute-won-1');
+
+            const lost = gateway.parseWebhookEvent({
+                id: 'WH-dispute-resolved-lost',
+                event_type: 'CUSTOMER.DISPUTE.RESOLVED',
+                create_time: '2024-06-15T15:00:00Z',
+                resource_type: 'dispute',
+                resource: {
+                    id: 'dispute-lost-1',
+                    status: 'RESOLVED',
+                    dispute_outcome: { outcome_code: 'RESOLVED_BUYER' },
+                },
+            });
+            expect(lost.status).toBe('lost');
+            expect(lost.stableType).toBe('dispute.closed');
+            expect(lost.gatewayPaymentId).toBe('dispute-lost-1');
+        });
+
+        it('P22-PP-DISPUTE: OPEN dispute maps to needs_response, never paid', () => {
+            const event = gateway.parseWebhookEvent({
+                id: 'WH-dispute-open',
+                event_type: 'CUSTOMER.DISPUTE.CREATED',
+                create_time: '2024-06-15T15:00:00Z',
+                resource_type: 'dispute',
+                resource: {
+                    id: 'PP-D-OPEN',
+                    status: 'OPEN',
+                },
+            });
+            expect(event.status).toBe('needs_response');
+            expect(event.status).not.toBe('paid');
+            expect(event.status).not.toBe('pending');
+            expect(event.stableType).toBe('dispute.opened');
+            expect(event.gatewayPaymentId).toBe('PP-D-OPEN');
+            expect(event.gatewayObjectId).toBe('PP-D-OPEN');
+        });
+
+        it('should reject unsupported unknown event types instead of mapping them to pending USD 0', () => {
+            const payload = {
+                id: 'WH-billing-456',
+                event_type: 'BILLING.SUBSCRIPTION.CREATED',
+                create_time: '2024-06-15T15:00:00Z',
+                resource_type: 'subscription',
+                resource: {
+                    id: 'I-SUB123',
+                    status: 'ACTIVE',
                 },
             };
 
