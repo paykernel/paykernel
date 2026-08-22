@@ -450,10 +450,7 @@ export class TapGateway extends BaseGateway {
       "string"
         ? (obj.response as { message: string }).message
         : tapStatus;
-    const isDecline =
-      isTapDeclineStatus(tapStatus) ||
-      code === "505" ||
-      (code !== undefined && code.startsWith("50"));
+    const isDecline = isTapDeclineStatus(tapStatus);
     const decline = isDecline
       ? {
           code: code ?? tapStatus,
@@ -491,7 +488,7 @@ export class TapGateway extends BaseGateway {
         ...(kind === "authorize" ? { authorizationId: id } : {}),
         providerNativeStatus: tapStatus,
       },
-      outcome === "declined" ? "declined" : outcome,
+      outcome,
       extras,
     );
   }

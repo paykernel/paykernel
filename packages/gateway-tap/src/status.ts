@@ -29,6 +29,7 @@ const REFUND_STATUS: Record<string, RefundStatus> = {
   "IN PROGRESS": "pending",
   IN_PROGRESS: "pending",
   CANCELED: "failed",
+  CANCELLED: "failed",
   FAILED: "failed",
   DECLINED: "failed",
   RESTRICTED: "failed",
@@ -85,7 +86,7 @@ export function inferTapStableType(
   status: PaymentStatus,
 ): StablePaymentEventType | undefined {
   if (kind === "refund") {
-    if (status === "refunded" || status === "refund_completed") return "refund.completed";
+    if (status === "refunded") return "refund.completed";
     if (status === "refund_pending") return "refund.pending";
     if (status === "refund_failed") return "refund.failed";
     return undefined;

@@ -53,6 +53,8 @@ describe("mapTapRefundEntityStatus", () => {
     expect(mapTapRefundEntityStatus("REFUNDED")).toBe("completed");
     expect(mapTapRefundEntityStatus("PENDING")).toBe("pending");
     expect(mapTapRefundEntityStatus("IN PROGRESS")).toBe("pending");
+    expect(mapTapRefundEntityStatus("CANCELED")).toBe("failed");
+    expect(mapTapRefundEntityStatus("CANCELLED")).toBe("failed");
     expect(mapTapRefundPaymentStatus("REFUNDED")).toBe("refunded");
   });
 
