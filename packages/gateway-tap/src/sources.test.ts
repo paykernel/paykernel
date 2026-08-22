@@ -17,6 +17,7 @@ describe("Tap sources", () => {
     expect(() => assertAllowedTapSourceId("src_card")).not.toThrow();
     expect(() => assertAllowedTapSourceId("src_kw.knet")).not.toThrow();
     expect(() => assertAllowedTapSourceId("auth_testAuthorize01")).not.toThrow();
+    expect(() => assertAllowedTapSourceId("tok_1234567890123")).not.toThrow();
   });
 
   it("rejects PAN-shaped ids and PCI source.card", () => {
@@ -25,6 +26,9 @@ describe("Tap sources", () => {
     );
     expect(() =>
       assertNoPciCardSource({ source: { card: "encrypted-blob" } }),
+    ).toThrow(InvalidRequestError);
+    expect(() =>
+      assertNoPciCardSource({ source: { on_file: true, id: "src_all" } }),
     ).toThrow(InvalidRequestError);
   });
 });

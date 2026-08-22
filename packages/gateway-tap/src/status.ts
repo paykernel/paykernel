@@ -4,10 +4,10 @@ import type {
   RefundStatus,
   StablePaymentEventType,
 } from "@paykernel/core";
-import type { TapChargeStatus, TapRefundStatus } from "./types";
 
 const CHARGE_STATUS: Record<string, PaymentStatus> = {
   INITIATED: "pending",
+  "IN PROGRESS": "pending",
   AUTHORIZED: "authorized",
   CAPTURED: "paid",
   VOID: "cancelled",

@@ -91,7 +91,7 @@ export function mapTapHttpFailure(input: {
   if (code !== undefined && DECLINE_CODES.has(code)) {
     return new CardDeclinedError(message, raw);
   }
-  if (status >= 500 || code === "2101" || code === "9999") {
+  if (status >= 500 || code === "2101" || code === "9999" || code === "1151") {
     return new NetworkError(message, raw, mutating ? { afterProviderSubmit: true } : undefined);
   }
   return new GatewayApiError(message, "tap", raw);

@@ -8,7 +8,11 @@ Canonical string:
 x_id{id}x_amount{isoAmount}x_currency{currency}x_gateway_reference{gatewayOrEmpty}x_payment_reference{payment}x_status{status}x_created{created}
 ```
 
-HMAC-SHA256 hex with the **secret API key**, compared to the `hashstring` header (`timingSafeEqualHex`). Amount must be ISO-padded (`1.00` SAR, `1.200` KWD). Missing `hashstring` fails closed.
+HMAC-SHA256 hex with the **secret API key**, compared to the `hashstring` header (`timingSafeEqualHex`). Amount must be ISO-padded (`1.00` SAR / USD, `1.200` KWD). Missing or non-hex `hashstring`, and a payload that cannot supply those fields, fail closed (`verifyWebhook` → `false`).
+
+Tests lock Tap’s published Create-a-Charge `hashstring` header (docs example secret + posted charge JSON). Unpadded amount `1` does not match that vector.
+
+`paymentId` is `metadata.paymentId`, then `metadata.orderId`, then `reference.order`. **`metadata.udf1` is not a payment id** (Tap uses udf1 as a free-form metadata slot).
 
 Invoice objects are not supported: after a verified delivery, unknown `object` throws `InvalidRequestError` (parse class — do not use `InvalidWebhookError` after verify).
 

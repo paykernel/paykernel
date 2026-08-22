@@ -24,6 +24,17 @@ describe("mapTapChargeOutcome", () => {
     );
   });
 
+  it("treats IN PROGRESS like INITIATED (pending / requires_action)", () => {
+    expect(mapTapChargeStatus("IN PROGRESS")).toBe("pending");
+    expect(
+      mapTapChargeOutcome(
+        "IN PROGRESS",
+        "pending",
+        "https://tap.company/pay",
+      ),
+    ).toBe("requires_action");
+  });
+
   it("treats CAPTURED as succeeded and DECLINED as declined", () => {
     expect(mapTapChargeOutcome("CAPTURED", "paid", undefined)).toBe("succeeded");
     expect(mapTapChargeOutcome("DECLINED", "failed", undefined)).toBe("declined");

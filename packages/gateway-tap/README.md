@@ -40,12 +40,14 @@ const result = await tap.createPayment({
 });
 
 if (result.outcome === "requires_action" && result.redirectUrl) {
-  // 3DS / KNET / mada — do not fulfill
+  // transaction.url (3DS / KNET / mada / Fawry) — do not fulfill
 }
 if (result.outcome === "succeeded" && result.status === "paid") {
   // still verify via webhook + inbox claim before fulfillment
 }
 ```
+
+`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`.
 
 ## Capabilities
 

@@ -14,13 +14,13 @@ export function assertAllowedTapSourceId(id: string): void {
   if (id.length === 0) {
     throw new InvalidRequestError("Tap source id must be a non-empty string");
   }
+  if (ALLOWED_SOURCE.test(id)) {
+    return;
+  }
   if (looksLikePan(id)) {
     throw new InvalidRequestError(
       "Tap source must be a token or src_* method id, not cardholder data",
     );
-  }
-  if (ALLOWED_SOURCE.test(id)) {
-    return;
   }
   throw new InvalidRequestError(
     `Unsupported Tap source id "${id}". Use tok_…, src_all, src_card, a local method (src_kw.knet, …), or an authorize id (auth_…).`,
@@ -36,9 +36,9 @@ export function assertNoPciCardSource(body: Record<string, unknown>): void {
         "Tap PCI source.card is not accepted by this backend adapter",
       );
     }
-    if (rec.on_file === true && rec.card !== undefined) {
+    if (rec.on_file === true) {
       throw new InvalidRequestError(
-        "Tap PCI on_file+card source is not accepted by this backend adapter",
+        "Tap PCI on_file source is not accepted by this backend adapter",
       );
     }
   }

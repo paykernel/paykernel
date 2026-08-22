@@ -11,6 +11,16 @@ const client = createPaymentClient({
 const gateway: TapGateway = client.gateway("tap");
 void gateway;
 
+function _assignTapCreateLiteral() {
+  void gateway.createPayment({
+    amount: 10,
+    currency: "SAR",
+    callbackUrl: "https://merchant.example/callback",
+    tapCustomer: { firstName: "Ada", email: "ada@example.com" },
+  });
+}
+void _assignTapCreateLiteral;
+
 type RegisteredName = Parameters<typeof client.gateway>[0];
 const _onlyTap: RegisteredName = "tap";
 void _onlyTap;

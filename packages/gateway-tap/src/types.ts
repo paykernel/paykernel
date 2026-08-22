@@ -1,7 +1,6 @@
 import type {
   CaptureParams,
-  CommonPaymentInput,
-  OperationRequestOptions,
+  CreatePaymentParams,
   RefundParams,
   VoidParams,
 } from "@paykernel/core";
@@ -35,30 +34,25 @@ export type TapRefundReason =
  * Typed Tap create payload. Extends the common 0.x create shape with Tap-only
  * fields. Do not add these keys to core `CreatePaymentParams`.
  */
-export type TapCreatePaymentParams = CommonPaymentInput &
-  OperationRequestOptions & {
-    currency: string;
-    callbackUrl: string;
-    capture?: boolean;
-    idempotencyKey?: string;
-    /**
-     * Customer for the Tap charge/authorize. Either an existing `cus_…` id or
-     * inline first name + email. `customerId` on {@link CreatePaymentParams}
-     * is accepted as `{ id }` when this field is omitted.
-     */
-    tapCustomer?: TapCustomerInput;
-    /**
-     * Source id. Defaults to `src_all` (Tap hosted methods page). Tokens and
-     * local methods (`src_kw.knet`, …) must be explicit.
-     */
-    tapSource?: TapSource;
-    /** Per-request `post.url` override (else config `webhookUrl`). */
-    tapPostUrl?: string;
-    /** 3-D Secure. Default `true`. */
-    tapThreeDSecure?: boolean;
-    /** Per-request merchant id override. */
-    tapMerchantId?: string;
-  };
+export type TapCreatePaymentParams = CreatePaymentParams & {
+  /**
+   * Customer for the Tap charge/authorize. Either an existing `cus_…` id or
+   * inline first name + email. `customerId` on {@link CreatePaymentParams}
+   * is accepted as `{ id }` when this field is omitted.
+   */
+  tapCustomer?: TapCustomerInput;
+  /**
+   * Source id. Defaults to `src_all` (Tap hosted methods page). Tokens and
+   * local methods (`src_kw.knet`, …) must be explicit.
+   */
+  tapSource?: TapSource;
+  /** Per-request `post.url` override (else config `webhookUrl`). */
+  tapPostUrl?: string;
+  /** 3-D Secure. Default `true`. */
+  tapThreeDSecure?: boolean;
+  /** Per-request merchant id override. */
+  tapMerchantId?: string;
+};
 
 export type TapCaptureParams = CaptureParams;
 export type TapRefundParams = RefundParams & {
@@ -79,7 +73,8 @@ export type TapChargeStatus =
   | "VOID"
   | "TIMEDOUT"
   | "UNKNOWN"
-  | "AUTHORIZED";
+  | "AUTHORIZED"
+  | "IN PROGRESS";
 
 export type TapRefundStatus =
   | "REFUNDED"

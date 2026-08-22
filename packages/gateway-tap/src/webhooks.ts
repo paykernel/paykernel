@@ -89,11 +89,7 @@ export function verifyTapHashstring(
     return false;
   }
   const computed = computeTapHashstring(fields, secretKey);
-  try {
-    return timingSafeEqualHex(provided, computed);
-  } catch {
-    return false;
-  }
+  return timingSafeEqualHex(provided, computed);
 }
 
 export function tapObjectKind(payload: unknown): TapObjectKind {

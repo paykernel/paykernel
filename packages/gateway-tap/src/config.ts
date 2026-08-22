@@ -15,7 +15,7 @@ export type TapConfig = {
   merchantId?: string;
   /** Default `post.url` for Tap IPN / webhook delivery. */
   webhookUrl?: string;
-  /** Request timeout in milliseconds. Default: 30000 */
+  /** Request timeout in milliseconds. Must be finite and > 0. Default: 30000 */
   timeoutMs?: number;
 };
 
@@ -25,11 +25,26 @@ export function assertTapSecretKey(secretKey: unknown): asserts secretKey is str
   }
 }
 
+export function assertTapTimeoutMs(
+  timeoutMs: unknown,
+): asserts timeoutMs is number {
+  if (
+    typeof timeoutMs !== "number" ||
+    !Number.isFinite(timeoutMs) ||
+    timeoutMs <= 0
+  ) {
+    throw new InvalidRequestError("tap.timeoutMs must be a finite number > 0");
+  }
+}
+
 export function copyTapConfig(config: TapConfig): TapConfig {
   assertTapSecretKey(config.secretKey);
   const copied: TapConfig = { secretKey: config.secretKey };
   if (config.merchantId !== undefined) copied.merchantId = config.merchantId;
   if (config.webhookUrl !== undefined) copied.webhookUrl = config.webhookUrl;
-  if (config.timeoutMs !== undefined) copied.timeoutMs = config.timeoutMs;
+  if (config.timeoutMs !== undefined) {
+    assertTapTimeoutMs(config.timeoutMs);
+    copied.timeoutMs = config.timeoutMs;
+  }
   return copied;
 }

@@ -79,4 +79,24 @@ describe("mapTapHttpFailure", () => {
     expect(error).toBeInstanceOf(NetworkError);
     expect((error as NetworkError).afterProviderSubmit).not.toBe(true);
   });
+
+  it("treats POST 400 code 1151 as NetworkError afterProviderSubmit", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1151, description: "Request timed out" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect((error as NetworkError).afterProviderSubmit).toBe(true);
+  });
+
+  it("treats GET 400 code 1151 as NetworkError without afterProviderSubmit", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1151 }] },
+      method: "GET",
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect((error as NetworkError).afterProviderSubmit).not.toBe(true);
+  });
 });

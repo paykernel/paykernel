@@ -42,7 +42,11 @@ function queued(response: Response, copies: number): Response[] {
   return Array.from({ length: copies }, () => response.clone());
 }
 
-function createGateway(queue: Response[], calls: FetchCall[]): TapGateway {
+function createGateway(
+  queue: Response[],
+  calls: FetchCall[],
+  config: { merchantId?: string } = {},
+): TapGateway {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     const next = queue.shift();
@@ -50,7 +54,11 @@ function createGateway(queue: Response[], calls: FetchCall[]): TapGateway {
     return next;
   }) as typeof fetch;
   return new TapGateway(
-    { secretKey: TAP_TEST_SECRET, webhookUrl: "https://merchant.example/post" },
+    {
+      secretKey: TAP_TEST_SECRET,
+      webhookUrl: "https://merchant.example/post",
+      ...config,
+    },
     new HooksManager({}),
     undefined,
     { fetch: fetchImpl, randomUUID: () => "minted-idem-key" },
@@ -98,6 +106,54 @@ describe("TapGateway.createPayment", () => {
     expect(isPaidOutcome(result)).toBe(false);
   });
 
+  it("does not treat merchant redirect.url as checkout redirect on CAPTURED charges", async () => {
+    const gateway = createGateway([jsonResponse(capturedCharge())], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.redirectUrl).toBeUndefined();
+    expect(result.nextAction).toBeUndefined();
+  });
+
+  it("does not treat leftover transaction.url as nextAction on CAPTURED charges", async () => {
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          capturedCharge({
+            transaction: {
+              created: "1000000000",
+              url: "https://checkout.payments.tap.company/receipt",
+            },
+          }),
+        ),
+      ],
+      [],
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.redirectUrl).toBeUndefined();
+    expect(result.nextAction).toBeUndefined();
+  });
+
+  it("does not treat merchant redirect.url as checkout redirect on AUTHORIZED authorize", async () => {
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          authorizedObject({
+            redirect: { url: "https://merchant.example/callback" },
+          }),
+        ),
+      ],
+      [],
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      capture: false,
+    });
+    expect(result.outcome).toBe("succeeded");
+    expect(result.status).toBe("authorized");
+    expect(result.redirectUrl).toBeUndefined();
+  });
+
   it("posts /authorize when capture is false", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway([jsonResponse(authorizedObject())], calls);
@@ -130,7 +186,7 @@ describe("TapGateway.createPayment", () => {
         currency: "SAR",
         callbackUrl: "",
         tapCustomer: { id: "cus_testCustomer01" },
-      } as never),
+      }),
     ).rejects.toBeInstanceOf(InvalidRequestError);
   });
 
@@ -165,6 +221,7 @@ describe("TapGateway mutations", () => {
     const gateway = createGateway(
       [jsonResponse(authorizedObject()), jsonResponse(capturedCharge())],
       calls,
+      { merchantId: "merchant_test01" },
     );
     const result = await gateway.capturePayment({
       gatewayPaymentId: "auth_testAuthorize01",
@@ -177,10 +234,70 @@ describe("TapGateway mutations", () => {
     const body = JSON.parse(String(calls[1]?.init?.body)) as {
       source: { id: string };
       amount: number;
+      post?: { url?: string };
+      merchant?: { id?: string };
     };
     expect(body.source.id).toBe("auth_testAuthorize01");
     expect(body.amount).toBe(10.5);
+    expect(body.post?.url).toBe("https://merchant.example/post");
+    expect(body.merchant?.id).toBe("merchant_test01");
     expect(result.outcome).toBe("succeeded");
+  });
+
+  it("replays capture via POST /charges when GET authorize is VOID", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(authorizedObject({ status: "VOID" })),
+        jsonResponse(capturedCharge()),
+      ],
+      calls,
+    );
+    const result = await gateway.capturePayment({
+      gatewayPaymentId: "auth_testAuthorize01",
+      amount: money("10.50", "SAR"),
+      currency: "SAR",
+      idempotencyKey: "idem-cap-replay",
+    });
+    expect(calls[1]?.url).toContain("/charges");
+    expect(result.outcome).toBe("succeeded");
+    expect(result.status).toBe("paid");
+  });
+
+  it("rejects capture when the authorize status is INITIATED", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(authorizedObject({ status: "INITIATED" }))],
+      calls,
+    );
+    try {
+      await gateway.capturePayment({
+        gatewayPaymentId: "auth_testAuthorize01",
+        idempotencyKey: "idem-cap-initiated",
+      });
+      expect.unreachable("capture of INITIATED authorize must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidRequestError);
+      expect((error as Error).message).toMatch(/authorize status/i);
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toContain("/authorize/auth_testAuthorize01");
+    expect(calls.some((call) => call.url.includes("/charges"))).toBe(false);
+  });
+
+  it("rejects capture when the authorize object omits status", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(authorizedObject({ status: undefined }))],
+      calls,
+    );
+    await expect(
+      gateway.capturePayment({
+        gatewayPaymentId: "auth_testAuthorize01",
+        idempotencyKey: "idem-cap-nostatus",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(calls.some((call) => call.url.includes("/charges"))).toBe(false);
   });
 
   it("voids an authorize", async () => {
@@ -195,6 +312,8 @@ describe("TapGateway mutations", () => {
     });
     expect(calls[0]?.url).toContain("/authorize/auth_testAuthorize01/void");
     expect(result.status).toBe("cancelled");
+    expect(result.outcome).toBe("succeeded");
+    expect(result.success).toBe(true);
   });
 
   it("refunds a charge", async () => {
@@ -213,11 +332,66 @@ describe("TapGateway mutations", () => {
     const body = JSON.parse(String(calls[1]?.init?.body)) as {
       charge_id: string;
       reason: string;
+      post?: { url?: string };
     };
     expect(body.charge_id).toBe("chg_testInitiated01");
     expect(body.reason).toBe("requested_by_customer");
+    expect(body.post?.url).toBe("https://merchant.example/post");
     expect(result.status).toBe("completed");
     expect(result.outcome).toBe("succeeded");
+    expect(result.totalRefunded).toBeUndefined();
+  });
+
+  it("sends a free-text refund reason instead of requested_by_customer", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(capturedCharge()), jsonResponse(refundedObject())],
+      calls,
+    );
+    await gateway.refundPayment({
+      gatewayPaymentId: "chg_testInitiated01",
+      amount: money("10.50", "SAR"),
+      currency: "SAR",
+      idempotencyKey: "idem-ref-stock",
+      reason: "The product is out of stock",
+    });
+    const body = JSON.parse(String(calls[1]?.init?.body)) as { reason: string };
+    expect(body.reason).toBe("The product is out of stock");
+  });
+
+  it("maps known refund reasons case-insensitively with spaces to underscore", async () => {
+    for (const [reason, expected] of [
+      ["duplicate", "duplicate"],
+      ["Fraudulent", "fraudulent"],
+      ["requested by customer", "requested_by_customer"],
+    ] as const) {
+      const calls: FetchCall[] = [];
+      const gateway = createGateway(
+        [jsonResponse(capturedCharge()), jsonResponse(refundedObject())],
+        calls,
+      );
+      await gateway.refundPayment({
+        gatewayPaymentId: "chg_testInitiated01",
+        amount: money("10.50", "SAR"),
+        currency: "SAR",
+        idempotencyKey: `idem-ref-${expected}`,
+        reason,
+      });
+      const body = JSON.parse(String(calls[1]?.init?.body)) as { reason: string };
+      expect(body.reason).toBe(expected);
+    }
+  });
+
+  it("does not retry void after a mutating 5xx", async () => {
+    const calls: FetchCall[] = [];
+    const boom = { errors: [{ code: "9999", description: "boom" }] };
+    const gateway = createGateway([jsonResponse(boom, 500)], calls);
+    const result = await gateway.voidPayment({
+      gatewayPaymentId: "auth_testAuthorize01",
+      idempotencyKey: "idem-void-500",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(calls).toHaveLength(1);
   });
 
   it("rejects capture of a charge id and refund of an authorize id", async () => {
@@ -258,13 +432,15 @@ describe("TapGateway.getPayment and errors", () => {
 
   it("maps post-submit 5xx on create to indeterminate", async () => {
     const boom = { errors: [{ code: "9999", description: "boom" }] };
+    const calls: FetchCall[] = [];
     const gateway = createGateway(
       [jsonResponse(boom, 500), jsonResponse(boom, 500), jsonResponse(boom, 500)],
-      [],
+      calls,
     );
     const result = await gateway.createPayment({ ...createParams });
     expect(isIndeterminateOutcome(result)).toBe(true);
     expect(result.reconciliationRequired).toBe(true);
+    expect(calls).toHaveLength(3);
   });
 
   it("maps empty mutating 2xx to indeterminate, not InvalidRequestError", async () => {
@@ -358,5 +534,32 @@ describe("TapGateway webhooks", () => {
     expect(() =>
       gateway.parseWebhookEvent({ object: "invoice", id: "inv_1", status: "PAID" }),
     ).toThrow(InvalidRequestError);
+  });
+
+  it("does not treat metadata.udf1 as paymentId", () => {
+    const gateway = createGateway([], []);
+    const event = gateway.parseWebhookEvent(
+      capturedCharge({
+        metadata: { udf1: "test_data_1" },
+        reference: { order: "ord_01", payment: "payref1" },
+      }),
+    );
+    expect(event.paymentId).toBe("ord_01");
+    expect(event.paymentId).not.toBe("test_data_1");
+  });
+
+  it("prefers metadata.paymentId over orderId and reference.order", () => {
+    const gateway = createGateway([], []);
+    const event = gateway.parseWebhookEvent(
+      capturedCharge({
+        metadata: {
+          paymentId: "pay_meta",
+          orderId: "ord_meta",
+          udf1: "test_data_1",
+        },
+        reference: { order: "ord_01", payment: "payref1" },
+      }),
+    );
+    expect(event.paymentId).toBe("pay_meta");
   });
 });
