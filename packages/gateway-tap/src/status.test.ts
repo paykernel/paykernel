@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  inferTapStableType,
   isTapDeclineStatus,
   mapTapChargeOutcome,
   mapTapChargeStatus,
@@ -11,6 +12,7 @@ describe("mapTapChargeStatus", () => {
   it("maps captured / authorized / initiated / declined", () => {
     expect(mapTapChargeStatus("CAPTURED")).toBe("paid");
     expect(mapTapChargeStatus("AUTHORIZED")).toBe("authorized");
+    expect(mapTapChargeStatus("REFUNDED")).toBe("refunded");
     expect(mapTapChargeStatus("INITIATED")).toBe("pending");
     expect(mapTapChargeStatus("DECLINED")).toBe("failed");
     expect(mapTapChargeStatus("UNKNOWN")).toBe("failed");
@@ -24,6 +26,13 @@ describe("mapTapChargeStatus", () => {
   it("maps CANCELED (one L) to cancelled like CANCELLED", () => {
     expect(mapTapChargeStatus("CANCELLED")).toBe("cancelled");
     expect(mapTapChargeStatus("CANCELED")).toBe("cancelled");
+  });
+});
+
+describe("inferTapStableType", () => {
+  it("maps a refunded charge to refund.completed, not payment.failed", () => {
+    expect(inferTapStableType("charge", "refunded")).toBe("refund.completed");
+    expect(inferTapStableType("refund", "refunded")).toBe("refund.completed");
   });
 });
 
@@ -41,6 +50,7 @@ describe("mapTapChargeOutcome", () => {
   it("treats CAPTURED and AUTHORIZED as succeeded and DECLINED as declined", () => {
     expect(mapTapChargeOutcome("CAPTURED", "paid")).toBe("succeeded");
     expect(mapTapChargeOutcome("AUTHORIZED", "authorized")).toBe("succeeded");
+    expect(mapTapChargeOutcome("REFUNDED", "refunded")).toBe("succeeded");
     expect(mapTapChargeOutcome("DECLINED", "failed")).toBe("declined");
   });
 

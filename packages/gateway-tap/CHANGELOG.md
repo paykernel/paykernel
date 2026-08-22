@@ -8,6 +8,7 @@
 
 ### Patch
 
+- **TAP-CHARGE-REFUNDED:** Charge object status `REFUNDED` maps to payment `refunded` (`getPayment` and charge webhooks), not `failed`. Refund *objects* were already `refunded`.
 - **TAP-MISSING-STATUS:** Mutating HTTP 2xx with an `id` but no object `status` is `indeterminate` (`afterProviderSubmit`). Missing status is not mapped as Tap `UNKNOWN` → `failed`.
 - **TAP-CAPTURE-REPLAY:** `capturePayment` GETs the authorize. `AUTHORIZED` POSTs `/charges`. `CAPTURED` does not POST — returns paid and keeps `authorizationId` (crash-retry after a completed capture). Replaying POST on an already-captured `auth_…` is Tap `1126`.
 - **TAP-AUTH-CHARGE-ID:** Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the charge `chg_…` id. Capture does not drop the authorize id when mapping the charge.

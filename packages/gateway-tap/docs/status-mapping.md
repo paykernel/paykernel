@@ -6,6 +6,7 @@
 | IN PROGRESS / IN_PROGRESS | pending | requires_action |
 | AUTHORIZED | authorized | succeeded (hold, not paid) |
 | CAPTURED | paid | succeeded |
+| REFUNDED (charge object) | refunded | succeeded (`getPayment` / charge webhook — not `failed`) |
 | VOID | cancelled | failed (`getPayment`); not capturable; `voidPayment` is `succeeded` + cancelled |
 | CANCELLED / ABANDONED | cancelled | failed (`getPayment`) |
 | DECLINED | failed | declined |

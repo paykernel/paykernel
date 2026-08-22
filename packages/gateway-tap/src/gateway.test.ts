@@ -756,6 +756,19 @@ describe("TapGateway.getPayment and errors", () => {
     ).rejects.toBeInstanceOf(InvalidRequestError);
   });
 
+  it("maps getPayment of a REFUNDED charge to refunded, not failed", async () => {
+    const gateway = createGateway(
+      [jsonResponse(capturedCharge({ status: "REFUNDED" }))],
+      [],
+    );
+    const result = await gateway.getPayment({
+      gatewayPaymentId: "chg_testInitiated01",
+    });
+    expect(result.status).toBe("refunded");
+    expect(result.outcome).toBe("succeeded");
+    expect(isPaidOutcome(result)).toBe(false);
+  });
+
   it("maps post-submit 5xx on create to indeterminate", async () => {
     const boom = { errors: [{ code: "9999", description: "boom" }] };
     const calls: FetchCall[] = [];
@@ -911,6 +924,16 @@ describe("TapGateway webhooks", () => {
     const refund = gateway.parseWebhookEvent(refundedObject());
     expect(refund.status).toBe("refunded");
     expect(refund.gatewayPaymentId).toBe("chg_testCaptured01");
+  });
+
+  it("maps a charge object with status REFUNDED to refunded, not failed", () => {
+    const gateway = createGateway([], []);
+    const event = gateway.parseWebhookEvent(
+      capturedCharge({ status: "REFUNDED" }),
+    );
+    expect(event.status).toBe("refunded");
+    expect(event.stableType).toBe("refund.completed");
+    expect(event.gatewayPaymentId).toBe("chg_testInitiated01");
   });
 
   it("rejects invoice objects at parse time", () => {

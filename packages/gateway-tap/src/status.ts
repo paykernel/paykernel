@@ -11,6 +11,7 @@ const CHARGE_STATUS: Record<string, PaymentStatus> = {
   IN_PROGRESS: "pending",
   AUTHORIZED: "authorized",
   CAPTURED: "paid",
+  REFUNDED: "refunded",
   VOID: "cancelled",
   CANCELLED: "cancelled",
   CANCELED: "cancelled",
@@ -117,6 +118,7 @@ export function inferTapStableType(
   if (status === "pending") return "payment.processing";
   if (status === "cancelled") return "payment.cancelled";
   if (status === "failed") return "payment.failed";
+  if (status === "refunded") return "refund.completed";
   return undefined;
 }
 
