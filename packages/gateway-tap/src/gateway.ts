@@ -11,7 +11,6 @@ import {
   mapHttpAbortError,
   NetworkError,
   withRetry,
-  type CaptureParams,
   type GatewayPaymentResult,
   type GatewayRefundResult,
   type GatewayRuntimeDeps,
@@ -47,6 +46,7 @@ import {
 } from "./status";
 import type {
   TapApiObject,
+  TapCaptureParams,
   TapCreatePaymentParams,
   TapCustomerInput,
   TapRefundParams,
@@ -102,7 +102,7 @@ export class TapGateway extends BaseGateway {
     });
   }
 
-  async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
+  async capturePayment(params: TapCaptureParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("capturePayment", params, async (p) => {
       this.assertMutationKey(p.idempotencyKey, "capturePayment");
       const authorizeId = this.assertIdPrefix(p.gatewayPaymentId, "auth_");
@@ -113,11 +113,11 @@ export class TapGateway extends BaseGateway {
       const tapStatus = (existing as TapApiObject).status;
       const normalized =
         typeof tapStatus === "string" ? tapStatus.trim().toUpperCase() : "";
-      // VOID: crash-retry after a completed capture — POST /charges with the
-      // same reference.idempotent so Tap returns the original charge.
-      if (normalized !== "AUTHORIZED" && normalized !== "VOID") {
+      // CAPTURED: crash-retry after a completed capture — POST /charges with
+      // the same reference.idempotent so Tap returns the original charge.
+      if (normalized !== "AUTHORIZED" && normalized !== "CAPTURED") {
         throw new InvalidRequestError(
-          `Tap capture requires AUTHORIZED authorize status (got "${String(tapStatus)}")`,
+          `Tap capture requires AUTHORIZED or CAPTURED authorize status (got "${String(tapStatus)}")`,
         );
       }
       const currency =
@@ -130,18 +130,21 @@ export class TapGateway extends BaseGateway {
           "Tap capture requires currency (pass CaptureParams.currency or retrieve it from the authorize object)",
         );
       }
-      const amount =
+      const amount = this.tapOutboundMajor(
         p.amount !== undefined
-          ? tapMajorNumber(p.amount, currency)
-          : tapMajorNumber(
-              parseTapAmount((existing as TapApiObject).amount, currency),
-              currency,
-            );
+          ? p.amount
+          : parseTapAmount((existing as TapApiObject).amount, currency),
+        currency,
+      );
+      const redirectUrl = this.captureRedirectUrl(p, existing);
       const customer = this.customerFromObject(existing);
       const body: Record<string, unknown> = {
         amount,
         currency: currency.toUpperCase(),
+        customer_initiated: true,
+        threeDSecure: true,
         source: { id: authorizeId },
+        redirect: { url: redirectUrl },
         reference: { idempotent: p.idempotencyKey },
       };
       if (customer !== undefined) body.customer = customer;
@@ -215,13 +218,12 @@ export class TapGateway extends BaseGateway {
           "Tap refund requires currency (pass RefundParams.currency or retrieve it from the charge)",
         );
       }
-      const amount =
+      const amount = this.tapOutboundMajor(
         p.amount !== undefined
-          ? tapMajorNumber(p.amount, currency)
-          : tapMajorNumber(
-              parseTapAmount((existing as TapApiObject).amount, currency),
-              currency,
-            );
+          ? p.amount
+          : parseTapAmount((existing as TapApiObject).amount, currency),
+        currency,
+      );
       const reason = this.refundReason(p);
       const body: Record<string, unknown> = {
         charge_id: chargeId,
@@ -437,7 +439,7 @@ export class TapGateway extends BaseGateway {
     const currency =
       typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
     const redirectUrl = this.redirectUrl(obj);
-    const outcome = mapTapChargeOutcome(tapStatus, status, redirectUrl);
+    const outcome = mapTapChargeOutcome(tapStatus, status);
     let amount: number | undefined;
     if (obj.amount !== undefined && currency !== undefined) {
       amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
@@ -531,7 +533,7 @@ export class TapGateway extends BaseGateway {
   ): Record<string, unknown> {
     const currency = params.currency.toUpperCase();
     const body: Record<string, unknown> = {
-      amount: tapMajorNumber(params.amount, currency),
+      amount: this.tapOutboundMajor(params.amount, currency),
       currency,
       customer_initiated: true,
       threeDSecure: tap.threeDSecure,
@@ -548,6 +550,9 @@ export class TapGateway extends BaseGateway {
     if (metadata !== undefined) body.metadata = metadata;
     if (tap.postUrl !== undefined) body.post = { url: tap.postUrl };
     if (tap.merchantId !== undefined) body.merchant = { id: tap.merchantId };
+    if (params.capture === false && this.tapConfig.autoVoidHours !== undefined) {
+      body.auto = { type: "VOID", time: this.tapConfig.autoVoidHours };
+    }
     return body;
   }
 
@@ -570,7 +575,15 @@ export class TapGateway extends BaseGateway {
         "Tap createPayment requires tapCustomer or customerId",
       );
     }
-    const sourceId = resolveTapSourceId(params.tapSource);
+    const sourceId =
+      params.tapSource === undefined && params.capture === false
+        ? "src_card"
+        : resolveTapSourceId(params.tapSource);
+    if (sourceId.toLowerCase().startsWith("auth_")) {
+      throw new InvalidRequestError(
+        "Tap createPayment does not accept auth_ source ids; use capturePayment",
+      );
+    }
     const postUrl = params.tapPostUrl ?? this.tapConfig.webhookUrl;
     const threeDSecure = params.tapThreeDSecure !== false;
     const merchantId = params.tapMerchantId ?? this.tapConfig.merchantId;
@@ -582,11 +595,17 @@ export class TapGateway extends BaseGateway {
       return { id: customer.id };
     }
     if ("firstName" in customer) {
+      const lastName = customer.lastName.trim();
+      if (lastName.length === 0) {
+        throw new InvalidRequestError(
+          "Tap createPayment inline customer requires lastName",
+        );
+      }
       const out: Record<string, unknown> = {
         first_name: customer.firstName,
+        last_name: lastName,
         email: customer.email,
       };
-      if (customer.lastName !== undefined) out.last_name = customer.lastName;
       if (customer.middleName !== undefined) out.middle_name = customer.middleName;
       if (customer.phone !== undefined) {
         out.phone = {
@@ -596,7 +615,34 @@ export class TapGateway extends BaseGateway {
       }
       return out;
     }
-    throw new InvalidRequestError("Tap customer requires id or firstName+email");
+    throw new InvalidRequestError("Tap customer requires id or firstName+lastName+email");
+  }
+
+  private captureRedirectUrl(
+    params: TapCaptureParams,
+    existing: unknown,
+  ): string {
+    const override = params.tapRedirectUrl;
+    if (typeof override === "string" && override.trim().length > 0) {
+      return override.trim();
+    }
+    const fromAuthorize = this.merchantRedirectUrl(existing);
+    if (fromAuthorize !== undefined) return fromAuthorize;
+    throw new InvalidRequestError(
+      "Tap capture requires redirect.url (authorize.redirect.url or tapRedirectUrl)",
+    );
+  }
+
+  private merchantRedirectUrl(raw: unknown): string | undefined {
+    if (raw === null || typeof raw !== "object") return undefined;
+    const redirect = (raw as TapApiObject).redirect;
+    if (redirect === null || typeof redirect !== "object" || Array.isArray(redirect)) {
+      return undefined;
+    }
+    const url = (redirect as { url?: unknown }).url;
+    if (typeof url !== "string") return undefined;
+    const trimmed = url.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
   }
 
   private customerFromObject(raw: unknown): Record<string, unknown> | undefined {
@@ -624,6 +670,17 @@ export class TapGateway extends BaseGateway {
       out[key] = String(value);
     }
     return Object.keys(out).length > 0 ? out : undefined;
+  }
+
+  private tapOutboundMajor(
+    amount: Parameters<typeof tapMajorNumber>[0],
+    currency: string,
+  ): number {
+    const major = tapMajorNumber(amount, currency);
+    if (major === 0) {
+      throw new InvalidRequestError("Tap amount must be greater than 0");
+    }
+    return major;
   }
 
   private createIdempotencyKey(provided: string | undefined): string {

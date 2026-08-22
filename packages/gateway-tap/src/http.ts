@@ -1,8 +1,6 @@
 import {
   AuthenticationError,
-  CardDeclinedError,
   GatewayApiError,
-  InsufficientFundsError,
   InvalidRequestError,
   NetworkError,
   RateLimitError,
@@ -14,26 +12,10 @@ export type TapErrorBody = {
   errors?: Array<{ code?: unknown; description?: unknown }>;
 };
 
-const NOT_FOUND_CODES = new Set(["1144", "1115", "1160", "1106", "2102"]);
+const NOT_FOUND_CODES = new Set(["1144", "1115", "1160", "2102"]);
 const AUTH_CODES = new Set(["2104", "2106", "2105", "2107", "1101"]);
 const AMOUNT_CODES = new Set(["1150", "1161", "1117"]);
-const DECLINE_CODES = new Set([
-  "501",
-  "502",
-  "503",
-  "504",
-  "506",
-  "507",
-  "508",
-  "509",
-  "510",
-  "511",
-  "512",
-  "513",
-  "514",
-  "515",
-  "516",
-]);
+const INVALID_REQUEST_CODES = new Set(["1106", "1114"]);
 
 export function isMutatingMethod(method: string): boolean {
   const normalized = method.toUpperCase();
@@ -82,14 +64,11 @@ export function mapTapHttpFailure(input: {
   if (status === 404 || (code !== undefined && NOT_FOUND_CODES.has(code))) {
     return new ResourceNotFoundError(message, raw);
   }
-  if (code !== undefined && AMOUNT_CODES.has(code)) {
-    return new InvalidRequestError(message);
-  }
-  if (code === "505") {
-    return new InsufficientFundsError(message, raw);
-  }
-  if (code !== undefined && DECLINE_CODES.has(code)) {
-    return new CardDeclinedError(message, raw);
+  if (
+    code !== undefined &&
+    (AMOUNT_CODES.has(code) || INVALID_REQUEST_CODES.has(code))
+  ) {
+    return new InvalidRequestError(message, [raw]);
   }
   if (status >= 500 || code === "2101" || code === "9999" || code === "1151") {
     return new NetworkError(message, raw, mutating ? { afterProviderSubmit: true } : undefined);

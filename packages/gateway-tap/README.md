@@ -23,6 +23,7 @@ const payments = createPaymentClient({
     tap: tapGateway({
       secretKey: process.env.TAP_SECRET_KEY!,
       webhookUrl: "https://merchant.example/webhooks/tap",
+      // autoVoidHours: 24, // optional; authorize create only; not defaulted
     }),
   },
   defaultGateway: "tap",
@@ -35,8 +36,9 @@ const result = await tap.createPayment({
   currency: "SAR",
   callbackUrl: "https://merchant.example/return",
   idempotencyKey: crypto.randomUUID(),
-  tapCustomer: { firstName: "Ada", email: "ada@example.com" },
+  tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
   // tapSource omitted → src_all (hosted methods page). Not hostedCheckout.
+  // capture: false omitted tapSource → src_card.
 });
 
 if (result.outcome === "requires_action" && result.redirectUrl) {
@@ -47,7 +49,7 @@ if (result.outcome === "succeeded" && result.status === "paid") {
 }
 ```
 
-`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`.
+`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`. Omitted `tapSource` is `src_all` for charges and `src_card` for `capture: false`. Optional config `autoVoidHours` is sent only on authorize create (not defaulted).
 
 ## Capabilities
 

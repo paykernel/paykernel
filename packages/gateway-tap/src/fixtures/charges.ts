@@ -63,6 +63,7 @@ export function authorizedObject(overrides: Record<string, unknown> = {}) {
     response: { code: "001", message: "Authorized" },
     customer: { id: "cus_testCustomer01" },
     source: { object: "token", id: "tok_testToken01" },
+    redirect: { status: "SUCCESS", url: "https://merchant.example/callback" },
     ...overrides,
   };
 }

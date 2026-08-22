@@ -16,10 +16,21 @@ function _assignTapCreateLiteral() {
     amount: 10,
     currency: "SAR",
     callbackUrl: "https://merchant.example/callback",
-    tapCustomer: { firstName: "Ada", email: "ada@example.com" },
+    tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
   });
 }
 void _assignTapCreateLiteral;
+
+function _rejectInlineCustomerWithoutLastName() {
+  void gateway.createPayment({
+    amount: 10,
+    currency: "SAR",
+    callbackUrl: "https://merchant.example/callback",
+    // @ts-expect-error inline tapCustomer requires lastName
+    tapCustomer: { firstName: "Ada", email: "ada@example.com" },
+  });
+}
+void _rejectInlineCustomerWithoutLastName;
 
 type RegisteredName = Parameters<typeof client.gateway>[0];
 const _onlyTap: RegisteredName = "tap";

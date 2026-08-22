@@ -15,33 +15,36 @@ describe("mapTapChargeStatus", () => {
     expect(mapTapChargeStatus("UNKNOWN")).toBe("failed");
     expect(mapTapChargeStatus("TIMEDOUT")).toBe("failed");
   });
+
+  it("maps IN_PROGRESS underscore form to pending", () => {
+    expect(mapTapChargeStatus("IN_PROGRESS")).toBe("pending");
+  });
+
+  it("maps CANCELED (one L) to cancelled like CANCELLED", () => {
+    expect(mapTapChargeStatus("CANCELLED")).toBe("cancelled");
+    expect(mapTapChargeStatus("CANCELED")).toBe("cancelled");
+  });
 });
 
 describe("mapTapChargeOutcome", () => {
-  it("treats INITIATED as requires_action even without a URL", () => {
-    expect(mapTapChargeOutcome("INITIATED", "pending", undefined)).toBe(
+  it("treats INITIATED and IN PROGRESS as requires_action", () => {
+    expect(mapTapChargeOutcome("INITIATED", "pending")).toBe("requires_action");
+    expect(mapTapChargeOutcome("IN PROGRESS", "pending")).toBe(
+      "requires_action",
+    );
+    expect(mapTapChargeOutcome("IN_PROGRESS", "pending")).toBe(
       "requires_action",
     );
   });
 
-  it("treats IN PROGRESS like INITIATED (pending / requires_action)", () => {
-    expect(mapTapChargeStatus("IN PROGRESS")).toBe("pending");
-    expect(
-      mapTapChargeOutcome(
-        "IN PROGRESS",
-        "pending",
-        "https://tap.company/pay",
-      ),
-    ).toBe("requires_action");
-  });
-
-  it("treats CAPTURED as succeeded and DECLINED as declined", () => {
-    expect(mapTapChargeOutcome("CAPTURED", "paid", undefined)).toBe("succeeded");
-    expect(mapTapChargeOutcome("DECLINED", "failed", undefined)).toBe("declined");
+  it("treats CAPTURED and AUTHORIZED as succeeded and DECLINED as declined", () => {
+    expect(mapTapChargeOutcome("CAPTURED", "paid")).toBe("succeeded");
+    expect(mapTapChargeOutcome("AUTHORIZED", "authorized")).toBe("succeeded");
+    expect(mapTapChargeOutcome("DECLINED", "failed")).toBe("declined");
   });
 
   it("does not treat UNKNOWN as paid", () => {
-    expect(mapTapChargeOutcome("UNKNOWN", "failed", undefined)).toBe("failed");
+    expect(mapTapChargeOutcome("UNKNOWN", "failed")).toBe("failed");
   });
 });
 
@@ -51,5 +54,15 @@ describe("mapTapRefundEntityStatus", () => {
     expect(mapTapRefundEntityStatus("PENDING")).toBe("pending");
     expect(mapTapRefundEntityStatus("IN PROGRESS")).toBe("pending");
     expect(mapTapRefundPaymentStatus("REFUNDED")).toBe("refunded");
+  });
+
+  it("maps ACCEPTED as pending, not completed or failed", () => {
+    expect(mapTapRefundEntityStatus("ACCEPTED")).toBe("pending");
+    expect(mapTapRefundPaymentStatus("ACCEPTED")).toBe("refund_pending");
+  });
+
+  it("maps refund IN_PROGRESS underscore form to pending", () => {
+    expect(mapTapRefundEntityStatus("IN_PROGRESS")).toBe("pending");
+    expect(mapTapRefundPaymentStatus("IN_PROGRESS")).toBe("refund_pending");
   });
 });

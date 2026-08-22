@@ -45,7 +45,7 @@ function queued(response: Response, copies: number): Response[] {
 function createGateway(
   queue: Response[],
   calls: FetchCall[],
-  config: { merchantId?: string } = {},
+  config: { merchantId?: string; autoVoidHours?: number } = {},
 ): TapGateway {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), init });
@@ -69,7 +69,7 @@ const createParams = {
   amount: money("10.50", "SAR"),
   currency: "SAR",
   callbackUrl: "https://merchant.example/callback",
-  tapCustomer: { firstName: "Ada", email: "ada@example.com" },
+  tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
   idempotencyKey: "idem-create-1",
 } as const;
 
@@ -87,6 +87,11 @@ describe("TapGateway.createPayment", () => {
     expect(body.amount).toBe(10.5);
     expect(body.currency).toBe("SAR");
     expect(body.source).toEqual({ id: "src_all" });
+    expect(body.customer).toMatchObject({
+      first_name: "Ada",
+      last_name: "Lovelace",
+      email: "ada@example.com",
+    });
     expect(body.redirect).toEqual({ url: "https://merchant.example/callback" });
     expect((body.reference as { idempotent: string }).idempotent).toBe(
       "idem-create-1",
@@ -159,9 +164,65 @@ describe("TapGateway.createPayment", () => {
     const gateway = createGateway([jsonResponse(authorizedObject())], calls);
     const result = await gateway.createPayment({ ...createParams, capture: false });
     expect(calls[0]?.url).toContain("/authorize");
+    const body = JSON.parse(String(calls[0]?.init?.body)) as {
+      source: { id: string };
+      auto?: unknown;
+    };
+    expect(body.source.id).toBe("src_card");
+    expect(body.auto).toBeUndefined();
     expect(result.status).toBe("authorized");
     expect(result.outcome).toBe("succeeded");
     expect(isPaidOutcome(result)).toBe(false);
+  });
+
+  it("sends auto VOID hours on authorize when autoVoidHours is set", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([jsonResponse(authorizedObject())], calls, {
+      autoVoidHours: 24,
+    });
+    await gateway.createPayment({ ...createParams, capture: false });
+    const body = JSON.parse(String(calls[0]?.init?.body)) as {
+      auto?: { type: string; time: number };
+    };
+    expect(body.auto).toEqual({ type: "VOID", time: 24 });
+  });
+
+  it("does not send auto on charges even when autoVoidHours is set", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([jsonResponse(capturedCharge())], calls, {
+      autoVoidHours: 24,
+    });
+    await gateway.createPayment({ ...createParams });
+    const body = JSON.parse(String(calls[0]?.init?.body)) as { auto?: unknown };
+    expect(body.auto).toBeUndefined();
+  });
+
+  it("rejects auth_ tapSource on createPayment and does not fetch", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([], calls);
+    try {
+      await gateway.createPayment({
+        ...createParams,
+        tapSource: { id: "auth_testAuthorize01" },
+      });
+      expect.unreachable("createPayment must reject auth_ sources");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidRequestError);
+      expect((error as Error).message).toMatch(/capturePayment/);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("rejects zero create amounts before fetch", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([], calls);
+    await expect(
+      gateway.createPayment({
+        ...createParams,
+        amount: money(0, "SAR", { allowZero: true }),
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(calls).toHaveLength(0);
   });
 
   it("maps DECLINED to declined outcome", async () => {
@@ -169,6 +230,18 @@ describe("TapGateway.createPayment", () => {
     const result = await gateway.createPayment({ ...createParams });
     expect(result.outcome).toBe("declined");
     expect(isPaidOutcome(result)).toBe(false);
+  });
+
+  it("rejects inline customer with blank lastName", async () => {
+    const gateway = createGateway([], []);
+    await expect(
+      gateway.createPayment({
+        amount: 10,
+        currency: "SAR",
+        callbackUrl: "https://merchant.example/callback",
+        tapCustomer: { firstName: "Ada", lastName: "  ", email: "ada@example.com" },
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
   });
 
   it("requires customer and callbackUrl", async () => {
@@ -234,21 +307,82 @@ describe("TapGateway mutations", () => {
     const body = JSON.parse(String(calls[1]?.init?.body)) as {
       source: { id: string };
       amount: number;
+      threeDSecure?: boolean;
+      customer_initiated?: boolean;
+      redirect?: { url?: string };
       post?: { url?: string };
       merchant?: { id?: string };
     };
     expect(body.source.id).toBe("auth_testAuthorize01");
     expect(body.amount).toBe(10.5);
+    expect(body.threeDSecure).toBe(true);
+    expect(body.customer_initiated).toBe(true);
+    expect(body.redirect?.url).toBe("https://merchant.example/callback");
     expect(body.post?.url).toBe("https://merchant.example/post");
     expect(body.merchant?.id).toBe("merchant_test01");
     expect(result.outcome).toBe("succeeded");
   });
 
-  it("replays capture via POST /charges when GET authorize is VOID", async () => {
+  it("prefers tapRedirectUrl over authorize.redirect.url on capture", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(authorizedObject()), jsonResponse(capturedCharge())],
+      calls,
+    );
+    await gateway.capturePayment({
+      gatewayPaymentId: "auth_testAuthorize01",
+      amount: money("10.50", "SAR"),
+      currency: "SAR",
+      idempotencyKey: "idem-cap-redirect",
+      tapRedirectUrl: "https://merchant.example/capture-return",
+    });
+    const body = JSON.parse(String(calls[1]?.init?.body)) as {
+      redirect?: { url?: string };
+    };
+    expect(body.redirect?.url).toBe("https://merchant.example/capture-return");
+  });
+
+  it("rejects capture when authorize has no redirect.url and tapRedirectUrl is omitted", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(authorizedObject({ redirect: {} }))],
+      calls,
+    );
+    await expect(
+      gateway.capturePayment({
+        gatewayPaymentId: "auth_testAuthorize01",
+        idempotencyKey: "idem-cap-noredirect",
+      }),
+    ).rejects.toBeInstanceOf(InvalidRequestError);
+    expect(calls.some((call) => call.url.includes("/charges"))).toBe(false);
+  });
+
+  it("rejects capture when the authorize status is VOID", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(authorizedObject({ status: "VOID" }))],
+      calls,
+    );
+    try {
+      await gateway.capturePayment({
+        gatewayPaymentId: "auth_testAuthorize01",
+        idempotencyKey: "idem-cap-void",
+      });
+      expect.unreachable("capture of VOID authorize must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidRequestError);
+      expect((error as Error).message).toMatch(/authorize status/i);
+    }
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toContain("/authorize/auth_testAuthorize01");
+    expect(calls.some((call) => call.url.includes("/charges"))).toBe(false);
+  });
+
+  it("replays capture via POST /charges when GET authorize is CAPTURED", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [
-        jsonResponse(authorizedObject({ status: "VOID" })),
+        jsonResponse(authorizedObject({ status: "CAPTURED" })),
         jsonResponse(capturedCharge()),
       ],
       calls,

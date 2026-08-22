@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { NetworkError } from "@paykernel/core";
+import {
+  CardDeclinedError,
+  GatewayApiError,
+  InvalidRequestError,
+  NetworkError,
+  ResourceNotFoundError,
+} from "@paykernel/core";
 import { assertTapSuccessBody, mapTapHttpFailure } from "./http";
 
 describe("assertTapSuccessBody", () => {
@@ -99,4 +105,86 @@ describe("mapTapHttpFailure", () => {
     expect(error).toBeInstanceOf(NetworkError);
     expect((error as NetworkError).afterProviderSubmit).not.toBe(true);
   });
+
+  it("does not map POST 400 errors code 504 to CardDeclinedError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 504, description: "Declined" }] },
+      method: "POST",
+    });
+    expect(error).not.toBeInstanceOf(CardDeclinedError);
+    expect(
+      error instanceof GatewayApiError || error instanceof InvalidRequestError,
+    ).toBe(true);
+  });
+
+  it("does not map POST 400 errors code 501 to CardDeclinedError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 501 }] },
+      method: "POST",
+    });
+    expect(error).not.toBeInstanceOf(CardDeclinedError);
+    expect(
+      error instanceof GatewayApiError || error instanceof InvalidRequestError,
+    ).toBe(true);
+  });
+
+  it("maps POST 400 code 1106 to InvalidRequestError not ResourceNotFoundError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1106, description: "Customer not found" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect(error).not.toBeInstanceOf(ResourceNotFoundError);
+  });
+
+  it("maps GET 400 code 1106 to InvalidRequestError not ResourceNotFoundError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1106, description: "Customer not found" }] },
+      method: "GET",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect(error).not.toBeInstanceOf(ResourceNotFoundError);
+  });
+
+  it("maps POST 400 code 1114 to InvalidRequestError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: {
+        errors: [
+          { code: 1114, description: "Please check the Authorize status" },
+        ],
+      },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("passes raw {status,body,code} on AMOUNT_CODES InvalidRequestError", () => {
+    const body = { errors: [{ code: 1150, description: "Invalid amount" }] };
+    const error = mapTapHttpFailure({
+      status: 400,
+      body,
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect((error as InvalidRequestError).validationErrors).toEqual([
+      { status: 400, body, code: "1150" },
+    ]);
+  });
+
+  it.each(["1144", "1115", "1160", "2102"] as const)(
+    "maps POST 400 code %s to ResourceNotFoundError",
+    (code) => {
+      const error = mapTapHttpFailure({
+        status: 400,
+        body: { errors: [{ code }] },
+        method: "POST",
+      });
+      expect(error).toBeInstanceOf(ResourceNotFoundError);
+    },
+  );
 });

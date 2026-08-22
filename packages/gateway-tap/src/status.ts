@@ -8,10 +8,12 @@ import type {
 const CHARGE_STATUS: Record<string, PaymentStatus> = {
   INITIATED: "pending",
   "IN PROGRESS": "pending",
+  IN_PROGRESS: "pending",
   AUTHORIZED: "authorized",
   CAPTURED: "paid",
   VOID: "cancelled",
   CANCELLED: "cancelled",
+  CANCELED: "cancelled",
   ABANDONED: "cancelled",
   FAILED: "failed",
   DECLINED: "failed",
@@ -23,7 +25,9 @@ const CHARGE_STATUS: Record<string, PaymentStatus> = {
 const REFUND_STATUS: Record<string, RefundStatus> = {
   REFUNDED: "completed",
   PENDING: "pending",
+  ACCEPTED: "pending",
   "IN PROGRESS": "pending",
+  IN_PROGRESS: "pending",
   CANCELED: "failed",
   FAILED: "failed",
   DECLINED: "failed",
@@ -54,28 +58,21 @@ export function mapTapRefundPaymentStatus(status: unknown): PaymentStatus {
   return "refund_failed";
 }
 
-function mapTapPaymentOutcome(
-  status: PaymentStatus,
-  redirectUrl: string | undefined,
-): PaymentOperationOutcome {
+function mapTapPaymentOutcome(status: PaymentStatus): PaymentOperationOutcome {
   if (status === "failed") return "failed";
   if (status === "cancelled") return "failed";
   if (status === "pending") return "requires_action";
-  if (redirectUrl !== undefined && redirectUrl.length > 0 && status !== "paid") {
-    return "requires_action";
-  }
   return "succeeded";
 }
 
 export function mapTapChargeOutcome(
   tapStatus: unknown,
   paymentStatus: PaymentStatus,
-  redirectUrl: string | undefined,
 ): PaymentOperationOutcome {
   if (normalizeTapStatus(tapStatus) === "DECLINED") {
     return "declined";
   }
-  return mapTapPaymentOutcome(paymentStatus, redirectUrl);
+  return mapTapPaymentOutcome(paymentStatus);
 }
 
 export function isTapDeclineStatus(tapStatus: unknown): boolean {

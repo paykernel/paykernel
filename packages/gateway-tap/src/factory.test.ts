@@ -34,6 +34,27 @@ describe("tapGateway", () => {
     ).toThrow(InvalidRequestError);
   });
 
+  it("rejects autoVoidHours outside 1..168", () => {
+    expect(() =>
+      tapGateway({ secretKey: TAP_TEST_SECRET, autoVoidHours: 0 }),
+    ).toThrow(InvalidRequestError);
+    expect(() =>
+      tapGateway({ secretKey: TAP_TEST_SECRET, autoVoidHours: 169 }),
+    ).toThrow(InvalidRequestError);
+    expect(() =>
+      tapGateway({ secretKey: TAP_TEST_SECRET, autoVoidHours: Number.NaN }),
+    ).toThrow(InvalidRequestError);
+  });
+
+  it("accepts autoVoidHours 1 and 168", () => {
+    expect(() =>
+      tapGateway({ secretKey: TAP_TEST_SECRET, autoVoidHours: 1 }),
+    ).not.toThrow();
+    expect(() =>
+      tapGateway({ secretKey: TAP_TEST_SECRET, autoVoidHours: 168 }),
+    ).not.toThrow();
+  });
+
   it("closes over secrets and keeps them off the manifest", () => {
     const adapter = tapGateway({ secretKey: TAP_TEST_SECRET });
     expect(adapter.name).toBe("tap");

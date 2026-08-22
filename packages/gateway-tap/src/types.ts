@@ -10,8 +10,8 @@ export type TapCustomerInput =
   | { id: string }
   | {
       firstName: string;
+      lastName: string;
       email: string;
-      lastName?: string;
       middleName?: string;
       phone?: { countryCode: string; number: string };
     };
@@ -37,8 +37,9 @@ export type TapRefundReason =
 export type TapCreatePaymentParams = CreatePaymentParams & {
   /**
    * Customer for the Tap charge/authorize. Either an existing `cus_…` id or
-   * inline first name + email. `customerId` on {@link CreatePaymentParams}
-   * is accepted as `{ id }` when this field is omitted.
+   * inline first name + last name + email (Tap error 1132 requires last name).
+   * `customerId` on {@link CreatePaymentParams} is accepted as `{ id }` when
+   * this field is omitted.
    */
   tapCustomer?: TapCustomerInput;
   /**
@@ -54,38 +55,16 @@ export type TapCreatePaymentParams = CreatePaymentParams & {
   tapMerchantId?: string;
 };
 
-export type TapCaptureParams = CaptureParams;
+export type TapCaptureParams = CaptureParams & {
+  /** Per-request `redirect.url` override (else authorize object `redirect.url`). */
+  tapRedirectUrl?: string;
+};
 export type TapRefundParams = RefundParams & {
   tapReason?: TapRefundReason;
 };
 export type TapVoidParams = VoidParams;
 
 export type TapObjectKind = "charge" | "authorize" | "refund";
-
-export type TapChargeStatus =
-  | "INITIATED"
-  | "ABANDONED"
-  | "CANCELLED"
-  | "FAILED"
-  | "DECLINED"
-  | "RESTRICTED"
-  | "CAPTURED"
-  | "VOID"
-  | "TIMEDOUT"
-  | "UNKNOWN"
-  | "AUTHORIZED"
-  | "IN PROGRESS";
-
-export type TapRefundStatus =
-  | "REFUNDED"
-  | "PENDING"
-  | "IN PROGRESS"
-  | "CANCELED"
-  | "FAILED"
-  | "DECLINED"
-  | "RESTRICTED"
-  | "TIMEDOUT"
-  | "UNKNOWN";
 
 /** Minimal Tap JSON object used by mapping helpers. */
 export type TapApiObject = {
