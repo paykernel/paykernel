@@ -6,6 +6,7 @@ import {
   InvalidRequestError,
 } from "@paykernel/core";
 import { TAP_CAPABILITIES } from "./capabilities";
+import { copyTapConfig } from "./config";
 import { tapGateway } from "./factory";
 import { TapGateway } from "./gateway";
 import { TAP_TEST_SECRET } from "./fixtures/charges";
@@ -13,6 +14,12 @@ import { TAP_TEST_SECRET } from "./fixtures/charges";
 describe("tapGateway", () => {
   it("rejects empty secretKey", () => {
     expect(() => tapGateway({ secretKey: "  " })).toThrow(InvalidRequestError);
+  });
+
+  it("trims secretKey", () => {
+    expect(copyTapConfig({ secretKey: `  ${TAP_TEST_SECRET}  ` }).secretKey).toBe(
+      TAP_TEST_SECRET,
+    );
   });
 
   it("rejects non-positive timeoutMs on TapGateway as well as the factory", () => {

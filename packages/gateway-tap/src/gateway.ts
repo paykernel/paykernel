@@ -6,10 +6,12 @@ import {
   buildProviderReferences,
   combineAbortSignals,
   createTimeoutSignal,
+  fromMinorUnits,
   hashWebhookPayload,
   InvalidRequestError,
   mapHttpAbortError,
   NetworkError,
+  toMinorUnits,
   withRetry,
   type GatewayPaymentResult,
   type GatewayRefundResult,
@@ -17,6 +19,7 @@ import {
   type GetPaymentParams,
   type HooksManager,
   type Logger,
+  type Money,
   type VoidParams,
   type WebhookEvent,
 } from "@paykernel/core";
@@ -33,6 +36,7 @@ import {
   isTapRetryableError,
   mapTapHttpFailure,
   tapResponseCode,
+  tapStatusMissing,
 } from "./http";
 import { parseTapAmount, tapMajorNumber } from "./money";
 import { assertNoPciCardSource, resolveTapSourceId } from "./sources";
@@ -72,6 +76,98 @@ function isTapRetryableBeforeSubmit(error: unknown): boolean {
   );
 }
 
+function currenciesMismatch(requested: unknown, retrieved: unknown): boolean {
+  if (typeof requested !== "string" || requested.trim().length === 0) {
+    return false;
+  }
+  if (typeof retrieved !== "string" || retrieved.trim().length === 0) {
+    return false;
+  }
+  return requested.trim().toUpperCase() !== retrieved.trim().toUpperCase();
+}
+
+function readTapMoney(value: unknown, currency: string): Money | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return parseTapAmount(value, currency);
+  }
+  if (typeof value === "string" && value.trim().length > 0) {
+    return parseTapAmount(value, currency);
+  }
+  return undefined;
+}
+
+function sumRefundAmounts(raw: unknown, currency: string): Money | undefined {
+  const items = Array.isArray(raw)
+    ? raw
+    : raw !== null &&
+        typeof raw === "object" &&
+        Array.isArray((raw as { data?: unknown }).data)
+      ? (raw as { data: unknown[] }).data
+      : undefined;
+  if (items === undefined) return undefined;
+  let total = 0n;
+  let seen = false;
+  for (const item of items) {
+    if (item === null || typeof item !== "object") continue;
+    const parsed = readTapMoney((item as { amount?: unknown }).amount, currency);
+    if (parsed === undefined) continue;
+    seen = true;
+    total += toMinorUnits(parsed);
+  }
+  if (!seen) {
+    return items.length === 0 ? parseTapAmount(0, currency) : undefined;
+  }
+  return fromMinorUnits(total, currency);
+}
+
+function chargeIdFromAuthorize(obj: TapApiObject): string | undefined {
+  if (typeof obj.charge_id === "string" && obj.charge_id.startsWith("chg_")) {
+    return obj.charge_id;
+  }
+  const nested = (obj as { charge?: unknown }).charge;
+  if (nested !== null && typeof nested === "object" && !Array.isArray(nested)) {
+    const id = (nested as { id?: unknown }).id;
+    if (typeof id === "string" && id.startsWith("chg_")) return id;
+  }
+  return undefined;
+}
+
+function authorizeIdFromSource(obj: TapApiObject): string | undefined {
+  const source = obj.source;
+  if (source !== null && typeof source === "object" && !Array.isArray(source)) {
+    const id = (source as { id?: unknown }).id;
+    if (typeof id === "string" && id.startsWith("auth_")) return id;
+  }
+  return undefined;
+}
+
+function withAuthorizeIdOnPaymentEvent(
+  event: NonNullable<WebhookEvent["event"]>,
+  authorizationId: string | undefined,
+): NonNullable<WebhookEvent["event"]> {
+  if (
+    authorizationId === undefined ||
+    !("payment" in event) ||
+    event.payment === undefined
+  ) {
+    return event;
+  }
+  const payment = event.payment;
+  return {
+    ...event,
+    payment: {
+      ...payment,
+      references: {
+        ...payment.references,
+        relatedIds: {
+          ...payment.references.relatedIds,
+          authorizationId,
+        },
+      },
+    },
+  };
+}
+
 export class TapGateway extends BaseGateway {
   readonly name = "tap" as const;
   private readonly tapConfig: TapConfig;
@@ -104,48 +200,50 @@ export class TapGateway extends BaseGateway {
 
   async capturePayment(params: TapCaptureParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("capturePayment", params, async (p) => {
-      this.assertMutationKey(p.idempotencyKey, "capturePayment");
+      const idempotencyKey = this.assertMutationKey(
+        p.idempotencyKey,
+        "capturePayment",
+      );
       const authorizeId = this.assertIdPrefix(p.gatewayPaymentId, "auth_");
       const existing = await this.tapRequest("GET", `/authorize/${authorizeId}`, undefined, {
         signal: p.signal,
         retry: true,
       });
-      const tapStatus = (existing as TapApiObject).status;
+      const obj = existing as TapApiObject;
+      const tapStatus = obj.status;
       const normalized =
         typeof tapStatus === "string" ? tapStatus.trim().toUpperCase() : "";
-      // CAPTURED: crash-retry after a completed capture — POST /charges with
-      // the same reference.idempotent so Tap returns the original charge.
-      if (normalized !== "AUTHORIZED" && normalized !== "CAPTURED") {
+      if (normalized === "CAPTURED") {
+        return this.mapCapturedAuthorize(existing, authorizeId, p.signal);
+      }
+      if (normalized !== "AUTHORIZED") {
         throw new InvalidRequestError(
           `Tap capture requires AUTHORIZED or CAPTURED authorize status (got "${String(tapStatus)}")`,
         );
       }
+      this.assertCurrencyMatch(p.currency, obj.currency, "capture");
       const currency =
         p.currency ??
-        (typeof (existing as TapApiObject).currency === "string"
-          ? ((existing as TapApiObject).currency as string)
-          : undefined);
-      if (currency === undefined || currency.length === 0) {
+        (typeof obj.currency === "string" ? obj.currency : undefined);
+      if (currency === undefined || currency.trim().length === 0) {
         throw new InvalidRequestError(
           "Tap capture requires currency (pass CaptureParams.currency or retrieve it from the authorize object)",
         );
       }
       const amount = this.tapOutboundMajor(
-        p.amount !== undefined
-          ? p.amount
-          : parseTapAmount((existing as TapApiObject).amount, currency),
+        p.amount !== undefined ? p.amount : parseTapAmount(obj.amount, currency),
         currency,
       );
       const redirectUrl = this.captureRedirectUrl(p, existing);
       const customer = this.customerFromObject(existing);
       const body: Record<string, unknown> = {
         amount,
-        currency: currency.toUpperCase(),
+        currency: currency.trim().toUpperCase(),
         customer_initiated: true,
         threeDSecure: true,
         source: { id: authorizeId },
         redirect: { url: redirectUrl },
-        reference: { idempotent: p.idempotencyKey },
+        reference: { idempotent: idempotencyKey },
       };
       if (customer !== undefined) body.customer = customer;
       if (this.tapConfig.merchantId !== undefined) {
@@ -158,18 +256,21 @@ export class TapGateway extends BaseGateway {
         signal: p.signal,
         retry: true,
       });
-      return this.mapPaymentObject(raw, "charge");
+      return this.mapPaymentObject(raw, "charge", authorizeId);
     });
   }
 
   async voidPayment(params: VoidParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("voidPayment", params, async (p) => {
-      this.assertMutationKey(p.idempotencyKey, "voidPayment");
+      const idempotencyKey = this.assertMutationKey(
+        p.idempotencyKey,
+        "voidPayment",
+      );
       const authorizeId = this.assertIdPrefix(p.gatewayPaymentId, "auth_");
       const raw = await this.tapRequest(
         "POST",
         `/authorize/${authorizeId}/void`,
-        { reference: { idempotent: p.idempotencyKey } },
+        { reference: { idempotent: idempotencyKey } },
         {
           signal: p.signal,
           retry: true,
@@ -202,35 +303,40 @@ export class TapGateway extends BaseGateway {
 
   async refundPayment(params: TapRefundParams): Promise<GatewayRefundResult> {
     return this.executeWithHooks("refundPayment", params, async (p) => {
-      this.assertMutationKey(p.idempotencyKey, "refundPayment");
+      const idempotencyKey = this.assertMutationKey(
+        p.idempotencyKey,
+        "refundPayment",
+      );
       const chargeId = this.assertIdPrefix(p.gatewayPaymentId, "chg_");
       const existing = await this.tapRequest("GET", `/charges/${chargeId}`, undefined, {
         signal: p.signal,
         retry: true,
       });
+      const obj = existing as TapApiObject;
+      const existingStatus =
+        typeof obj.status === "string" ? obj.status.trim().toUpperCase() : "";
+      if (existingStatus === "REFUNDED") {
+        throw new InvalidRequestError("Tap charge is already refunded");
+      }
+      this.assertCurrencyMatch(p.currency, obj.currency, "refund");
       const currency =
-        p.currency ??
-        (typeof (existing as TapApiObject).currency === "string"
-          ? ((existing as TapApiObject).currency as string)
-          : undefined);
-      if (currency === undefined || currency.length === 0) {
+        p.currency ?? (typeof obj.currency === "string" ? obj.currency : undefined);
+      if (currency === undefined || currency.trim().length === 0) {
         throw new InvalidRequestError(
           "Tap refund requires currency (pass RefundParams.currency or retrieve it from the charge)",
         );
       }
-      const amount = this.tapOutboundMajor(
+      const amount =
         p.amount !== undefined
-          ? p.amount
-          : parseTapAmount((existing as TapApiObject).amount, currency),
-        currency,
-      );
+          ? this.tapOutboundMajor(p.amount, currency)
+          : this.remainingRefundMajor(obj, currency);
       const reason = this.refundReason(p);
       const body: Record<string, unknown> = {
         charge_id: chargeId,
         amount,
-        currency: currency.toUpperCase(),
+        currency: currency.trim().toUpperCase(),
         reason,
-        reference: { idempotent: p.idempotencyKey },
+        reference: { idempotent: idempotencyKey },
       };
       const metadata = this.toTapMetadata(p.metadata);
       if (metadata !== undefined) body.metadata = metadata;
@@ -319,10 +425,13 @@ export class TapGateway extends BaseGateway {
       ? { ...attached.provider, eventType: nativeType }
       : attached.provider;
     const nested = attached.event
-      ? {
-          ...attached.event,
-          provider: { ...attached.event.provider, eventType: nativeType },
-        }
+      ? withAuthorizeIdOnPaymentEvent(
+          {
+            ...attached.event,
+            provider: { ...attached.event.provider, eventType: nativeType },
+          },
+          authorizeIdFromSource(obj),
+        )
       : attached.event;
     return {
       ...attached,
@@ -422,35 +531,42 @@ export class TapGateway extends BaseGateway {
       jsonParseFailed,
       data,
     });
+    if (
+      !isMutatingMethod(method) &&
+      tapStatusMissing((data as { status?: unknown }).status)
+    ) {
+      throw new InvalidRequestError("Tap API returned a 2xx GET body missing status");
+    }
     return data;
   }
 
   private mapPaymentObject(
     raw: unknown,
     kind: "charge" | "authorize",
+    authorizationId?: string,
   ): GatewayPaymentResult {
     if (raw === null || typeof raw !== "object") {
       throw new InvalidRequestError("Tap payment response must be an object");
     }
     const obj = raw as TapApiObject;
     const id = this.requireString(obj.id, "id");
-    const tapStatus = typeof obj.status === "string" ? obj.status : "UNKNOWN";
+    const tapStatus = obj.status as string;
     const status = mapTapChargeStatus(tapStatus);
     const currency =
       typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
     const redirectUrl = this.redirectUrl(obj);
-    const outcome = mapTapChargeOutcome(tapStatus, status);
+    const code = tapResponseCode(obj);
+    const outcome = mapTapChargeOutcome(tapStatus, status, code);
     let amount: number | undefined;
     if (obj.amount !== undefined && currency !== undefined) {
       amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
     }
-    const code = tapResponseCode(obj);
     const declineMessage =
       typeof (obj.response as { message?: unknown } | undefined)?.message ===
       "string"
         ? (obj.response as { message: string }).message
         : tapStatus;
-    const isDecline = isTapDeclineStatus(tapStatus);
+    const isDecline = isTapDeclineStatus(tapStatus, code);
     const decline = isDecline
       ? {
           code: code ?? tapStatus,
@@ -459,12 +575,13 @@ export class TapGateway extends BaseGateway {
         }
       : undefined;
 
+    const authId = authorizationId ?? (kind === "authorize" ? id : undefined);
     const references = buildProviderReferences({
       gateway: "tap",
       gatewayId: id,
       status,
       providerNativeStatus: tapStatus,
-      ...(kind === "authorize" ? { authorizationId: id } : {}),
+      ...(authId !== undefined ? { authorizationId: authId } : {}),
       ...(kind === "charge" ? { chargeId: id } : {}),
     });
 
@@ -485,7 +602,7 @@ export class TapGateway extends BaseGateway {
         references,
         ...(amount !== undefined ? { amount } : {}),
         ...(currency !== undefined ? { currency } : {}),
-        ...(kind === "authorize" ? { authorizationId: id } : {}),
+        ...(authId !== undefined ? { authorizationId: authId } : {}),
         providerNativeStatus: tapStatus,
       },
       outcome,
@@ -499,7 +616,7 @@ export class TapGateway extends BaseGateway {
     }
     const obj = raw as TapApiObject;
     const id = this.requireString(obj.id, "id");
-    const tapStatus = typeof obj.status === "string" ? obj.status : "UNKNOWN";
+    const tapStatus = obj.status as string;
     const status = mapTapRefundEntityStatus(tapStatus);
     const outcome =
       status === "completed"
@@ -592,16 +709,28 @@ export class TapGateway extends BaseGateway {
       return { id: customer.id };
     }
     if ("firstName" in customer) {
+      const firstName = customer.firstName.trim();
       const lastName = customer.lastName.trim();
+      const email = customer.email.trim();
+      if (firstName.length === 0) {
+        throw new InvalidRequestError(
+          "Tap createPayment inline customer requires firstName",
+        );
+      }
       if (lastName.length === 0) {
         throw new InvalidRequestError(
           "Tap createPayment inline customer requires lastName",
         );
       }
+      if (email.length === 0) {
+        throw new InvalidRequestError(
+          "Tap createPayment inline customer requires email",
+        );
+      }
       const out: Record<string, unknown> = {
-        first_name: customer.firstName,
+        first_name: firstName,
         last_name: lastName,
-        email: customer.email,
+        email,
       };
       if (customer.middleName !== undefined) out.middle_name = customer.middleName;
       if (customer.phone !== undefined) {
@@ -613,6 +742,63 @@ export class TapGateway extends BaseGateway {
       return out;
     }
     throw new InvalidRequestError("Tap customer requires id or firstName+lastName+email");
+  }
+
+  private async mapCapturedAuthorize(
+    existing: unknown,
+    authorizeId: string,
+    signal?: AbortSignal,
+  ): Promise<GatewayPaymentResult> {
+    const chargeId = chargeIdFromAuthorize(existing as TapApiObject);
+    if (chargeId !== undefined) {
+      const charge = await this.tapRequest("GET", `/charges/${chargeId}`, undefined, {
+        signal,
+        retry: true,
+      });
+      return this.mapPaymentObject(charge, "charge", authorizeId);
+    }
+    return this.mapPaymentObject(existing, "authorize", authorizeId);
+  }
+
+  private assertCurrencyMatch(
+    requested: string | undefined,
+    retrieved: unknown,
+    operation: "capture" | "refund",
+  ): void {
+    if (!currenciesMismatch(requested, retrieved)) return;
+    throw new InvalidRequestError(
+      `Tap ${operation} currency "${String(requested)}" does not match retrieved currency "${String(retrieved)}"`,
+    );
+  }
+
+  private remainingRefundMajor(obj: TapApiObject, currency: string): number {
+    const rec = obj as TapApiObject & Record<string, unknown>;
+    const remainingDirect = readTapMoney(
+      rec.remaining ?? rec.refundable,
+      currency,
+    );
+    if (remainingDirect !== undefined) {
+      const major = tapMajorNumber(remainingDirect, currency);
+      if (major === 0) {
+        throw new InvalidRequestError("Tap charge is already refunded");
+      }
+      return this.tapOutboundMajor(remainingDirect, currency);
+    }
+    const refunded =
+      readTapMoney(rec.amount_refunded ?? rec.refunded, currency) ??
+      sumRefundAmounts(rec.refunds, currency);
+    if (refunded === undefined) {
+      return this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency);
+    }
+    const total = parseTapAmount(obj.amount, currency);
+    const remainingMinor = toMinorUnits(total) - toMinorUnits(refunded);
+    if (remainingMinor < 0n) {
+      throw new InvalidRequestError("Tap refund remaining is invalid");
+    }
+    if (remainingMinor === 0n) {
+      throw new InvalidRequestError("Tap charge is already refunded");
+    }
+    return tapMajorNumber(fromMinorUnits(remainingMinor, currency), currency);
   }
 
   private captureRedirectUrl(
@@ -682,7 +868,7 @@ export class TapGateway extends BaseGateway {
 
   private createIdempotencyKey(provided: string | undefined): string {
     if (typeof provided === "string" && provided.trim().length > 0) {
-      return provided;
+      return provided.trim();
     }
     const minted = this.runtime.randomUUID();
     this.logger.warn(
@@ -691,10 +877,11 @@ export class TapGateway extends BaseGateway {
     return minted;
   }
 
-  private assertMutationKey(key: string | undefined, operation: string): void {
+  private assertMutationKey(key: string | undefined, operation: string): string {
     if (typeof key !== "string" || key.trim().length === 0) {
       throw new InvalidRequestError(`Tap ${operation} requires idempotencyKey`);
     }
+    return key.trim();
   }
 
   private assertIdPrefix(id: string, prefix: string): string {
@@ -722,6 +909,11 @@ export class TapGateway extends BaseGateway {
     if (typeof raw !== "string") return "requested_by_customer";
     const trimmed = raw.trim();
     if (trimmed.length === 0) return "requested_by_customer";
+    if (trimmed.length > 249) {
+      throw new InvalidRequestError(
+        "Tap refund reason must be 249 characters or fewer",
+      );
+    }
     const normalized = trimmed.toLowerCase().replace(/ /g, "_");
     if (TAP_REFUND_REASONS.has(normalized as TapRefundReason)) {
       return normalized;

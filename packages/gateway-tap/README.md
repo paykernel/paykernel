@@ -49,7 +49,7 @@ if (result.outcome === "succeeded" && result.status === "paid") {
 }
 ```
 
-`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`. Omitted `tapSource` is `src_all` for charges and `src_card` for `capture: false`. Optional config `autoVoidHours` is sent only on authorize create (not defaulted).
+`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`. Inline `tapCustomer` requires non-empty `firstName`, `lastName`, and `email`. Omitted `tapSource` is `src_all` for charges and `src_card` for `capture: false`. Optional config `autoVoidHours` is sent only on authorize create (not defaulted). `capturePayment` result keeps `authorizationId` as the `auth_…` id; `gatewayId` is the charge `chg_…` id.
 
 ## Capabilities
 

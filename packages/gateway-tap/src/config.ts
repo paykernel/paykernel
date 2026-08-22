@@ -56,7 +56,7 @@ export function assertTapAutoVoidHours(
 
 export function copyTapConfig(config: TapConfig): TapConfig {
   assertTapSecretKey(config.secretKey);
-  const copied: TapConfig = { secretKey: config.secretKey };
+  const copied: TapConfig = { secretKey: config.secretKey.trim() };
   if (config.merchantId !== undefined) copied.merchantId = config.merchantId;
   if (config.webhookUrl !== undefined) copied.webhookUrl = config.webhookUrl;
   if (config.timeoutMs !== undefined) {

@@ -8,13 +8,24 @@
 
 ### Patch
 
+- **TAP-MISSING-STATUS:** Mutating HTTP 2xx with an `id` but no object `status` is `indeterminate` (`afterProviderSubmit`). Missing status is not mapped as Tap `UNKNOWN` → `failed`.
+- **TAP-CAPTURE-REPLAY:** `capturePayment` GETs the authorize. `AUTHORIZED` POSTs `/charges`. `CAPTURED` does not POST — returns paid and keeps `authorizationId` (crash-retry after a completed capture). Replaying POST on an already-captured `auth_…` is Tap `1126`.
+- **TAP-AUTH-CHARGE-ID:** Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the charge `chg_…` id. Capture does not drop the authorize id when mapping the charge.
+- **TAP-REFUND-REMAINING:** Omitted refund `amount` is the remaining refundable amount when the charge exposes `refunded` / remaining — not a resend of `charge.amount`. A `REFUNDED` charge cannot be refunded again. After a partial refund, pass remaining explicitly if the charge does not expose `refunded`.
+- **TAP-CURRENCY-MATCH:** Capture and refund `currency` must match the authorize / charge. Mismatch is `InvalidRequestError` (Tap `1149`).
+- **TAP-CREATE-RECONCILE:** `createPayment` timeout / 5xx / `1151` after submit: replay `createPayment` with the same `idempotencyKey`. Do not `getPayment` until you have a `chg_…` or `auth_…` id. capture / void / refund timeouts: `getPayment` with the stored id.
+- **TAP-HTTP-11XX:** Tap error codes `1126` ("Source already used") and `1149` ("Currency code is not matching") are `InvalidRequestError`, not untyped `GatewayApiError`.
+- **TAP-CUSTOMER-FIELDS:** Inline `tapCustomer` requires non-empty `firstName`, `lastName`, and `email`. Blank names or email are rejected (Tap `1130` / `1132` / `1138`).
+- **TAP-DECLINE-CODES:** Charge `FAILED` with `response.code` `501`–`516` is `declined` (with decline extras), not a generic `failed`. `DECLINED` is unchanged.
+- **TAP-REASON-LENGTH:** Refund `reason` longer than 249 characters is rejected (`InvalidRequestError`; Tap `1157`).
+- **TAP-KEY-TRIM:** Config `secretKey` is trimmed. Whitespace-only keys remain invalid.
 - **TAP-REDIRECT-URL:** Result `redirectUrl` / `nextAction` is `transaction.url` only. Merchant `redirect.url` (`callbackUrl`) is never a checkout next action. CAPTURED / AUTHORIZED must not redirect from that echo URL.
 - **TAP-UDF1-PAYMENT-ID:** Webhook `paymentId` is `metadata.paymentId` / `metadata.orderId` / `reference.order` — never `metadata.udf1`.
 - **TAP-REFUND-POST:** Refund POST includes `post.url` from config `webhookUrl` when set.
-- **TAP-FAWRY-IN-PROGRESS:** Charge status `IN PROGRESS` (Fawry) maps to `pending` / `requires_action` when `transaction.url` is present — not `failed`.
+- **TAP-FAWRY-IN-PROGRESS:** Charge status `IN PROGRESS` / `IN_PROGRESS` (Fawry) maps to `pending` / `requires_action` like other pending statuses — not `failed`. All pending statuses are `requires_action`; `transaction.url` is only the redirect target when present.
 - **TAP-TOTAL-REFUNDED:** Refund results omit `totalRefunded`. A single refund `amount` is not a cumulative total; the adapter does not invent `0`.
 - **TAP-CAPTURE-BODY:** Capture POST sends `merchant.id` from config and `post.url` from `webhookUrl` when set.
-- **TAP-CAPTURE-STATUS:** Capture requires GET authorize `AUTHORIZED` (normal) or `CAPTURED` (idempotent replay of `POST /charges` with the same `idempotencyKey`). `VOID` is rejected — the hold was released, not captured.
+- **TAP-CAPTURE-STATUS:** Capture requires GET authorize `AUTHORIZED` then `POST /charges`. GET `CAPTURED` does not POST — returns paid and keeps `authorizationId` (crash-retry after a completed capture). `VOID` is rejected — the hold was released, not captured.
 - **TAP-REFUND-ACCEPTED:** Refund object `ACCEPTED` maps to pending / `refund_pending`, not failed. Do not fulfill or retry as failure.
 - **TAP-AUTH-LEFTOVER-URL:** Leftover `transaction.url` on AUTHORIZED / CAPTURED is not `requires_action`.
 - **TAP-CAPTURE-FIELDS:** Capture POST sends `threeDSecure: true` and `customer_initiated: true`.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  isTapDeclineStatus,
   mapTapChargeOutcome,
   mapTapChargeStatus,
   mapTapRefundEntityStatus,
@@ -45,6 +46,45 @@ describe("mapTapChargeOutcome", () => {
 
   it("does not treat UNKNOWN as paid", () => {
     expect(mapTapChargeOutcome("UNKNOWN", "failed")).toBe("failed");
+  });
+
+  it.each([505, "505"] as const)(
+    "maps FAILED + response code %s to declined even when paymentStatus is failed",
+    (code) => {
+      expect(mapTapChargeOutcome("FAILED", "failed", code)).toBe("declined");
+    },
+  );
+
+  it("maps FAILED + response codes 501 and 516 to declined", () => {
+    expect(mapTapChargeOutcome("FAILED", "failed", 501)).toBe("declined");
+    expect(mapTapChargeOutcome("FAILED", "failed", "516")).toBe("declined");
+  });
+
+  it("maps FAILED without a 501–516 response code as failed", () => {
+    expect(mapTapChargeOutcome("FAILED", "failed")).toBe("failed");
+    expect(mapTapChargeOutcome("FAILED", "failed", 500)).toBe("failed");
+    expect(mapTapChargeOutcome("FAILED", "failed", "517")).toBe("failed");
+  });
+});
+
+describe("isTapDeclineStatus", () => {
+  it("is true for DECLINED without a response code", () => {
+    expect(isTapDeclineStatus("DECLINED")).toBe(true);
+  });
+
+  it("is true for FAILED with decline response code 505", () => {
+    expect(isTapDeclineStatus("FAILED", 505)).toBe(true);
+    expect(isTapDeclineStatus("FAILED", "505")).toBe(true);
+  });
+
+  it("is false for FAILED without a 501–516 response code", () => {
+    expect(isTapDeclineStatus("FAILED")).toBe(false);
+    expect(isTapDeclineStatus("FAILED", 500)).toBe(false);
+    expect(isTapDeclineStatus("FAILED", "517")).toBe(false);
+  });
+
+  it("is false for CAPTURED with success response code 000", () => {
+    expect(isTapDeclineStatus("CAPTURED", "000")).toBe(false);
   });
 });
 

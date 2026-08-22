@@ -12,7 +12,7 @@ HMAC-SHA256 hex with the **secret API key**, compared to the `hashstring` header
 
 Tests lock Tap’s published Create-a-Charge `hashstring` header (docs example secret + posted charge JSON). Unpadded amount `1` does not match that vector.
 
-`paymentId` is `metadata.paymentId`, then `metadata.orderId`, then `reference.order`. **`metadata.udf1` is not a payment id** (Tap uses udf1 as a free-form metadata slot).
+Charge webhooks set `gatewayPaymentId` to the `chg_…` id. Auth/capture merchants must also match `reference.order` / `metadata.paymentId`: capture settlement is a **charge** object (`chg_…`), not the original `auth_…`. `paymentId` is `metadata.paymentId`, then `metadata.orderId`, then `reference.order`. **`metadata.udf1` is not a payment id** (Tap uses udf1 as a free-form metadata slot).
 
 Invoice objects are not supported: after a verified delivery, unknown `object` throws `InvalidRequestError` (parse class — do not use `InvalidWebhookError` after verify).
 

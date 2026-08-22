@@ -66,18 +66,39 @@ function mapTapPaymentOutcome(status: PaymentStatus): PaymentOperationOutcome {
   return "succeeded";
 }
 
+function isTapDeclineResponseCode(code: unknown): boolean {
+  let n: number;
+  if (typeof code === "number") {
+    n = code;
+  } else if (typeof code === "string") {
+    const trimmed = code.trim();
+    if (trimmed.length === 0 || !/^\d+$/.test(trimmed)) return false;
+    n = Number(trimmed);
+  } else {
+    return false;
+  }
+  return Number.isInteger(n) && n >= 501 && n <= 516;
+}
+
 export function mapTapChargeOutcome(
   tapStatus: unknown,
   paymentStatus: PaymentStatus,
+  responseCode?: unknown,
 ): PaymentOperationOutcome {
-  if (normalizeTapStatus(tapStatus) === "DECLINED") {
+  if (isTapDeclineStatus(tapStatus, responseCode)) {
     return "declined";
   }
   return mapTapPaymentOutcome(paymentStatus);
 }
 
-export function isTapDeclineStatus(tapStatus: unknown): boolean {
-  return normalizeTapStatus(tapStatus) === "DECLINED";
+export function isTapDeclineStatus(
+  tapStatus: unknown,
+  responseCode?: unknown,
+): boolean {
+  return (
+    normalizeTapStatus(tapStatus) === "DECLINED" ||
+    isTapDeclineResponseCode(responseCode)
+  );
 }
 
 /** Stable Phase 7 names so attachPaymentEvent can map a custom gateway. */

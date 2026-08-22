@@ -1,8 +1,12 @@
 # Refunds
 
-`refundPayment` calls `POST /v2/refunds`. `gatewayPaymentId` must be a **charge** id (`chg_…`).
+`refundPayment` calls `POST /v2/refunds`. `gatewayPaymentId` must be a **charge** id (`chg_…`). Authorize ids (`auth_…`) are rejected — store the capture result `gatewayId` separately from `authorizationId`.
 
-Tap requires `amount`, `currency`, and `reason`. If `amount` / `currency` are omitted, the adapter GETs the charge first. Reason is `tapReason` if set, else the caller `reason`, else `requested_by_customer`.
+Tap requires `amount`, `currency`, and `reason`. If `amount` is omitted, the adapter uses the **remaining** refundable amount when the charge exposes `refunded` / remaining. It does **not** resend `charge.amount` (that would retry a full refund after a partial). A charge whose status is `REFUNDED` cannot be refunded again. After a partial refund, pass remaining **explicitly** if the charge does not expose `refunded`.
+
+If `currency` is omitted, it is taken from the charge. If the caller passes `currency`, it must match the charge (`InvalidRequestError`; Tap `1149`).
+
+Reason is `tapReason` if set, else the caller `reason`, else `requested_by_customer`. Reason length must be less than 250 characters (Tap `1157`).
 
 When config `webhookUrl` is set, the POST includes `post.url` from that value.
 

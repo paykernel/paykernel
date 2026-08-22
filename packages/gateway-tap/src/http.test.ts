@@ -52,16 +52,66 @@ describe("assertTapSuccessBody", () => {
     }
   });
 
-  it("accepts a mutating 2xx object with id", () => {
+  it("accepts a mutating 2xx object with id and status", () => {
     expect(() =>
+      assertTapSuccessBody({
+        method: "POST",
+        status: 200,
+        responseText: '{"id":"chg_1","status":"CAPTURED"}',
+        jsonParseFailed: false,
+        data: { id: "chg_1", status: "CAPTURED" },
+      }),
+    ).not.toThrow();
+  });
+
+  it("throws NetworkError afterProviderSubmit when mutating 2xx status is whitespace", () => {
+    try {
+      assertTapSuccessBody({
+        method: "POST",
+        status: 200,
+        responseText: '{"id":"chg_1","status":"  "}',
+        jsonParseFailed: false,
+        data: { id: "chg_1", status: "  " },
+      });
+      expect.unreachable("mutating 2xx with blank status must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NetworkError);
+      expect((error as NetworkError).afterProviderSubmit).toBe(true);
+    }
+  });
+
+  it("throws NetworkError afterProviderSubmit when mutating 2xx has id but missing status", () => {
+    try {
       assertTapSuccessBody({
         method: "POST",
         status: 200,
         responseText: '{"id":"chg_1"}',
         jsonParseFailed: false,
         data: { id: "chg_1" },
-      }),
-    ).not.toThrow();
+      });
+      expect.unreachable("mutating 2xx without status must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NetworkError);
+      expect((error as NetworkError).afterProviderSubmit).toBe(true);
+      expect((error as Error).message).toMatch(/missing status/i);
+    }
+  });
+
+  it("throws NetworkError afterProviderSubmit when mutating 2xx status is not a string", () => {
+    try {
+      assertTapSuccessBody({
+        method: "POST",
+        status: 200,
+        responseText: '{"id":"chg_1","status":1}',
+        jsonParseFailed: false,
+        data: { id: "chg_1", status: 1 },
+      });
+      expect.unreachable("mutating 2xx with non-string status must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NetworkError);
+      expect((error as NetworkError).afterProviderSubmit).toBe(true);
+      expect((error as Error).message).toMatch(/missing status/i);
+    }
   });
 });
 
@@ -161,6 +211,26 @@ describe("mapTapHttpFailure", () => {
       method: "POST",
     });
     expect(error).toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("maps POST 400 code 1126 to InvalidRequestError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1126, description: "Invalid authorize id" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect(error).not.toBeInstanceOf(GatewayApiError);
+  });
+
+  it("maps POST 400 code 1149 to InvalidRequestError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1149, description: "Invalid request" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect(error).not.toBeInstanceOf(GatewayApiError);
   });
 
   it("passes raw {status,body,code} on AMOUNT_CODES InvalidRequestError", () => {

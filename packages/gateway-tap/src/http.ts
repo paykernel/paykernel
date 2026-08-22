@@ -15,11 +15,26 @@ export type TapErrorBody = {
 const NOT_FOUND_CODES = new Set(["1144", "1115", "1160", "2102"]);
 const AUTH_CODES = new Set(["2104", "2106", "2105", "2107", "1101"]);
 const AMOUNT_CODES = new Set(["1150", "1161", "1117"]);
-const INVALID_REQUEST_CODES = new Set(["1106", "1114"]);
+const INVALID_REQUEST_CODES = new Set([
+  "1106",
+  "1110",
+  "1111",
+  "1114",
+  "1118",
+  "1119",
+  "1124",
+  "1125",
+  "1126",
+  "1149",
+]);
 
 export function isMutatingMethod(method: string): boolean {
   const normalized = method.toUpperCase();
   return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
+}
+
+export function tapStatusMissing(status: unknown): boolean {
+  return typeof status !== "string" || status.trim().length === 0;
 }
 
 export function tapErrorCode(body: unknown): string | undefined {
@@ -108,10 +123,18 @@ export function assertTapSuccessBody(input: {
     throw new NetworkError("Tap API returned an unusable JSON body", raw, tag);
   }
   if (!mutating) return;
-  const id = (input.data as { id?: unknown }).id;
+  const body = input.data as { id?: unknown; status?: unknown };
+  const id = body.id;
   if (typeof id !== "string" || id.length === 0) {
     throw new NetworkError(
       "Tap API returned a 2xx mutation body without an id",
+      { status: input.status, body: input.data },
+      { afterProviderSubmit: true },
+    );
+  }
+  if (tapStatusMissing(body.status)) {
+    throw new NetworkError(
+      "Tap API returned a 2xx mutation body missing status",
       { status: input.status, body: input.data },
       { afterProviderSubmit: true },
     );
