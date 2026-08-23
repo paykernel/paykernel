@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+  AuthenticationError,
   CardDeclinedError,
   GatewayApiError,
   InvalidRequestError,
@@ -136,6 +137,28 @@ describe("mapTapHttpFailure", () => {
     expect((error as NetworkError).afterProviderSubmit).not.toBe(true);
   });
 
+  it("maps POST 500 code 1106 to NetworkError afterProviderSubmit not InvalidRequestError", () => {
+    const error = mapTapHttpFailure({
+      status: 500,
+      body: { errors: [{ code: 1106, description: "Customer not found" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect(error).not.toBeInstanceOf(InvalidRequestError);
+    expect((error as NetworkError).afterProviderSubmit).toBe(true);
+  });
+
+  it("maps GET 500 code 1106 to NetworkError without afterProviderSubmit", () => {
+    const error = mapTapHttpFailure({
+      status: 500,
+      body: { errors: [{ code: 1106, description: "Customer not found" }] },
+      method: "GET",
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect(error).not.toBeInstanceOf(InvalidRequestError);
+    expect((error as NetworkError).afterProviderSubmit).not.toBe(true);
+  });
+
   it("treats POST 400 code 1151 as NetworkError afterProviderSubmit", () => {
     const error = mapTapHttpFailure({
       status: 400,
@@ -231,6 +254,47 @@ describe("mapTapHttpFailure", () => {
     });
     expect(error).toBeInstanceOf(InvalidRequestError);
     expect(error).not.toBeInstanceOf(GatewayApiError);
+  });
+
+  it("maps POST 400 code 1101 to AuthenticationError not InvalidRequestError", () => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code: 1101, description: "Unauthorized" }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(AuthenticationError);
+    expect(error).not.toBeInstanceOf(InvalidRequestError);
+  });
+
+  it.each([
+    "1102",
+    "1103",
+    "1104",
+    "1105",
+    "1107",
+    "1108",
+    "1112",
+    "1113",
+    "1132",
+    "1152",
+    "1153",
+    "1156",
+    "1157",
+    "1164",
+    "2100",
+    "2103",
+    "2108",
+    "4101",
+    "9998",
+  ] as const)("maps POST 400 code %s to InvalidRequestError", (code) => {
+    const error = mapTapHttpFailure({
+      status: 400,
+      body: { errors: [{ code }] },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+    expect(error).not.toBeInstanceOf(GatewayApiError);
+    expect(error).not.toBeInstanceOf(AuthenticationError);
   });
 
   it("passes raw {status,body,code} on AMOUNT_CODES InvalidRequestError", () => {

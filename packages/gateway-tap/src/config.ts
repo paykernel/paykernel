@@ -54,11 +54,33 @@ export function assertTapAutoVoidHours(
   }
 }
 
+/** Tap will not POST IPN to non-HTTPS URLs. localhost http is rejected. */
+export function assertTapHttpsUrl(
+  value: unknown,
+  field: string,
+): asserts value is string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidRequestError(`${field} must be a non-empty HTTPS URL`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value.trim());
+  } catch {
+    throw new InvalidRequestError(`${field} must be a valid HTTPS URL`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new InvalidRequestError(`${field} must be an HTTPS URL`);
+  }
+}
+
 export function copyTapConfig(config: TapConfig): TapConfig {
   assertTapSecretKey(config.secretKey);
   const copied: TapConfig = { secretKey: config.secretKey.trim() };
   if (config.merchantId !== undefined) copied.merchantId = config.merchantId;
-  if (config.webhookUrl !== undefined) copied.webhookUrl = config.webhookUrl;
+  if (config.webhookUrl !== undefined) {
+    assertTapHttpsUrl(config.webhookUrl, "tap.webhookUrl");
+    copied.webhookUrl = config.webhookUrl.trim();
+  }
   if (config.timeoutMs !== undefined) {
     assertTapTimeoutMs(config.timeoutMs);
     copied.timeoutMs = config.timeoutMs;

@@ -49,7 +49,7 @@ if (result.outcome === "succeeded" && result.status === "paid") {
 }
 ```
 
-`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`. Inline `tapCustomer` requires non-empty `firstName`, `lastName`, and `email`. Omitted `tapSource` is `src_all` for charges and `src_card` for `capture: false`. Optional config `autoVoidHours` is sent only on authorize create (not defaulted). `capturePayment` result keeps `authorizationId` as the `auth_…` id; `gatewayId` is the charge `chg_…` id.
+`TapGateway.createPayment` accepts Tap-only `tap*` fields (`tapCustomer`, `tapSource`, `tapPostUrl`, `tapThreeDSecure`, `tapMerchantId`) as `TapCreatePaymentParams`. With `defaultGateway: "tap"`, `payments.createPayment({ tapCustomer, … })` is typed the same way (core does not add `tap*` to `CreatePaymentParams`). Inline `tapCustomer` requires non-empty `firstName`, `lastName`, and `email`. Omitted `tapSource` is `src_all` for charges and `src_card` for `capture: false`. Config `webhookUrl` / `tapPostUrl` must be HTTPS. Optional config `autoVoidHours` is sent only on authorize create (not defaulted). Create and capture POST send `save_card: false`. `capturePayment` result keeps `authorizationId` as the `auth_…` id; `gatewayId` is the charge `chg_…` id. `getPayment(auth_…)` on CAPTURED uses nested `charge_id` when present (`gatewayId` is `chg_…`); without it, paid + `authorizationId` `auth_…`.
 
 ## Capabilities
 

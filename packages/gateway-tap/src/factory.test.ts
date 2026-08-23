@@ -16,6 +16,27 @@ describe("tapGateway", () => {
     expect(() => tapGateway({ secretKey: "  " })).toThrow(InvalidRequestError);
   });
 
+  it.each(["http://merchant.example/post", "not-a-url"] as const)(
+    "rejects non-HTTPS webhookUrl %s",
+    (webhookUrl) => {
+      expect(() =>
+        tapGateway({
+          secretKey: TAP_TEST_SECRET,
+          webhookUrl,
+        }),
+      ).toThrow(InvalidRequestError);
+    },
+  );
+
+  it("accepts HTTPS webhookUrl", () => {
+    expect(() =>
+      tapGateway({
+        secretKey: TAP_TEST_SECRET,
+        webhookUrl: "https://merchant.example/post",
+      }),
+    ).not.toThrow();
+  });
+
   it("trims secretKey", () => {
     expect(copyTapConfig({ secretKey: `  ${TAP_TEST_SECRET}  ` }).secretKey).toBe(
       TAP_TEST_SECRET,

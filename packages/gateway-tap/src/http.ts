@@ -15,18 +15,6 @@ export type TapErrorBody = {
 const NOT_FOUND_CODES = new Set(["1144", "1115", "1160", "2102"]);
 const AUTH_CODES = new Set(["2104", "2106", "2105", "2107", "1101"]);
 const AMOUNT_CODES = new Set(["1150", "1161", "1117"]);
-const INVALID_REQUEST_CODES = new Set([
-  "1106",
-  "1110",
-  "1111",
-  "1114",
-  "1118",
-  "1119",
-  "1124",
-  "1125",
-  "1126",
-  "1149",
-]);
 
 export function isMutatingMethod(method: string): boolean {
   const normalized = method.toUpperCase();
@@ -73,22 +61,37 @@ export function mapTapHttpFailure(input: {
       ? new RateLimitError("tap", retryAfter)
       : new RateLimitError("tap");
   }
+  if (status >= 500) {
+    return new NetworkError(message, raw, mutating ? { afterProviderSubmit: true } : undefined);
+  }
   if (status === 401 || (code !== undefined && AUTH_CODES.has(code))) {
     return new AuthenticationError(message, raw);
   }
   if (status === 404 || (code !== undefined && NOT_FOUND_CODES.has(code))) {
     return new ResourceNotFoundError(message, raw);
   }
-  if (
-    code !== undefined &&
-    (AMOUNT_CODES.has(code) || INVALID_REQUEST_CODES.has(code))
-  ) {
+  if (code !== undefined && isTapClientErrorCode(code)) {
     return new InvalidRequestError(message, [raw]);
   }
-  if (status >= 500 || code === "2101" || code === "9999" || code === "1151") {
+  if (code === "2101" || code === "9999" || code === "1151") {
     return new NetworkError(message, raw, mutating ? { afterProviderSubmit: true } : undefined);
   }
   return new GatewayApiError(message, "tap", raw);
+}
+
+/**
+ * Client JSON codes → InvalidRequestError.
+ * Excludes auth / not-found / 1151 / 2101 / 9999. Includes amount codes (1150…).
+ * HTTP 5xx is classified before this runs.
+ */
+export function isTapClientErrorCode(code: string): boolean {
+  if (AUTH_CODES.has(code) || NOT_FOUND_CODES.has(code)) {
+    return false;
+  }
+  if (code === "2101" || code === "9999" || code === "1151") return false;
+  if (AMOUNT_CODES.has(code)) return true;
+  if (/^11\d{2}$/.test(code) || /^41\d{2}$/.test(code)) return true;
+  return code === "2100" || code === "2103" || code === "2108" || code === "9998";
 }
 
 export function isTapRetryableError(error: unknown): boolean {

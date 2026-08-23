@@ -48,26 +48,37 @@ export type InferGatewayMapFromAdapters<
  * payments.gateway('stripe'); // StripeGateway
  * ```
  */
-export function createPaymentClient<TMap extends GatewayMap>(
-  options: CreatePaymentClientOptions<TMap> & {
+export function createPaymentClient<
+  TMap extends GatewayMap,
+  TDefault extends (keyof TMap & string) | undefined = undefined,
+>(
+  options: Omit<CreatePaymentClientOptions<TMap>, "defaultGateway" | "gateways"> & {
     registry: import("./gateways/gateway-registry").ImmutableGatewayRegistry<TMap>;
     gateways?: never;
+    defaultGateway?: TDefault;
   },
-): PaymentClient<TMap>;
+): PaymentClient<
+  TMap,
+  TDefault extends keyof TMap & string ? TDefault : undefined
+>;
 
 export function createPaymentClient<
   TAdapters extends Record<string, GatewayAdapter>,
+  TDefault extends (keyof TAdapters & string) | undefined = undefined,
 >(
   options: {
     gateways: TAdapters;
     registry?: never;
-    defaultGateway?: keyof TAdapters & string;
+    defaultGateway?: TDefault;
     hooks?: CreatePaymentClientOptions["hooks"];
     logger?: CreatePaymentClientOptions["logger"];
     /** Portable fetch/crypto/clock/randomUUID overrides (Phase 8). */
     runtime?: CreatePaymentClientOptions["runtime"];
   },
-): PaymentClient<InferGatewayMapFromAdapters<TAdapters>>;
+): PaymentClient<
+  InferGatewayMapFromAdapters<TAdapters>,
+  TDefault extends keyof TAdapters & string ? TDefault : undefined
+>;
 
 export function createPaymentClient<TMap extends GatewayMap>(
   options: CreatePaymentClientOptions<TMap>,

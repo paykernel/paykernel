@@ -6,12 +6,10 @@ import {
   buildProviderReferences,
   combineAbortSignals,
   createTimeoutSignal,
-  fromMinorUnits,
   hashWebhookPayload,
   InvalidRequestError,
   mapHttpAbortError,
   NetworkError,
-  toMinorUnits,
   withRetry,
   type GatewayPaymentResult,
   type GatewayRefundResult,
@@ -19,7 +17,6 @@ import {
   type GetPaymentParams,
   type HooksManager,
   type Logger,
-  type Money,
   type VoidParams,
   type WebhookEvent,
 } from "@paykernel/core";
@@ -27,18 +24,25 @@ import { TAP_CAPABILITIES } from "./capabilities";
 import {
   TAP_API_BASE_URL,
   TAP_DEFAULT_TIMEOUT_MS,
+  assertTapHttpsUrl,
   copyTapConfig,
   type TapConfig,
 } from "./config";
 import {
   assertTapSuccessBody,
   isMutatingMethod,
-  isTapRetryableError,
+  isTapRetryableError as isTapHttpRetryableError,
   mapTapHttpFailure,
   tapResponseCode,
   tapStatusMissing,
 } from "./http";
 import { parseTapAmount, tapMajorNumber } from "./money";
+import {
+  isMappableRefundObject,
+  nestedRefundFromCharge,
+  refundIdFromUnknown,
+  tapRemainingRefundMajor,
+} from "./refund-support";
 import { assertNoPciCardSource, resolveTapSourceId } from "./sources";
 import {
   inferTapStableType,
@@ -57,6 +61,14 @@ import type {
   TapRefundReason,
 } from "./types";
 import {
+  authorizeIdFromSource,
+  chargeIdFromAuthorize,
+  parseTapInvoiceWebhookEvent,
+  tapMetadataPaymentId,
+  tapWebhookTimestamp,
+  withRelatedIdsOnPaymentEvent,
+} from "./webhook-map";
+import {
   extractHashstringHeader,
   tapCreatedRaw,
   tapObjectKind,
@@ -68,6 +80,16 @@ const TAP_REFUND_REASONS = new Set<TapRefundReason>([
   "fraudulent",
   "requested_by_customer",
 ]);
+
+function isTapRetryableError(error: unknown): boolean {
+  if (
+    error instanceof NetworkError &&
+    error.message.includes("aborted by caller")
+  ) {
+    return false;
+  }
+  return isTapHttpRetryableError(error);
+}
 
 function isTapRetryableBeforeSubmit(error: unknown): boolean {
   return (
@@ -86,86 +108,10 @@ function currenciesMismatch(requested: unknown, retrieved: unknown): boolean {
   return requested.trim().toUpperCase() !== retrieved.trim().toUpperCase();
 }
 
-function readTapMoney(value: unknown, currency: string): Money | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return parseTapAmount(value, currency);
-  }
-  if (typeof value === "string" && value.trim().length > 0) {
-    return parseTapAmount(value, currency);
-  }
-  return undefined;
-}
-
-function sumRefundAmounts(raw: unknown, currency: string): Money | undefined {
-  const items = Array.isArray(raw)
-    ? raw
-    : raw !== null &&
-        typeof raw === "object" &&
-        Array.isArray((raw as { data?: unknown }).data)
-      ? (raw as { data: unknown[] }).data
-      : undefined;
-  if (items === undefined) return undefined;
-  let total = 0n;
-  let seen = false;
-  for (const item of items) {
-    if (item === null || typeof item !== "object") continue;
-    const parsed = readTapMoney((item as { amount?: unknown }).amount, currency);
-    if (parsed === undefined) continue;
-    seen = true;
-    total += toMinorUnits(parsed);
-  }
-  if (!seen) {
-    return items.length === 0 ? parseTapAmount(0, currency) : undefined;
-  }
-  return fromMinorUnits(total, currency);
-}
-
-function chargeIdFromAuthorize(obj: TapApiObject): string | undefined {
-  if (typeof obj.charge_id === "string" && obj.charge_id.startsWith("chg_")) {
-    return obj.charge_id;
-  }
-  const nested = (obj as { charge?: unknown }).charge;
-  if (nested !== null && typeof nested === "object" && !Array.isArray(nested)) {
-    const id = (nested as { id?: unknown }).id;
-    if (typeof id === "string" && id.startsWith("chg_")) return id;
-  }
-  return undefined;
-}
-
-function authorizeIdFromSource(obj: TapApiObject): string | undefined {
-  const source = obj.source;
-  if (source !== null && typeof source === "object" && !Array.isArray(source)) {
-    const id = (source as { id?: unknown }).id;
-    if (typeof id === "string" && id.startsWith("auth_")) return id;
-  }
-  return undefined;
-}
-
-function withAuthorizeIdOnPaymentEvent(
-  event: NonNullable<WebhookEvent["event"]>,
-  authorizationId: string | undefined,
-): NonNullable<WebhookEvent["event"]> {
-  if (
-    authorizationId === undefined ||
-    !("payment" in event) ||
-    event.payment === undefined
-  ) {
-    return event;
-  }
-  const payment = event.payment;
-  return {
-    ...event,
-    payment: {
-      ...payment,
-      references: {
-        ...payment.references,
-        relatedIds: {
-          ...payment.references.relatedIds,
-          authorizationId,
-        },
-      },
-    },
-  };
+export interface TapGateway {
+  createPayment(params: TapCreatePaymentParams): Promise<GatewayPaymentResult>;
+  capturePayment(params: TapCaptureParams): Promise<GatewayPaymentResult>;
+  refundPayment(params: TapRefundParams): Promise<GatewayRefundResult>;
 }
 
 export class TapGateway extends BaseGateway {
@@ -236,11 +182,22 @@ export class TapGateway extends BaseGateway {
       );
       const redirectUrl = this.captureRedirectUrl(p, existing);
       const customer = this.customerFromObject(existing);
+      if (p.tapThreeDSecure === false) {
+        throw new InvalidRequestError(
+          "Tap capture cannot set threeDSecure false (Tap requires it not false on authorize capture)",
+        );
+      }
+      if (p.tapCustomerInitiated === false) {
+        throw new InvalidRequestError(
+          "Tap capture cannot set customer_initiated false (Tap requires it not false on authorize capture)",
+        );
+      }
       const body: Record<string, unknown> = {
         amount,
         currency: currency.trim().toUpperCase(),
         customer_initiated: true,
         threeDSecure: true,
+        save_card: false,
         source: { id: authorizeId },
         redirect: { url: redirectUrl },
         reference: { idempotent: idempotencyKey },
@@ -315,9 +272,6 @@ export class TapGateway extends BaseGateway {
       const obj = existing as TapApiObject;
       const existingStatus =
         typeof obj.status === "string" ? obj.status.trim().toUpperCase() : "";
-      if (existingStatus === "REFUNDED") {
-        throw new InvalidRequestError("Tap charge is already refunded");
-      }
       this.assertCurrencyMatch(p.currency, obj.currency, "refund");
       const currency =
         p.currency ?? (typeof obj.currency === "string" ? obj.currency : undefined);
@@ -326,28 +280,43 @@ export class TapGateway extends BaseGateway {
           "Tap refund requires currency (pass RefundParams.currency or retrieve it from the charge)",
         );
       }
+      if (existingStatus === "REFUNDED") {
+        const embedded = await this.mapEmbeddedRefund(obj, p.signal, idempotencyKey);
+        if (embedded !== undefined) return embedded;
+        const replayAmount =
+          p.amount !== undefined
+            ? this.tapOutboundMajor(p.amount, currency)
+            : this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency);
+        return this.postTapRefund({
+          chargeId,
+          amount: replayAmount,
+          currency,
+          params: p,
+          idempotencyKey,
+        });
+      }
       const amount =
         p.amount !== undefined
           ? this.tapOutboundMajor(p.amount, currency)
-          : this.remainingRefundMajor(obj, currency);
-      const reason = this.refundReason(p);
-      const body: Record<string, unknown> = {
-        charge_id: chargeId,
-        amount,
-        currency: currency.trim().toUpperCase(),
-        reason,
-        reference: { idempotent: idempotencyKey },
-      };
-      const metadata = this.toTapMetadata(p.metadata);
-      if (metadata !== undefined) body.metadata = metadata;
-      if (this.tapConfig.webhookUrl !== undefined) {
-        body.post = { url: this.tapConfig.webhookUrl };
+          : tapRemainingRefundMajor(obj, currency);
+      if (amount === 0) {
+        const embedded = await this.mapEmbeddedRefund(obj, p.signal, idempotencyKey);
+        if (embedded !== undefined) return embedded;
+        return this.postTapRefund({
+          chargeId,
+          amount: this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency),
+          currency,
+          params: p,
+          idempotencyKey,
+        });
       }
-      const raw = await this.tapRequest("POST", "/refunds", body, {
-        signal: p.signal,
-        retry: true,
+      return this.postTapRefund({
+        chargeId,
+        amount,
+        currency,
+        params: p,
+        idempotencyKey,
       });
-      return this.mapRefundObject(raw);
     });
   }
 
@@ -360,6 +329,14 @@ export class TapGateway extends BaseGateway {
         signal: p.signal,
         retry: true,
       });
+      if (kind === "authorize") {
+        const obj = raw as TapApiObject;
+        const tapStatus =
+          typeof obj.status === "string" ? obj.status.trim().toUpperCase() : "";
+        if (tapStatus === "CAPTURED") {
+          return this.mapCapturedAuthorize(raw, id, p.signal);
+        }
+      }
       return this.mapPaymentObject(raw, kind);
     });
   }
@@ -374,6 +351,11 @@ export class TapGateway extends BaseGateway {
   }
 
   parseWebhookEvent(payload: unknown): WebhookEvent {
+    if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
+      if ((payload as TapApiObject).object === "invoice") {
+        return parseTapInvoiceWebhookEvent(payload as TapApiObject);
+      }
+    }
     const kind = tapObjectKind(payload);
     const obj = payload as TapApiObject;
     const id = this.requireString(obj.id, "id");
@@ -395,14 +377,14 @@ export class TapGateway extends BaseGateway {
     const liveMode = typeof obj.live_mode === "boolean" ? obj.live_mode : undefined;
     const apiVersion =
       typeof obj.api_version === "string" ? obj.api_version : undefined;
-    const paymentId = this.metadataPaymentId(obj);
+    const paymentId = tapMetadataPaymentId(obj);
     const nativeType = `${kind}.${tapStatus}`;
     const stable = inferTapStableType(kind, status);
     const createdRaw = tapCreatedRaw(obj);
     if (createdRaw === undefined) {
       throw new InvalidRequestError("Tap webhook missing created timestamp");
     }
-    const created = this.webhookTimestamp(createdRaw);
+    const created = tapWebhookTimestamp(createdRaw);
 
     const legacy: WebhookEvent = {
       id,
@@ -425,12 +407,15 @@ export class TapGateway extends BaseGateway {
       ? { ...attached.provider, eventType: nativeType }
       : attached.provider;
     const nested = attached.event
-      ? withAuthorizeIdOnPaymentEvent(
+      ? withRelatedIdsOnPaymentEvent(
           {
             ...attached.event,
             provider: { ...attached.event.provider, eventType: nativeType },
           },
-          authorizeIdFromSource(obj),
+          {
+            authorizationId: authorizeIdFromSource(obj),
+            chargeId: kind === "authorize" ? chargeIdFromAuthorize(obj) : undefined,
+          },
         )
       : attached.event;
     return {
@@ -556,7 +541,12 @@ export class TapGateway extends BaseGateway {
       typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
     const redirectUrl = this.redirectUrl(obj);
     const code = tapResponseCode(obj);
-    const outcome = mapTapChargeOutcome(tapStatus, status, code);
+    const tapStatusNormalized =
+      typeof tapStatus === "string" ? tapStatus.trim().toUpperCase() : "";
+    const outcome =
+      tapStatusNormalized === "VOID"
+        ? "succeeded"
+        : mapTapChargeOutcome(tapStatus, status, code);
     let amount: number | undefined;
     if (obj.amount !== undefined && currency !== undefined) {
       amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
@@ -610,6 +600,52 @@ export class TapGateway extends BaseGateway {
     );
   }
 
+  private async mapEmbeddedRefund(
+    obj: TapApiObject,
+    signal: AbortSignal | undefined,
+    idempotencyKey: string,
+  ): Promise<GatewayRefundResult | undefined> {
+    const nested = nestedRefundFromCharge(obj, idempotencyKey);
+    if (nested === undefined) return undefined;
+    if (isMappableRefundObject(nested)) {
+      return this.mapRefundObject(nested);
+    }
+    const refundId = refundIdFromUnknown(nested);
+    if (refundId === undefined) return undefined;
+    const raw = await this.tapRequest("GET", `/refunds/${refundId}`, undefined, {
+      signal,
+      retry: true,
+    });
+    return this.mapRefundObject(raw);
+  }
+
+  private async postTapRefund(input: {
+    chargeId: string;
+    amount: number;
+    currency: string;
+    params: TapRefundParams;
+    idempotencyKey: string;
+  }): Promise<GatewayRefundResult> {
+    const reason = this.refundReason(input.params);
+    const body: Record<string, unknown> = {
+      charge_id: input.chargeId,
+      amount: input.amount,
+      currency: input.currency.trim().toUpperCase(),
+      reason,
+      reference: { idempotent: input.idempotencyKey },
+    };
+    const metadata = this.toTapMetadata(input.params.metadata);
+    if (metadata !== undefined) body.metadata = metadata;
+    if (this.tapConfig.webhookUrl !== undefined) {
+      body.post = { url: this.tapConfig.webhookUrl };
+    }
+    const raw = await this.tapRequest("POST", "/refunds", body, {
+      signal: input.params.signal,
+      retry: true,
+    });
+    return this.mapRefundObject(raw);
+  }
+
   private mapRefundObject(raw: unknown): GatewayRefundResult {
     if (raw === null || typeof raw !== "object") {
       throw new InvalidRequestError("Tap refund response must be an object");
@@ -651,6 +687,7 @@ export class TapGateway extends BaseGateway {
       currency,
       customer_initiated: true,
       threeDSecure: tap.threeDSecure,
+      save_card: false,
       customer: this.serializeCustomer(tap.customer),
       source: { id: tap.sourceId },
       redirect: { url: params.callbackUrl },
@@ -697,6 +734,9 @@ export class TapGateway extends BaseGateway {
       throw new InvalidRequestError(
         "Tap createPayment does not accept auth_ source ids; use capturePayment",
       );
+    }
+    if (params.tapPostUrl !== undefined) {
+      assertTapHttpsUrl(params.tapPostUrl, "tapPostUrl");
     }
     const postUrl = params.tapPostUrl ?? this.tapConfig.webhookUrl;
     const threeDSecure = params.tapThreeDSecure !== false;
@@ -769,36 +809,6 @@ export class TapGateway extends BaseGateway {
     throw new InvalidRequestError(
       `Tap ${operation} currency "${String(requested)}" does not match retrieved currency "${String(retrieved)}"`,
     );
-  }
-
-  private remainingRefundMajor(obj: TapApiObject, currency: string): number {
-    const rec = obj as TapApiObject & Record<string, unknown>;
-    const remainingDirect = readTapMoney(
-      rec.remaining ?? rec.refundable,
-      currency,
-    );
-    if (remainingDirect !== undefined) {
-      const major = tapMajorNumber(remainingDirect, currency);
-      if (major === 0) {
-        throw new InvalidRequestError("Tap charge is already refunded");
-      }
-      return this.tapOutboundMajor(remainingDirect, currency);
-    }
-    const refunded =
-      readTapMoney(rec.amount_refunded ?? rec.refunded, currency) ??
-      sumRefundAmounts(rec.refunds, currency);
-    if (refunded === undefined) {
-      return this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency);
-    }
-    const total = parseTapAmount(obj.amount, currency);
-    const remainingMinor = toMinorUnits(total) - toMinorUnits(refunded);
-    if (remainingMinor < 0n) {
-      throw new InvalidRequestError("Tap refund remaining is invalid");
-    }
-    if (remainingMinor === 0n) {
-      throw new InvalidRequestError("Tap charge is already refunded");
-    }
-    return tapMajorNumber(fromMinorUnits(remainingMinor, currency), currency);
   }
 
   private captureRedirectUrl(
@@ -937,31 +947,5 @@ export class TapGateway extends BaseGateway {
     return value;
   }
 
-  private metadataPaymentId(obj: TapApiObject): string | undefined {
-    const metadata = (obj as { metadata?: unknown }).metadata;
-    if (metadata !== null && typeof metadata === "object" && !Array.isArray(metadata)) {
-      const rec = metadata as Record<string, unknown>;
-      for (const key of ["paymentId", "orderId"]) {
-        const value = rec[key];
-        if (typeof value === "string" && value.length > 0) return value;
-      }
-    }
-    const reference = obj.reference;
-    if (reference !== null && typeof reference === "object") {
-      const order = (reference as { order?: unknown }).order;
-      if (typeof order === "string" && order.length > 0) return order;
-    }
-    return undefined;
-  }
-
-  private webhookTimestamp(createdRaw: string): Date {
-    const asNumber = Number(createdRaw);
-    if (!Number.isFinite(asNumber) || asNumber <= 0) {
-      throw new InvalidRequestError("Tap webhook created timestamp is not a unix time");
-    }
-    // Tap charge/authorize samples use millisecond unix strings (13 digits).
-    // Values below 1e12 are treated as seconds so Date is not 1970.
-    const ms = asNumber < 1e12 ? asNumber * 1000 : asNumber;
-    return new Date(ms);
-  }
 }
+

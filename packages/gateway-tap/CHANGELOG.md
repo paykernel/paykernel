@@ -8,11 +8,25 @@
 
 ### Patch
 
+- **TAP-WEBHOOK-HTTPS:** Config `webhookUrl` and per-request `tapPostUrl` must be HTTPS. `http://` and unparseable URLs are `InvalidRequestError`.
+- **TAP-HTTP-11XX-REST:** Unlisted Tap `11xx` / `41xx` / `2100` / `2103` / `2108` JSON error codes are `InvalidRequestError`. Auth / not-found / amount / `1151` keep their existing maps. HTTP 5xx is still `NetworkError`.
+- **TAP-REFUND-OMITTED:** Omitted refund amount without remaining/refunded on the charge throws `InvalidRequestError` (do not resend `charge.amount`). Remaining is used when exposed; remaining `0` still replays. A `refunds` list that mixes parseable and opaque amounts is fail-closed.
+- **TAP-CLIENT-OVERLOAD:** `createPaymentClient({ defaultGateway: "tap" })` (gateways map or registry) types `createPayment` / `capturePayment` / `refundPayment` from the registered gateway (Tap `tap*` fields) without adding those keys to core `CreatePaymentParams`.
+- **TAP-GOD-CLASS:** Refund remaining math lives in `refund-support.ts`; webhook identity / invoice parse live in `webhook-map.ts`.
+- **TAP-CAPTURE-3DS:** Capture still sends `threeDSecure: true` and `customer_initiated: true`. Passing `false` throws (Tap forbids those false on authorize capture).
+- **TAP-REFUND-REPLAY:** A charge already `REFUNDED` is a crash-replay, not `InvalidRequestError`. The same `idempotencyKey` returns the original refund, or a nested refund whose `reference.idempotent` matches (a single nested refund is still mapped). Multiple unmatched nested refunds POST the key.
+- **TAP-CAPTURE-CHARGE-ID:** `getPayment(auth_…)` on a CAPTURED authorize uses nested `charge_id` when present (`gatewayId` is `chg_…`, `authorizationId` is `auth_…`). Without `charge_id`, paid + `authorizationId` `auth_…` — refunds still need a `chg_…` from capture POST or a charge webhook.
+- **TAP-VOID-GET-OUTCOME:** `getPayment` of VOID is `outcome: "succeeded"` + `status: "cancelled"` (same as `voidPayment`), not `failed`. ABANDONED / CANCELLED stay `failed`.
+- **TAP-INVOICE-PARSE:** Well-formed invoice webhook objects parse as non-paid (`cancelled`) so they are not fulfilled. Missing `id` or `created` still throws.
+- **TAP-SAVE-CARD:** Create and capture POST send `save_card: false`.
+- **TAP-ABORT-RETRY:** Caller-abort `NetworkError` after a mutating POST is not retried.
+- **TAP-HTTP-5XX-ORDER:** HTTP 5xx maps to `NetworkError` before Tap JSON `1106` / other 11xx body codes. A 5xx body that includes `1106` is not `InvalidRequestError`.
+- **TAP-WEBHOOK-AUTH-CHARGE:** Authorize webhook objects set `relatedIds.chargeId` when `charge_id` is present.
 - **TAP-CHARGE-REFUNDED:** Charge object status `REFUNDED` maps to payment `refunded` (`getPayment` and charge webhooks), not `failed`. Refund *objects* were already `refunded`.
 - **TAP-MISSING-STATUS:** Mutating HTTP 2xx with an `id` but no object `status` is `indeterminate` (`afterProviderSubmit`). Missing status is not mapped as Tap `UNKNOWN` → `failed`.
 - **TAP-CAPTURE-REPLAY:** `capturePayment` GETs the authorize. `AUTHORIZED` POSTs `/charges`. `CAPTURED` does not POST — returns paid and keeps `authorizationId` (crash-retry after a completed capture). Replaying POST on an already-captured `auth_…` is Tap `1126`.
 - **TAP-AUTH-CHARGE-ID:** Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the charge `chg_…` id. Capture does not drop the authorize id when mapping the charge.
-- **TAP-REFUND-REMAINING:** Omitted refund `amount` is the remaining refundable amount when the charge exposes `refunded` / remaining — not a resend of `charge.amount`. A `REFUNDED` charge cannot be refunded again. After a partial refund, pass remaining explicitly if the charge does not expose `refunded`.
+- **TAP-REFUND-REMAINING:** Omitted refund `amount` is the remaining refundable amount when the charge exposes `refunded` / remaining. If remaining is not exposed, pass `amount` explicitly (see TAP-REFUND-OMITTED).
 - **TAP-CURRENCY-MATCH:** Capture and refund `currency` must match the authorize / charge. Mismatch is `InvalidRequestError` (Tap `1149`).
 - **TAP-CREATE-RECONCILE:** `createPayment` timeout / 5xx / `1151` after submit: replay `createPayment` with the same `idempotencyKey`. Do not `getPayment` until you have a `chg_…` or `auth_…` id. capture / void / refund timeouts: `getPayment` with the stored id.
 - **TAP-HTTP-11XX:** Tap error codes `1126` ("Source already used") and `1149` ("Currency code is not matching") are `InvalidRequestError`, not untyped `GatewayApiError`.

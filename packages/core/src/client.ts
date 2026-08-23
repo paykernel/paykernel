@@ -460,7 +460,49 @@ function isPluginInitBag(config: unknown): config is PluginInitBag {
  * });
  * ```
  */
-export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
+/** First argument of a gateway operation method, when present. */
+type GatewayMethodParams<G, M extends string> = G extends {
+  [K in M]: (params: infer P) => unknown;
+}
+  ? P
+  : never;
+
+/** Sole key of a one-entry gateway map; `never` when the map is empty or has 2+ keys. */
+type SingletonGatewayKey<T> = keyof T extends infer K
+  ? K extends keyof T
+    ? keyof T extends K
+      ? K
+      : never
+    : never
+  : never;
+
+type CoreOpParams<M extends string> = M extends "createPayment"
+  ? CreatePaymentParams
+  : M extends "capturePayment"
+    ? CaptureParams
+    : M extends "refundPayment"
+      ? RefundParams
+      : never;
+
+/**
+ * Params for a one-arg facade call. Prefer `TDefault` when set.
+ * `[never] extends [keyof T]` is true, so a non-singleton must be compared to
+ * `never` first or multi-gateway clients collapse `createPayment` to `never`.
+ */
+type DefaultOpParams<
+  TGateways extends GatewayMap,
+  TDefault extends (keyof TGateways & string) | undefined,
+  M extends string,
+> = [Exclude<TDefault, undefined>] extends [never]
+  ? [SingletonGatewayKey<TGateways>] extends [never]
+    ? CoreOpParams<M>
+    : GatewayMethodParams<TGateways[SingletonGatewayKey<TGateways>], M>
+  : GatewayMethodParams<TGateways[Exclude<TDefault, undefined>], M>;
+
+export class PaymentClient<
+  TGateways extends GatewayMap = BuiltInGatewayMap,
+  TDefault extends (keyof TGateways & string) | undefined = undefined,
+> {
   private readonly gateways = new Map<string, PaymentGateway>();
   private readonly hooksManager: HooksManager;
   private readonly defaultGateway: (keyof TGateways & string) | undefined;
@@ -586,14 +628,19 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
    *
    * @internal
    */
-  static createFromPlugin<TMap extends GatewayMap>(
+  static createFromPlugin<
+    TMap extends GatewayMap,
+    TDefault extends (keyof TMap & string) | undefined = undefined,
+  >(
     options: CreatePaymentClientOptions<TMap>,
-  ): PaymentClient<TMap> {
+  ): PaymentClient<TMap, TDefault> {
     const bag: PluginInitBag = {
       [PLUGIN_INIT]: true,
       options: options as CreatePaymentClientOptions,
     };
-    return new PaymentClient(bag as unknown as PaymentClientConfig) as unknown as PaymentClient<TMap>;
+    return new PaymentClient(
+      bag as unknown as PaymentClientConfig,
+    ) as unknown as PaymentClient<TMap, TDefault>;
   }
 
   /**
@@ -767,9 +814,11 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
   /**
    * Create a payment using the specified or default gateway.
    *
-   * Single-arg calls use {@link CreatePaymentParams} (callbackUrl required at the
-   * type level). Gateway-specific overloads relax fields where the provider allows
-   * (e.g. Stripe callbackUrl optional when calling with gateway: "stripe").
+   * Single-arg calls use {@link CreatePaymentParams} unless the client was built
+   * with a typed `defaultGateway` (then params are that gateway's `createPayment`
+   * argument, e.g. Tap `tap*` fields). Named `gateway` uses that instance's
+   * method params. Built-in overloads still relax fields (e.g. Stripe
+   * `callbackUrl` optional when calling with `gateway: "stripe"`).
    */
   async createPayment(
     params: StripeCreatePaymentParams,
@@ -787,9 +836,12 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
     params: PaymobCreatePaymentParams,
     gateway: "paymob" & (keyof TGateways & string),
   ): Promise<GatewayPaymentResult>;
+  async createPayment<K extends keyof TGateways & string>(
+    params: GatewayMethodParams<TGateways[K], "createPayment">,
+    gateway: K,
+  ): Promise<GatewayPaymentResult>;
   async createPayment(
-    params: CreatePaymentParams,
-    gateway?: keyof TGateways & string,
+    params: DefaultOpParams<TGateways, TDefault, "createPayment">,
   ): Promise<GatewayPaymentResult>;
   async createPayment(
     params:
@@ -837,6 +889,13 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
    * is provided and the gateway claims `partialCapture: false`, throws
    * {@link OperationNotSupportedError} with capability `partialCapture`.
    */
+  async capturePayment<K extends keyof TGateways & string>(
+    params: GatewayMethodParams<TGateways[K], "capturePayment">,
+    gateway: K,
+  ): Promise<GatewayPaymentResult>;
+  async capturePayment(
+    params: DefaultOpParams<TGateways, TDefault, "capturePayment">,
+  ): Promise<GatewayPaymentResult>;
   async capturePayment(
     params: CaptureParams,
     gateway?: keyof TGateways & string,
@@ -858,6 +917,13 @@ export class PaymentClient<TGateways extends GatewayMap = BuiltInGatewayMap> {
    * - `refunds: false` blocks all refunds
    * - `partialRefunds: false` blocks refunds that pass `amount` (full refund ok)
    */
+  async refundPayment<K extends keyof TGateways & string>(
+    params: GatewayMethodParams<TGateways[K], "refundPayment">,
+    gateway: K,
+  ): Promise<GatewayRefundResult>;
+  async refundPayment(
+    params: DefaultOpParams<TGateways, TDefault, "refundPayment">,
+  ): Promise<GatewayRefundResult>;
   async refundPayment(
     params: RefundParams,
     gateway?: keyof TGateways & string,

@@ -43,8 +43,8 @@ export type TapCreatePaymentParams = CreatePaymentParams & {
    */
   tapCustomer?: TapCustomerInput;
   /**
-   * Source id. Defaults to `src_all` (Tap hosted methods page). Tokens and
-   * local methods (`src_kw.knet`, …) must be explicit.
+   * Source id. Tokens and local methods (`src_kw.knet`, …) must be explicit.
+   * Omitted: `src_all` on charges, `src_card` when `capture: false`.
    */
   tapSource?: TapSource;
   /** Per-request `post.url` override (else config `webhookUrl`). */
@@ -58,6 +58,16 @@ export type TapCreatePaymentParams = CreatePaymentParams & {
 export type TapCaptureParams = CaptureParams & {
   /** Per-request `redirect.url` override (else authorize object `redirect.url`). */
   tapRedirectUrl?: string;
+  /**
+   * Capture 3-D Secure flag. Body is always `true`. `false` is typed so it
+   * fail-closes (Tap forbids `threeDSecure: false` on authorize capture).
+   */
+  tapThreeDSecure?: boolean;
+  /**
+   * Capture `customer_initiated`. Body is always `true`. `false` is typed so
+   * it fail-closes (Tap forbids `customer_initiated: false` on authorize capture).
+   */
+  tapCustomerInitiated?: boolean;
 };
 export type TapRefundParams = RefundParams & {
   tapReason?: TapRefundReason;

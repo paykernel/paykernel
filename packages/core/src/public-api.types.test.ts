@@ -1391,6 +1391,41 @@ const typedPluginClient = createPaymentClient({
 });
 expectType<StripeGateway>(typedPluginClient.gateway("stripe"));
 expectType<MoyasarGateway>(typedPluginClient.gateway("moyasar"));
+
+function _defaultClientOneArgCreatePayment(legacy: PaymentClient): void {
+  void legacy.createPayment({
+    amount: 10,
+    currency: "USD",
+    callbackUrl: "https://merchant.example/callback",
+  });
+  void legacy.createPayment({
+    amount: 10,
+    currency: "USD",
+    callbackUrl: "https://merchant.example/callback",
+    // @ts-expect-error extra-package keys are not on core CreatePaymentParams
+    tapCustomer: { firstName: "Ada" },
+  });
+}
+void _defaultClientOneArgCreatePayment;
+
+function _namedGatewayCreatePaymentDoesNotUseDefaultParams(
+  client: typeof typedPluginClient,
+): void {
+  void client.createPayment(
+    {
+      amount: 10,
+      currency: "USD",
+      callbackUrl: "https://merchant.example/callback",
+    },
+    "stripe",
+  );
+  void client.createPayment({
+    amount: 10,
+    currency: "USD",
+    callbackUrl: "https://merchant.example/callback",
+  });
+}
+void _namedGatewayCreatePaymentDoesNotUseDefaultParams;
 // Negative name checks are type-only (must not execute at runtime)
 function _unregisteredGatewayNamesMustFailTypecheck(
   client: typeof typedPluginClient,

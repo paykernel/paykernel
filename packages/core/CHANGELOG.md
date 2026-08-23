@@ -9,6 +9,7 @@
 
 ### Behavior (0.x)
 
+- **CLIENT-DEFAULT-OP-PARAMS:** `createPaymentClient` infers a second `PaymentClient` type argument from `defaultGateway` (gateways-map **and** registry forms). One-arg `createPayment` / `capturePayment` / `refundPayment` use that gateway's method params. Multi-gateway clients without a typed default still use core `CreatePaymentParams` / `CaptureParams` / `RefundParams` (not `never`). Named `gateway` is a separate overload so default-gateway extra fields cannot be passed to another registered name.
 - **P22-CKO-GET-ZERO:** `getCheckoutSession` amount is session `amount_total` while unpaid; captured rematch only after paid. Do not fulfill on GET checkout amount.
 - **List paging:** Stripe refund lists follow `has_more` / `starting_after`. Payment-link `line_items.has_more` omits amount rather than inventing major `0`.
 - **P22-PCI:** PCI fence walks nested `metadata` / `evidence` / CVC, not only top-level PAN keys. Allows numeric order ids / timestamps and Moyasar AFT `sender.account.number` that is not a Luhn PAN; rejects Luhn-valid PAN, embedded PAN text, and CVC aliases including `cvv2`. Does not claim every 13-digit leaf is blocked. Stripe `tok_…` attach is `paymentMethods`, not capability `tokenization`.

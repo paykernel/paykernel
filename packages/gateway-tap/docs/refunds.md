@@ -2,7 +2,9 @@
 
 `refundPayment` calls `POST /v2/refunds`. `gatewayPaymentId` must be a **charge** id (`chg_…`). Authorize ids (`auth_…`) are rejected — store the capture result `gatewayId` separately from `authorizationId`.
 
-Tap requires `amount`, `currency`, and `reason`. If `amount` is omitted, the adapter uses the **remaining** refundable amount when the charge exposes `refunded` / remaining. It does **not** resend `charge.amount` (that would retry a full refund after a partial). A charge whose status is `REFUNDED` cannot be refunded again. After a partial refund, pass remaining **explicitly** if the charge does not expose `refunded`.
+Tap requires `amount`, `currency`, and `reason`. If `amount` is omitted, the adapter uses the **remaining** refundable amount when the charge exposes remaining / refunded amounts. A `refunds` list with any unparseable amount is **fail-closed**. When the charge does **not** expose remaining / refunded, omitted amount throws `InvalidRequestError` — pass `amount` explicitly (Tap retrieve-charge does not document `amount_refunded`).
+
+A charge whose status is already `REFUNDED` is a **crash-replay**, not `InvalidRequestError`. The same `idempotencyKey` returns the original refund, or a nested refund whose `reference.idempotent` matches. A single nested refund is still mapped when Tap omits that field. Multiple unmatched nested refunds `POST /refunds` with the caller key.
 
 If `currency` is omitted, it is taken from the charge. If the caller passes `currency`, it must match the charge (`InvalidRequestError`; Tap `1149`).
 
