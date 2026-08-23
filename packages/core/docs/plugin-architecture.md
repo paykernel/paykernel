@@ -169,6 +169,9 @@ const client = createPaymentClient({
 | Neither `registry` nor `gateways` | `InvalidRequestError` |
 | `defaultGateway` not registered | `InvalidRequestError` |
 | Map key ≠ `adapter.name` | `InvalidRequestError` |
+| Two or more gateways, op omits `gateway`, no `defaultGateway` | `InvalidRequestError` |
+
+A **one-gateway** map or registry without `defaultGateway` uses that gateway for one-arg `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` / `getPayment` (same as the singleton type).
 
 There is **no** live `unregisterGateway`. To change gateways, construct a new
 client (new registry / map). Concurrent `createPayment` calls share the stable

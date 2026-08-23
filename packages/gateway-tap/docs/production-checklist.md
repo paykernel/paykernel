@@ -1,21 +1,21 @@
 # Production checklist
 
-- Verify `hashstring` with the secret key; never skip verification
+- Verify `hashstring` with the secret key; never skip verification. Invoice formula uses `x_updated`. Fail closed if `object` is missing or not charge/authorize/refund/invoice
 - Config `secretKey` is trimmed; whitespace-only keys are invalid. Do not ship padded keys
 - Config `webhookUrl` / `tapPostUrl` (`post.url`) must be public HTTPS (Tap will not post to localhost). Non-HTTPS is rejected
-- Fulfill after inbox **claim** and only when `isPaidOutcome` / `status === "paid"` (`CAPTURED`)
+- Fulfill after inbox **claim** and only when `isPaidOutcome` / `status === "paid"` (`CAPTURED`). Partial capture is `partially_captured` — **not** `isPaidOutcome`
 - Do not redirect the payer on `result.redirectUrl` unless `outcome === "requires_action"` **and** the URL is `transaction.url` / a Tap checkout host (`checkout.payments.tap.company`). Merchant `redirect.url` (`callbackUrl`) is not a next action. Leftover `transaction.url` on AUTHORIZED / CAPTURED is not a next action
-- Store `chg_` vs `auth_` separately; refunds need the charge id (`chg_…`). Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the `chg_…` id. `getPayment(auth_…)` on CAPTURED uses nested `charge_id` when present (`gatewayId` is `chg_…`); without it, paid + `authorizationId` `auth_…` — wait for a charge webhook before refund
-- Do not capture VOID auths (hold released). A CAPTURED authorize is already paid — `capturePayment` does not POST `/charges`. VOID `getPayment` is `succeeded` + cancelled — do not void again
+- Store `chg_` vs `auth_` separately; refunds need the charge id (`chg_…`). Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the `chg_…` id. `getPayment(auth_…)` on CAPTURED uses nested `charge_id` when present (`gatewayId` is `chg_…`); without it, omit `amount` (do not invent captured money from the hold) and keep `authorizationId` `auth_…` — wait for a charge webhook before refund
+- Do not capture VOID auths (hold released). A CAPTURED authorize is already captured — `capturePayment` does not POST `/charges`. Charge VOID is a failed payment (not succeeded). Authorize VOID `getPayment` is `succeeded` + cancelled — do not void again. `voidPayment` GETs first; already VOID does not POST
 - Refund `ACCEPTED` is in progress (`refund_pending`) — do not fulfill or treat as failure
-- Pass a stable `idempotencyKey` on create for crash retries; required on capture / refund / void
+- `createPayment` **requires** a caller `idempotencyKey` (no minted UUID). Required on capture / refund / void as well
 - 3DS / KNET / mada / Fawry require `callbackUrl`. Pending statuses (`INITIATED` / `IN PROGRESS` / `IN_PROGRESS`, including Fawry) are `requires_action`; redirect only when `transaction.url` is present
 - Customer is required (`tapCustomer` or `customerId`). Inline customers need non-empty `firstName`, `lastName`, and `email` (Tap `1130` / `1132` / `1138`). Tap `1106` ("Customer not found") is `InvalidRequestError`, not a missing payment
-- Amount must be `> 0`. Capture / refund `currency` must match the authorize / charge (Tap `1149`). Omitted refund `amount` requires remaining/refunded on the charge; otherwise pass `amount` explicitly
+- Amount must be `> 0`. Capture / refund `currency` must match the authorize / charge (Tap `1149`). Capture `amount` greater than the authorize throws. Omitted refund `amount` requires remaining/refunded on the charge for a **positive** remaining; remaining `0` or status `REFUNDED` does **not** re-POST `charge.amount`
 - No raw cards — tokens and `src_*` only. `createPayment` rejects `auth_…` sources (use `capturePayment`)
 - `createPayment` timeout / HTTP 5xx / Tap `1151` after submit: replay `createPayment` with the **same** `idempotencyKey`. Do **not** `getPayment` until you have a `chg_…` or `auth_…` id
 - Capture timeout: `getPayment(auth_…)`. If CAPTURED, use nested `charge_id` when present; otherwise wait for a charge webhook for `chg_…` before refund
-- Void timeout: `getPayment(auth_…)`. If status is cancelled / VOID, do **not** void again
+- Void timeout: `getPayment(auth_…)`. If status is cancelled / VOID, do **not** void again (`voidPayment` already GETs first and does not POST when VOID)
 - Refund timeout: `getPayment(chg_…)`. Mutating `1151` / HTTP 50x is `NetworkError.afterProviderSubmit`, not a card decline. HTTP 5xx is `NetworkError` even if the JSON body includes `1106` / other 11xx codes
 - Tap `1114` ("Please check the Authorize status"), `1126` ("Source already used"), and `1149` ("Currency code is not matching") are fail-closed `InvalidRequestError`. Remaining Tap 11xx JSON error codes (other than already-typed auth / not-found / amount) are also `InvalidRequestError`, not untyped `GatewayApiError`
 - Runtime: Bun / Node ≥ 18 / Deno / Workers

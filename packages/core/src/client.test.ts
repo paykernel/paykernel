@@ -144,9 +144,10 @@ describe('PaymentClient Stripe convenience methods', () => {
 });
 
 describe('PaymentClient resolveGateway and error types', () => {
-    it('throws InvalidRequestError when no gateway and no default are set', async () => {
+    it('throws InvalidRequestError when a multi-gateway client omits gateway and defaultGateway', async () => {
         const client = new PaymentClient({
             stripe: { secretKey: 'sk_test_123' },
+            moyasar: { secretKey: 'sk_test_moyasar' },
         });
 
         try {

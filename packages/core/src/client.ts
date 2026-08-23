@@ -486,8 +486,10 @@ type CoreOpParams<M extends string> = M extends "createPayment"
 
 /**
  * Params for a one-arg facade call. Prefer `TDefault` when set.
- * `[never] extends [keyof T]` is true, so a non-singleton must be compared to
- * `never` first or multi-gateway clients collapse `createPayment` to `never`.
+ * A one-entry gateway map (no `defaultGateway`) uses that gateway's params —
+ * runtime `resolveGateway` matches. `[never] extends [keyof T]` is true, so a
+ * non-singleton must be compared to `never` first or multi-gateway clients
+ * collapse `createPayment` to `never`.
  */
 type DefaultOpParams<
   TGateways extends GatewayMap,
@@ -815,10 +817,10 @@ export class PaymentClient<
    * Create a payment using the specified or default gateway.
    *
    * Single-arg calls use {@link CreatePaymentParams} unless the client was built
-   * with a typed `defaultGateway` (then params are that gateway's `createPayment`
-   * argument, e.g. Tap `tap*` fields). Named `gateway` uses that instance's
-   * method params. Built-in overloads still relax fields (e.g. Stripe
-   * `callbackUrl` optional when calling with `gateway: "stripe"`).
+   * with a typed `defaultGateway` **or** a one-gateway map (then params are that
+   * gateway's `createPayment` argument, e.g. Tap `tap*` fields). Named `gateway`
+   * uses that instance's method params. Built-in overloads still relax fields
+   * (e.g. Stripe `callbackUrl` optional when calling with `gateway: "stripe"`).
    */
   async createPayment(
     params: StripeCreatePaymentParams,
@@ -1490,14 +1492,20 @@ export class PaymentClient<
   }
 
   /**
-   * Resolve which gateway to use
-   * @throws {InvalidRequestError} If neither an explicit nor a default gateway is available
+   * Resolve which gateway to use.
+   *
+   * Order: explicit `gateway` argument, then `defaultGateway`, then the sole
+   * configured gateway when the map has exactly one entry (matches
+   * {@link DefaultOpParams} singleton typing). Two or more gateways without a
+   * default still fail closed.
+   *
+   * @throws {InvalidRequestError} If neither an explicit, default, nor sole gateway is available
    * @throws {GatewayNotConfiguredError} If the resolved gateway is not configured
    */
   private resolveGateway(
     gateway?: keyof TGateways & string,
   ): PaymentGateway {
-    const name = gateway ?? this.defaultGateway;
+    const name = gateway ?? this.defaultGateway ?? this.soleConfiguredGateway();
 
     if (!name) {
       throw new InvalidRequestError(
@@ -1506,5 +1514,10 @@ export class PaymentClient<
     }
 
     return this.gateway(name);
+  }
+
+  private soleConfiguredGateway(): (keyof TGateways & string) | undefined {
+    if (this.gateways.size !== 1) return undefined;
+    return this.gateways.keys().next().value as keyof TGateways & string;
   }
 }

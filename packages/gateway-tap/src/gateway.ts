@@ -10,7 +10,9 @@ import {
   InvalidRequestError,
   mapHttpAbortError,
   NetworkError,
+  toMinorUnits,
   withRetry,
+  type AmountInput,
   type GatewayPaymentResult,
   type GatewayRefundResult,
   type GatewayRuntimeDeps,
@@ -36,7 +38,7 @@ import {
   tapResponseCode,
   tapStatusMissing,
 } from "./http";
-import { parseTapAmount, tapMajorNumber } from "./money";
+import { parseTapAmount, stringifyTapJsonBody, tapMajorNumber } from "./money";
 import {
   isMappableRefundObject,
   nestedRefundFromCharge,
@@ -131,9 +133,12 @@ export class TapGateway extends BaseGateway {
 
   async createPayment(params: TapCreatePaymentParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("createPayment", params, async (p) => {
+      const idempotencyKey = this.assertMutationKey(
+        p.idempotencyKey,
+        "createPayment",
+      );
       const capture = p.capture !== false;
       const tap = this.readTapCreate(p);
-      const idempotencyKey = this.createIdempotencyKey(p.idempotencyKey);
       const body = this.buildCreateBody(p, tap, idempotencyKey);
       const path = capture ? "/charges" : "/authorize";
       const raw = await this.tapRequest("POST", path, body, {
@@ -176,6 +181,7 @@ export class TapGateway extends BaseGateway {
           "Tap capture requires currency (pass CaptureParams.currency or retrieve it from the authorize object)",
         );
       }
+      const isPartialCapture = this.assertCaptureAmount(p.amount, obj.amount, currency);
       const amount = this.tapOutboundMajor(
         p.amount !== undefined ? p.amount : parseTapAmount(obj.amount, currency),
         currency,
@@ -213,7 +219,24 @@ export class TapGateway extends BaseGateway {
         signal: p.signal,
         retry: true,
       });
-      return this.mapPaymentObject(raw, "charge", authorizeId);
+      const mapped = this.mapPaymentObject(raw, "charge", authorizeId);
+      if (!isPartialCapture) return mapped;
+      return applyOutcomeToGatewayResult(
+        {
+          gateway: "tap",
+          gatewayId: mapped.gatewayId,
+          status: "partially_captured",
+          redirectUrl: undefined,
+          rawResponse: mapped.rawResponse,
+          references: mapped.references,
+          ...(mapped.amount !== undefined ? { amount: mapped.amount } : {}),
+          ...(mapped.currency !== undefined ? { currency: mapped.currency } : {}),
+          ...(mapped.authorizationId !== undefined
+            ? { authorizationId: mapped.authorizationId }
+            : {}),
+        },
+        "requires_action",
+      );
     });
   }
 
@@ -224,6 +247,27 @@ export class TapGateway extends BaseGateway {
         "voidPayment",
       );
       const authorizeId = this.assertIdPrefix(p.gatewayPaymentId, "auth_");
+      const existing = await this.tapRequest(
+        "GET",
+        `/authorize/${authorizeId}`,
+        undefined,
+        {
+          signal: p.signal,
+          retry: true,
+        },
+      );
+      const obj = existing as TapApiObject;
+      const tapStatus = obj.status;
+      const normalized =
+        typeof tapStatus === "string" ? tapStatus.trim().toUpperCase() : "";
+      if (normalized === "VOID") {
+        return this.mapPaymentObject(existing, "authorize");
+      }
+      if (normalized !== "AUTHORIZED") {
+        throw new InvalidRequestError(
+          `Tap void requires AUTHORIZED authorize status (got "${String(tapStatus)}")`,
+        );
+      }
       const raw = await this.tapRequest(
         "POST",
         `/authorize/${authorizeId}/void`,
@@ -283,32 +327,37 @@ export class TapGateway extends BaseGateway {
       if (existingStatus === "REFUNDED") {
         const embedded = await this.mapEmbeddedRefund(obj, p.signal, idempotencyKey);
         if (embedded !== undefined) return embedded;
-        const replayAmount =
-          p.amount !== undefined
-            ? this.tapOutboundMajor(p.amount, currency)
-            : this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency);
-        return this.postTapRefund({
-          chargeId,
-          amount: replayAmount,
-          currency,
-          params: p,
-          idempotencyKey,
-        });
+        throw new InvalidRequestError(
+          "Tap charge is already fully refunded (nothing remaining)",
+        );
+      }
+      let remaining: number | undefined;
+      try {
+        remaining = tapRemainingRefundMajor(obj, currency);
+      } catch (error) {
+        if (
+          p.amount === undefined ||
+          !(error instanceof InvalidRequestError) ||
+          !error.message.includes("does not expose remaining/refunded")
+        ) {
+          throw error;
+        }
+      }
+      if (remaining === 0) {
+        const embedded = await this.mapEmbeddedRefund(obj, p.signal, idempotencyKey);
+        if (embedded !== undefined) return embedded;
+        throw new InvalidRequestError(
+          "Tap charge is already fully refunded (nothing remaining)",
+        );
       }
       const amount =
         p.amount !== undefined
           ? this.tapOutboundMajor(p.amount, currency)
-          : tapRemainingRefundMajor(obj, currency);
-      if (amount === 0) {
-        const embedded = await this.mapEmbeddedRefund(obj, p.signal, idempotencyKey);
-        if (embedded !== undefined) return embedded;
-        return this.postTapRefund({
-          chargeId,
-          amount: this.tapOutboundMajor(parseTapAmount(obj.amount, currency), currency),
-          currency,
-          params: p,
-          idempotencyKey,
-        });
+          : remaining;
+      if (amount === undefined) {
+        throw new InvalidRequestError(
+          "Tap refund requires amount (charge does not expose remaining/refunded)",
+        );
       }
       return this.postTapRefund({
         chargeId,
@@ -366,10 +415,12 @@ export class TapGateway extends BaseGateway {
       kind === "refund"
         ? mapTapRefundPaymentStatus(tapStatus)
         : mapTapChargeStatus(tapStatus);
+    const authorizeChargeId =
+      kind === "authorize" ? chargeIdFromAuthorize(obj) : undefined;
     const chargeId =
       kind === "refund" && typeof obj.charge_id === "string"
         ? obj.charge_id
-        : id;
+        : (authorizeChargeId ?? id);
     let amount: number | undefined;
     if (obj.amount !== undefined && currency !== undefined) {
       amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
@@ -413,8 +464,10 @@ export class TapGateway extends BaseGateway {
             provider: { ...attached.event.provider, eventType: nativeType },
           },
           {
-            authorizationId: authorizeIdFromSource(obj),
-            chargeId: kind === "authorize" ? chargeIdFromAuthorize(obj) : undefined,
+            authorizationId:
+              authorizeIdFromSource(obj) ??
+              (kind === "authorize" ? id : undefined),
+            chargeId: authorizeChargeId,
           },
         )
       : attached.event;
@@ -468,7 +521,7 @@ export class TapGateway extends BaseGateway {
     };
     const init: RequestInit = { method, headers };
     if (body !== undefined && isMutatingMethod(method)) {
-      init.body = JSON.stringify(body);
+      init.body = stringifyTapJsonBody(body);
     }
     if (signal !== undefined) init.signal = signal;
 
@@ -544,11 +597,17 @@ export class TapGateway extends BaseGateway {
     const tapStatusNormalized =
       typeof tapStatus === "string" ? tapStatus.trim().toUpperCase() : "";
     const outcome =
-      tapStatusNormalized === "VOID"
+      tapStatusNormalized === "VOID" && kind === "authorize"
         ? "succeeded"
         : mapTapChargeOutcome(tapStatus, status, code);
+    const omitCapturedHoldAmount =
+      kind === "authorize" && tapStatusNormalized === "CAPTURED";
     let amount: number | undefined;
-    if (obj.amount !== undefined && currency !== undefined) {
+    if (
+      obj.amount !== undefined &&
+      currency !== undefined &&
+      !omitCapturedHoldAmount
+    ) {
       amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
     }
     const declineMessage =
@@ -702,6 +761,12 @@ export class TapGateway extends BaseGateway {
     if (tap.postUrl !== undefined) body.post = { url: tap.postUrl };
     if (tap.merchantId !== undefined) body.merchant = { id: tap.merchantId };
     if (params.capture === false && this.tapConfig.autoVoidHours !== undefined) {
+      const sourceId = tap.sourceId.toLowerCase();
+      if (sourceId === "src_all" || sourceId === "src_card") {
+        throw new InvalidRequestError(
+          "Tap autoVoidHours cannot be used with src_all or src_card",
+        );
+      }
       body.auto = { type: "VOID", time: this.tapConfig.autoVoidHours };
     }
     return body;
@@ -876,15 +941,23 @@ export class TapGateway extends BaseGateway {
     return major;
   }
 
-  private createIdempotencyKey(provided: string | undefined): string {
-    if (typeof provided === "string" && provided.trim().length > 0) {
-      return provided.trim();
+  private assertCaptureAmount(
+    requested: AmountInput | undefined,
+    authorizeAmount: unknown,
+    currency: string,
+  ): boolean {
+    if (requested === undefined) return false;
+    const requestedMinor =
+      typeof requested === "number"
+        ? toMinorUnits(requested, currency)
+        : toMinorUnits(requested);
+    const authorizedMinor = toMinorUnits(parseTapAmount(authorizeAmount, currency));
+    if (requestedMinor > authorizedMinor) {
+      throw new InvalidRequestError(
+        "Tap capture amount exceeds the authorized amount",
+      );
     }
-    const minted = this.runtime.randomUUID();
-    this.logger.warn(
-      "[Tap] createPayment minted an ephemeral idempotencyKey for in-process retry only; supply a stable key to retry after process crash",
-    );
-    return minted;
+    return requestedMinor < authorizedMinor;
   }
 
   private assertMutationKey(key: string | undefined, operation: string): string {

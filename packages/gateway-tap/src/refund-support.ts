@@ -103,8 +103,9 @@ function nestedRefundCandidates(obj: TapApiObject): unknown[] {
 
 /**
  * Nested refund for crash-replay. Prefer `reference.idempotent` match.
- * A single nested refund (Tap often omits the idempotent field) is still mapped.
- * Multiple unmatched refunds return undefined so the caller POSTs the key.
+ * A single nested refund is mapped only when Tap omits that field.
+ * Unmatched keys (including a single nested refund with a different key)
+ * return undefined so the caller fail-closes instead of posting again.
  */
 export function nestedRefundFromCharge(
   obj: TapApiObject,
@@ -117,6 +118,13 @@ export function nestedRefundFromCharge(
       (entry) => refundIdempotentKey(entry) === idempotencyKey,
     );
     if (matched.length > 0) return matched[matched.length - 1];
+    if (
+      candidates.length === 1 &&
+      refundIdempotentKey(candidates[0]) === undefined
+    ) {
+      return candidates[0];
+    }
+    return undefined;
   }
   if (candidates.length === 1) return candidates[0];
   return undefined;

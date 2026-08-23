@@ -67,4 +67,27 @@ describe("nestedRefundFromCharge", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("returns undefined when the only nested refund has a different idempotent key", () => {
+    expect(
+      nestedRefundFromCharge(
+        capturedCharge({
+          refunds: [
+            { id: "re_a", status: "REFUNDED", reference: { idempotent: "k-a" } },
+          ],
+        }),
+        "k-b",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("returns the only nested refund when Tap omitted the idempotent field", () => {
+    const nested = nestedRefundFromCharge(
+      capturedCharge({
+        refunds: [{ id: "re_a", status: "REFUNDED" }],
+      }),
+      "k-b",
+    );
+    expect((nested as { id: string }).id).toBe("re_a");
+  });
 });

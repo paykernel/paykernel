@@ -14,6 +14,7 @@ export type TapHashFields = {
   paymentReference: string;
   status: string;
   created: string;
+  updated?: string;
 };
 
 export function extractHashstringHeader(
@@ -32,19 +33,52 @@ export function extractHashstringHeader(
   return undefined;
 }
 
-export function computeTapHashstring(
-  fields: TapHashFields,
-  secretKey: string,
-): string {
-  const canonical =
+export function canonicalTapHashstring(fields: TapHashFields): string {
+  // Invoice HMAC is a different field list (`x_updated`, no gateway/payment
+  // refs). `hashFieldsFromTapObject` only sets `updated` for object=invoice.
+  if (fields.updated !== undefined) {
+    return (
+      `x_id${fields.id}` +
+      `x_amount${fields.amount}` +
+      `x_currency${fields.currency}` +
+      `x_updated${fields.updated}` +
+      `x_status${fields.status}` +
+      `x_created${fields.created}`
+    );
+  }
+  return (
     `x_id${fields.id}` +
     `x_amount${fields.amount}` +
     `x_currency${fields.currency}` +
     `x_gateway_reference${fields.gatewayReference}` +
     `x_payment_reference${fields.paymentReference}` +
     `x_status${fields.status}` +
-    `x_created${fields.created}`;
-  return hmacSha256Hex(secretKey, canonical);
+    `x_created${fields.created}`
+  );
+}
+
+export function computeTapHashstring(
+  fields: TapHashFields,
+  secretKey: string,
+): string {
+  return hmacSha256Hex(secretKey, canonicalTapHashstring(fields));
+}
+
+function tapHashableObject(
+  payload: TapApiObject,
+): "charge" | "authorize" | "refund" | "invoice" {
+  const object = payload.object;
+  if (
+    object === "charge" ||
+    object === "authorize" ||
+    object === "refund" ||
+    object === "invoice"
+  ) {
+    return object;
+  }
+  throw new InvalidRequestError(
+    `Unsupported Tap webhook object ${String(object)} (charge, authorize, refund, or invoice)`,
+  );
 }
 
 export function hashFieldsFromTapObject(payload: unknown): TapHashFields {
@@ -52,10 +86,24 @@ export function hashFieldsFromTapObject(payload: unknown): TapHashFields {
     throw new InvalidRequestError("Tap webhook payload must be a JSON object");
   }
   const obj = payload as TapApiObject;
+  const kind = tapHashableObject(obj);
   const id = requiredString(obj.id, "id");
   const currency = requiredString(obj.currency, "currency").toUpperCase();
   const status = requiredString(obj.status, "status");
   const amount = formatTapIsoAmount(parseTapAmount(obj.amount, currency), currency);
+  const created = extractCreated(obj);
+  if (kind === "invoice") {
+    return {
+      id,
+      amount,
+      currency,
+      gatewayReference: "",
+      paymentReference: "",
+      status,
+      created,
+      updated: extractUpdated(obj),
+    };
+  }
   const reference =
     obj.reference !== null && typeof obj.reference === "object"
       ? (obj.reference as Record<string, unknown>)
@@ -64,7 +112,6 @@ export function hashFieldsFromTapObject(payload: unknown): TapHashFields {
     typeof reference.gateway === "string" ? reference.gateway : "";
   const payment =
     typeof reference.payment === "string" ? reference.payment : "";
-  const created = extractCreated(obj);
   return {
     id,
     amount,
@@ -136,4 +183,13 @@ function extractCreated(obj: TapApiObject): string {
     throw new InvalidRequestError("Tap webhook missing created timestamp");
   }
   return created;
+}
+
+function extractUpdated(obj: TapApiObject): string {
+  const raw = (obj as { updated?: unknown }).updated;
+  if (typeof raw === "string" || typeof raw === "number") {
+    const value = String(raw);
+    if (value.length > 0) return value;
+  }
+  throw new InvalidRequestError("Tap webhook missing updated timestamp");
 }

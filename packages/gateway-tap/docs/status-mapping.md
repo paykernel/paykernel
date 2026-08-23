@@ -6,8 +6,10 @@
 | IN PROGRESS / IN_PROGRESS | pending | requires_action |
 | AUTHORIZED | authorized | succeeded (hold, not paid) |
 | CAPTURED | paid | succeeded |
+| CAPTURED (partial capture) | partially_captured | not `isPaidOutcome` |
 | REFUNDED (charge object) | refunded | succeeded (`getPayment` / charge webhook — not `failed`) |
-| VOID | cancelled | succeeded (`getPayment` and `voidPayment`); not capturable |
+| VOID (charge object) | cancelled | failed (`getPayment` / charge webhook — not succeeded) |
+| VOID (authorize object) | cancelled | succeeded (`getPayment` and `voidPayment`); not capturable |
 | CANCELLED / ABANDONED | cancelled | failed (`getPayment`) |
 | DECLINED | failed | declined |
 | FAILED + `response.code` `501`–`516` | failed | declined |
@@ -18,9 +20,9 @@ Missing object `status` after a **mutating** HTTP 2xx (body has `id`) is `indete
 
 Charge `INITIATED` / `IN PROGRESS` / `IN_PROGRESS` are pending / `requires_action` — **not** `failed`. Fawry (`src_eg.fawry`) uses `IN PROGRESS`; all pending statuses share that outcome. Redirect only to `transaction.url` when it is present.
 
-Authorize `CAPTURED` is paid on `getPayment`. Nested `charge_id` becomes `gatewayId` (`chg_…`) with `authorizationId` `auth_…`; without it, paid + `authorizationId` `auth_…`. `capturePayment` does **not** POST `/charges` when GET authorize is `CAPTURED` — it returns paid and keeps `authorizationId`. Authorize `VOID` is `succeeded` + cancelled on `getPayment` (same as `voidPayment`) and must not be captured. ABANDONED / CANCELLED stay `failed`.
+Authorize `CAPTURED` is paid on `getPayment` when nested `charge_id` is present (`gatewayId` `chg_…`, `authorizationId` `auth_…`). Without `charge_id`, omit `amount` (do not invent captured money from the hold). `capturePayment` does **not** POST `/charges` when GET authorize is `CAPTURED`. Capture `amount` less than the authorize is `partially_captured`, not `paid` (`isPaidOutcome` is false). Capture `amount` greater than the authorize throws `InvalidRequestError`. Charge `VOID` is `failed`. Authorize `VOID` is `succeeded` + cancelled on `getPayment` (same as `voidPayment`) and must not be captured. ABANDONED / CANCELLED stay `failed`.
 
-Invoice webhook objects parse as **non-paid** after a verified `hashstring`. They do not throw.
+Invoice webhook objects parse as **non-paid** after a verified `hashstring` that uses `x_updated`. They do not throw.
 
 Leftover `transaction.url` on AUTHORIZED or CAPTURED is **not** `requires_action`.
 

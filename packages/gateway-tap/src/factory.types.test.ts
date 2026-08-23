@@ -54,6 +54,21 @@ function _assignTapCreateViaClientFacade() {
 }
 void _assignTapCreateViaClientFacade;
 
+function _assignTapCreateViaSingletonWithoutDefaultGateway() {
+  const singleton = createPaymentClient({
+    gateways: {
+      tap: tapGateway({ secretKey: "sk_test_types" }),
+    },
+  });
+  void singleton.createPayment({
+    amount: 10,
+    currency: "SAR",
+    callbackUrl: "https://merchant.example/callback",
+    tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
+  });
+}
+void _assignTapCreateViaSingletonWithoutDefaultGateway;
+
 function _assignTapCreateViaRegistryFacade() {
   const registryClient = createPaymentClient({
     registry: createGatewayRegistry()

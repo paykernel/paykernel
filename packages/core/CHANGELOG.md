@@ -9,6 +9,7 @@
 
 ### Behavior (0.x)
 
+- **TAP-SINGLETON-DEFAULT / CLIENT-SOLE-GATEWAY:** When `defaultGateway` is omitted and exactly one gateway is configured (gateways map, registry, or legacy constructor), one-arg `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` / `getPayment` use that gateway. This matches existing singleton `DefaultOpParams` typing. Two or more configured gateways without a default still throw `InvalidRequestError`.
 - **CLIENT-DEFAULT-OP-PARAMS:** `createPaymentClient` infers a second `PaymentClient` type argument from `defaultGateway` (gateways-map **and** registry forms). One-arg `createPayment` / `capturePayment` / `refundPayment` use that gateway's method params. Multi-gateway clients without a typed default still use core `CreatePaymentParams` / `CaptureParams` / `RefundParams` (not `never`). Named `gateway` is a separate overload so default-gateway extra fields cannot be passed to another registered name.
 - **P22-CKO-GET-ZERO:** `getCheckoutSession` amount is session `amount_total` while unpaid; captured rematch only after paid. Do not fulfill on GET checkout amount.
 - **List paging:** Stripe refund lists follow `has_more` / `starting_after`. Payment-link `line_items.has_more` omits amount rather than inventing major `0`.

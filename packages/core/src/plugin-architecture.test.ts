@@ -557,14 +557,37 @@ describe("Phase 2: defaultGateway validation", () => {
     }
   });
 
-  it("throws when ops omit gateway and no default is set", async () => {
+  it("throws when ops omit gateway and no default is set on a multi-gateway client", async () => {
     const client = createPaymentClient({
-      gateways: { custom: createCustomAdapter() },
+      gateways: {
+        custom: createCustomAdapter(),
+        alpha: createNamedAdapter("alpha"),
+      },
     });
 
     await expect(client.createPayment(baseCreateParams)).rejects.toBeInstanceOf(
       InvalidRequestError,
     );
+  });
+
+  it("uses the sole configured gateway when defaultGateway is omitted", async () => {
+    const client = createPaymentClient({
+      gateways: { custom: createCustomAdapter() },
+    });
+
+    const result = await client.createPayment(baseCreateParams);
+    expect(result.success).toBe(true);
+    expect(result.gatewayId).toBe("custom_42.5");
+  });
+
+  it("uses the sole registry gateway when defaultGateway is omitted", async () => {
+    const client = createPaymentClient({
+      registry: createGatewayRegistry().register(createCustomAdapter()).build(),
+    });
+
+    const result = await client.createPayment(baseCreateParams);
+    expect(result.success).toBe(true);
+    expect(result.gatewayId).toBe("custom_42.5");
   });
 });
 

@@ -15,7 +15,7 @@ const PARSE_OPTS = {
 };
 
 /**
- * ISO-padded major decimal string for Tap JSON / hashstring.
+ * ISO-padded major decimal string for Tap hashstring and JSON number tokens.
  * SAR `1` → `1.00`; KWD `1.2` → `1.200`. Never float-multiplies.
  */
 export function formatTapIsoAmount(
@@ -49,4 +49,36 @@ export function parseTapAmount(amount: unknown, currency: string): Money {
 
 function toTapMoney(amount: AmountInput, currency: string): Money {
   return normalizeAmountInput(amount, currency, PARSE_OPTS);
+}
+
+const TAP_JSON_AMOUNT_PLACEHOLDER = "__paykernel_tap_iso_amount__";
+const TAP_JSON_NUMBER_TOKEN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+/**
+ * JSON body for Tap mutating requests. Top-level `amount` is an ISO-padded
+ * JSON **number** token (`10.50` / `1.200`), not a string. Other fields use
+ * `JSON.stringify`. Bodies without a numeric `amount` + string `currency` are
+ * stringified unchanged.
+ */
+export function stringifyTapJsonBody(body: Record<string, unknown>): string {
+  const amount = body.amount;
+  const currency = body.currency;
+  if (typeof amount !== "number" || typeof currency !== "string") {
+    return JSON.stringify(body);
+  }
+  const padded = formatTapIsoAmount(amount, currency);
+  if (!TAP_JSON_NUMBER_TOKEN.test(padded)) {
+    throw new InvalidRequestError(
+      `Tap amount for ${currency.toUpperCase()} is not a JSON number token`,
+    );
+  }
+  const serialized = JSON.stringify({
+    ...body,
+    amount: TAP_JSON_AMOUNT_PLACEHOLDER,
+  });
+  const amountNeedle = `"amount":"${TAP_JSON_AMOUNT_PLACEHOLDER}"`;
+  if (!serialized.includes(amountNeedle)) {
+    throw new InvalidRequestError("Tap JSON amount could not be ISO-padded");
+  }
+  return serialized.replace(amountNeedle, `"amount":${padded}`);
 }
