@@ -1105,6 +1105,7 @@ describe("live monorepo packages", () => {
     expect(names.has("@paykernel/opentelemetry")).toBe(true);
     expect(names.has("@paykernel/routing")).toBe(true);
     expect(names.has("@paykernel/gateway-tap")).toBe(true);
+    expect(names.has("@paykernel/gateway-myfatoorah")).toBe(true);
     expect(names.has("@paykernel/testkit")).toBe(true);
     expect(names.has("@paykernel/internal-sql-store")).toBe(true);
     expect(names.has("@paykernel/store-postgres")).toBe(true);
@@ -1115,6 +1116,10 @@ describe("live monorepo packages", () => {
     expect(isPortablePackage(routing)).toBe(true);
     const tap = packages.find((p) => p.name === "@paykernel/gateway-tap")!;
     expect(isPortablePackage(tap)).toBe(true);
+    const myfatoorah = packages.find(
+      (p) => p.name === "@paykernel/gateway-myfatoorah",
+    )!;
+    expect(isPortablePackage(myfatoorah)).toBe(true);
     expect(runChecks(packages, root)).toEqual([]);
   });
 });

@@ -36,6 +36,7 @@ export const PORTABLE_PACKAGE_DIRS = [
   "packages/webhooks",
   "packages/store-contracts",
   "packages/gateway-tap",
+  "packages/gateway-myfatoorah",
 ] as const;
 
 // ---------------------------------------------------------------------------

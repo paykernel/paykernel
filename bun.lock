@@ -79,6 +79,20 @@
         "typescript": "^5.9.3",
       },
     },
+    "packages/gateway-myfatoorah": {
+      "name": "@paykernel/gateway-myfatoorah",
+      "version": "0.1.0-next.0",
+      "dependencies": {
+        "@paykernel/core": "workspace:*",
+      },
+      "devDependencies": {
+        "@arethetypeswrong/cli": "^0.18.5",
+        "@paykernel/testkit": "workspace:*",
+        "@types/bun": "latest",
+        "publint": "^0.3.22",
+        "typescript": "^5.9.3",
+      },
+    },
     "packages/gateway-tap": {
       "name": "@paykernel/gateway-tap",
       "version": "0.1.0-next.0",
@@ -433,6 +447,8 @@
     "@paykernel/example-bun-hono-sqlite": ["@paykernel/example-bun-hono-sqlite@workspace:examples/bun-hono-sqlite"],
 
     "@paykernel/example-checkout-kernel": ["@paykernel/example-checkout-kernel@workspace:examples/checkout-kernel"],
+
+    "@paykernel/gateway-myfatoorah": ["@paykernel/gateway-myfatoorah@workspace:packages/gateway-myfatoorah"],
 
     "@paykernel/gateway-tap": ["@paykernel/gateway-tap@workspace:packages/gateway-tap"],
 
@@ -1024,6 +1040,8 @@
 
     "@paykernel/example-checkout-kernel/@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 
+    "@paykernel/gateway-myfatoorah/@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
+
     "@paykernel/gateway-tap/@types/bun": ["@types/bun@1.4.0", "", { "dependencies": { "bun-types": "1.4.0" } }, "sha512-K+lZULY23vRgK/CfTjFIV+tyifaNdSMlPh9j+6mQ/cLfpOznLyAuzgV/JQysyECpkBQLVMSyvjlr2fBUSA9wFQ=="],
 
     "@paykernel/internal-sql-store/@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
@@ -1083,6 +1101,8 @@
     "@paykernel/example-bun-hono-sqlite/@types/bun/bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
 
     "@paykernel/example-checkout-kernel/@types/bun/bun-types": ["bun-types@1.3.14", "", { "dependencies": { "@types/node": "*" } }, "sha512-4N0ig0fEomHt5R0KCFWjovxow98rIoRwKolrYdCcknNwMekCXRnWEUvgu5soYV8QXtVsrUD8B95MBOZGPvr6KQ=="],
+
+    "@paykernel/gateway-myfatoorah/@types/bun/bun-types": ["bun-types@1.4.0", "", { "dependencies": { "@types/node": "*" } }, "sha512-iIKw23BspnQQYd3prITOBxeUsxBHnwzX6YJfGMuNOZzeNcMmVqzIIVGRm1l69ogaPQmb4wB6BN8mA5bE9YuC5Q=="],
 
     "@paykernel/gateway-tap/@types/bun/bun-types": ["bun-types@1.4.0", "", { "dependencies": { "@types/node": "*" } }, "sha512-iIKw23BspnQQYd3prITOBxeUsxBHnwzX6YJfGMuNOZzeNcMmVqzIIVGRm1l69ogaPQmb4wB6BN8mA5bE9YuC5Q=="],
 

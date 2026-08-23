@@ -167,7 +167,24 @@ const payments = createPaymentClient({
 });
 ```
 
-See [`@paykernel/gateway-tap`](../../gateway-tap/README.md).
+MyFatoorah works the same way (V3 hosted payments, refunds, Webhook V2):
+
+```typescript
+import { myfatoorahGateway } from '@paykernel/gateway-myfatoorah';
+
+const myfatoorahPayments = createPaymentClient({
+  gateways: {
+    myfatoorah: myfatoorahGateway({
+      apiToken: process.env.MYFATOORAH_API_TOKEN!,
+      country: 'KWT',
+      webhookSecret: process.env.MYFATOORAH_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: 'myfatoorah',
+});
+```
+
+See [`@paykernel/gateway-tap`](../../gateway-tap/README.md) and [`@paykernel/gateway-myfatoorah`](../../gateway-myfatoorah/README.md).
 
 ## Registry builder (same adapters)
 

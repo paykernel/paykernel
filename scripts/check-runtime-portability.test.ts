@@ -144,13 +144,14 @@ describe("scanCoreDist (live monorepo, when built)", () => {
 });
 
 describe("PORTABLE_PACKAGE_DIRS", () => {
-  it("includes core, webhooks, store-contracts, and gateway-tap", () => {
+  it("includes core, webhooks, store-contracts, gateway-tap, and gateway-myfatoorah", () => {
     expect([...PORTABLE_PACKAGE_DIRS]).toEqual(
       expect.arrayContaining([
         "packages/core",
         "packages/webhooks",
         "packages/store-contracts",
         "packages/gateway-tap",
+        "packages/gateway-myfatoorah",
       ]),
     );
   });
