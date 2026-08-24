@@ -5,6 +5,7 @@ import {
   type PaymentStatus,
   type WebhookEvent,
 } from "@paykernel/core";
+import { normalizeMyFatoorahCurrency } from "./currency";
 import { myFatoorahMajorNumber, parseMyFatoorahAmount } from "./money";
 import {
   inferMyFatoorahStableType,
@@ -79,6 +80,7 @@ export function withRelatedIdsOnPaymentEvent(
     },
   };
 }
+
 function webhookMoneyFromAmountRecord(
   amount: unknown,
 ): { amount: number; currency: string } | undefined {
@@ -87,12 +89,12 @@ function webhookMoneyFromAmountRecord(
     value: unknown,
     currency: unknown,
   ): { amount: number; currency: string } | undefined => {
-    if (typeof currency !== "string" || currency.trim().length !== 3) return undefined;
-    const cur = currency.trim().toUpperCase();
+    const normalized = normalizeMyFatoorahCurrency(currency);
+    if (normalized === undefined) return undefined;
     if (value === undefined || value === null) return undefined;
     try {
-      const money = parseMyFatoorahAmount(value, cur);
-      return { amount: myFatoorahMajorNumber(money, cur), currency: cur };
+      const money = parseMyFatoorahAmount(value, normalized);
+      return { amount: myFatoorahMajorNumber(money, normalized), currency: normalized };
     } catch {
       return undefined;
     }
@@ -220,16 +222,13 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
   const refundMoney = webhookMoneyFromAmountRecord(
     data.Amount !== undefined ? data.Amount : refund.Amount,
   );
-  // ReferencedInvoice.ExternalIdentifier carries the original orderId (Customer.Reference)
-  // so refunds can be correlated to the merchant payment.
+  // ReferencedInvoice.ExternalIdentifier carries the original orderId (Customer.Reference).
+  // Do not fallback to Refund.ExternalIdentifier (refund idempotency key).
   const referencedExternalId =
     typeof referencedInvoice.ExternalIdentifier === "string" &&
     referencedInvoice.ExternalIdentifier.trim().length > 0
       ? referencedInvoice.ExternalIdentifier.trim()
-      : typeof refund.ExternalIdentifier === "string" && refund.ExternalIdentifier.trim().length > 0
-        ? refund.ExternalIdentifier.trim()
-        : undefined;
-
+      : undefined;
   const legacy: WebhookEvent = {
     id,
     type: stable ?? nativeType,

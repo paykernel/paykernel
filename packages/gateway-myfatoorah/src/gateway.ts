@@ -21,6 +21,7 @@ import {
 } from "@paykernel/core";
 import { MYFATOORAH_CAPABILITIES } from "./capabilities";
 import {
+  MYFATOORAH_COUNTRY_CURRENCY,
   MYFATOORAH_DEFAULT_TIMEOUT_MS,
   assertMyFatoorahHttpsUrl,
   copyMyFatoorahConfig,
@@ -68,26 +69,9 @@ import {
   myFatoorahWebhookKind,
   verifyMyFatoorahSignature,
 } from "./webhooks";
+import { normalizeMyFatoorahCurrency } from "./currency";
 const MYFATOORAH_REFUND_COMMENT_MAX = 500;
 const CURRENCY_CODE = /^[A-Za-z]{3}$/;
-/** MyFatoorah V2 aliases: official samples use "KD" for KWD and "SR" for SAR. */
-const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
-  KD: "KWD",
-  "K.D.": "KWD",
-  "K.D": "KWD",
-  SR: "SAR",
-  "S.R.": "SAR",
-  "S.R": "SAR",
-};
-
-function normalizeMyFatoorahCurrency(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim().toUpperCase();
-  if (trimmed.length === 0) return undefined;
-  const aliased = MYFATOORAH_CURRENCY_ALIASES[trimmed] ?? trimmed;
-  if (aliased.length !== 3 || !CURRENCY_CODE.test(aliased)) return undefined;
-  return aliased;
-}
 
 function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
   if (error instanceof NetworkError && error.message.includes("aborted by caller")) {
@@ -138,9 +122,8 @@ function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
         parsed = undefined;
       }
       if (parsed !== undefined && validationBodyMentionsIdempotency(parsed)) return true;
-      // Unparseable string body: a mention of the header is enough to justify
-      // the single headerless retry.
-      if (body.toLowerCase().includes("idempotency")) return true;
+      // Unparseable string body: only retry when it mentions the Idempotency-Key header.
+      if (body.toLowerCase().includes("idempotency-key")) return true;
     } else if (validationBodyMentionsIdempotency(body)) {
       return true;
     }
@@ -239,11 +222,12 @@ export class MyFatoorahGateway extends BaseGateway {
         return this.mapCreateResult(data, raw, p.currency.trim().toUpperCase());
       } catch (error) {
         if (hasMyFatoorahIdempotencyValidationError(error)) {
+          // Header not supported (or other idempotency validation) — retry once without header,
+          // without post-submit retry to avoid double-charge if the headerless POST is accepted.
           const retryWithoutHeader = {
             signal: requestOptions.signal,
-            retry: requestOptions.retry,
+            retry: false as const,
             postSubmit: requestOptions.postSubmit,
-            isRetryable: requestOptions.isRetryable,
           };
           const { data, raw } = await this.myfatoorahRequest(
             "POST",
@@ -279,7 +263,8 @@ export class MyFatoorahGateway extends BaseGateway {
           "POST",
           "/v2/GetRefundStatus",
           { KeyType: "InvoiceId", Key: invoiceId },
-          { signal: p.signal, retry: true, postSubmit: false },
+          // Data is nullable per OpenAPI — no refunds yet is a valid empty history.
+          { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
         ),
         this.myfatoorahRequest(
           "POST",
@@ -289,8 +274,9 @@ export class MyFatoorahGateway extends BaseGateway {
         ),
       ]);
 
-      const currency = this.refundCurrency(p, paymentStatus.data, refundStatus.data);
+      const currency = this.refundCurrency(p, refundStatus.data);
       this.assertCurrencyMatch(p.currency, currency, "refund");
+
 
       const invoiceAmount = this.invoiceValue(paymentStatus.data);
       // Official GetRefundStatus uses RefundStatusResult; fallback to legacy Refunds.
@@ -387,7 +373,7 @@ export class MyFatoorahGateway extends BaseGateway {
     });
   }
 
-  verifyWebhook(payload: unknown, signature?: string, headers?: Record<string, string>): boolean {
+  verifyWebhook(payload: unknown, signature?: string, headers?: Record<string, string | string[]>): boolean {
     const provided = extractMyFatoorahSignatureHeader(signature, headers);
     return verifyMyFatoorahSignature(payload, this.myfatoorahConfig.webhookSecret, provided);
   }
@@ -414,6 +400,8 @@ export class MyFatoorahGateway extends BaseGateway {
       /** Currency for top-level `Amount` ISO padding (MakeRefund). */
       currency?: string;
       isRetryable?: (error: unknown) => boolean;
+      /** Return empty data instead of throwing on a 2xx body without Data (inquiries only). */
+      allowMissingData?: boolean;
     },
   ): Promise<{ data: Record<string, unknown>; raw: unknown }> {
     if (body !== undefined) assertNoPciCardSource(body);
@@ -426,6 +414,7 @@ export class MyFatoorahGateway extends BaseGateway {
         options.idempotencyKey,
         options.postSubmit === true,
         options.currency,
+        options.allowMissingData === true,
       );
     if (options.retry) {
       return withRetry(run, {
@@ -443,6 +432,7 @@ export class MyFatoorahGateway extends BaseGateway {
     idempotencyKey: string | undefined,
     postSubmit: boolean,
     currency: string | undefined,
+    allowMissingData: boolean,
   ): Promise<{ data: Record<string, unknown>; raw: unknown }> {
     const timeoutMs = this.myfatoorahConfig.timeoutMs ?? MYFATOORAH_DEFAULT_TIMEOUT_MS;
     const { signal: timeoutSignal, clear } = createTimeoutSignal(timeoutMs);
@@ -518,6 +508,9 @@ export class MyFatoorahGateway extends BaseGateway {
     const raw = data;
     const unwrapped = readMyFatoorahData(raw);
     if (unwrapped === undefined) {
+      if (allowMissingData && !postSubmit) {
+        return { data: {}, raw };
+      }
       if (postSubmit) {
         throw new NetworkError(
           "MyFatoorah API returned a 2xx body missing Data",
@@ -868,22 +861,18 @@ export class MyFatoorahGateway extends BaseGateway {
           ? "paid"
           : invoiceStatus;
 
-    // MF-MED-1: InvoiceValue is always base currency. Pair PaidCurrencyValue with
-    // PaidCurrency only when the base Currency is missing or equals the paid
-    // currency; otherwise pair InvoiceValue with the base Currency.
+    // Amount: prefer PaidCurrency/PaidCurrencyValue (pay currency) when present to match create's
+    // pay-currency publishing; fall back to InvoiceValue + base Currency otherwise.
     let currency: string | undefined;
     let amount: number | undefined;
     if (successTransaction !== undefined) {
       const paidCurrency = normalizeMyFatoorahCurrency(successTransaction.PaidCurrency);
       const paidValue = successTransaction.PaidCurrencyValue ?? successTransaction.TransationValue;
-      const baseCurrency = normalizeMyFatoorahCurrency(successTransaction.Currency);
       if (paidCurrency !== undefined && paidValue !== undefined) {
-        if (baseCurrency === undefined || paidCurrency === baseCurrency) {
-          const parsedPaid = this.parseMajor(paidValue, paidCurrency);
-          if (parsedPaid !== undefined) {
-            currency = paidCurrency;
-            amount = parsedPaid;
-          }
+        const parsedPaid = this.parseMajor(paidValue, paidCurrency);
+        if (parsedPaid !== undefined) {
+          currency = paidCurrency;
+          amount = parsedPaid;
         }
       }
       if (currency === undefined) {
@@ -971,7 +960,6 @@ export class MyFatoorahGateway extends BaseGateway {
 
   private refundCurrency(
     params: MyFatoorahRefundParams,
-    paymentStatus: Record<string, unknown>,
     refundStatus?: Record<string, unknown>,
   ): string {
     // MakeRefund Amount is account base currency (e.g. KWD), not display/pay currency (e.g. SAR).
@@ -986,16 +974,15 @@ export class MyFatoorahGateway extends BaseGateway {
           const normReq = normalizeMyFatoorahCurrency(requested) ?? requested.trim().toUpperCase();
           if (normReq !== normalizedBase) {
             throw new InvalidRequestError(
-              `MyFatoorah refund currency "${requested}" does not match account base currency "${normalizedBase}" (MakeRefund is base-only; see docs/refund.md)`,
+              `MyFatoorah refund currency "${requested}" does not match account base currency "${normalizedBase}" (MakeRefund is base-only; see docs/refunds.md)`,
             );
           }
         }
         return normalizedBase;
       }
     }
-    // No BaseCurrency yet (first refund, empty RefundStatusResult). MakeRefund is still base-only.
-    // Use caller currency as base if provided; otherwise fall back to transaction currency
-    // as best-effort (may be pay currency, not base — caller should pass base explicitly).
+    // No BaseCurrency yet (first refund, empty history): the portal country fixes the base currency.
+    const inferredBase = MYFATOORAH_COUNTRY_CURRENCY[this.myfatoorahConfig.country];
     const requested = typeof params.currency === "string" ? params.currency.trim() : "";
     if (requested.length > 0) {
       const normReq = normalizeMyFatoorahCurrency(requested);
@@ -1004,15 +991,14 @@ export class MyFatoorahGateway extends BaseGateway {
           `MyFatoorah refund currency "${requested}" is not a 3-letter code`,
         );
       }
+      if (normReq !== inferredBase) {
+        throw new InvalidRequestError(
+          `MyFatoorah refund currency "${requested}" does not match account base currency "${inferredBase}" (MakeRefund is base-only; see docs/refunds.md)`,
+        );
+      }
       return normReq;
     }
-    const fromInvoice = this.transactionCurrency(this.successTransaction(paymentStatus) ?? {});
-    if (fromInvoice !== undefined) {
-      return fromInvoice;
-    }
-    throw new InvalidRequestError(
-      "MyFatoorah refund requires currency (pass RefundParams.currency — MakeRefund is base currency, e.g. KWD)",
-    );
+    return inferredBase;
   }
 
   private assertCurrencyMatch(
