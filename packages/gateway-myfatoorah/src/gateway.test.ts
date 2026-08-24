@@ -199,12 +199,14 @@ describe("MyFatoorahGateway.createPayment", () => {
 
   it("does not retry post-submit network errors on create outside KWT/SAU", async () => {
     const calls: FetchCall[] = [];
-    const gateway = createGateway([new TypeError("connect ECONNREFUSED")], calls, {
-      country: "BHR",
-    });
-    const result = await gateway.createPayment({ ...createParams });
+    const gateway = createGateway(
+      [jsonResponse({ IsSuccess: false, Message: "Not found" }, 404), new TypeError("connect ECONNREFUSED")],
+      calls,
+      { country: "BHR" },
+    );
+    const result = await gateway.createPayment({ ...createParams, orderId: "ord_bhr_1" });
     expect(result.outcome).toBe("indeterminate");
-    expect(calls.length).toBe(1);
+    expect(calls.length).toBe(2);
   });
 
   it("returns indeterminate when a mutating 2xx has no InvoiceId", async () => {
@@ -395,14 +397,29 @@ describe("MyFatoorahGateway.createPayment", () => {
   it("does not send Idempotency-Key outside KWT/SAU", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
-      [jsonResponse(myfatoorahEnvelope(initiatedCreateData()))],
+      [
+        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
       calls,
       { country: "ARE" },
     );
-    const result = await gateway.createPayment({ ...createParams });
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_are_no_header",
+    });
     expect(result.outcome).toBe("requires_action");
-    expect(calls.length).toBe(1);
-    expect(calls[0]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+    expect(calls.length).toBe(2);
+    expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+  });
+
+  it("requires orderId or myfatoorahCustomer.reference outside KWT/SAU", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([], calls, { country: "ARE" });
+    await expect(gateway.createPayment({ ...createParams })).rejects.toThrow(
+      /orderId|CustomerReference|myfatoorahCustomer\.reference/,
+    );
+    expect(calls.length).toBe(0);
   });
 
   it("picks the currency-matching ValueIn* field on paid create", async () => {
@@ -482,14 +499,15 @@ describe("MyFatoorahGateway.getPayment", () => {
     expect(result.outcome).toBe("requires_action");
   });
 
-  it("maps a paid invoice without a success transaction as paid", async () => {
+  it("does not treat a Paid invoice without a success transaction as paid", async () => {
     const data = paidInvoiceStatusData();
     const failed = [{ TransactionStatus: "FAILED", Currency: "SAR" }];
     data.Transactions = failed;
     (data as Record<string, unknown>).InvoiceTransactions = failed;
     const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
     const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
-    expect(result.status).toBe("paid");
+    expect(result.status).not.toBe("paid");
+    expect(isPaidOutcome(result)).toBe(false);
     expect(result.amount).toBeUndefined();
   });
 
@@ -542,6 +560,16 @@ describe("MyFatoorahGateway.getPayment", () => {
     const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
     expect(result.amount).toBe(800);
     expect(result.currency).toBe("SAR");
+  });
+
+  it("maps a refunded invoice as settled but not paid", async () => {
+    const data = paidInvoiceStatusData();
+    data.InvoiceStatus = "Refunded";
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    expect(result.status).toBe("refunded");
+    expect(result.outcome).toBe("succeeded");
+    expect(isPaidOutcome(result)).toBe(false);
   });
 
   it("maps canceled invoices to cancelled / failed outcome", async () => {
@@ -920,6 +948,39 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 
+  it("does not treat GetRefundStatus Data array as empty history", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({
+          IsSuccess: true,
+          Message: "",
+          ValidationErrors: null,
+          Data: [
+            {
+              RefundId: 22201,
+              ExternalIdentifier: "refund-array-1",
+              Amount: 2.5,
+              RefundStatus: "Pending",
+              BaseCurrency: "KWD",
+            },
+          ],
+        }),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-array-1",
+      currency: "KWD",
+    });
+    expect(result.gatewayRefundId).toBe("22201");
+    expect(result.status).toBe("pending");
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
   it("treats a GetRefundStatus 2xx without Data as empty history (MF-CRIT-3)", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -1071,6 +1132,33 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(bodyOf(calls[0]).Customer).toEqual({ Reference: "ord_kwt_1" });
   });
 
+  it("MF-CREATE-REPLAY: ARE Pending invoice does not POST a second payment", async () => {
+    const calls: FetchCall[] = [];
+    const existing = paidInvoiceStatusData({
+      InvoiceId: 777778,
+      InvoiceStatus: "Pending",
+      InvoiceValue: 10.5,
+      Transactions: [],
+    });
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(existing)),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_pending",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://apitest.myfatoorah.com/v2/GetPaymentStatus",
+    ]);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
   it("MF-CREATE-REPLAY: ARE Paid invoice with a different amount is not reused", async () => {
     const calls: FetchCall[] = [];
     const existing = paidInvoiceStatusData({
@@ -1100,12 +1188,11 @@ describe("MyFatoorahGateway MF fixes", () => {
       ...createParams,
       orderId: "ord_replay_amount",
     });
-    expect(result.outcome).toBe("requires_action");
-    expect(result.gatewayId).toBe("915102");
+    expect(isIndeterminateOutcome(result)).toBe(true);
     expect(calls.map((c) => c.url)).toEqual([
       "https://apitest.myfatoorah.com/v2/GetPaymentStatus",
-      "https://apitest.myfatoorah.com/v3/payments",
     ]);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
   });
 
   it("MF-CREATE-REPLAY: ARE inquiry 5xx does not POST a second payment", async () => {
@@ -1123,6 +1210,31 @@ describe("MyFatoorahGateway MF fixes", () => {
     const result = await gateway.createPayment({
       ...createParams,
       orderId: "ord_replay_5xx",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-CREATE-REPLAY: ARE lookup 400 does not POST a second payment", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "Validation Error",
+            ValidationErrors: [{ Name: "KeyType", Error: "KeyType is invalid" }],
+          },
+          400,
+        ),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_400",
     });
     expect(isIndeterminateOutcome(result)).toBe(true);
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");

@@ -8,11 +8,6 @@ import {
   parseRetryAfterSeconds,
 } from "@paykernel/core";
 
-export function isMutatingMethod(method: string): boolean {
-  const normalized = method.toUpperCase();
-  return normalized !== "GET" && normalized !== "HEAD" && normalized !== "OPTIONS";
-}
-
 /** `IsSuccess` is success when boolean true or case-insensitive string "true". */
 export function myFatoorahIsSuccess(body: unknown): boolean {
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -65,7 +60,13 @@ export function readMyFatoorahData(body: unknown): Record<string, unknown> | und
     return undefined;
   }
   const data = (body as Record<string, unknown>).Data;
-  if (data === null || typeof data !== "object" || Array.isArray(data)) {
+  if (data === null || data === undefined) {
+    return undefined;
+  }
+  if (Array.isArray(data)) {
+    return { RefundStatusResult: data };
+  }
+  if (typeof data !== "object") {
     return undefined;
   }
   return data as Record<string, unknown>;

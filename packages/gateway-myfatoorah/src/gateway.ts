@@ -225,8 +225,14 @@ export class MyFatoorahGateway extends BaseGateway {
         this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
       // MF-CREATE-REPLAY: only when the header is omitted. CustomerReference is
       // not unique — reuse a Paid invoice only when amount+currency match.
-      // Inquiry 5xx / 429 fail closed (indeterminate) instead of creating a second invoice.
+      // Pending / mismatch / inquiry 5xx / 429 / non-404 4xx fail closed
+      // (indeterminate) instead of creating a second invoice.
       const replayReference = this.customerReferenceForReplay(p);
+      if (!idempotencySupported && replayReference === undefined) {
+        throw new InvalidRequestError(
+          "MyFatoorah createPayment requires orderId or myfatoorahCustomer.reference outside KWT/SAU (Idempotency-Key is omitted; CustomerReference is the replay key)",
+        );
+      }
       if (replayReference !== undefined && !idempotencySupported) {
         try {
           const { data, raw } = await this.myfatoorahRequest(
@@ -243,6 +249,16 @@ export class MyFatoorahGateway extends BaseGateway {
             if (invoiceStatus === "paid" && this.replayInvoiceMatchesRequest(data, p)) {
               return this.mapGetPaymentResult(data, raw);
             }
+            // Any other invoice for this CustomerReference (Pending, Paid with a
+            // different amount, refunded, …) must not create a second chargeable
+            // invoice. GetPaymentStatus has no PaymentURL for unpaid invoices.
+            throw new NetworkError(
+              invoiceStatus === "pending"
+                ? "MyFatoorah createPayment found a pending invoice for this CustomerReference; refusing to create a second invoice"
+                : "MyFatoorah createPayment found an existing invoice for this CustomerReference that does not match the request; refusing to create a second invoice",
+              { invoiceId: existingInvoiceId, invoiceStatus: invoiceStatusRaw },
+              { afterProviderSubmit: true },
+            );
           }
         } catch (error) {
           if (p.signal?.aborted) throw error;
@@ -250,7 +266,11 @@ export class MyFatoorahGateway extends BaseGateway {
             error instanceof PaymentAbortedError ||
             (error instanceof NetworkError && error.message.includes("aborted by caller"));
           if (isAbort) throw error;
-          if (!(error instanceof ResourceNotFoundError || error instanceof InvalidRequestError)) {
+          if (this.isCreateReplayNotFound(error)) {
+            // True not-found — safe to create the first invoice.
+          } else if (error instanceof NetworkError && error.afterProviderSubmit === true) {
+            throw error;
+          } else {
             throw new NetworkError(
               "MyFatoorah createPayment replay lookup failed; refusing to create a second invoice",
               error,
@@ -708,6 +728,11 @@ export class MyFatoorahGateway extends BaseGateway {
     });
   }
 
+  /** Only a 404 means "no invoice yet" — other 4xx must not create. */
+  private isCreateReplayNotFound(error: unknown): boolean {
+    return error instanceof ResourceNotFoundError;
+  }
+
   /** Reuse only when the existing invoice amount is in the request currency and equals it. */
   private replayInvoiceMatchesRequest(
     data: Record<string, unknown>,
@@ -923,10 +948,13 @@ export class MyFatoorahGateway extends BaseGateway {
 
     // A pending invoice stays pending even when the latest transaction
     // failed — the customer can retry the same invoice.
+    // Official: invoice is Paid only when a SUCCESS/SUCCSS transaction exists.
+    // InvoiceStatus=Paid without that evidence is not fulfillable.
     const status =
-      invoiceStatus === "pending"
+      invoiceStatus === "pending" ||
+      (invoiceStatus === "paid" && successTransaction === undefined)
         ? "pending"
-        : invoiceStatus === "paid" && successTransaction !== undefined
+        : invoiceStatus === "paid"
           ? "paid"
           : invoiceStatus;
 

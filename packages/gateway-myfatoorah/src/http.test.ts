@@ -11,6 +11,7 @@ import {
   assertMyFatoorahSuccessEnvelope,
   mapMyFatoorahHttpFailure,
   myFatoorahIsSuccess,
+  readMyFatoorahData,
 } from "./http";
 
 function envelope(overrides: Record<string, unknown> = {}) {
@@ -24,6 +25,13 @@ function envelope(overrides: Record<string, unknown> = {}) {
 }
 
 describe("myfatoorah HTTP mapping", () => {
+  it("wraps array Data as RefundStatusResult so refund history is not dropped", () => {
+    expect(readMyFatoorahData({ Data: [{ RefundId: 1 }] })).toEqual({
+      RefundStatusResult: [{ RefundId: 1 }],
+    });
+    expect(readMyFatoorahData({ Data: null })).toBeUndefined();
+  });
+
   it("treats IsSuccess true as success (boolean and string forms)", () => {
     expect(myFatoorahIsSuccess({ IsSuccess: true })).toBe(true);
     expect(myFatoorahIsSuccess({ IsSuccess: "true" })).toBe(true);

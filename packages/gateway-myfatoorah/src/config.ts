@@ -119,19 +119,52 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
   if (parsed.username.length > 0 || parsed.password.length > 0) {
     throw new InvalidRequestError(`${field} must not contain credentials`);
   }
-  const host = parsed.hostname.toLowerCase();
-  if (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host.endsWith(".localhost") ||
-    host === "0.0.0.0" ||
-    host.startsWith("10.") ||
-    host.startsWith("192.168.") ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
-  ) {
+  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isMyFatoorahNonPublicHost(host)) {
     throw new InvalidRequestError(`${field} must not be localhost (MyFatoorah rejects non-public hosts)`);
   }
+}
+
+function parseIpv4Literal(host: string): [number, number, number, number] | undefined {
+  const parts = host.split(".");
+  if (parts.length !== 4) return undefined;
+  const octets: number[] = [];
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return undefined;
+    const n = Number(part);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return undefined;
+    octets.push(n);
+  }
+  return [octets[0]!, octets[1]!, octets[2]!, octets[3]!];
+}
+
+function isNonPublicIpv4(octets: [number, number, number, number]): boolean {
+  const [a, b] = octets;
+  if (a === 10) return true;
+  if (a === 127) return true;
+  if (a === 0) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  return false;
+}
+
+function isMyFatoorahNonPublicHost(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const ipv4 = parseIpv4Literal(host);
+  if (ipv4 !== undefined) return isNonPublicIpv4(ipv4);
+  if (!host.includes(":")) return false;
+  if (host === "::1" || host === "0:0:0:0:0:0:0:1") return true;
+  if (host.startsWith("::ffff:")) {
+    const mapped = parseIpv4Literal(host.slice("::ffff:".length));
+    return mapped !== undefined && isNonPublicIpv4(mapped);
+  }
+  const firstHextet = host.split(":")[0] ?? "";
+  if (!/^[0-9a-f]{1,4}$/.test(firstHextet)) return false;
+  const first = Number.parseInt(firstHextet, 16);
+  if ((first & 0xfe00) === 0xfc00) return true;
+  if ((first & 0xffc0) === 0xfe80) return true;
+  return false;
 }
 
 export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig {

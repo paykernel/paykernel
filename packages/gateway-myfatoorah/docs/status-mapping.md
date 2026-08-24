@@ -35,7 +35,7 @@ Unknown provider values fail closed to `failed`.
 
 ## Create `PaymentCompleted`
 
-`POST /v3/payments` returns `PaymentCompleted: true` when the hosted session completed inline (no redirect). **`PaymentCompleted: true` alone is `paid`/`succeeded` even without nested `TransactionDetails.Invoice.Status=PAID` or `TransactionDetails.Transaction.Status=SUCCESS`** (MF-PAYMENTCOMPLETED-REDIRECT). `PaymentURL` on such a completion is the Result URL, not checkout, and is ignored. When nested statuses are present, `TransactionDetails.Invoice.Status=PAID` **or** `TransactionDetails.Transaction.Status` in `{SUCCESS,Succss}` also maps to `paid` (with `PaymentCompleted: true`); otherwise the response is `pending`/`requires_action` or `indeterminate`.
+`POST /v3/payments` returns `PaymentCompleted: true` when the hosted session completed inline (no redirect). **`PaymentCompleted: true` alone is `paid`/`succeeded` even without nested `TransactionDetails.Invoice.Status=PAID` or `TransactionDetails.Transaction.Status=SUCCESS`** (MF-PAYMENTCOMPLETED-REDIRECT). `PaymentURL` on such a completion is the Result URL, not checkout, and is ignored. Nested PAID/SUCCESS without `PaymentCompleted: true` stays hosted/`pending` (or `indeterminate` if `PaymentURL` is also missing).
 
 ## Webhook payment status
 
@@ -43,4 +43,4 @@ Unknown provider values fail closed to `failed`.
 
 ## `getPayment` invoice
 
-`getPayment` (`POST /v2/GetPaymentStatus`) maps `InvoiceStatus=PENDING` → `pending` **regardless of the last transaction's `TransactionStatus`** (`FAILED`/`AUTHORIZE`/`INPROGRESS` all stay `pending` because the invoice is retryable). Only `PAID` + a `SUCCESS`/`SUCCSS` transaction (last success, not first) becomes `paid`.
+`getPayment` (`POST /v2/GetPaymentStatus`) maps `InvoiceStatus=PENDING` → `pending` **regardless of the last transaction's `TransactionStatus`** (`FAILED`/`AUTHORIZE`/`INPROGRESS` all stay `pending` because the invoice is retryable). Only `PAID` + a `SUCCESS`/`SUCCSS` transaction (last success, not first) becomes `paid`. `PAID` without a success transaction stays `pending` (official: Paid requires a `Succss` transaction). `REFUNDED` / `PARTIALLY_REFUNDED` stay those statuses with `outcome: succeeded` (settled, not fulfillable — `isPaidOutcome` is false).

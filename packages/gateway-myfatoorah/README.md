@@ -37,6 +37,7 @@ const result = await payments.createPayment({
   currency: "SAR",
   callbackUrl: "https://merchant.example/return",
   idempotencyKey: crypto.randomUUID(), // required
+  orderId: "ord_01", // required outside KWT/SAU (CustomerReference replay)
   // myfatoorahCustomer: { name: "Ada", email: "ada@example.com" }, // optional
 });
 

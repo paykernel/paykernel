@@ -50,6 +50,31 @@ describe("myfatoorahGateway", () => {
     ).not.toThrow();
   });
 
+  it("accepts a public hostname that starts with 10.", () => {
+    expect(() =>
+      myfatoorahGateway({
+        apiToken: MYFATOORAH_TEST_API_TOKEN,
+        country: "KWT",
+        webhookUrl: "https://10.example.com/webhook",
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    "https://10.0.0.1/webhook",
+    "https://192.168.1.1/webhook",
+    "https://169.254.1.1/webhook",
+    "https://[fd12:3456:789a::1]/webhook",
+  ] as const)("rejects non-public webhook host %s", (webhookUrl) => {
+    expect(() =>
+      myfatoorahGateway({
+        apiToken: MYFATOORAH_TEST_API_TOKEN,
+        country: "KWT",
+        webhookUrl,
+      }),
+    ).toThrow(InvalidRequestError);
+  });
+
   it("trims apiToken and webhookSecret", () => {
     const copied = copyMyFatoorahConfig({
       apiToken: `  ${MYFATOORAH_TEST_API_TOKEN}  `,
