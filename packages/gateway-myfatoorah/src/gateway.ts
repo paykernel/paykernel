@@ -196,7 +196,10 @@ export class MyFatoorahGateway extends BaseGateway {
       }
       assertMyFatoorahHttpsUrl(p.callbackUrl, "callbackUrl");
       // MF-CREATE-REPLAY: before POST /v3/payments, if Customer.Reference will be set,
-      // attempt GetPaymentStatus with KeyType CustomerReference to reuse existing invoice.
+      // attempt GetPaymentStatus with KeyType CustomerReference to reuse an existing
+      // Paid invoice and avoid double-charge outside KWT/SAU where Idempotency-Key
+      // is not sent. Pending would lose PaymentURL via GetPaymentStatus, so only
+      // Paid is reused — pending falls through to create.
       const replayReference = this.customerReferenceForReplay(p);
       if (replayReference !== undefined) {
         try {
@@ -208,13 +211,16 @@ export class MyFatoorahGateway extends BaseGateway {
           );
           const existingInvoiceId = stringOrNumberId(data.InvoiceId);
           if (existingInvoiceId !== undefined) {
-            return this.mapGetPaymentResult(data, raw);
+            const invoiceStatusRaw =
+              typeof data.InvoiceStatus === "string" ? data.InvoiceStatus : "";
+            const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
+            if (invoiceStatus === "paid") {
+              return this.mapGetPaymentResult(data, raw);
+            }
           }
         } catch (error) {
-          // Preflight is a safety net: any inquiry failure (404, IsSuccess:false,
-          // network/5xx after retries, malformed shape) falls through to the real
-          // create below, which carries its own error handling. Only caller aborts
-          // propagate — retrying create on an aborted signal is pointless.
+          // Preflight is best-effort: 404 / IsSuccess:false / network / malformed
+          // all fall through to the real create below. Only caller aborts propagate.
           if (p.signal?.aborted) throw error;
           const isAbort =
             error instanceof NetworkError && error.message.includes("aborted by caller");
@@ -712,21 +718,16 @@ export class MyFatoorahGateway extends BaseGateway {
     const paymentCompleted = data.PaymentCompleted === true;
     const paymentUrl = typeof data.PaymentURL === "string" ? data.PaymentURL.trim() : "";
 
-    // Official V3 paid body nests statuses under TransactionDetails.Invoice/Transaction.
-    // Legacy shape used top-level InvoiceStatus and TransactionDetails.Status directly.
+    // Official V3 paid body nests Invoice status under TransactionDetails.Invoice.Status
+    // (legacy: top-level InvoiceStatus). PaymentCompleted is authoritative per V3 for
+    // non-3DS paid completions; nested statuses are only for providerNativeStatus.
     const transactionDetails = asRecord(data.TransactionDetails);
     const legacyInvoiceStatusRaw =
       typeof data.InvoiceStatus === "string" ? data.InvoiceStatus.trim() : "";
     const nestedInvoice = asRecord(transactionDetails.Invoice);
-    const nestedTransaction = asRecord(transactionDetails.Transaction);
     const invoiceStatusRaw =
       (typeof nestedInvoice.Status === "string" ? nestedInvoice.Status.trim() : "") ||
       legacyInvoiceStatusRaw;
-    const transactionStatusRaw =
-      (typeof nestedTransaction.Status === "string" ? nestedTransaction.Status.trim() : "") ||
-      (typeof transactionDetails.Status === "string" ? transactionDetails.Status.trim() : "");
-    const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
-    const transactionEvidence = mapMyFatoorahTransactionEvidence(transactionStatusRaw);
 
     // MF-PAYMENTCOMPLETED-REDIRECT: PaymentCompleted true is definitive paid evidence
     // even when nested statuses are missing; PaymentURL then is Result URL, not checkout.
@@ -1083,7 +1084,7 @@ export class MyFatoorahGateway extends BaseGateway {
       if (!hasMyFatoorahIdempotencyValidationError(error)) throw error;
       const retryWithoutHeader = {
         signal: requestOptions.signal,
-        retry: requestOptions.retry,
+        retry: false as const,
         postSubmit: requestOptions.postSubmit,
         currency: requestOptions.currency,
         isRetryable: requestOptions.isRetryable,

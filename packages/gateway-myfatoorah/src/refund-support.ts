@@ -150,13 +150,13 @@ export function myFatoorahRefundBaseCurrency(refundData: unknown): string | unde
     for (const item of items) {
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
         const rec = item as Record<string, unknown>;
-        const base = rec.BaseCurrency ?? rec.Currency ?? rec.RefundCurrency;
+        const base = rec.BaseCurrency;
         if (typeof base === "string" && base.trim().length > 0) return base.trim().toUpperCase();
-        // Amount object may carry currency
+        // Amount object may carry base currency on some shapes
         const amt = rec.Amount;
         if (amt !== null && typeof amt === "object" && !Array.isArray(amt)) {
           const amtRec = amt as Record<string, unknown>;
-          const c = amtRec.Currency ?? amtRec.BaseCurrency;
+          const c = amtRec.BaseCurrency;
           if (typeof c === "string" && c.trim().length > 0) return c.trim().toUpperCase();
         }
       }
@@ -164,7 +164,7 @@ export function myFatoorahRefundBaseCurrency(refundData: unknown): string | unde
   }
   if (refundData !== null && typeof refundData === "object" && !Array.isArray(refundData)) {
     const rec = refundData as Record<string, unknown>;
-    const invCur = rec.InvoiceCurrency ?? rec.BaseCurrency ?? rec.Currency;
+    const invCur = rec.InvoiceCurrency ?? rec.BaseCurrency;
     if (typeof invCur === "string" && invCur.trim().length > 0) return invCur.trim().toUpperCase();
   }
   return undefined;
