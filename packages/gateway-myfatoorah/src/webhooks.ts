@@ -12,15 +12,19 @@ import {
  */
 export function extractMyFatoorahSignatureHeader(
   signature?: string,
-  headers?: Record<string, string>,
+  headers?: Record<string, string | string[]>,
 ): string | undefined {
   if (typeof signature === "string" && signature.trim().length > 0) {
     return signature.trim();
   }
   if (headers === undefined) return undefined;
-  for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === "myfatoorah-signature" && value.trim().length > 0) {
-      return value.trim();
+  for (const [key, raw] of Object.entries(headers)) {
+    if (key.toLowerCase() !== "myfatoorah-signature") continue;
+    if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+    if (Array.isArray(raw)) {
+      for (const v of raw) {
+        if (typeof v === "string" && v.trim().length > 0) return v.trim();
+      }
     }
   }
   return undefined;

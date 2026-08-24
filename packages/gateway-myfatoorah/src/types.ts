@@ -3,18 +3,15 @@ import type { CreatePaymentParams, GetPaymentParams, RefundParams } from "@payke
 /**
  * Payment methods accepted on V3 create. `INVOICE` renders the hosted
  * all-methods page; specific methods narrow the page. Never cardholder data.
+ * V3 official PaymentMethod enum is CARD | APPLE_PAY | GOOGLE_PAY | KNET (INVOICE example).
+ * Legacy regional methods (BENEFIT, MADA, STC_PAY, QPAY, OMANNET) are DisplayPaymentMethods tokens, not PaymentMethod.
  */
 export type MyFatoorahPaymentMethod =
   | "INVOICE"
   | "CARD"
   | "APPLE_PAY"
   | "GOOGLE_PAY"
-  | "KNET"
-  | "BENEFIT"
-  | "STC_PAY"
-  | "MADA"
-  | "QPAY"
-  | "OMANNET";
+  | "KNET";
 
 /** Optional customer block for V3 create (all fields optional). */
 export type MyFatoorahCustomerInput = {

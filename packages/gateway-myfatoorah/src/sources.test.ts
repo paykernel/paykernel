@@ -8,16 +8,14 @@ import {
 
 describe("myfatoorah sources / PCI fence", () => {
   it("accepts documented uppercase PaymentMethod values", () => {
-    for (const method of [
-      "INVOICE",
-      "CARD",
-      "APPLE_PAY",
-      "GOOGLE_PAY",
-      "KNET",
-      "BENEFIT",
-      "STC_PAY",
-    ]) {
+    for (const method of ["INVOICE", "CARD", "APPLE_PAY", "GOOGLE_PAY", "KNET"]) {
       expect(() => assertMyFatoorahPaymentMethod(method)).not.toThrow();
+    }
+  });
+
+  it("rejects legacy regional methods as PaymentMethod (use DisplayPaymentMethods)", () => {
+    for (const method of ["BENEFIT", "STC_PAY", "MADA", "QPAY", "OMANNET"]) {
+      expect(() => assertMyFatoorahPaymentMethod(method)).toThrow(InvalidRequestError);
     }
   });
 

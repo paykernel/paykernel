@@ -7,11 +7,6 @@ const MYFATOORAH_PAYMENT_METHODS: Record<string, true> = {
   APPLE_PAY: true,
   GOOGLE_PAY: true,
   KNET: true,
-  BENEFIT: true,
-  STC_PAY: true,
-  MADA: true,
-  QPAY: true,
-  OMANNET: true,
 };
 
 /** PaymentMethod must be an uppercase documented method token (never a PAN). */

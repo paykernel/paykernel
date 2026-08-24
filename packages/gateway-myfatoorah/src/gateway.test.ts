@@ -322,6 +322,29 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
   });
 
+  it("does not auto-retry the headerless create POST after submit (MF-CRIT-2)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "",
+            ValidationErrors: [{ Name: "Idempotency-Key", Error: "Header not supported" }],
+          },
+          200,
+        ),
+        new TypeError("connect ECONNREFUSED"),
+        new TypeError("connect ECONNREFUSED"), // must never be consumed
+      ],
+      calls,
+      { country: "KWT" },
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("indeterminate");
+    expect(calls.length).toBe(2);
+  });
+
   it("does not send Idempotency-Key outside KWT/SAU", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -433,6 +456,25 @@ describe("MyFatoorahGateway.getPayment", () => {
     const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
     expect(result.status).toBe("paid");
     expect(result.currency).toBe("KWD");
+  });
+
+  it("publishes the pay currency amount when base differs (KWD base, SAR pay)", async () => {
+    const data = paidInvoiceStatusData({
+      InvoiceValue: 64.772,
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "0707",
+          Currency: "KWD",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "800",
+        },
+      ],
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    expect(result.amount).toBe(800);
+    expect(result.currency).toBe("SAR");
   });
 
   it("maps canceled invoices to cancelled / failed outcome", async () => {
@@ -720,6 +762,66 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect((caught as NetworkError).afterProviderSubmit).toBe(false);
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
+
+
+  it("fails closed on a first refund whose currency is not the account base (MF-CRIT-1)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+      ],
+      calls,
+    );
+    await expect(
+      gateway.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "refund-idem-3",
+        amount: money("50", "SAR"),
+        currency: "SAR",
+      }),
+    ).rejects.toThrow(/base currency/);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
+  it("treats a GetRefundStatus 2xx without Data as empty history (MF-CRIT-3)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: true, Message: "", ValidationErrors: null, Data: null }),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-idem-3",
+      currency: "KWD",
+    });
+    expect(result.status).toBe("pending");
+    expect(calls.map((c) => c.url)).toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
+  it("infers the account base currency on a first refund without explicit currency", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-idem-3",
+    });
+    expect(result.status).toBe("pending");
+    const makeRefundBody = bodyOf(calls[2]);
+    expect(makeRefundBody.Amount).toBe(10.5); // InvoiceValue in inferred KWD
+  });
+
 });
 
 describe("MyFatoorahGateway.capturePayment / webhooks", () => {
@@ -760,5 +862,27 @@ describe("MyFatoorahGateway.capturePayment / webhooks", () => {
     expect(event.amount).toBe(30);
     expect(event.currency).toBe("KWD");
     expect(event.type).toBe("refund.REFUNDED");
+  });
+  it("does not map refund paymentId from Refund.ExternalIdentifier (MF-HIGH-5)", () => {
+    const gateway = createGateway([], []);
+    const payload = refundWebhook();
+    payload.Data.Refund = { Id: 111147, Status: "REFUNDED", ExternalIdentifier: "refund-idem-1" };
+    payload.Data.ReferencedInvoice = { Id: 5620277 };
+    const event = gateway.parseWebhookEvent(payload);
+    expect(event.paymentId).toBeUndefined();
+    expect(event.gatewayObjectId).toBe("111147");
+  });
+  it("normalizes the KD webhook currency alias to KWD (MF-MED-2)", () => {
+    const gateway = createGateway([], []);
+    const payload = paymentWebhook();
+    payload.Data.Amount = {
+      BaseCurrency: "KD",
+      ValueInBaseCurrency: 100,
+      DisplayCurrency: "KD",
+      ValueInDisplayCurrency: 100,
+    };
+    const event = gateway.parseWebhookEvent(payload);
+    expect(event.amount).toBe(100);
+    expect(event.currency).toBe("KWD");
   });
 });

@@ -34,6 +34,18 @@ export const MYFATOORAH_LIVE_API_BASE_URL: Record<MyFatoorahCountry, string> = {
   EGY: "https://api-eg.myfatoorah.com",
 };
 
+/** Base currency for each portal country (ISO Lookups). */
+export const MYFATOORAH_COUNTRY_CURRENCY: Record<MyFatoorahCountry, string> = {
+  KWT: "KWD",
+  BHR: "BHD",
+  JOR: "JOD",
+  OMN: "OMR",
+  ARE: "AED",
+  SAU: "SAR",
+  QAT: "QAR",
+  EGY: "EGP",
+};
+
 /**
  * Closed-over MyFatoorah adapter configuration. Secrets never go on the
  * manifest or {@link import("@paykernel/core").GatewayContext}.
@@ -103,6 +115,15 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
   }
   if (parsed.hostname.length === 0 || parsed.host === "") {
     throw new InvalidRequestError(`${field} must be an HTTPS URL`);
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host === "127.0.0.1" ||
+    host === "::1" ||
+    host.endsWith(".localhost")
+  ) {
+    throw new InvalidRequestError(`${field} must not be localhost (MyFatoorah rejects non-public hosts)`);
   }
 }
 
