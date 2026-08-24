@@ -39,10 +39,16 @@ export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
       `Unsupported MyFatoorah webhook event ${String(event.Name)} (PAYMENT_STATUS_CHANGED or REFUND_STATUS_CHANGED)`,
     );
   }
-  // Fallback to Code only when Name is empty
-  const code = event.Code;
-  if (code === 1) return "payment";
-  if (code === 2) return "refund";
+  // Fallback to Code only when Name is empty — accept number or string "1"/"2"
+  const codeRaw = event.Code;
+  const codeNum =
+    typeof codeRaw === "number"
+      ? codeRaw
+      : typeof codeRaw === "string" && codeRaw.trim().length > 0
+        ? Number(codeRaw.trim())
+        : undefined;
+  if (codeNum === 1) return "payment";
+  if (codeNum === 2) return "refund";
   throw new InvalidRequestError(
     `Unsupported MyFatoorah webhook event ${String(event.Name)} (PAYMENT_STATUS_CHANGED or REFUND_STATUS_CHANGED)`,
   );
