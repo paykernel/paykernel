@@ -791,7 +791,6 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 
-
   it("fails closed on a first refund whose currency is not the account base (MF-CRIT-1)", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -849,7 +848,6 @@ describe("MyFatoorahGateway.refundPayment", () => {
     const makeRefundBody = bodyOf(calls[2]);
     expect(makeRefundBody.Amount).toBe(10.5); // InvoiceValue in inferred KWD
   });
-
 });
 
 describe("MyFatoorahGateway.capturePayment / webhooks", () => {
@@ -968,9 +966,9 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls[1]?.url).toBe("https://apitest.myfatoorah.com/v3/payments");
   });
 
-  it("MF-SANDBOX-BASE: sandbox always KWD (ARE sandbox infers KWD, not AED)", async () => {
+  it("MF-SANDBOX-BASE: ARE sandbox first refund without currency infers KWD and posts MakeRefund", async () => {
     const calls: FetchCall[] = [];
-    const gatewaySandbox = createGateway(
+    const gateway = createGateway(
       [
         jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
         jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
@@ -979,12 +977,16 @@ describe("MyFatoorahGateway MF fixes", () => {
       calls,
       { country: "ARE" },
     );
-    const result = await gatewaySandbox.refundPayment({
+    const result = await gateway.refundPayment({
       gatewayPaymentId: "915102",
       idempotencyKey: "sandbox-base-1",
     });
     expect(result.status).toBe("pending");
-    const gatewaySandbox2 = createGateway(
+    expect(bodyOf(calls[2]).Amount).toBe(10.5); // InvoiceValue parsed as KWD, not AED
+  });
+
+  it("MF-SANDBOX-BASE: ARE sandbox rejects an AED refund amount (base is KWD)", async () => {
+    const gateway = createGateway(
       [
         jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
         jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
@@ -993,14 +995,17 @@ describe("MyFatoorahGateway MF fixes", () => {
       { country: "ARE" },
     );
     await expect(
-      gatewaySandbox2.refundPayment({
+      gateway.refundPayment({
         gatewayPaymentId: "915102",
         idempotencyKey: "sandbox-base-2",
         amount: money("1.00", "AED"),
         currency: "AED",
       }),
     ).rejects.toThrow(/base currency.*KWD/);
-    const gatewayLive = createGateway(
+  });
+
+  it("MF-SANDBOX-BASE: ARE live rejects a KWD refund amount (base is AED)", async () => {
+    const gateway = createGateway(
       [
         jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
         jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData({ InvoiceValue: 100 }))),
@@ -1009,7 +1014,7 @@ describe("MyFatoorahGateway MF fixes", () => {
       { country: "ARE", live: true },
     );
     await expect(
-      gatewayLive.refundPayment({
+      gateway.refundPayment({
         gatewayPaymentId: "915102",
         idempotencyKey: "live-base-1",
         amount: money("1.00", "KWD"),
@@ -1071,7 +1076,8 @@ describe("MyFatoorahGateway MF fixes", () => {
     const paid = {
       InvoiceId: 915102,
       PaymentCompleted: true,
-      PaymentURL: "https://sandbox.pg.apitest.myfatoorah.com/payment/result?invoice=915102&result=paid",
+      PaymentURL:
+        "https://sandbox.pg.apitest.myfatoorah.com/payment/result?invoice=915102&result=paid",
       CustomerReference: "payref1",
       UserDefinedField: "order_01",
       PaymentId: "07076409988323998875",
@@ -1144,4 +1150,3 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetRefundStatus");
   });
 });
-

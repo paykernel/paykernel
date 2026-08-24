@@ -8,11 +8,7 @@ import {
   myFatoorahWebhookKind,
   verifyMyFatoorahSignature,
 } from "./webhooks";
-import {
-  MYFATOORAH_TEST_WEBHOOK_SECRET,
-  paymentWebhook,
-  refundWebhook,
-} from "./fixtures/webhooks";
+import { MYFATOORAH_TEST_WEBHOOK_SECRET, paymentWebhook, refundWebhook } from "./fixtures/webhooks";
 import { MyFatoorahGateway } from "./gateway";
 import { HooksManager } from "@paykernel/core";
 import { MYFATOORAH_TEST_API_TOKEN } from "./fixtures/webhooks";
@@ -172,38 +168,35 @@ describe("myfatoorah webhook signatures", () => {
 });
 
 describe("myfatoorah customer reference", () => {
-  it("prefers explicit myfatoorahCustomer.reference, then orderId, never customerId", () => {
+  it("prefers explicit myfatoorahCustomer.reference over orderId", () => {
     expect(
       resolveMyFatoorahCustomerReference({
         orderId: "ord_123",
         myfatoorahCustomerReference: "explicit_ref",
-        customerId: "cust_999",
       }),
     ).toBe("explicit_ref");
     expect(
-      resolveMyFatoorahCustomerReference({ orderId: "ord_123", customerId: "cust_999" }),
-    ).toBe("ord_123");
-    expect(resolveMyFatoorahCustomerReference({ customerId: "cust_999" })).toBeUndefined();
-    expect(
-      resolveMyFatoorahCustomerReference({ orderId: "  ", customerId: "cust_999" }),
-    ).toBeUndefined();
+      resolveMyFatoorahCustomerReference({
+        orderId: "  ord_123  ",
+        myfatoorahCustomerReference: "explicit_ref",
+      }),
+    ).toBe("explicit_ref");
+  });
+
+  it("falls back to trimmed orderId", () => {
+    expect(resolveMyFatoorahCustomerReference({ orderId: "ord_123" })).toBe("ord_123");
+    expect(resolveMyFatoorahCustomerReference({ orderId: "  ord_trim  " })).toBe("ord_trim");
+  });
+
+  it("returns undefined for missing or blank inputs", () => {
+    expect(resolveMyFatoorahCustomerReference({})).toBeUndefined();
+    expect(resolveMyFatoorahCustomerReference({ orderId: "  " })).toBeUndefined();
     expect(
       resolveMyFatoorahCustomerReference({
         orderId: "ord_123",
         myfatoorahCustomerReference: "  ",
-        customerId: "cust_999",
       }),
     ).toBe("ord_123");
-    expect(
-      resolveMyFatoorahCustomerReference({
-        orderId: "  ord_123  ",
-        myfatoorahCustomerReference: "  explicit  ",
-      }),
-    ).toBe("explicit");
-    expect(resolveMyFatoorahCustomerReference({ orderId: "  ord_trim  " })).toBe("ord_trim");
-  });
-
-  it("trims and ignores empty strings", () => {
     expect(
       resolveMyFatoorahCustomerReference({ myfatoorahCustomerReference: "", orderId: "" }),
     ).toBeUndefined();

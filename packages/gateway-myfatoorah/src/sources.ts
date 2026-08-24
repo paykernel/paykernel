@@ -93,20 +93,15 @@ export function assertNoPciCardSource(params: Record<string, unknown>): void {
  *
  * Priority: 1) explicit `myfatoorahCustomer.reference` (trimmed non-empty)
  *           2) `orderId` (trimmed non-empty)
- *           → `undefined` when neither is provided (no fallback to customerId).
- *
- * This helper is owned by Stream B; Stream A should call it from
- * `gateway.ts#serializeCustomer` / `buildCreateBody` and remove the legacy
- * `customerId → Reference` branch. Keeping the branch here documented as
- * intentionally absent prevents regressions.
+ *           → `undefined` when neither is provided. Callers must not pass
+ *           `customerId` here: core's opaque customer id is not a MyFatoorah
+ *           per-order CustomerIdentifier.
  *
  * @see gateway.ts#buildCreateBody for the Order.ExternalIdentifier + Customer.Reference wiring.
  */
 export function resolveMyFatoorahCustomerReference(input: {
   orderId?: string | undefined;
   myfatoorahCustomerReference?: string | undefined;
-  /** Accepted but intentionally ignored — never becomes Reference. Documented to prevent regression. */
-  customerId?: string | undefined;
 }): string | undefined {
   const explicit = input.myfatoorahCustomerReference;
   if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
@@ -114,4 +109,3 @@ export function resolveMyFatoorahCustomerReference(input: {
   if (typeof order === "string" && order.trim().length > 0) return order.trim();
   return undefined;
 }
-

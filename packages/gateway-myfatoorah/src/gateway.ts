@@ -5,13 +5,10 @@ import {
   buildProviderReferences,
   combineAbortSignals,
   createTimeoutSignal,
-  GatewayApiError,
   InvalidRequestError,
   mapHttpAbortError,
   NetworkError,
   OperationNotSupportedError,
-  RateLimitError,
-  ResourceNotFoundError,
   toMinorUnits,
   withRetry,
   type CaptureParams,
@@ -89,10 +86,7 @@ function validationErrorArrayMentionsIdempotency(arr: unknown): boolean {
     const rec = asRecord(ve);
     const name = typeof rec.Name === "string" ? rec.Name : "";
     const err = typeof rec.Error === "string" ? rec.Error : "";
-    if (
-      name.toLowerCase().includes("idempotency") ||
-      err.toLowerCase().includes("idempotency")
-    ) {
+    if (name.toLowerCase().includes("idempotency") || err.toLowerCase().includes("idempotency")) {
       return true;
     }
   }
@@ -217,22 +211,14 @@ export class MyFatoorahGateway extends BaseGateway {
             return this.mapGetPaymentResult(data, raw);
           }
         } catch (error) {
-          // 404 / IsSuccess false / missing Data -> no existing invoice, continue to create.
-          // Swallow inquiry failures and proceed to create; only propagate caller abort.
+          // Preflight is a safety net: any inquiry failure (404, IsSuccess:false,
+          // network/5xx after retries, malformed shape) falls through to the real
+          // create below, which carries its own error handling. Only caller aborts
+          // propagate — retrying create on an aborted signal is pointless.
           if (p.signal?.aborted) throw error;
-          const isAbort = error instanceof NetworkError && error.message.includes("aborted by caller");
+          const isAbort =
+            error instanceof NetworkError && error.message.includes("aborted by caller");
           if (isAbort) throw error;
-          if (error instanceof ResourceNotFoundError || error instanceof InvalidRequestError) {
-            // continue to create
-          } else if (
-            error instanceof NetworkError ||
-            error instanceof GatewayApiError ||
-            error instanceof RateLimitError
-          ) {
-            // Network/5xx after retries — still try to create rather than fail the whole operation
-          } else {
-            // Unknown shape -> also continue to create (fail open for replay, fail closed for create)
-          }
         }
       }
       const body = this.buildCreateBody(p);
@@ -409,7 +395,11 @@ export class MyFatoorahGateway extends BaseGateway {
     });
   }
 
-  verifyWebhook(payload: unknown, signature?: string, headers?: Record<string, string | string[]>): boolean {
+  verifyWebhook(
+    payload: unknown,
+    signature?: string,
+    headers?: Record<string, string | string[]>,
+  ): boolean {
     const provided = extractMyFatoorahSignatureHeader(signature, headers);
     return verifyMyFatoorahSignature(payload, this.myfatoorahConfig.webhookSecret, provided);
   }
@@ -672,13 +662,10 @@ export class MyFatoorahGateway extends BaseGateway {
     return undefined;
   }
 
-  private customerReferenceForReplay(
-    params: MyFatoorahCreatePaymentParams,
-  ): string | undefined {
+  private customerReferenceForReplay(params: MyFatoorahCreatePaymentParams): string | undefined {
     return resolveMyFatoorahCustomerReference({
       orderId: params.orderId,
       myfatoorahCustomerReference: params.myfatoorahCustomer?.reference,
-      customerId: typeof params.customerId === "string" ? params.customerId : undefined,
     });
   }
 
@@ -980,14 +967,6 @@ export class MyFatoorahGateway extends BaseGateway {
   ): string | undefined {
     if (transaction === undefined) return undefined;
     return stringOrNumberId(transaction.PaymentId);
-  }
-
-  private transactionCurrency(transaction: Record<string, unknown>): string | undefined {
-    for (const key of ["Currency", "PaidCurrency"]) {
-      const value = normalizeMyFatoorahCurrency(transaction[key]);
-      if (value !== undefined) return value;
-    }
-    return undefined;
   }
 
   private invoiceValue(data: Record<string, unknown>): unknown {

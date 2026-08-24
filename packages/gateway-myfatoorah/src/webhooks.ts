@@ -82,8 +82,6 @@ function myFatoorahDataRecord(payload: unknown): Record<string, unknown> {
   return data as Record<string, unknown>;
 }
 
-
-
 function asRecord(value: unknown): Record<string, unknown> {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -98,7 +96,7 @@ function asRecord(value: unknown): Record<string, unknown> {
  * InvalidRequestError (canonical helpers) — verifyMyFatoorahSignature catches and
  * returns false (fail-closed).
  */
-function coerceWebhookPayload(payload: unknown): unknown {
+export function coerceWebhookPayload(payload: unknown): unknown {
   if (typeof payload === "string") {
     const trimmed = payload.trim();
     if (trimmed.length === 0) return payload;
@@ -170,7 +168,6 @@ export function canonicalMyFatoorahString(payload: unknown): string {
     : canonicalMyFatoorahRefundString(normalized);
 }
 
-
 /** Webhook V2 signature: Base64(HMAC-SHA256(secret, canonicalString)). */
 export function computeMyFatoorahSignature(canonical: string, webhookSecret: string): string {
   return bytesToBase64(hmacSha256(webhookSecret, canonical));
@@ -196,16 +193,11 @@ export function verifyMyFatoorahSignature(
 
   // Accept raw JSON string bodies (e.g. raw HTTP body before JSON middleware).
   // On bad JSON fail closed (false) rather than throwing.
-  let normalizedPayload: unknown = payload;
-  if (typeof payload === "string") {
-    const trimmed = payload.trim();
-    if (trimmed.length > 0) {
-      try {
-        normalizedPayload = JSON.parse(trimmed) as unknown;
-      } catch {
-        return false;
-      }
-    }
+  let normalizedPayload: unknown;
+  try {
+    normalizedPayload = coerceWebhookPayload(payload);
+  } catch {
+    return false;
   }
 
   let canonical: string;

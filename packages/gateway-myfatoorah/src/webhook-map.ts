@@ -13,7 +13,7 @@ import {
   mapMyFatoorahRefundPaymentStatus,
   mapMyFatoorahTransactionEvidence,
 } from "./status";
-import { myFatoorahWebhookKind } from "./webhooks";
+import { coerceWebhookPayload, myFatoorahWebhookKind } from "./webhooks";
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -121,23 +121,6 @@ function webhookMoneyFromAmountRecord(
   );
   if (fallback !== undefined) return fallback;
   return undefined;
-}
-
-/**
- * Coerce raw JSON string bodies for webhook helpers. Mirrors webhooks.ts/coerceWebhookPayload
- * so both layers accept either object or raw string (e.g. raw HTTP body).
- */
-function coerceWebhookPayload(payload: unknown): unknown {
-  if (typeof payload === "string") {
-    const trimmed = payload.trim();
-    if (trimmed.length === 0) return payload;
-    try {
-      return JSON.parse(trimmed) as unknown;
-    } catch {
-      throw new InvalidRequestError("MyFatoorah webhook payload is not valid JSON");
-    }
-  }
-  return payload;
 }
 
 /** Webhook timestamp: `Event.CreationDate` ISO string, fail-closed. */
