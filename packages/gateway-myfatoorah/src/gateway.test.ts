@@ -126,6 +126,7 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(body.Customer).toEqual({
       Name: "Ada Lovelace",
       Email: "ada@example.com",
+      Reference: "ord_01",
     });
   });
 
@@ -272,8 +273,33 @@ describe("MyFatoorahGateway.createPayment", () => {
       gateway.createPayment({ ...createParams, metadata: { orderId: "x" } }),
     ).rejects.toThrow(InvalidRequestError);
   });
-
   it("retries create once without Idempotency-Key on an idempotency validation error", async () => {
+    const calls: FetchCall[] = [];
+    // KWT honors Idempotency-Key, but provider may still return 2xx IsSuccess:false
+    // with ValidationErrors as string body (e.g. FieldsErrors alias). Adapter retries once
+    // without header; second request parses as success.
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "",
+            ValidationErrors: [{ Name: "Idempotency-Key", Error: "Header not supported" }],
+          },
+          200,
+        ),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "KWT" },
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.length).toBe(2);
+    expect(String(calls[0]?.init?.headers?.["Idempotency-Key"] ?? "")).toBe("idem-create-1");
+    expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+  });
+  it("retries create once without Idempotency-Key on a 400 ValidationErrors object body", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [
@@ -288,13 +314,25 @@ describe("MyFatoorahGateway.createPayment", () => {
         jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
       ],
       calls,
-      { country: "ARE" },
+      { country: "KWT" },
     );
     const result = await gateway.createPayment({ ...createParams });
     expect(result.outcome).toBe("requires_action");
     expect(calls.length).toBe(2);
-    expect(String(calls[0]?.init?.headers?.["Idempotency-Key"] ?? "")).toBe("idem-create-1");
     expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+  });
+
+  it("does not send Idempotency-Key outside KWT/SAU", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(myfatoorahEnvelope(initiatedCreateData()))],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
   });
 
   it("picks the currency-matching ValueIn* field on paid create", async () => {
@@ -516,6 +554,41 @@ describe("MyFatoorahGateway.refundPayment", () => {
         currency: "USD",
       }),
     ).rejects.toThrow(InvalidRequestError);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
+  it("replays a partial refund with same idempotencyKey without posting MakeRefund (MF-CRIT-1)", async () => {
+    // Existing partial refund with same ExternalIdentifier should be returned before any MakeRefund,
+    // even though remaining > 0 (idempotent retry after partial).
+    const refundStatus = partialRefundStatusData({
+      Refunds: [
+        {
+          RefundId: 22201,
+          ExternalIdentifier: "refund-idem-2",
+          Comment: null,
+          InvoiceId: 915102,
+          Amount: 2.5,
+          ServiceChargeOnCustomer: 0,
+          RefundStatus: "Pending",
+        },
+      ],
+    });
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(refundStatus)),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-idem-2",
+      amount: money("2.50", "SAR"),
+      currency: "SAR",
+    });
+    expect(result.gatewayRefundId).toBe("22201");
+    expect(result.status).toBe("pending");
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 

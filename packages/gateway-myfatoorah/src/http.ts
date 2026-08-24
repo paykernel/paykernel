@@ -32,7 +32,8 @@ export function myFatoorahValidationErrors(
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
     return undefined;
   }
-  const errors = (body as Record<string, unknown>).ValidationErrors;
+  const rec = body as Record<string, unknown>;
+  const errors = rec.ValidationErrors ?? rec.FieldsErrors;
   if (!Array.isArray(errors) || errors.length === 0) return undefined;
   const out: Array<Record<string, unknown>> = [];
   for (const entry of errors) {

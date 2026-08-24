@@ -70,11 +70,14 @@ import {
 } from "./webhooks";
 const MYFATOORAH_REFUND_COMMENT_MAX = 500;
 const CURRENCY_CODE = /^[A-Za-z]{3}$/;
-/** MyFatoorah V2 alias: official samples use "KD" for Kuwait base currency. */
+/** MyFatoorah V2 aliases: official samples use "KD" for KWD and "SR" for SAR. */
 const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
   KD: "KWD",
   "K.D.": "KWD",
   "K.D": "KWD",
+  SR: "SAR",
+  "S.R.": "SAR",
+  "S.R": "SAR",
 };
 
 function normalizeMyFatoorahCurrency(value: unknown): string | undefined {
@@ -92,6 +95,29 @@ function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
   }
   return isMyFatoorahRetryableError(error);
 }
+function validationErrorArrayMentionsIdempotency(arr: unknown): boolean {
+  if (!Array.isArray(arr)) return false;
+  for (const ve of arr) {
+    const rec = asRecord(ve);
+    const name = typeof rec.Name === "string" ? rec.Name : "";
+    const err = typeof rec.Error === "string" ? rec.Error : "";
+    if (
+      name.toLowerCase().includes("idempotency") ||
+      err.toLowerCase().includes("idempotency")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function validationBodyMentionsIdempotency(body: unknown): boolean {
+  const rec = asRecord(body);
+  // Official field is ValidationErrors; legacy alias FieldsErrors
+  const ve = rec.ValidationErrors ?? rec.FieldsErrors;
+  return validationErrorArrayMentionsIdempotency(ve);
+}
+
 function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
   if (
     !(error instanceof InvalidRequestError) ||
@@ -101,31 +127,22 @@ function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
     return false;
   }
   for (const entry of error.validationErrors) {
-    if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
-      const rec = entry as Record<string, unknown>;
-      const body = rec.body as unknown;
-      if (body !== null && typeof body === "object" && !Array.isArray(body)) {
-        const validationErrors = (body as Record<string, unknown>).ValidationErrors;
-        if (Array.isArray(validationErrors)) {
-          for (const ve of validationErrors) {
-            if (ve !== null && typeof ve === "object" && !Array.isArray(ve)) {
-              const veRec = ve as Record<string, unknown>;
-              const name = typeof veRec.Name === "string" ? veRec.Name : "";
-              const err = typeof veRec.Error === "string" ? veRec.Error : "";
-              if (
-                name.toLowerCase().includes("idempotency") ||
-                err.toLowerCase().includes("idempotency")
-              ) {
-                return true;
-              }
-            }
-          }
-        }
+    // Entries are the http layer's `{ status, body }` raw snapshots.
+    const body = asRecord(entry).body;
+    if (typeof body === "string" && body.trim().length > 0) {
+      // 2xx IsSuccess:false arrives with the raw response text as body.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        parsed = undefined;
       }
-      const name = (rec as Record<string, unknown>).Name;
-      if (typeof name === "string" && name.toLowerCase().includes("idempotency")) {
-        return true;
-      }
+      if (parsed !== undefined && validationBodyMentionsIdempotency(parsed)) return true;
+      // Unparseable string body: a mention of the header is enough to justify
+      // the single headerless retry.
+      if (body.toLowerCase().includes("idempotency")) return true;
+    } else if (validationBodyMentionsIdempotency(body)) {
+      return true;
     }
   }
   return false;
@@ -280,6 +297,14 @@ export class MyFatoorahGateway extends BaseGateway {
       // Pass the whole Data object so myFatoorahRefundItems can handle both shapes.
       const refundsRaw: unknown = refundStatus.data;
 
+      // MF-CRIT-1: ExternalIdentifier is not provider-deduped. Check for an existing
+      // refund with the same idempotencyKey before any MakeRefund, even when
+      // remaining > 0, to avoid double-refunding on partial-replay / crash-retry.
+      const existingRefund = nestedRefundFromInvoice(refundsRaw, idempotencyKey);
+      if (existingRefund !== undefined) {
+        return this.mapNestedRefundObject(existingRefund);
+      }
+
       let remaining: number | undefined;
       if (invoiceAmount !== undefined) {
         remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
@@ -290,8 +315,7 @@ export class MyFatoorahGateway extends BaseGateway {
       }
 
       if (remaining === 0) {
-        const embedded = nestedRefundFromInvoice(refundsRaw, idempotencyKey);
-        if (embedded !== undefined) return this.mapNestedRefundObject(embedded);
+        // No matching ExternalIdentifier and nothing remaining -> already fully refunded.
         throw new InvalidRequestError(
           "MyFatoorah invoice is already fully refunded (nothing remaining)",
         );
@@ -428,7 +452,11 @@ export class MyFatoorahGateway extends BaseGateway {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    if (idempotencyKey !== undefined && postSubmit) {
+    // Idempotency-Key is only honored in KWT/SAU per https://docs.myfatoorah.com/docs/idempotency.
+    // Outside those countries we omit the header entirely to avoid a validation rejection.
+    const idempotencySupported =
+      this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
+    if (idempotencyKey !== undefined && postSubmit && idempotencySupported) {
       headers["Idempotency-Key"] = idempotencyKey;
     }
     const init: RequestInit = { method, headers };
@@ -533,7 +561,23 @@ export class MyFatoorahGateway extends BaseGateway {
       body.PaymentMethod = method;
     }
     const customer = this.serializeCustomer(params);
-    if (customer !== undefined) body.Customer = customer;
+    // Official payment webhook Invoice.ExternalIdentifier is populated from Customer.Reference
+    // (CustomerIdentifier). To make `orderId` reliably appear as webhook `paymentId`,
+    // we send it as Customer.Reference when no explicit customer reference exists.
+    // Keep Order.ExternalIdentifier for back-compat.
+    let customerForBody = customer;
+    const orderRef = params.orderId !== undefined ? params.orderId.trim() : "";
+    if (orderRef.length > 0) {
+      if (customerForBody === undefined) {
+        customerForBody = { Reference: orderRef };
+      } else if (
+        typeof customerForBody.Reference !== "string" ||
+        (customerForBody.Reference as string).trim().length === 0
+      ) {
+        customerForBody = { ...customerForBody, Reference: orderRef };
+      }
+    }
+    if (customerForBody !== undefined) body.Customer = customerForBody;
     if (params.myfatoorahLanguage !== undefined) {
       if (params.myfatoorahLanguage !== "EN" && params.myfatoorahLanguage !== "AR") {
         throw new InvalidRequestError('MyFatoorah myfatoorahLanguage must be "EN" or "AR"');
@@ -784,9 +828,12 @@ export class MyFatoorahGateway extends BaseGateway {
   }
 
   private paymentIdFromData(data: Record<string, unknown>): string | undefined {
+    const td = asRecord(data.TransactionDetails);
     return (
       stringOrNumberId(data.PaymentId) ??
-      stringOrNumberId(asRecord(data.TransactionDetails).PaymentId)
+      stringOrNumberId(td.PaymentId) ??
+      stringOrNumberId(asRecord(td.Transaction).PaymentId) ??
+      stringOrNumberId(asRecord(td.Invoice).PaymentId)
     );
   }
 
@@ -821,13 +868,32 @@ export class MyFatoorahGateway extends BaseGateway {
           ? "paid"
           : invoiceStatus;
 
-    const currency =
-      successTransaction !== undefined ? this.transactionCurrency(successTransaction) : undefined;
-    const invoiceAmount = this.invoiceValue(data);
-    const amount =
-      currency !== undefined && invoiceAmount !== undefined
-        ? this.parseMajor(invoiceAmount, currency)
-        : undefined;
+    // MF-MED-1: InvoiceValue is always base currency. Pair PaidCurrencyValue with
+    // PaidCurrency only when the base Currency is missing or equals the paid
+    // currency; otherwise pair InvoiceValue with the base Currency.
+    let currency: string | undefined;
+    let amount: number | undefined;
+    if (successTransaction !== undefined) {
+      const paidCurrency = normalizeMyFatoorahCurrency(successTransaction.PaidCurrency);
+      const paidValue = successTransaction.PaidCurrencyValue ?? successTransaction.TransationValue;
+      const baseCurrency = normalizeMyFatoorahCurrency(successTransaction.Currency);
+      if (paidCurrency !== undefined && paidValue !== undefined) {
+        if (baseCurrency === undefined || paidCurrency === baseCurrency) {
+          const parsedPaid = this.parseMajor(paidValue, paidCurrency);
+          if (parsedPaid !== undefined) {
+            currency = paidCurrency;
+            amount = parsedPaid;
+          }
+        }
+      }
+      if (currency === undefined) {
+        currency = this.transactionCurrency(successTransaction);
+        const invoiceAmount = this.invoiceValue(data);
+        if (currency !== undefined && invoiceAmount !== undefined) {
+          amount = this.parseMajor(invoiceAmount, currency);
+        }
+      }
+    }
 
     const transactionPaymentId = this.successTransactionPaymentId(successTransaction);
     const references = buildProviderReferences({
@@ -902,14 +968,13 @@ export class MyFatoorahGateway extends BaseGateway {
     }
     return undefined;
   }
-  // ─── Refund helpers ─────────────────────────────────────────────────────
 
   private refundCurrency(
     params: MyFatoorahRefundParams,
     paymentStatus: Record<string, unknown>,
     refundStatus?: Record<string, unknown>,
   ): string {
-    // MakeRefund Amount is account base currency (e.g. KWD), not display currency (e.g. SAR).
+    // MakeRefund Amount is account base currency (e.g. KWD), not display/pay currency (e.g. SAR).
     // Prefer BaseCurrency from GetRefundStatus RefundStatusResult when available.
     if (refundStatus !== undefined) {
       const baseFromRefund = myFatoorahRefundBaseCurrency(refundStatus);
@@ -921,37 +986,32 @@ export class MyFatoorahGateway extends BaseGateway {
           const normReq = normalizeMyFatoorahCurrency(requested) ?? requested.trim().toUpperCase();
           if (normReq !== normalizedBase) {
             throw new InvalidRequestError(
-              `MyFatoorah refund currency "${requested}" does not match account base currency "${normalizedBase}"`,
+              `MyFatoorah refund currency "${requested}" does not match account base currency "${normalizedBase}" (MakeRefund is base-only; see docs/refund.md)`,
             );
           }
         }
         return normalizedBase;
       }
     }
-    const fromInvoice = this.transactionCurrency(this.successTransaction(paymentStatus) ?? {});
+    // No BaseCurrency yet (first refund, empty RefundStatusResult). MakeRefund is still base-only.
+    // Use caller currency as base if provided; otherwise fall back to transaction currency
+    // as best-effort (may be pay currency, not base — caller should pass base explicitly).
     const requested = typeof params.currency === "string" ? params.currency.trim() : "";
-    // fromInvoice is display currency (PaidCurrency/Currency) — not ideal for MakeRefund base currency,
-    // but fallback when refund base currency is unavailable. Validate against caller currency when provided.
-    if (fromInvoice !== undefined) {
-      const normReq = requested.length > 0 ? normalizeMyFatoorahCurrency(requested) : undefined;
-      if (requested.length > 0 && normReq === undefined) {
+    if (requested.length > 0) {
+      const normReq = normalizeMyFatoorahCurrency(requested);
+      if (normReq === undefined) {
         throw new InvalidRequestError(
           `MyFatoorah refund currency "${requested}" is not a 3-letter code`,
         );
       }
-      if (normReq !== undefined && normReq !== fromInvoice) {
-        throw new InvalidRequestError(
-          `MyFatoorah refund currency "${String(requested)}" does not match retrieved currency "${String(fromInvoice)}"`,
-        );
-      }
-      return fromInvoice;
-    }
-    const normReq = normalizeMyFatoorahCurrency(requested);
-    if (normReq !== undefined) {
       return normReq;
     }
+    const fromInvoice = this.transactionCurrency(this.successTransaction(paymentStatus) ?? {});
+    if (fromInvoice !== undefined) {
+      return fromInvoice;
+    }
     throw new InvalidRequestError(
-      "MyFatoorah refund requires currency (pass RefundParams.currency or retrieve it from the invoice)",
+      "MyFatoorah refund requires currency (pass RefundParams.currency — MakeRefund is base currency, e.g. KWD)",
     );
   }
 
