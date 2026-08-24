@@ -119,7 +119,7 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
   if (parsed.username.length > 0 || parsed.password.length > 0) {
     throw new InvalidRequestError(`${field} must not contain credentials`);
   }
-  const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const host = parsed.hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
   if (isMyFatoorahNonPublicHost(host)) {
     throw new InvalidRequestError(`${field} must not be localhost (MyFatoorah rejects non-public hosts)`);
   }

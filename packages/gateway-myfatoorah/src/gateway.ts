@@ -728,9 +728,15 @@ export class MyFatoorahGateway extends BaseGateway {
     });
   }
 
-  /** Only a 404 means "no invoice yet" — other 4xx must not create. */
+  /** Only "not found" means "no invoice yet" — other 4xx must not create. */
   private isCreateReplayNotFound(error: unknown): boolean {
-    return error instanceof ResourceNotFoundError;
+    if (error instanceof ResourceNotFoundError) return true;
+    if (error instanceof InvalidRequestError) {
+      const msg = error.message.toLowerCase();
+      if (msg.includes("not found") || msg.includes("no invoice") || msg.includes("no data"))
+        return true;
+    }
+    return false;
   }
 
   /** Reuse only when the existing invoice amount is in the request currency and equals it. */

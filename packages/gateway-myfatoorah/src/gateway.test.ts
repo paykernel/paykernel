@@ -1240,7 +1240,7 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
   });
 
-  it("MF-CREATE-REPLAY: ARE country with orderId missing → continues to POST /v3/payments", async () => {
+  it("MF-CREATE-REPLAY: ARE country with orderId present but not found → POSTs /v3/payments", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [
