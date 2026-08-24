@@ -11,10 +11,10 @@ const INVOICE_STATUS: Record<string, PaymentStatus> = {
   CANCELED: "cancelled",
   CANCELLED: "cancelled",
   REFUNDED: "refunded",
-  PARTIALLY_REFUNDED: "refunded",
-  "PARTIALLY-REFUNDED": "refunded",
-  "PARTIALLY REFUNDED": "refunded",
-  PARTIALLYREFUNDED: "refunded",
+  PARTIALLY_REFUNDED: "partially_refunded",
+  "PARTIALLY-REFUNDED": "partially_refunded",
+  "PARTIALLY REFUNDED": "partially_refunded",
+  PARTIALLYREFUNDED: "partially_refunded",
 };
 
 const REFUND_STATUS: Record<string, RefundStatus> = {
@@ -93,6 +93,6 @@ export function inferMyFatoorahStableType(
   if (status === "pending") return "payment.processing";
   if (status === "cancelled") return "payment.cancelled";
   if (status === "failed") return "payment.failed";
-  if (status === "refunded") return "refund.completed";
+  if (status === "refunded" || status === "partially_refunded") return "refund.completed";
   return undefined;
 }

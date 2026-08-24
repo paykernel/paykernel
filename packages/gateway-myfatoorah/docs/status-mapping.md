@@ -9,8 +9,8 @@ Unknown provider values fail closed to `failed`.
 | `PAID` / `Paid`                                   | `paid`         |
 | `PENDING`                                         | `pending`      |
 | `CANCELED` / `CANCELLED`                          | `cancelled`    |
-| `REFUNDED`                                        | `refunded`     |
-| `PARTIALLY_REFUNDED` / `PARTIALLY-REFUNDED` etc.  | `refunded`     |
+| `REFUNDED`                                        | `refunded`            |
+| `PARTIALLY_REFUNDED` / `PARTIALLY-REFUNDED` etc.  | `partially_refunded`  |
 | anything else                                     | `failed`       |
 
 ## Transaction (`Transaction.Status` / `TransactionStatus`)
@@ -39,7 +39,7 @@ Unknown provider values fail closed to `failed`.
 
 ## Webhook payment status
 
-`Invoice.Status=PAID` is authoritative → `paid` regardless of `Transaction.Status` (KNET can emit duplicate webhooks with auxiliary statuses; success is final and must not be un-fulfilled). A pending invoice stays `pending` even when the latest transaction failed **or is `AUTHORIZE`** (the customer can retry the same invoice; `AUTHORIZE` is not fulfilled as `authorized` until capture is implemented) — MF-PAYMENTCOMPLETED-REDIRECT pending case. Legacy `PAID` + non-success → `paid` (not `failed`). `getPayment` also keeps a `PENDING` invoice as `pending` regardless of transaction evidence (the invoice can be retried).
+`Invoice.Status=PAID` is authoritative → `paid` regardless of `Transaction.Status` (KNET can emit duplicate webhooks with auxiliary statuses; success is final and must not be un-fulfilled). A pending invoice stays `pending` even when the latest transaction failed **or is `AUTHORIZE`** (the customer can retry the same invoice; `AUTHORIZE` is not fulfilled as `authorized` until capture is implemented) — MF-PAYMENTCOMPLETED-REDIRECT pending case. `Invoice.Status=REFUNDED` / `PARTIALLY_REFUNDED` stay `refunded` / `partially_refunded` (not `failed`). Legacy `PAID` + non-success → `paid` (not `failed`). `getPayment` also keeps a `PENDING` invoice as `pending` regardless of transaction evidence (the invoice can be retried).
 
 ## `getPayment` invoice
 

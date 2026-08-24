@@ -25,6 +25,12 @@ describe("myfatoorah money", () => {
     expect(() => parseMyFatoorahAmount(null, "SAR")).toThrow(InvalidRequestError);
   });
 
+  it("parses official GetPaymentStatus thousand-separated amount strings", () => {
+    expect(parseMyFatoorahAmount("12,345.000", "KWD").amount).toBe("12345.000");
+    expect(parseMyFatoorahAmount("1,234,567.89", "SAR").amount).toBe("1234567.89");
+    expect(myFatoorahMajorNumber(parseMyFatoorahAmount("12,345.000", "KWD"), "KWD")).toBe(12345);
+  });
+
   it("converts to major number with reject rounding", () => {
     expect(myFatoorahMajorNumber(money("10.50", "SAR"), "SAR")).toBe(10.5);
     expect(myFatoorahMajorNumber(money("1.200", "KWD"), "KWD")).toBe(1.2);

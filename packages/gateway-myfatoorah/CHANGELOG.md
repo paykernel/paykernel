@@ -29,4 +29,9 @@
 - **MF-PAYMENTCOMPLETED-REDIRECT:** `PaymentCompleted: true` alone is `paid`/`succeeded` even without nested `TransactionDetails.Invoice.Status=PAID` or `TransactionDetails.Transaction.Status=SUCCESS`; `PaymentURL` on a paid completion is the Result URL and is ignored. Pending invoices stay `pending` even when transaction is `FAILED`/`AUTHORIZE`.
 - **MF-WEBHOOK-RAW:** `verifyWebhook` and `parseWebhookEvent` accept raw `string` bodies (e.g. `request.text()`) and JSON-parse them before verify/normalize; unparseable strings fail closed.
 - **MF-WEBHOOK-MONEY-DRIFT:** Webhook `PAYMENT_STATUS_CHANGED`/`REFUND_STATUS_CHANGED` amounts are **base** (`ValueInBaseCurrency`/`BaseCurrency`), while `createPayment`/`getPayment` paid amounts are **pay** when available — never drift base into pay.
+- **MF-CREATE-REPLAY-SAFE:** CustomerReference lookup runs only outside KWT/SAU; a Paid invoice is reused only when amount+currency match; inquiry 5xx/429 fail closed as `indeterminate` (no second `/v3/payments`).
+- **MF-IDEMPOTENCY-CONFLICT:** Headerless create/refund retry only on “header not supported”, never on “key already used with a different request”. Headerless MakeRefund is `retry: false` (no 429 fan-out).
+- **MF-THOUSANDS:** Official `12,345.000` amount strings parse; `getPayment` keeps pay currency for amounts ≥ 1,000.
+- **MF-REFUND-PAYMENTID:** `refundPayment` rejects PaymentId-shaped ids unless `myfatoorahKeyType: "PaymentId"`; MakeRefund then uses that key type.
+- **MF-PARTIAL-STATUS:** `PARTIALLY_REFUNDED` maps to `partially_refunded`; payment webhooks do not treat refunded invoices as `failed`.
 

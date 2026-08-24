@@ -10,6 +10,7 @@ import {
   NetworkError,
   OperationNotSupportedError,
   PaymentAbortedError,
+  ResourceNotFoundError,
   toMinorUnits,
   withRetry,
   type CaptureParams,
@@ -82,24 +83,44 @@ function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
   }
   return isMyFatoorahRetryableError(error);
 }
-function validationErrorArrayMentionsIdempotency(arr: unknown): boolean {
+function isIdempotencyHeaderUnsupported(name: string, err: string): boolean {
+  const n = name.toLowerCase();
+  const e = err.toLowerCase();
+  const mentionsHeader =
+    n.includes("idempotency") || e.includes("idempotency-key") || e.includes("idempotency key");
+  if (!mentionsHeader) return false;
+  const conflict =
+    e.includes("already") ||
+    e.includes("different") ||
+    e.includes("conflict") ||
+    e.includes("mismatch");
+  if (conflict) return false;
+  return (
+    e.includes("not supported") ||
+    e.includes("unsupported") ||
+    e.includes("not available") ||
+    e.includes("not honored") ||
+    e.includes("not allowed") ||
+    e.includes("invalid header")
+  );
+}
+
+function validationErrorArrayMentionsUnsupportedIdempotencyHeader(arr: unknown): boolean {
   if (!Array.isArray(arr)) return false;
   for (const ve of arr) {
     const rec = asRecord(ve);
     const name = typeof rec.Name === "string" ? rec.Name : "";
     const err = typeof rec.Error === "string" ? rec.Error : "";
-    if (name.toLowerCase().includes("idempotency") || err.toLowerCase().includes("idempotency")) {
-      return true;
-    }
+    if (isIdempotencyHeaderUnsupported(name, err)) return true;
   }
   return false;
 }
 
-function validationBodyMentionsIdempotency(body: unknown): boolean {
+function validationBodyMentionsUnsupportedIdempotencyHeader(body: unknown): boolean {
   const rec = asRecord(body);
   // Official field is ValidationErrors; legacy alias FieldsErrors
   const ve = rec.ValidationErrors ?? rec.FieldsErrors;
-  return validationErrorArrayMentionsIdempotency(ve);
+  return validationErrorArrayMentionsUnsupportedIdempotencyHeader(ve);
 }
 
 function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
@@ -121,10 +142,11 @@ function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
       } catch {
         parsed = undefined;
       }
-      if (parsed !== undefined && validationBodyMentionsIdempotency(parsed)) return true;
-      // Unparseable string body: only retry when it mentions the Idempotency-Key header.
-      if (body.toLowerCase().includes("idempotency-key")) return true;
-    } else if (validationBodyMentionsIdempotency(body)) {
+      if (parsed !== undefined && validationBodyMentionsUnsupportedIdempotencyHeader(parsed)) {
+        return true;
+      }
+      if (isIdempotencyHeaderUnsupported("", body)) return true;
+    } else if (validationBodyMentionsUnsupportedIdempotencyHeader(body)) {
       return true;
     }
   }
@@ -197,13 +219,15 @@ export class MyFatoorahGateway extends BaseGateway {
         });
       }
       assertMyFatoorahHttpsUrl(p.callbackUrl, "callbackUrl");
-      // MF-CREATE-REPLAY: before POST /v3/payments, if Customer.Reference will be set,
-      // attempt GetPaymentStatus with KeyType CustomerReference to reuse an existing
-      // Paid invoice and avoid double-charge outside KWT/SAU where Idempotency-Key
-      // is not sent. Pending would lose PaymentURL via GetPaymentStatus, so only
-      // Paid is reused — pending falls through to create.
+      // Idempotency-Key is only honored in KWT/SAU. Elsewhere we omit the header
+      // and use CustomerReference lookup to avoid double-charge on replay.
+      const idempotencySupported =
+        this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
+      // MF-CREATE-REPLAY: only when the header is omitted. CustomerReference is
+      // not unique — reuse a Paid invoice only when amount+currency match.
+      // Inquiry 5xx / 429 fail closed (indeterminate) instead of creating a second invoice.
       const replayReference = this.customerReferenceForReplay(p);
-      if (replayReference !== undefined) {
+      if (replayReference !== undefined && !idempotencySupported) {
         try {
           const { data, raw } = await this.myfatoorahRequest(
             "POST",
@@ -216,25 +240,26 @@ export class MyFatoorahGateway extends BaseGateway {
             const invoiceStatusRaw =
               typeof data.InvoiceStatus === "string" ? data.InvoiceStatus : "";
             const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
-            if (invoiceStatus === "paid") {
+            if (invoiceStatus === "paid" && this.replayInvoiceMatchesRequest(data, p)) {
               return this.mapGetPaymentResult(data, raw);
             }
           }
         } catch (error) {
-          // Preflight is best-effort: 404 / IsSuccess:false / network / malformed
-          // all fall through to the real create below. Only caller aborts propagate.
           if (p.signal?.aborted) throw error;
           const isAbort =
             error instanceof PaymentAbortedError ||
             (error instanceof NetworkError && error.message.includes("aborted by caller"));
           if (isAbort) throw error;
+          if (!(error instanceof ResourceNotFoundError || error instanceof InvalidRequestError)) {
+            throw new NetworkError(
+              "MyFatoorah createPayment replay lookup failed; refusing to create a second invoice",
+              error,
+              { afterProviderSubmit: true },
+            );
+          }
         }
       }
       const body = this.buildCreateBody(p);
-      // Idempotency-Key is only honored in KWT/SAU — outside those countries,
-      // after-submit retries risk double-charge, so only retry before submit.
-      const idempotencySupported =
-        this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
       const isRetryable = idempotencySupported
         ? isMyFatoorahRetryableNetworkError
         : isMyFatoorahRetryableBeforeSubmit;
@@ -289,10 +314,27 @@ export class MyFatoorahGateway extends BaseGateway {
   async refundPayment(params: MyFatoorahRefundParams): Promise<GatewayRefundResult> {
     return this.executeWithHooks("refundPayment", params, async (p) => {
       const idempotencyKey = this.assertMutationKey(p.idempotencyKey, "refundPayment");
-      const invoiceId = this.assertInvoiceId(p.gatewayPaymentId, "refundPayment");
+      const refundKey = this.resolveRefundKey(p);
+
+      let invoiceId = refundKey.keyType === "InvoiceId" ? refundKey.key : undefined;
+      let paymentStatusData: Record<string, unknown> | undefined;
+      if (invoiceId === undefined) {
+        const paymentStatusForId = await this.myfatoorahRequest(
+          "POST",
+          "/v2/GetPaymentStatus",
+          { Key: refundKey.key, KeyType: "PaymentId" },
+          { signal: p.signal, retry: true, postSubmit: false },
+        );
+        paymentStatusData = paymentStatusForId.data;
+        invoiceId = stringOrNumberId(paymentStatusForId.data.InvoiceId);
+        if (invoiceId === undefined) {
+          throw new InvalidRequestError("MyFatoorah GetPaymentStatus response missing InvoiceId");
+        }
+      }
 
       // Fetch GetRefundStatus first — if an existing refund with this idempotencyKey is found,
       // return immediately without awaiting GetPaymentStatus (cheap path).
+      // Official GetRefundStatus keys are InvoiceId / RefundId / RefundReference — not PaymentId.
       const refundStatus = await this.myfatoorahRequest(
         "POST",
         "/v2/GetRefundStatus",
@@ -309,12 +351,15 @@ export class MyFatoorahGateway extends BaseGateway {
         return this.mapNestedRefundObject(existingRefund);
       }
 
-      const paymentStatus = await this.myfatoorahRequest(
-        "POST",
-        "/v2/GetPaymentStatus",
-        { KeyType: "InvoiceId", Key: invoiceId },
-        { signal: p.signal, retry: true, postSubmit: false },
-      );
+      const paymentStatus =
+        paymentStatusData !== undefined
+          ? { data: paymentStatusData }
+          : await this.myfatoorahRequest(
+              "POST",
+              "/v2/GetPaymentStatus",
+              { Key: refundKey.key, KeyType: refundKey.keyType },
+              { signal: p.signal, retry: true, postSubmit: false },
+            );
 
       const currency = this.refundCurrency(p, refundStatus.data);
       this.assertCurrencyMatch(p.currency, currency, "refund");
@@ -353,7 +398,8 @@ export class MyFatoorahGateway extends BaseGateway {
       }
 
       return this.postMyFatoorahRefund({
-        invoiceId,
+        invoiceId: refundKey.key,
+        keyType: refundKey.keyType,
         amount: outboundMajor,
         currency,
         params: p,
@@ -660,6 +706,28 @@ export class MyFatoorahGateway extends BaseGateway {
       orderId: params.orderId,
       myfatoorahCustomerReference: params.myfatoorahCustomer?.reference,
     });
+  }
+
+  /** Reuse only when the existing invoice amount is in the request currency and equals it. */
+  private replayInvoiceMatchesRequest(
+    data: Record<string, unknown>,
+    params: MyFatoorahCreatePaymentParams,
+  ): boolean {
+    const mapped = this.mapGetPaymentResult(data, data);
+    if (mapped.amount === undefined || mapped.currency === undefined) return false;
+    const requested = normalizeMyFatoorahCurrency(params.currency) ?? params.currency.trim().toUpperCase();
+    const retrieved =
+      normalizeMyFatoorahCurrency(mapped.currency) ?? mapped.currency.trim().toUpperCase();
+    if (requested !== retrieved) return false;
+    try {
+      const requestedMinor = toMinorUnits(
+        parseMyFatoorahAmount(this.myfatoorahOutboundMajor(params.amount, requested), requested),
+      );
+      const retrievedMinor = toMinorUnits(parseMyFatoorahAmount(mapped.amount, retrieved));
+      return requestedMinor === retrievedMinor;
+    } catch {
+      return false;
+    }
   }
 
   private buildSourceOfFund(
@@ -1034,6 +1102,7 @@ export class MyFatoorahGateway extends BaseGateway {
   }
   private async postMyFatoorahRefund(input: {
     invoiceId: string;
+    keyType: "InvoiceId" | "PaymentId";
     amount: number;
     currency: string;
     params: MyFatoorahRefundParams;
@@ -1041,7 +1110,7 @@ export class MyFatoorahGateway extends BaseGateway {
   }): Promise<GatewayRefundResult> {
     const comment = this.refundComment(input.params);
     const body: Record<string, unknown> = {
-      KeyType: "InvoiceId",
+      KeyType: input.keyType,
       Key: input.invoiceId,
       ServiceChargeOnCustomer: false,
       Amount: input.amount,
@@ -1071,10 +1140,9 @@ export class MyFatoorahGateway extends BaseGateway {
       if (!hasMyFatoorahIdempotencyValidationError(error)) throw error;
       const retryWithoutHeader = {
         signal: requestOptions.signal,
-        retry: true as const,
+        retry: false as const,
         postSubmit: requestOptions.postSubmit,
         currency: requestOptions.currency,
-        isRetryable: requestOptions.isRetryable,
       };
       const { data, raw } = await this.myfatoorahRequest(
         "POST",
@@ -1160,6 +1228,25 @@ export class MyFatoorahGateway extends BaseGateway {
       throw new InvalidRequestError(`MyFatoorah ${operation} requires idempotencyKey`);
     }
     return key.trim();
+  }
+
+  private resolveRefundKey(params: MyFatoorahRefundParams): {
+    key: string;
+    keyType: "InvoiceId" | "PaymentId";
+  } {
+    const keyType = params.myfatoorahKeyType ?? "InvoiceId";
+    if (keyType !== "InvoiceId" && keyType !== "PaymentId") {
+      throw new InvalidRequestError(
+        'MyFatoorah myfatoorahKeyType must be "InvoiceId" or "PaymentId"',
+      );
+    }
+    const key = this.assertInvoiceId(params.gatewayPaymentId, "refundPayment");
+    if (keyType === "InvoiceId" && key.length >= 14) {
+      throw new InvalidRequestError(
+        `MyFatoorah refundPayment gatewayPaymentId "${key}" looks like a PaymentId (use myfatoorahKeyType: "PaymentId" for the callback paymentId)`,
+      );
+    }
+    return { key, keyType };
   }
 
   private assertInvoiceId(id: string, operation: string): string {

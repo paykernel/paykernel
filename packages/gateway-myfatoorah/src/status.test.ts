@@ -15,6 +15,9 @@ describe("myfatoorah status mapping", () => {
     expect(mapMyFatoorahInvoiceStatus("PENDING")).toBe("pending");
     expect(mapMyFatoorahInvoiceStatus("Canceled")).toBe("cancelled");
     expect(mapMyFatoorahInvoiceStatus("CANCELLED")).toBe("cancelled");
+    expect(mapMyFatoorahInvoiceStatus("REFUNDED")).toBe("refunded");
+    expect(mapMyFatoorahInvoiceStatus("PARTIALLY_REFUNDED")).toBe("partially_refunded");
+    expect(mapMyFatoorahInvoiceStatus("PARTIALLY-REFUNDED")).toBe("partially_refunded");
     expect(mapMyFatoorahInvoiceStatus("nonsense")).toBe("failed");
   });
 
@@ -59,6 +62,10 @@ describe("myfatoorah status mapping", () => {
     expect(myFatoorahPaymentWebhookStatus("CANCELED", "FAILED")).toBe("cancelled");
     expect(myFatoorahPaymentWebhookStatus("PAID", "AUTHORIZE")).toBe("paid");
     expect(myFatoorahPaymentWebhookStatus("PENDING", "AUTHORIZE")).toBe("pending");
+    expect(myFatoorahPaymentWebhookStatus("REFUNDED", "SUCCESS")).toBe("refunded");
+    expect(myFatoorahPaymentWebhookStatus("PARTIALLY_REFUNDED", "SUCCESS")).toBe(
+      "partially_refunded",
+    );
   });
 
   it("infers stable types", () => {
@@ -66,6 +73,8 @@ describe("myfatoorah status mapping", () => {
     expect(inferMyFatoorahStableType("invoice", "pending")).toBe("payment.processing");
     expect(inferMyFatoorahStableType("invoice", "cancelled")).toBe("payment.cancelled");
     expect(inferMyFatoorahStableType("invoice", "failed")).toBe("payment.failed");
+    expect(inferMyFatoorahStableType("invoice", "refunded")).toBe("refund.completed");
+    expect(inferMyFatoorahStableType("invoice", "partially_refunded")).toBe("refund.completed");
     expect(inferMyFatoorahStableType("refund", "refunded")).toBe("refund.completed");
     expect(inferMyFatoorahStableType("refund", "refund_pending")).toBe("refund.pending");
     expect(inferMyFatoorahStableType("refund", "refund_failed")).toBe("refund.failed");

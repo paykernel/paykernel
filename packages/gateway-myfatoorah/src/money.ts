@@ -38,8 +38,16 @@ export function myFatoorahMajorNumber(amount: AmountInput, currency: string): nu
 }
 
 export function parseMyFatoorahAmount(amount: unknown, currency: string): Money {
-  if (typeof amount === "number" || typeof amount === "string") {
+  if (typeof amount === "number") {
     return money(amount, currency, PARSE_OPTS);
+  }
+  if (typeof amount === "string") {
+    // Official GetPaymentStatus string fields use grouping commas ("12,345.000").
+    const normalized = amount.trim().replace(/,/g, "");
+    if (normalized.length === 0) {
+      throw new InvalidRequestError("MyFatoorah amount must be a number or decimal string");
+    }
+    return money(normalized, currency, PARSE_OPTS);
   }
   throw new InvalidRequestError("MyFatoorah amount must be a number or decimal string");
 }

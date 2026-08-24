@@ -6,7 +6,7 @@ import { partialRefundStatusData } from "./fixtures/webhooks";
 describe("myfatoorah refund support", () => {
   it("computes remaining from InvoiceValue minus non-canceled refunds", () => {
     const data = partialRefundStatusData();
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "SAR")).toBe(8);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(8);
   });
 
   it("ignores canceled refunds in the sum", () => {
@@ -20,7 +20,7 @@ describe("myfatoorah refund support", () => {
       ServiceChargeOnCustomer: 0,
       RefundStatus: "Canceled",
     });
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "SAR")).toBe(8);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(8);
   });
 
   it("returns 0 when fully refunded", () => {
@@ -36,7 +36,7 @@ describe("myfatoorah refund support", () => {
         RefundStatus: "Refunded",
       },
     ];
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "SAR")).toBe(0);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0);
   });
 
   it("throws when remaining is negative", () => {
@@ -52,17 +52,17 @@ describe("myfatoorah refund support", () => {
         RefundStatus: "Refunded",
       },
     ];
-    expect(() => myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "SAR")).toThrow(
+    expect(() => myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toThrow(
       InvalidRequestError,
     );
   });
 
   it("throws when the invoice amount or refund list is unparseable", () => {
-    expect(() => myFatoorahRemainingRefundMajor(undefined, [], "SAR")).toThrow(InvalidRequestError);
+    expect(() => myFatoorahRemainingRefundMajor(undefined, [], "KWD")).toThrow(InvalidRequestError);
     // No refunds yet — remaining is full invoice amount (does not throw)
-    expect(myFatoorahRemainingRefundMajor(10.5, undefined, "SAR")).toBe(10.5);
-    expect(myFatoorahRemainingRefundMajor(10.5, [], "SAR")).toBe(10.5);
-    expect(() => myFatoorahRemainingRefundMajor(10.5, [{ RefundId: 1 }], "SAR")).toThrow(
+    expect(myFatoorahRemainingRefundMajor(10.5, undefined, "KWD")).toBe(10.5);
+    expect(myFatoorahRemainingRefundMajor(10.5, [], "KWD")).toBe(10.5);
+    expect(() => myFatoorahRemainingRefundMajor(10.5, [{ RefundId: 1 }], "KWD")).toThrow(
       InvalidRequestError,
     );
   });

@@ -47,7 +47,14 @@ export function myFatoorahPaymentWebhookStatus(
   if (invoice === "pending") {
     return "pending";
   }
-  if (invoice === "cancelled" || invoice === "failed") return invoice;
+  if (
+    invoice === "cancelled" ||
+    invoice === "failed" ||
+    invoice === "refunded" ||
+    invoice === "partially_refunded"
+  ) {
+    return invoice;
+  }
   switch (mapMyFatoorahTransactionEvidence(transactionStatus)) {
     case "authorized":
       return "pending";

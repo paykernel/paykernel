@@ -51,6 +51,8 @@ export type MyFatoorahCreatePaymentParams = CreatePaymentParams & {
 export type MyFatoorahRefundParams = RefundParams & {
   /** Refund comment (max 500 chars). Defaults to trimmed `reason` when omitted. */
   myfatoorahComment?: string;
+  /** Lookup key for GetPaymentStatus / MakeRefund. Default: InvoiceId. */
+  myfatoorahKeyType?: "InvoiceId" | "PaymentId";
 };
 
 export type MyFatoorahGetPaymentParams = GetPaymentParams & {

@@ -7,6 +7,7 @@ import {
   money,
   NetworkError,
   OperationNotSupportedError,
+  RateLimitError,
 } from "@paykernel/core";
 import { MyFatoorahGateway } from "./gateway";
 import {
@@ -102,10 +103,7 @@ describe("MyFatoorahGateway.createPayment", () => {
   it("sends config webhookUrl and PaymentMethod / language / customer", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
-      [
-        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
-        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
-      ],
+      [jsonResponse(myfatoorahEnvelope(initiatedCreateData()))],
       calls,
       { webhookUrl: "https://merchant.example/webhook", defaultPaymentMethod: "KNET" },
     );
@@ -115,10 +113,8 @@ describe("MyFatoorahGateway.createPayment", () => {
       myfatoorahLanguage: "EN",
       orderId: "ord_01",
     });
-    // MF-CREATE-REPLAY: first call is GetPaymentStatus CustomerReference, second is v3/payments
-    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
-    expect(bodyOf(calls[0])).toEqual({ Key: "ord_01", KeyType: "CustomerReference" });
-    const body = bodyOf(calls[1]);
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v3/payments");
+    const body = bodyOf(calls[0]);
     expect(body.PaymentMethod).toBe("KNET");
     expect(body.Language).toBe("EN");
     expect(body.Order).toEqual({
@@ -350,6 +346,29 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
   });
 
+  it("does not drop Idempotency-Key on an idempotency conflict (different body)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "",
+            ValidationErrors: [
+              { Name: "Idempotency-Key", Error: "Key already used with a different request" },
+            ],
+          },
+          200,
+        ),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "KWT" },
+    );
+    await expect(gateway.createPayment({ ...createParams })).rejects.toThrow(InvalidRequestError);
+    expect(calls.length).toBe(1);
+  });
+
   it("does not auto-retry the headerless create POST after submit (MF-CRIT-2)", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -486,6 +505,26 @@ describe("MyFatoorahGateway.getPayment", () => {
     expect(result.currency).toBe("KWD");
   });
 
+  it("publishes official thousand-separated PaidCurrencyValue as pay amount", async () => {
+    const data = paidInvoiceStatusData({
+      InvoiceValue: 997.123,
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "0707",
+          Currency: "KWD",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "12,345.00",
+          TransationValue: "12,345.00",
+        },
+      ],
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    expect(result.amount).toBe(12345);
+    expect(result.currency).toBe("SAR");
+  });
+
   it("publishes the pay currency amount when base differs (KWD base, SAR pay)", async () => {
     const data = paidInvoiceStatusData({
       InvoiceValue: 64.772,
@@ -589,11 +628,11 @@ describe("MyFatoorahGateway.refundPayment", () => {
     await gateway.refundPayment({
       gatewayPaymentId: "915102",
       idempotencyKey: "refund-idem-2",
-      amount: money("3.00", "SAR"),
-      currency: "SAR",
+      amount: money("3.000", "KWD"),
+      currency: "KWD",
     });
     const body = bodyOf(calls[2]);
-    expect(String(calls[2]?.init?.body)).toContain('"Amount":3.00');
+    expect(String(calls[2]?.init?.body)).toContain('"Amount":3.000');
     expect(body.Amount).toBe(3);
   });
 
@@ -605,8 +644,8 @@ describe("MyFatoorahGateway.refundPayment", () => {
       gateway.refundPayment({
         gatewayPaymentId: "915102",
         idempotencyKey: "refund-idem-2",
-        amount: money("9.00", "SAR"),
-        currency: "SAR",
+        amount: money("9.000", "KWD"),
+        currency: "KWD",
       }),
     ).rejects.toThrow(InvalidRequestError);
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
@@ -654,8 +693,8 @@ describe("MyFatoorahGateway.refundPayment", () => {
     const result = await gateway.refundPayment({
       gatewayPaymentId: "915102",
       idempotencyKey: "refund-idem-2",
-      amount: money("2.50", "SAR"),
-      currency: "SAR",
+      amount: money("2.500", "KWD"),
+      currency: "KWD",
     });
     expect(result.gatewayRefundId).toBe("22201");
     expect(result.status).toBe("pending");
@@ -725,6 +764,38 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 
+  it("does not auto-retry the headerless MakeRefund POST (no 429 fan-out)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "",
+            ValidationErrors: [{ Name: "Idempotency-Key", Error: "Header not supported" }],
+          },
+          200,
+        ),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+      ],
+      calls,
+    );
+    await expect(
+      gateway.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "refund-headerless-1",
+        currency: "KWD",
+      }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    const makeRefundCalls = calls.filter((c) => c.url.endsWith("/v2/MakeRefund"));
+    expect(makeRefundCalls.length).toBe(2);
+    expect(makeRefundCalls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+  });
+
   it("returns indeterminate when MakeRefund 2xx is missing RefundId", async () => {
     const { queue } = refundQueue();
     queue[2] = jsonResponse(myfatoorahEnvelope({}));
@@ -745,6 +816,44 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(calls.length).toBe(0);
   });
 
+  it("rejects PaymentId-shaped gatewayPaymentId unless myfatoorahKeyType is PaymentId", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([], calls);
+    await expect(
+      gateway.refundPayment({
+        gatewayPaymentId: "07076409988323998875",
+        idempotencyKey: "refund-payid-1",
+      }),
+    ).rejects.toThrow(/PaymentId/);
+    expect(calls.length).toBe(0);
+  });
+
+  it("refunds with KeyType PaymentId when requested", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(partialRefundStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    await gateway.refundPayment({
+      gatewayPaymentId: "07076409988323998875",
+      idempotencyKey: "refund-payid-2",
+      myfatoorahKeyType: "PaymentId",
+    });
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
+    expect(bodyOf(calls[0])).toEqual({
+      Key: "07076409988323998875",
+      KeyType: "PaymentId",
+    });
+    expect(calls[1]?.url).toBe("https://apitest.myfatoorah.com/v2/GetRefundStatus");
+    expect(bodyOf(calls[1])).toEqual({ KeyType: "InvoiceId", Key: "915102" });
+    expect(bodyOf(calls[2]).KeyType).toBe("PaymentId");
+    expect(bodyOf(calls[2]).Key).toBe("07076409988323998875");
+  });
+
   it("throws on an unparseable refund list even with an explicit amount", async () => {
     const refundStatus = {
       Refunds: [{ RefundId: 22201, RefundStatus: "Refunded" }],
@@ -761,8 +870,8 @@ describe("MyFatoorahGateway.refundPayment", () => {
       gateway.refundPayment({
         gatewayPaymentId: "915102",
         idempotencyKey: "refund-idem-2",
-        amount: money("3.00", "SAR"),
-        currency: "SAR",
+        amount: money("3.000", "KWD"),
+        currency: "KWD",
       }),
     ).rejects.toThrow(InvalidRequestError);
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
@@ -925,9 +1034,9 @@ describe("MyFatoorahGateway MF fixes", () => {
           TransactionStatus: "Succss",
           PaymentId: "07076409988323998877",
           PaidCurrency: "SAR",
-          PaidCurrencyValue: "10.500",
+          PaidCurrencyValue: "10.50",
           Currency: "SAR",
-          TransationValue: "10.500",
+          TransationValue: "10.50",
         },
       ],
     });
@@ -943,6 +1052,79 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls.length).toBe(1);
     expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
     expect(bodyOf(calls[0])).toEqual({ Key: "ord_replay_123", KeyType: "CustomerReference" });
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("KWT create with orderId does not preflight CustomerReference (header dedupes)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(myfatoorahEnvelope(initiatedCreateData()))],
+      calls,
+      { country: "KWT" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_kwt_1",
+    });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.map((c) => c.url)).toEqual(["https://apitest.myfatoorah.com/v3/payments"]);
+    expect(bodyOf(calls[0]).Customer).toEqual({ Reference: "ord_kwt_1" });
+  });
+
+  it("MF-CREATE-REPLAY: ARE Paid invoice with a different amount is not reused", async () => {
+    const calls: FetchCall[] = [];
+    const existing = paidInvoiceStatusData({
+      InvoiceId: 777777,
+      InvoiceStatus: "Paid",
+      InvoiceValue: 1.5,
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "07076409988323998877",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "1.50",
+          Currency: "SAR",
+          TransationValue: "1.50",
+        },
+      ],
+    });
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(existing)),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_amount",
+    });
+    expect(result.outcome).toBe("requires_action");
+    expect(result.gatewayId).toBe("915102");
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://apitest.myfatoorah.com/v2/GetPaymentStatus",
+      "https://apitest.myfatoorah.com/v3/payments",
+    ]);
+  });
+
+  it("MF-CREATE-REPLAY: ARE inquiry 5xx does not POST a second payment", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_5xx",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
   });
 

@@ -84,10 +84,8 @@ export function nestedRefundFromInvoice(
  * Remaining refundable major units, or 0 when fully refunded.
  * Refunds whose status is `Refunded` / `Pending` count; `Canceled` does not.
  * When the refund list is missing/empty, remaining equals the invoice amount
- * (no refunds yet). Throws only when the invoice amount itself is unparseable
- * or refund amounts are malformed. Callers that already have an explicit
- * `amount` can proceed even when remaining cannot be determined — the gateway
- * flow handles that by treating `remaining` as undefined in that path.
+ * (no refunds yet). Throws when the invoice amount itself is unparseable
+ * or refund amounts are malformed — never returns undefined.
  */
 export function myFatoorahRemainingRefundMajor(
   invoiceAmount: unknown,
