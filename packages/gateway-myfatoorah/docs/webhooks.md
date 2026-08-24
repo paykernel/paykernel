@@ -10,7 +10,7 @@ Payment (`PAYMENT_STATUS_CHANGED` / `Event.Code` 1):
 Invoice.Id={id},Invoice.Status={status},Transaction.Status={status},Transaction.PaymentId={paymentId},Invoice.ExternalIdentifier={ext}
 ```
 
-Refund (`REFUND_STATUS_CHANGED` / `Event.Code` 2):
+Refund (`REFUND_STATUS_CHANGED` / `Event.Code` 2): official `Data` has **siblings** `{ Refund, Amount, ReferencedInvoice }` (see https://docs.myfatoorah.com/docs/webhook-v2-refund-data-model); legacy fixtures nested `Amount`/`ReferencedInvoice` under `Refund` are still accepted for back-compat with a fallback.
 
 ```text
 Refund.Id={id},Refund.Status={status},Amount.ValueInBaseCurrency={amount},ReferencedInvoice.Id={id}
@@ -20,9 +20,8 @@ Refund.Id={id},Refund.Status={status},Amount.ValueInBaseCurrency={amount},Refere
 
 `parseWebhookEvent` normalizes:
 
-- payment: `gatewayPaymentId` = `Invoice.Id`, merchant `paymentId` = `Invoice.ExternalIdentifier` (never `UserDefinedField`); `SUCCESS`+`PAID` → `paid`, `AUTHORIZE` → `authorized`, `FAILED` → `failed`, `CANCELED` → `cancelled`, pending invoice → `pending`. `Transaction.PaymentId` rides `event.payment.references.relatedIds.paymentId`
-- refund: `gatewayPaymentId` = `ReferencedInvoice.Id`, `gatewayObjectId` = `Refund.Id`; `REFUNDED` → `refunded`, `CANCELED` → `refund_failed`
-- `id` = `Event.Reference`; `timestamp` = `Event.CreationDate` (fail-closed ISO parse)
+- payment: `gatewayPaymentId` = `Invoice.Id`, merchant `paymentId` = `Invoice.ExternalIdentifier` (never `UserDefinedField`); `Invoice.Status=PAID` is authoritative (`paid` regardless of `Transaction.Status` — KNET duplicate webhooks must not un-fulfill); `AUTHORIZE` → `authorized`, `FAILED` → `failed`, `CANCELED` → `cancelled`, pending invoice → `pending`. `Transaction.PaymentId` (string or number) rides `event.payment.references.relatedIds.paymentId`
+- refund: `gatewayPaymentId` = `ReferencedInvoice.Id` (official sibling; legacy `Refund.ReferencedInvoice` fallback), `gatewayObjectId` = `Refund.Id`; `REFUNDED` → `refunded`, `CANCELED` → `refund_failed`; `Amount.ValueInBaseCurrency` is read from `Data.Amount` (fallback to `Refund.Amount`)
 
 Card data from `Transaction.Card` is never copied onto the normalized event beyond `rawPayload`.
 

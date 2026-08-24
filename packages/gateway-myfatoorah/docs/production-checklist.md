@@ -5,6 +5,6 @@
 - **Hosts & tokens:** sandbox is `apitest.myfatoorah.com` (currency KWD, no real money). Live uses per-country hosts (`api`, `api-ae`, `api-sa`, `api-qa`, `api-eg`) and a per-country live token.
 - **HTTPS callback:** `callbackUrl` and `webhookUrl` must be HTTPS. MyFatoorah rejects localhost.
 - **No raw cards:** this backend adapter never sends cardholder data. Embedded sessions use `myfatoorahSessionId`; saved cards use `myfatoorahToken`. Never store PAN/CVC.
-- **Idempotency:** always pass a caller `idempotencyKey` on create/refund. On create timeout / 5xx, replay with the same key (250-minute cache). On refund submit-timeout, do **not** re-POST — reconcile with `GetRefundStatus` using the same `ExternalIdentifier`.
+- **Idempotency:** always pass a caller `idempotencyKey` on create/refund. On create timeout / 5xx, replay with the same key (250-minute cache **in KWT/SAU only** — https://docs.myfatoorah.com/docs/idempotency; elsewhere create retries are before-submit only to avoid double-charge). On refund submit-timeout, do **not** re-POST — reconcile with `GetRefundStatus` using the same `ExternalIdentifier` (refund `Idempotency-Key` is also KWT/SAU only; the adapter retries once without the header on `Idempotency` validation error).
 - **Refund settlement:** MakeRefund acceptance is not settlement. Wait for `REFUND_STATUS_CHANGED` `REFUNDED` (or `GetRefundStatus` `Refunded`) before treating a refund as complete.
 - **Amounts:** major units, ISO-padded on the wire (`10.50` SAR, `1.200` KWD). Zero amounts are rejected.

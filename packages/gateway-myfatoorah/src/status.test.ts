@@ -52,11 +52,12 @@ describe("myfatoorah status mapping", () => {
   it("derives webhook payment status fail-closed", () => {
     expect(myFatoorahPaymentWebhookStatus("PAID", "SUCCESS")).toBe("paid");
     expect(myFatoorahPaymentWebhookStatus("PAID", "Succss")).toBe("paid");
-    expect(myFatoorahPaymentWebhookStatus("PAID", "FAILED")).toBe("failed");
+    // PAID is authoritative — even non-success transaction stays paid (KNET duplicate handling)
+    expect(myFatoorahPaymentWebhookStatus("PAID", "FAILED")).toBe("paid");
     expect(myFatoorahPaymentWebhookStatus("PENDING", "FAILED")).toBe("pending");
     expect(myFatoorahPaymentWebhookStatus("PENDING", "SUCCESS")).toBe("pending");
     expect(myFatoorahPaymentWebhookStatus("CANCELED", "FAILED")).toBe("cancelled");
-    expect(myFatoorahPaymentWebhookStatus("PAID", "AUTHORIZE")).toBe("failed");
+    expect(myFatoorahPaymentWebhookStatus("PAID", "AUTHORIZE")).toBe("paid");
     expect(myFatoorahPaymentWebhookStatus("PENDING", "AUTHORIZE")).toBe("authorized");
   });
 

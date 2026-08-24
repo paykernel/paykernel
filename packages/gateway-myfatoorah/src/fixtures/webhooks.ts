@@ -44,6 +44,9 @@ export function paymentWebhook(overrides: Record<string, unknown> = {}) {
 }
 
 export function refundWebhook(overrides: Record<string, unknown> = {}) {
+  // Official REFUND_STATUS_CHANGED Data has siblings { Refund, Amount, ReferencedInvoice }
+  // (https://docs.myfatoorah.com/docs/webhook-v2-refund-data-model)
+  // Legacy nested shape under Refund is still supported for back-compat verification.
   return {
     Event: {
       Id: "62a39fe1-b3e8-4c66-8b20-9f8cfbe0acda",
@@ -55,10 +58,9 @@ export function refundWebhook(overrides: Record<string, unknown> = {}) {
       Refund: {
         Id: 111147,
         Status: "REFUNDED",
-        Amount: { ValueInBaseCurrency: 30, ValueInDisplayCurrency: 30 },
-        Comment: null,
-        ReferencedInvoice: { Id: 5620277 },
       },
+      Amount: { ValueInBaseCurrency: 30, ValueInDisplayCurrency: 30 },
+      ReferencedInvoice: { Id: 5620277 },
     },
     ...overrides,
   };
@@ -78,20 +80,24 @@ export function initiatedCreateData(overrides: Record<string, unknown> = {}) {
   };
 }
 
-/** V3 create `Data` for a directly completed (paid) payment. */
+/** V3 create `Data` for a directly completed (paid) payment — official nested shape. */
 export function paidCreateData(overrides: Record<string, unknown> = {}) {
   return {
     InvoiceId: 915102,
     IsDirectPayment: true,
-    PaymentURL: "",
+    PaymentURL:
+      "https://sandbox.pg.apitest.myfatoorah.com/payment/result?invoice=915102&result=paid",
     CustomerReference: "payref1",
     UserDefinedField: "order_01",
     RecurringId: null,
     PaymentId: "07076409988323998875",
     PaymentCompleted: true,
-    InvoiceStatus: "PAID",
+    // Official V3 shape only — statuses nested under TransactionDetails.
+    // The legacy flat shape (top-level InvoiceStatus + TransactionDetails.Status)
+    // has a dedicated regression test that passes both via overrides.
     TransactionDetails: {
-      Status: "SUCCESS",
+      Invoice: { Status: "PAID" },
+      Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
       Amount: { ValueInBaseCurrency: 10.5, ValueInDisplayCurrency: 10.5 },
     },
     ...overrides,
@@ -100,7 +106,28 @@ export function paidCreateData(overrides: Record<string, unknown> = {}) {
 
 /** V2 GetPaymentStatus `Data` for a paid invoice with one success transaction. */
 export function paidInvoiceStatusData(overrides: Record<string, unknown> = {}) {
-  return {
+  const tx = {
+    TransactionDate: "2025-02-18T11:20:00.000Z",
+    PaymentGateway: "card",
+    ReferenceId: "1310001",
+    TrackId: null,
+    TransactionId: "07076409988323998875",
+    PaymentId: "07076409988323998875",
+    AuthorizationId: null,
+    TransactionStatus: "Succss",
+    TransationValue: "10.500",
+    CustomerServiceCharge: "0",
+    DueValue: "0",
+    PaidCurrency: "SAR",
+    PaidCurrencyValue: "10.500",
+    IpAddress: null,
+    Country: null,
+    Currency: "SAR",
+    Error: null,
+    CardNumber: null,
+    ErrorCode: null,
+  };
+  const base: Record<string, unknown> = {
     InvoiceId: 915102,
     InvoiceStatus: "Paid",
     InvoiceReference: "1310001",
@@ -114,52 +141,85 @@ export function paidInvoiceStatusData(overrides: Record<string, unknown> = {}) {
     UserDefinedField: "order_01",
     InvoiceDisplayValue: "10.500",
     InvoiceItems: [],
-    Transactions: [
-      {
-        TransactionDate: "2025-02-18T11:20:00.000Z",
-        PaymentGateway: "card",
-        ReferenceId: "1310001",
-        TrackId: null,
-        TransactionId: "07076409988323998875",
-        PaymentId: "07076409988323998875",
-        AuthorizationId: null,
-        TransactionStatus: "Succss",
-        TransationValue: "10.500",
-        CustomerServiceCharge: "0",
-        DueValue: "0",
-        PaidCurrency: "SAR",
-        PaidCurrencyValue: "10.500",
-        IpAddress: null,
-        Country: null,
-        Currency: "SAR",
-        Error: null,
-        CardNumber: null,
-        ErrorCode: null,
-      },
-    ],
-    ...overrides,
+    InvoiceTransactions: [tx],
+    Transactions: [tx],
   };
+  const merged = { ...base, ...overrides };
+  // Keep InvoiceTransactions and Transactions in sync when only one is overridden
+  if ("Transactions" in overrides && !("InvoiceTransactions" in overrides)) {
+    merged.InvoiceTransactions = overrides.Transactions as unknown;
+  }
+  if ("InvoiceTransactions" in overrides && !("Transactions" in overrides)) {
+    merged.Transactions = overrides.InvoiceTransactions as unknown;
+  }
+  return merged;
 }
 
-/** V2 GetRefundStatus `Data` for a partially refunded invoice. */
+/** V2 GetRefundStatus `Data` for a partially refunded invoice — provides both official and legacy shapes. */
 export function partialRefundStatusData(overrides: Record<string, unknown> = {}) {
-  return {
+  const legacyRefund = {
+    RefundId: 22201,
+    ExternalIdentifier: "refund-idem-1",
+    Comment: null,
+    InvoiceId: 915102,
+    Amount: 2.5,
+    ServiceChargeOnCustomer: 0,
+    RefundStatus: "Refunded",
+  };
+  const officialRefund = {
+    RefundId: 22201,
+    RefundStatus: "Refunded",
+    Amount: 2.5,
+    BaseCurrency: "SAR",
+    ExternalIdentifier: "refund-idem-1",
+    InvoiceId: 915102,
+    ServiceChargeOnCustomer: 0,
+    RefundAmount: 2.5,
+  };
+  const base: Record<string, unknown> = {
     InvoiceId: 915102,
     InvoiceStatus: "PARTIALLY_REFUNDED",
     InvoiceAmount: 10.5,
-    Refunds: [
-      {
-        RefundId: 22201,
-        ExternalIdentifier: "refund-idem-1",
-        Comment: null,
-        InvoiceId: 915102,
-        Amount: 2.5,
-        ServiceChargeOnCustomer: 0,
-        RefundStatus: "Refunded",
-      },
-    ],
-    ...overrides,
+    RefundStatusResult: [officialRefund],
+    Refunds: [legacyRefund],
   };
+  const merged = { ...base, ...overrides };
+  // Keep RefundStatusResult and Refunds in sync when only one is overridden
+  if ("Refunds" in overrides && !("RefundStatusResult" in overrides)) {
+    const refunds = overrides.Refunds as unknown[];
+    merged.RefundStatusResult = refunds.map((r) => {
+      if (r !== null && typeof r === "object" && !Array.isArray(r)) {
+        const rec = r as Record<string, unknown>;
+        return {
+          RefundId: rec.RefundId ?? rec.Id,
+          RefundStatus: rec.RefundStatus ?? rec.Status ?? "Refunded",
+          Amount: rec.Amount,
+          BaseCurrency: rec.BaseCurrency ?? "SAR",
+          ExternalIdentifier: rec.ExternalIdentifier,
+          InvoiceId: rec.InvoiceId ?? 915102,
+          RefundAmount: rec.Amount,
+        };
+      }
+      return r;
+    });
+  }
+  if ("RefundStatusResult" in overrides && !("Refunds" in overrides)) {
+    const result = overrides.RefundStatusResult as unknown[];
+    merged.Refunds = result.map((r) => {
+      if (r !== null && typeof r === "object" && !Array.isArray(r)) {
+        const rec = r as Record<string, unknown>;
+        return {
+          RefundId: rec.RefundId ?? rec.Id,
+          RefundStatus: rec.RefundStatus ?? rec.Status,
+          Amount: rec.Amount ?? rec.RefundAmount,
+          ExternalIdentifier: rec.ExternalIdentifier,
+          InvoiceId: rec.InvoiceId,
+        };
+      }
+      return r;
+    });
+  }
+  return merged;
 }
 
 /** V2 MakeRefund `Data`. */

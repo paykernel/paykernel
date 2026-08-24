@@ -33,4 +33,4 @@ Unknown provider values fail closed to `failed`.
 
 ## Webhook payment status
 
-`PAID` + success transaction → `paid`. A pending invoice stays `pending` even when the latest transaction failed (the customer can retry the same invoice). A `PAID` invoice with a non-success transaction is `failed` (fail-closed).
+`Invoice.Status=PAID` is authoritative → `paid` regardless of `Transaction.Status` (KNET can emit duplicate webhooks with auxiliary statuses; success is final and must not be un-fulfilled). A pending invoice stays `pending` even when the latest transaction failed (the customer can retry the same invoice). Legacy `PAID` + non-success → `paid` (not `failed`).

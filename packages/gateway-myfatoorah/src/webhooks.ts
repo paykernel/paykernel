@@ -28,13 +28,16 @@ export function extractMyFatoorahSignatureHeader(
 
 export type MyFatoorahWebhookKind = "payment" | "refund";
 
-/** Webhook V2 event kinds. `Event.Code` 1/2 accepted as a fallback. */
+/** Webhook V2 event kinds. `Event.Name` is authoritative; `Event.Code` 1/2 is fallback only when Name is missing/unknown. */
 export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
   const event = myFatoorahEventRecord(payload);
   const name = typeof event.Name === "string" ? event.Name.trim().toUpperCase() : "";
+  if (name === "PAYMENT_STATUS_CHANGED") return "payment";
+  if (name === "REFUND_STATUS_CHANGED") return "refund";
+  // Fallback to Code only when Name is empty or unrecognized
   const code = event.Code;
-  if (name === "PAYMENT_STATUS_CHANGED" || code === 1) return "payment";
-  if (name === "REFUND_STATUS_CHANGED" || code === 2) return "refund";
+  if (code === 1) return "payment";
+  if (code === 2) return "refund";
   throw new InvalidRequestError(
     `Unsupported MyFatoorah webhook event ${String(event.Name)} (PAYMENT_STATUS_CHANGED or REFUND_STATUS_CHANGED)`,
   );
@@ -97,12 +100,19 @@ export function canonicalMyFatoorahPaymentString(payload: unknown): string {
 /**
  * Refund canonical string (fixed field order — never sort keys):
  * `Refund.Id,Refund.Status,Amount.ValueInBaseCurrency,ReferencedInvoice.Id`
+ * Official Data has siblings `{ Refund, Amount, ReferencedInvoice }`; legacy
+ * fixtures nested Amount/ReferencedInvoice under Refund. Both are supported,
+ * with sibling (official) preferred.
  */
 export function canonicalMyFatoorahRefundString(payload: unknown): string {
   const data = myFatoorahDataRecord(payload);
   const refund = asRecord(data.Refund);
-  const amount = asRecord(refund.Amount);
-  const invoice = asRecord(refund.ReferencedInvoice);
+  // Official: Data.Amount and Data.ReferencedInvoice are siblings of Refund.
+  // Legacy: they were nested under Refund. Prefer sibling when present.
+  const amount = asRecord(data.Amount !== undefined ? data.Amount : refund.Amount);
+  const invoice = asRecord(
+    data.ReferencedInvoice !== undefined ? data.ReferencedInvoice : refund.ReferencedInvoice,
+  );
   return (
     `Refund.Id=${myFatoorahCanonicalField(refund.Id)}` +
     `,Refund.Status=${myFatoorahCanonicalField(refund.Status)}` +

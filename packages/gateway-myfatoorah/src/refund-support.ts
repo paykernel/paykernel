@@ -11,11 +11,19 @@ export function readMyFatoorahMoney(value: unknown, currency: string): Money | u
   return undefined;
 }
 
-/** `GetRefundStatus` `Data.Refunds` list (array or `{ data }`-shaped). */
+/** `GetRefundStatus` list — supports official `RefundStatusResult`, legacy `Refunds`, and `{ Data: [] }` wrappers. */
 export function myFatoorahRefundItems(raw: unknown): unknown[] | undefined {
   if (Array.isArray(raw)) return raw;
   if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
-    const data = (raw as { Data?: unknown }).Data;
+    const rec = raw as Record<string, unknown>;
+    // Official: Data.RefundStatusResult
+    const official = rec.RefundStatusResult;
+    if (Array.isArray(official)) return official;
+    // Legacy: Data.Refunds
+    const legacyRefunds = rec.Refunds;
+    if (Array.isArray(legacyRefunds)) return legacyRefunds;
+    // Legacy wrapper { Data: [...] } (rare)
+    const data = rec.Data;
     if (Array.isArray(data)) return data;
     return undefined;
   }
@@ -79,8 +87,11 @@ export function nestedRefundFromInvoice(
 /**
  * Remaining refundable major units, or 0 when fully refunded.
  * Refunds whose status is `Refunded` / `Pending` count; `Canceled` does not.
- * Throws when the invoice amount or refund list is not parseable (caller must
- * pass an explicit amount instead of guessing).
+ * When the refund list is missing/empty, remaining equals the invoice amount
+ * (no refunds yet). Throws only when the invoice amount itself is unparseable
+ * or refund amounts are malformed. Callers that already have an explicit
+ * `amount` can proceed even when remaining cannot be determined — the gateway
+ * flow handles that by treating `remaining` as undefined in that path.
  */
 export function myFatoorahRemainingRefundMajor(
   invoiceAmount: unknown,
@@ -94,10 +105,9 @@ export function myFatoorahRemainingRefundMajor(
     );
   }
   const items = myFatoorahRefundItems(refunds);
-  if (items === undefined) {
-    throw new InvalidRequestError(
-      "MyFatoorah refund requires amount (invoice does not expose remaining)",
-    );
+  // No refunds yet — remaining is full invoice amount.
+  if (items === undefined || items.length === 0) {
+    return myFatoorahMajorNumber(invoice, currency);
   }
   let refundedMinor = 0n;
   for (const item of items) {
@@ -106,7 +116,19 @@ export function myFatoorahRemainingRefundMajor(
     }
     const normalized = myFatoorahRefundStatus(item).trim().toUpperCase();
     if (normalized === "CANCELED" || normalized === "CANCELLED") continue;
-    const amount = readMyFatoorahMoney((item as { Amount?: unknown }).Amount, currency);
+    const rec = item as Record<string, unknown>;
+    // Amount may be a plain number (legacy) or an object (official sibling Amount),
+    // or an official RefundAmount / ValueInBaseCurrency field.
+    let rawAmount: unknown = rec.Amount;
+    if (rawAmount !== null && typeof rawAmount === "object" && !Array.isArray(rawAmount)) {
+      const amtRec = rawAmount as Record<string, unknown>;
+      rawAmount = amtRec.ValueInBaseCurrency ?? amtRec.Value ?? amtRec.Amount ?? rawAmount;
+    }
+    // Fallback for official RefundStatusResult shape with RefundAmount
+    if (rawAmount === undefined) {
+      rawAmount = rec.RefundAmount ?? rec.ValueInBaseCurrency;
+    }
+    const amount = readMyFatoorahMoney(rawAmount, currency);
     if (amount === undefined) {
       throw new InvalidRequestError("MyFatoorah refunds list has no parseable amounts");
     }
@@ -120,4 +142,34 @@ export function myFatoorahRemainingRefundMajor(
     return 0;
   }
   return myFatoorahMajorNumber(fromMinorUnits(remainingMinor, currency), currency);
+}
+/**
+ * Extract the account base currency from a GetRefundStatus payload.
+ * Prefers the first `BaseCurrency` / `Currency` on a `RefundStatusResult` entry,
+ * falling back to undefined when not present.
+ */
+export function myFatoorahRefundBaseCurrency(refundData: unknown): string | undefined {
+  const items = myFatoorahRefundItems(refundData);
+  if (items !== undefined) {
+    for (const item of items) {
+      if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+        const rec = item as Record<string, unknown>;
+        const base = rec.BaseCurrency ?? rec.Currency ?? rec.RefundCurrency;
+        if (typeof base === "string" && base.trim().length > 0) return base.trim().toUpperCase();
+        // Amount object may carry currency
+        const amt = rec.Amount;
+        if (amt !== null && typeof amt === "object" && !Array.isArray(amt)) {
+          const amtRec = amt as Record<string, unknown>;
+          const c = amtRec.Currency ?? amtRec.BaseCurrency;
+          if (typeof c === "string" && c.trim().length > 0) return c.trim().toUpperCase();
+        }
+      }
+    }
+  }
+  if (refundData !== null && typeof refundData === "object" && !Array.isArray(refundData)) {
+    const rec = refundData as Record<string, unknown>;
+    const invCur = rec.InvoiceCurrency ?? rec.BaseCurrency ?? rec.Currency;
+    if (typeof invCur === "string" && invCur.trim().length > 0) return invCur.trim().toUpperCase();
+  }
+  return undefined;
 }

@@ -9,6 +9,7 @@ import {
   mapHttpAbortError,
   NetworkError,
   OperationNotSupportedError,
+  toMinorUnits,
   withRetry,
   type CaptureParams,
   type GatewayPaymentResult,
@@ -35,7 +36,9 @@ import {
 } from "./http";
 import { myFatoorahMajorNumber, parseMyFatoorahAmount, stringifyMyFatoorahJsonBody } from "./money";
 import {
+  myFatoorahRefundBaseCurrency,
   myFatoorahRefundId,
+  myFatoorahRefundItems,
   myFatoorahRefundStatus,
   myFatoorahRemainingRefundMajor,
   nestedRefundFromInvoice,
@@ -67,6 +70,21 @@ import {
 } from "./webhooks";
 const MYFATOORAH_REFUND_COMMENT_MAX = 500;
 const CURRENCY_CODE = /^[A-Za-z]{3}$/;
+/** MyFatoorah V2 alias: official samples use "KD" for Kuwait base currency. */
+const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
+  KD: "KWD",
+  "K.D.": "KWD",
+  "K.D": "KWD",
+};
+
+function normalizeMyFatoorahCurrency(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim().toUpperCase();
+  if (trimmed.length === 0) return undefined;
+  const aliased = MYFATOORAH_CURRENCY_ALIASES[trimmed] ?? trimmed;
+  if (aliased.length !== 3 || !CURRENCY_CODE.test(aliased)) return undefined;
+  return aliased;
+}
 
 function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
   if (error instanceof NetworkError && error.message.includes("aborted by caller")) {
@@ -82,7 +100,9 @@ function currenciesMismatch(requested: unknown, retrieved: unknown): boolean {
   if (typeof retrieved !== "string" || retrieved.trim().length === 0) {
     return false;
   }
-  return requested.trim().toUpperCase() !== retrieved.trim().toUpperCase();
+  const req = normalizeMyFatoorahCurrency(requested) ?? requested.trim().toUpperCase();
+  const ret = normalizeMyFatoorahCurrency(retrieved) ?? retrieved.trim().toUpperCase();
+  return req !== ret;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -140,11 +160,19 @@ export class MyFatoorahGateway extends BaseGateway {
       }
       assertMyFatoorahHttpsUrl(p.callbackUrl, "callbackUrl");
       const body = this.buildCreateBody(p);
+      // Idempotency-Key is only honored in KWT/SAU — outside those countries,
+      // after-submit retries risk double-charge, so only retry before submit.
+      const idempotencySupported =
+        this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
+      const isRetryable = idempotencySupported
+        ? isMyFatoorahRetryableNetworkError
+        : isMyFatoorahRetryableBeforeSubmit;
       const { data, raw } = await this.myfatoorahRequest("POST", "/v3/payments", body, {
         signal: p.signal,
         retry: true,
         idempotencyKey,
         postSubmit: true,
+        isRetryable,
       });
       return this.mapCreateResult(data, raw, p.currency.trim().toUpperCase());
     });
@@ -167,19 +195,38 @@ export class MyFatoorahGateway extends BaseGateway {
       const invoiceId = this.assertInvoiceId(p.gatewayPaymentId, "refundPayment");
 
       const [refundStatus, paymentStatus] = await Promise.all([
-        this.myfatoorahRequest("POST", "/v2/GetRefundStatus", { KeyType: "InvoiceId", Key: invoiceId }, { signal: p.signal, retry: true }),
-        this.myfatoorahRequest("POST", "/v2/GetPaymentStatus", { KeyType: "InvoiceId", Key: invoiceId }, { signal: p.signal, retry: true }),
+        this.myfatoorahRequest(
+          "POST",
+          "/v2/GetRefundStatus",
+          { KeyType: "InvoiceId", Key: invoiceId },
+          { signal: p.signal, retry: true },
+        ),
+        this.myfatoorahRequest(
+          "POST",
+          "/v2/GetPaymentStatus",
+          { KeyType: "InvoiceId", Key: invoiceId },
+          { signal: p.signal, retry: true },
+        ),
       ]);
 
-      const currency = this.refundCurrency(p, paymentStatus.data);
+      const currency = this.refundCurrency(p, paymentStatus.data, refundStatus.data);
       this.assertCurrencyMatch(p.currency, currency, "refund");
 
       const invoiceAmount = this.invoiceValue(paymentStatus.data);
-      const refunds = refundStatus.data.Refunds;
+      // Official GetRefundStatus uses RefundStatusResult; fallback to legacy Refunds.
+      // Pass the whole Data object so myFatoorahRefundItems can handle both shapes.
+      const refundsRaw: unknown = refundStatus.data;
 
       let remaining: number | undefined;
       if (invoiceAmount !== undefined) {
-        remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refunds, currency);
+        try {
+          remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
+        } catch (error) {
+          // When caller supplied an explicit amount, don't fail on unparseable
+          // refund list — we'll validate against remaining only if we can compute it.
+          if (p.amount === undefined) throw error;
+          remaining = undefined;
+        }
       } else if (p.amount === undefined) {
         throw new InvalidRequestError(
           "MyFatoorah refund requires amount (invoice does not expose remaining)",
@@ -187,7 +234,7 @@ export class MyFatoorahGateway extends BaseGateway {
       }
 
       if (remaining === 0) {
-        const embedded = nestedRefundFromInvoice(refunds, idempotencyKey);
+        const embedded = nestedRefundFromInvoice(refundsRaw, idempotencyKey);
         if (embedded !== undefined) return this.mapNestedRefundObject(embedded);
         throw new InvalidRequestError(
           "MyFatoorah invoice is already fully refunded (nothing remaining)",
@@ -197,10 +244,25 @@ export class MyFatoorahGateway extends BaseGateway {
       let outboundMajor: number;
       if (p.amount !== undefined) {
         const requested = this.myfatoorahOutboundMajor(p.amount, currency);
-        if (remaining !== undefined && requested > remaining) {
-          throw new InvalidRequestError(
-            "MyFatoorah refund amount exceeds the remaining refundable amount",
-          );
+        if (remaining !== undefined) {
+          // Compare via minor units to avoid IEEE float errors.
+          try {
+            const reqMinor = toMinorUnits(parseMyFatoorahAmount(requested, currency));
+            const remMinor = toMinorUnits(parseMyFatoorahAmount(remaining, currency));
+            if (reqMinor > remMinor) {
+              throw new InvalidRequestError(
+                "MyFatoorah refund amount exceeds the remaining refundable amount",
+              );
+            }
+          } catch (e) {
+            if (e instanceof InvalidRequestError) throw e;
+            // Fallback to numeric compare if Money parsing fails
+            if (requested > remaining) {
+              throw new InvalidRequestError(
+                "MyFatoorah refund amount exceeds the remaining refundable amount",
+              );
+            }
+          }
         }
         outboundMajor = requested;
       } else if (remaining !== undefined) {
@@ -391,6 +453,8 @@ export class MyFatoorahGateway extends BaseGateway {
       Order: {
         Amount: this.myfatoorahOutboundMajor(params.amount, currency),
         Currency: currency,
+        // Order.ExternalIdentifier is returned as Invoice.ExternalIdentifier in PAYMENT_STATUS_CHANGED webhooks
+        // for merchant paymentId correlation (Critical 12) — use orderId here.
         ...(params.orderId !== undefined && params.orderId.trim().length > 0
           ? { ExternalIdentifier: params.orderId.trim() }
           : {}),
@@ -460,6 +524,8 @@ export class MyFatoorahGateway extends BaseGateway {
       if (customer.civilId !== undefined && customer.civilId.trim().length > 0) {
         out.CivilId = customer.civilId.trim();
       }
+      // Avoid emitting empty Customer:{} which provider may reject.
+      if (Object.keys(out).length === 0) return undefined;
       return out;
     }
     if (typeof params.customerId === "string") {
@@ -510,11 +576,23 @@ export class MyFatoorahGateway extends BaseGateway {
   ): GatewayPaymentResult {
     const invoiceId = this.requireInvoiceId(data);
     const paymentCompleted = data.PaymentCompleted === true;
-    const invoiceStatusRaw = typeof data.InvoiceStatus === "string" ? data.InvoiceStatus : "";
-    const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
-    const transactionDetails = asRecord(data.TransactionDetails);
-    const transactionEvidence = mapMyFatoorahTransactionEvidence(transactionDetails.Status);
     const paymentUrl = typeof data.PaymentURL === "string" ? data.PaymentURL.trim() : "";
+
+    // Official V3 paid body nests statuses under TransactionDetails.Invoice/Transaction.
+    // Legacy shape used top-level InvoiceStatus and TransactionDetails.Status directly.
+    const transactionDetails = asRecord(data.TransactionDetails);
+    const legacyInvoiceStatusRaw =
+      typeof data.InvoiceStatus === "string" ? data.InvoiceStatus.trim() : "";
+    const nestedInvoice = asRecord(transactionDetails.Invoice);
+    const nestedTransaction = asRecord(transactionDetails.Transaction);
+    const invoiceStatusRaw =
+      (typeof nestedInvoice.Status === "string" ? nestedInvoice.Status.trim() : "") ||
+      legacyInvoiceStatusRaw;
+    const transactionStatusRaw =
+      (typeof nestedTransaction.Status === "string" ? nestedTransaction.Status.trim() : "") ||
+      (typeof transactionDetails.Status === "string" ? transactionDetails.Status.trim() : "");
+    const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
+    const transactionEvidence = mapMyFatoorahTransactionEvidence(transactionStatusRaw);
 
     const paidEvidence =
       paymentCompleted && (invoiceStatus === "paid" || transactionEvidence === "success");
@@ -578,13 +656,19 @@ export class MyFatoorahGateway extends BaseGateway {
     currency: string,
   ): number | undefined {
     const amount = asRecord(transactionDetails.Amount);
-    return this.parseMajor(amount.ValueInDisplayCurrency, currency);
+    // Official nests Amount under TransactionDetails.Amount; legacy same.
+    const value =
+      amount.ValueInDisplayCurrency ??
+      amount.Value ??
+      (transactionDetails as Record<string, unknown>).Amount;
+    return this.parseMajor(value, currency);
   }
 
   private paymentIdFromData(data: Record<string, unknown>): string | undefined {
-    const paymentId = data.PaymentId;
-    if (typeof paymentId === "string" && paymentId.length > 0) return paymentId;
-    return undefined;
+    return (
+      stringOrNumberId(data.PaymentId) ??
+      stringOrNumberId(asRecord(data.TransactionDetails).PaymentId)
+    );
   }
 
   private requireInvoiceId(data: Record<string, unknown>): string {
@@ -654,9 +738,11 @@ export class MyFatoorahGateway extends BaseGateway {
   }
 
   private successTransaction(data: Record<string, unknown>): Record<string, unknown> | undefined {
-    const transactions = data.Transactions;
-    if (!Array.isArray(transactions)) return undefined;
-    for (const transaction of transactions) {
+    const candidates: unknown[] | undefined =
+      (Array.isArray(data.InvoiceTransactions) ? data.InvoiceTransactions : undefined) ??
+      (Array.isArray(data.Transactions) ? data.Transactions : undefined);
+    if (candidates === undefined) return undefined;
+    for (const transaction of candidates) {
       const rec = asRecord(transaction);
       if (mapMyFatoorahTransactionEvidence(rec.TransactionStatus) === "success") {
         return rec;
@@ -669,21 +755,13 @@ export class MyFatoorahGateway extends BaseGateway {
     transaction: Record<string, unknown> | undefined,
   ): string | undefined {
     if (transaction === undefined) return undefined;
-    const paymentId = transaction.PaymentId;
-    if (typeof paymentId === "string" && paymentId.length > 0) return paymentId;
-    return undefined;
+    return stringOrNumberId(transaction.PaymentId);
   }
 
   private transactionCurrency(transaction: Record<string, unknown>): string | undefined {
     for (const key of ["Currency", "PaidCurrency"]) {
-      const value = transaction[key];
-      if (
-        typeof value === "string" &&
-        value.trim().length === 3 &&
-        CURRENCY_CODE.test(value.trim())
-      ) {
-        return value.trim().toUpperCase();
-      }
+      const value = normalizeMyFatoorahCurrency(transaction[key]);
+      if (value !== undefined) return value;
     }
     return undefined;
   }
@@ -705,25 +783,53 @@ export class MyFatoorahGateway extends BaseGateway {
     }
     return undefined;
   }
-
   // ─── Refund helpers ─────────────────────────────────────────────────────
 
   private refundCurrency(
     params: MyFatoorahRefundParams,
     paymentStatus: Record<string, unknown>,
+    refundStatus?: Record<string, unknown>,
   ): string {
+    // MakeRefund Amount is account base currency (e.g. KWD), not display currency (e.g. SAR).
+    // Prefer BaseCurrency from GetRefundStatus RefundStatusResult when available.
+    if (refundStatus !== undefined) {
+      const baseFromRefund = myFatoorahRefundBaseCurrency(refundStatus);
+      const normalizedBase =
+        baseFromRefund !== undefined ? normalizeMyFatoorahCurrency(baseFromRefund) : undefined;
+      if (normalizedBase !== undefined) {
+        const requested = typeof params.currency === "string" ? params.currency.trim() : "";
+        if (requested.length > 0) {
+          const normReq = normalizeMyFatoorahCurrency(requested) ?? requested.trim().toUpperCase();
+          if (normReq !== normalizedBase) {
+            throw new InvalidRequestError(
+              `MyFatoorah refund currency "${requested}" does not match account base currency "${normalizedBase}"`,
+            );
+          }
+        }
+        return normalizedBase;
+      }
+    }
     const fromInvoice = this.transactionCurrency(this.successTransaction(paymentStatus) ?? {});
     const requested = typeof params.currency === "string" ? params.currency.trim() : "";
+    // fromInvoice is display currency (PaidCurrency/Currency) — not ideal for MakeRefund base currency,
+    // but fallback when refund base currency is unavailable. Validate against caller currency when provided.
     if (fromInvoice !== undefined) {
-      if (requested.length > 0 && !CURRENCY_CODE.test(requested)) {
+      const normReq = requested.length > 0 ? normalizeMyFatoorahCurrency(requested) : undefined;
+      if (requested.length > 0 && normReq === undefined) {
         throw new InvalidRequestError(
           `MyFatoorah refund currency "${requested}" is not a 3-letter code`,
         );
       }
+      if (normReq !== undefined && normReq !== fromInvoice) {
+        throw new InvalidRequestError(
+          `MyFatoorah refund currency "${String(requested)}" does not match retrieved currency "${String(fromInvoice)}"`,
+        );
+      }
       return fromInvoice;
     }
-    if (requested.length > 0 && CURRENCY_CODE.test(requested)) {
-      return requested.toUpperCase();
+    const normReq = normalizeMyFatoorahCurrency(requested);
+    if (normReq !== undefined) {
+      return normReq;
     }
     throw new InvalidRequestError(
       "MyFatoorah refund requires currency (pass RefundParams.currency or retrieve it from the invoice)",
@@ -740,7 +846,6 @@ export class MyFatoorahGateway extends BaseGateway {
       `MyFatoorah ${operation} currency "${String(requested)}" does not match retrieved currency "${String(retrieved)}"`,
     );
   }
-
   private async postMyFatoorahRefund(input: {
     invoiceId: string;
     amount: number;
@@ -777,20 +882,43 @@ export class MyFatoorahGateway extends BaseGateway {
       // Contingency: the Idempotency-Key header is only honored in KWT/SAU.
       // On a provider validation rejection elsewhere, retry once without the
       // header; `ExternalIdentifier` still carries the caller key for replay.
-      // Provider validation failures carry `validationErrors`; local
-      // pre-request validation errors never trigger this retry.
+      // Provider validation failures carry `validationErrors` as [{status, body: {ValidationErrors:[{Name,Error}]}}].
+      // Local pre-request validation errors never trigger this retry.
       if (
         error instanceof InvalidRequestError &&
         error.validationErrors !== undefined &&
         error.validationErrors.length > 0
       ) {
-        const hasIdempotencyValidationError = error.validationErrors.some((v) => {
-          const name = (v as unknown as Record<string, unknown>).Name;
-          if (typeof name === "string" && String(name).toLowerCase().includes("idempotency")) {
-            return true;
+        const hasIdempotencyValidationError = error.validationErrors.some((entry) => {
+          if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+            const rec = entry as Record<string, unknown>;
+            const body = rec.body as unknown;
+            if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+              const validationErrors = (body as Record<string, unknown>).ValidationErrors;
+              if (Array.isArray(validationErrors)) {
+                for (const ve of validationErrors) {
+                  if (ve !== null && typeof ve === "object" && !Array.isArray(ve)) {
+                    const veRec = ve as Record<string, unknown>;
+                    const name = typeof veRec.Name === "string" ? veRec.Name : "";
+                    const err = typeof veRec.Error === "string" ? veRec.Error : "";
+                    if (
+                      name.toLowerCase().includes("idempotency") ||
+                      err.toLowerCase().includes("idempotency")
+                    ) {
+                      return true;
+                    }
+                  }
+                }
+              }
+            }
+            // Fallback: check direct Name on wrapper or full JSON for idempotency
+            const name = (rec as Record<string, unknown>).Name;
+            if (typeof name === "string" && name.toLowerCase().includes("idempotency")) {
+              return true;
+            }
           }
           try {
-            return JSON.stringify(v).toLowerCase().includes("idempotency");
+            return JSON.stringify(entry).toLowerCase().includes("idempotency");
           } catch {
             return false;
           }

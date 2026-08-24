@@ -59,9 +59,9 @@ describe("myfatoorah refund support", () => {
 
   it("throws when the invoice amount or refund list is unparseable", () => {
     expect(() => myFatoorahRemainingRefundMajor(undefined, [], "SAR")).toThrow(InvalidRequestError);
-    expect(() => myFatoorahRemainingRefundMajor(10.5, undefined, "SAR")).toThrow(
-      InvalidRequestError,
-    );
+    // No refunds yet — remaining is full invoice amount (does not throw)
+    expect(myFatoorahRemainingRefundMajor(10.5, undefined, "SAR")).toBe(10.5);
+    expect(myFatoorahRemainingRefundMajor(10.5, [], "SAR")).toBe(10.5);
     expect(() => myFatoorahRemainingRefundMajor(10.5, [{ RefundId: 1 }], "SAR")).toThrow(
       InvalidRequestError,
     );

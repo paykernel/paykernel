@@ -19,6 +19,7 @@ import {
   makeRefundData,
   paymentWebhook,
 } from "./fixtures/webhooks";
+import type { MyFatoorahCountry } from "./config";
 
 type FetchCall = { url: string; init?: RequestInit };
 
@@ -30,14 +31,20 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function createGateway(
-  queue: Response[],
+  queue: (Response | Error)[],
   calls: FetchCall[],
-  config: { webhookUrl?: string; defaultPaymentMethod?: string; timeoutMs?: number } = {},
+  config: {
+    country?: MyFatoorahCountry;
+    webhookUrl?: string;
+    defaultPaymentMethod?: string;
+    timeoutMs?: number;
+  } = {},
 ): MyFatoorahGateway {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ url: String(input), init });
     const next = queue.shift();
     if (!next) throw new Error(`unexpected MyFatoorah fetch: ${String(input)}`);
+    if (next instanceof Error) throw next;
     return next;
   }) as typeof fetch;
   return new MyFatoorahGateway(
@@ -131,6 +138,47 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(result.nextAction).toBeUndefined();
     expect(result.amount).toBe(10.5);
     expect(result.currency).toBe("SAR");
+  });
+
+  it("maps legacy flat paid evidence (InvoiceStatus + TransactionDetails.Status) as paid", async () => {
+    const legacy = paidCreateData({
+      InvoiceStatus: "PAID",
+      TransactionDetails: {
+        Status: "SUCCESS",
+        Amount: { ValueInBaseCurrency: 10.5, ValueInDisplayCurrency: 10.5 },
+      },
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(legacy))], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.status).toBe("paid");
+    expect(result.amount).toBe(10.5);
+  });
+
+  it("retries post-submit network errors on create only for KWT/SAU", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        new TypeError("connect ECONNREFUSED"),
+        new TypeError("connect ECONNREFUSED"),
+        new TypeError("connect ECONNREFUSED"),
+      ],
+      calls,
+      { country: "KWT" },
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("indeterminate");
+    expect(calls.length).toBe(3);
+  });
+
+  it("does not retry post-submit network errors on create outside KWT/SAU", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([new TypeError("connect ECONNREFUSED")], calls, {
+      country: "BHR",
+    });
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("indeterminate");
+    expect(calls.length).toBe(1);
   });
 
   it("returns indeterminate when a mutating 2xx has no InvoiceId", async () => {
@@ -245,13 +293,15 @@ describe("MyFatoorahGateway.getPayment", () => {
   it("keeps a pending invoice pending even when the latest transaction failed", async () => {
     const data = paidInvoiceStatusData();
     data.InvoiceStatus = "Pending";
-    data.Transactions = [
+    const failed = [
       {
         TransactionStatus: "FAILED",
         TransactionId: "t1",
         Currency: "SAR",
       },
     ];
+    data.Transactions = failed;
+    (data as Record<string, unknown>).InvoiceTransactions = failed;
     const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
     const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
     expect(result.status).toBe("pending");
@@ -260,11 +310,25 @@ describe("MyFatoorahGateway.getPayment", () => {
 
   it("maps a paid invoice without a success transaction as paid", async () => {
     const data = paidInvoiceStatusData();
-    data.Transactions = [{ TransactionStatus: "FAILED", Currency: "SAR" }];
+    const failed = [{ TransactionStatus: "FAILED", Currency: "SAR" }];
+    data.Transactions = failed;
+    (data as Record<string, unknown>).InvoiceTransactions = failed;
     const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
     const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
     expect(result.status).toBe("paid");
     expect(result.amount).toBeUndefined();
+  });
+
+  it("normalizes the KD currency alias to KWD from the success transaction", async () => {
+    const data = paidInvoiceStatusData({
+      Transactions: [
+        { TransactionStatus: "Succss", PaymentId: "t1", Currency: "KD", PaidCurrency: "KD" },
+      ],
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    expect(result.status).toBe("paid");
+    expect(result.currency).toBe("KWD");
   });
 
   it("maps canceled invoices to cancelled / failed outcome", async () => {
@@ -367,18 +431,19 @@ describe("MyFatoorahGateway.refundPayment", () => {
   });
 
   it("replays a fully refunded invoice from the nested refund when keyed", async () => {
-    const refundStatus = partialRefundStatusData();
-    refundStatus.Refunds = [
-      {
-        RefundId: 22201,
-        ExternalIdentifier: "refund-idem-2",
-        Comment: null,
-        InvoiceId: 915102,
-        Amount: 10.5,
-        ServiceChargeOnCustomer: 0,
-        RefundStatus: "Refunded",
-      },
-    ];
+    const refundStatus = partialRefundStatusData({
+      Refunds: [
+        {
+          RefundId: 22201,
+          ExternalIdentifier: "refund-idem-2",
+          Comment: null,
+          InvoiceId: 915102,
+          Amount: 10.5,
+          ServiceChargeOnCustomer: 0,
+          RefundStatus: "Refunded",
+        },
+      ],
+    });
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [
@@ -398,18 +463,19 @@ describe("MyFatoorahGateway.refundPayment", () => {
   });
 
   it("throws for a fully refunded invoice with no matching nested refund", async () => {
-    const refundStatus = partialRefundStatusData();
-    refundStatus.Refunds = [
-      {
-        RefundId: 22201,
-        ExternalIdentifier: "refund-idem-1",
-        Comment: null,
-        InvoiceId: 915102,
-        Amount: 10.5,
-        ServiceChargeOnCustomer: 0,
-        RefundStatus: "Refunded",
-      },
-    ];
+    const refundStatus = partialRefundStatusData({
+      Refunds: [
+        {
+          RefundId: 22201,
+          ExternalIdentifier: "refund-idem-1",
+          Comment: null,
+          InvoiceId: 915102,
+          Amount: 10.5,
+          ServiceChargeOnCustomer: 0,
+          RefundStatus: "Refunded",
+        },
+      ],
+    });
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [

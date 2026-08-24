@@ -28,7 +28,8 @@ function stringOrNumberId(value: unknown): string | undefined {
 
 /**
  * Payment-domain status from a `PAYMENT_STATUS_CHANGED` event.
- * Paid requires `Invoice.Status=PAID` **and** a success transaction.
+ * Invoice `PAID` is authoritative — it stays `paid` regardless of the
+ * Transaction status (KNET can emit duplicate/aux transaction statuses).
  * A pending invoice stays pending even when the latest transaction failed
  * (the customer can retry the same invoice).
  */
@@ -38,7 +39,7 @@ export function myFatoorahPaymentWebhookStatus(
 ): PaymentStatus {
   const invoice = mapMyFatoorahInvoiceStatus(invoiceStatus);
   if (invoice === "paid") {
-    return mapMyFatoorahTransactionEvidence(transactionStatus) === "success" ? "paid" : "failed";
+    return "paid";
   }
   if (invoice === "pending") {
     return mapMyFatoorahTransactionEvidence(transactionStatus) === "authorized" ? "authorized" : "pending";
@@ -116,8 +117,7 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
   const paymentId =
     typeof merchantId === "string" && merchantId.length > 0 ? merchantId : undefined;
   const status = myFatoorahPaymentWebhookStatus(invoice.Status, transaction.Status);
-  const transactionPaymentId =
-    typeof transaction.PaymentId === "string" ? transaction.PaymentId : undefined;
+  const transactionPaymentId = stringOrNumberId(transaction.PaymentId);
   const nativeType = `invoice.${typeof invoice.Status === "string" ? invoice.Status : "UNKNOWN"}`;
   const stable = inferMyFatoorahStableType("invoice", status);
   const timestamp = myFatoorahWebhookTimestamp(payload);
@@ -162,7 +162,10 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
   }
   const data = asRecord((payload as Record<string, unknown>)?.Data);
   const refund = asRecord(data.Refund);
-  const referencedInvoice = asRecord(refund.ReferencedInvoice);
+  // Official shape has ReferencedInvoice as sibling of Refund; legacy nests it under Refund.
+  const referencedInvoice = asRecord(
+    data.ReferencedInvoice !== undefined ? data.ReferencedInvoice : refund.ReferencedInvoice,
+  );
 
   const invoiceId = stringOrNumberId(referencedInvoice.Id);
   if (invoiceId === undefined) {
