@@ -5,6 +5,7 @@ import {
   type PaymentStatus,
   type WebhookEvent,
 } from "@paykernel/core";
+import { myFatoorahMajorNumber, parseMyFatoorahAmount } from "./money";
 import {
   inferMyFatoorahStableType,
   mapMyFatoorahInvoiceStatus,
@@ -30,8 +31,9 @@ function stringOrNumberId(value: unknown): string | undefined {
  * Payment-domain status from a `PAYMENT_STATUS_CHANGED` event.
  * Invoice `PAID` is authoritative — it stays `paid` regardless of the
  * Transaction status (KNET can emit duplicate/aux transaction statuses).
- * A pending invoice stays pending even when the latest transaction failed
- * (the customer can retry the same invoice).
+ * A pending invoice stays pending even when transaction is `AUTHORIZE`
+ * (auth/capture not implemented; no fulfilled authorized state). Customer
+ * can retry the same invoice when transaction failed.
  */
 export function myFatoorahPaymentWebhookStatus(
   invoiceStatus: unknown,
@@ -42,12 +44,12 @@ export function myFatoorahPaymentWebhookStatus(
     return "paid";
   }
   if (invoice === "pending") {
-    return mapMyFatoorahTransactionEvidence(transactionStatus) === "authorized" ? "authorized" : "pending";
+    return "pending";
   }
   if (invoice === "cancelled" || invoice === "failed") return invoice;
   switch (mapMyFatoorahTransactionEvidence(transactionStatus)) {
     case "authorized":
-      return "authorized";
+      return "pending";
     case "cancelled":
       return "cancelled";
     default:
@@ -76,6 +78,39 @@ export function withRelatedIdsOnPaymentEvent(
       },
     },
   };
+}
+function webhookMoneyFromAmountRecord(
+  amount: unknown,
+): { amount: number; currency: string } | undefined {
+  const rec = asRecord(amount);
+  const tryParse = (
+    value: unknown,
+    currency: unknown,
+  ): { amount: number; currency: string } | undefined => {
+    if (typeof currency !== "string" || currency.trim().length !== 3) return undefined;
+    const cur = currency.trim().toUpperCase();
+    if (value === undefined || value === null) return undefined;
+    try {
+      const money = parseMyFatoorahAmount(value, cur);
+      return { amount: myFatoorahMajorNumber(money, cur), currency: cur };
+    } catch {
+      return undefined;
+    }
+  };
+  // Prefer base currency, then display, then pay
+  const base = tryParse(rec.ValueInBaseCurrency, rec.BaseCurrency);
+  if (base !== undefined) return base;
+  const display = tryParse(rec.ValueInDisplayCurrency, rec.DisplayCurrency);
+  if (display !== undefined) return display;
+  const pay = tryParse(rec.ValueInPayCurrency, rec.PayCurrency);
+  if (pay !== undefined) return pay;
+  // Fallback legacy plain Value
+  const fallback = tryParse(
+    rec.Value ?? rec.Amount,
+    rec.Currency ?? rec.BaseCurrency ?? rec.DisplayCurrency,
+  );
+  if (fallback !== undefined) return fallback;
+  return undefined;
 }
 
 /** Webhook timestamp: `Event.CreationDate` ISO string, fail-closed. */
@@ -122,6 +157,7 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
   const stable = inferMyFatoorahStableType("invoice", status);
   const timestamp = myFatoorahWebhookTimestamp(payload);
   const id = myFatoorahEventReference(payload);
+  const money = webhookMoneyFromAmountRecord(data.Amount);
 
   const legacy: WebhookEvent = {
     id,
@@ -132,6 +168,7 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
     status,
     timestamp,
     rawPayload: payload,
+    ...(money !== undefined ? { amount: money.amount, currency: money.currency } : {}),
   };
 
   const attached = attachPaymentEvent(legacy);
@@ -180,6 +217,9 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
   const stable = inferMyFatoorahStableType("refund", status);
   const timestamp = myFatoorahWebhookTimestamp(payload);
   const id = myFatoorahEventReference(payload);
+  const refundMoney = webhookMoneyFromAmountRecord(
+    data.Amount !== undefined ? data.Amount : refund.Amount,
+  );
 
   const legacy: WebhookEvent = {
     id,
@@ -191,6 +231,9 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
     status,
     timestamp,
     rawPayload: payload,
+    ...(refundMoney !== undefined
+      ? { amount: refundMoney.amount, currency: refundMoney.currency }
+      : {}),
   };
 
   const attached = attachPaymentEvent(legacy);

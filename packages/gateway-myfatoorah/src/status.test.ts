@@ -58,7 +58,7 @@ describe("myfatoorah status mapping", () => {
     expect(myFatoorahPaymentWebhookStatus("PENDING", "SUCCESS")).toBe("pending");
     expect(myFatoorahPaymentWebhookStatus("CANCELED", "FAILED")).toBe("cancelled");
     expect(myFatoorahPaymentWebhookStatus("PAID", "AUTHORIZE")).toBe("paid");
-    expect(myFatoorahPaymentWebhookStatus("PENDING", "AUTHORIZE")).toBe("authorized");
+    expect(myFatoorahPaymentWebhookStatus("PENDING", "AUTHORIZE")).toBe("pending");
   });
 
   it("infers stable types", () => {

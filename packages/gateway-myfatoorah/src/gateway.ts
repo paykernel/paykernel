@@ -92,6 +92,44 @@ function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
   }
   return isMyFatoorahRetryableError(error);
 }
+function hasMyFatoorahIdempotencyValidationError(error: unknown): boolean {
+  if (
+    !(error instanceof InvalidRequestError) ||
+    error.validationErrors === undefined ||
+    error.validationErrors.length === 0
+  ) {
+    return false;
+  }
+  for (const entry of error.validationErrors) {
+    if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
+      const rec = entry as Record<string, unknown>;
+      const body = rec.body as unknown;
+      if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+        const validationErrors = (body as Record<string, unknown>).ValidationErrors;
+        if (Array.isArray(validationErrors)) {
+          for (const ve of validationErrors) {
+            if (ve !== null && typeof ve === "object" && !Array.isArray(ve)) {
+              const veRec = ve as Record<string, unknown>;
+              const name = typeof veRec.Name === "string" ? veRec.Name : "";
+              const err = typeof veRec.Error === "string" ? veRec.Error : "";
+              if (
+                name.toLowerCase().includes("idempotency") ||
+                err.toLowerCase().includes("idempotency")
+              ) {
+                return true;
+              }
+            }
+          }
+        }
+      }
+      const name = (rec as Record<string, unknown>).Name;
+      if (typeof name === "string" && name.toLowerCase().includes("idempotency")) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 function currenciesMismatch(requested: unknown, retrieved: unknown): boolean {
   if (typeof requested !== "string" || requested.trim().length === 0) {
@@ -167,14 +205,39 @@ export class MyFatoorahGateway extends BaseGateway {
       const isRetryable = idempotencySupported
         ? isMyFatoorahRetryableNetworkError
         : isMyFatoorahRetryableBeforeSubmit;
-      const { data, raw } = await this.myfatoorahRequest("POST", "/v3/payments", body, {
+      const requestOptions = {
         signal: p.signal,
-        retry: true,
+        retry: true as const,
         idempotencyKey,
-        postSubmit: true,
+        postSubmit: true as const,
         isRetryable,
-      });
-      return this.mapCreateResult(data, raw, p.currency.trim().toUpperCase());
+      };
+      try {
+        const { data, raw } = await this.myfatoorahRequest(
+          "POST",
+          "/v3/payments",
+          body,
+          requestOptions,
+        );
+        return this.mapCreateResult(data, raw, p.currency.trim().toUpperCase());
+      } catch (error) {
+        if (hasMyFatoorahIdempotencyValidationError(error)) {
+          const retryWithoutHeader = {
+            signal: requestOptions.signal,
+            retry: requestOptions.retry,
+            postSubmit: requestOptions.postSubmit,
+            isRetryable: requestOptions.isRetryable,
+          };
+          const { data, raw } = await this.myfatoorahRequest(
+            "POST",
+            "/v3/payments",
+            body,
+            retryWithoutHeader,
+          );
+          return this.mapCreateResult(data, raw, p.currency.trim().toUpperCase());
+        }
+        throw error;
+      }
     });
   }
 
@@ -199,13 +262,13 @@ export class MyFatoorahGateway extends BaseGateway {
           "POST",
           "/v2/GetRefundStatus",
           { KeyType: "InvoiceId", Key: invoiceId },
-          { signal: p.signal, retry: true },
+          { signal: p.signal, retry: true, postSubmit: false },
         ),
         this.myfatoorahRequest(
           "POST",
           "/v2/GetPaymentStatus",
           { KeyType: "InvoiceId", Key: invoiceId },
-          { signal: p.signal, retry: true },
+          { signal: p.signal, retry: true, postSubmit: false },
         ),
       ]);
 
@@ -219,14 +282,7 @@ export class MyFatoorahGateway extends BaseGateway {
 
       let remaining: number | undefined;
       if (invoiceAmount !== undefined) {
-        try {
-          remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
-        } catch (error) {
-          // When caller supplied an explicit amount, don't fail on unparseable
-          // refund list — we'll validate against remaining only if we can compute it.
-          if (p.amount === undefined) throw error;
-          remaining = undefined;
-        }
+        remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
       } else if (p.amount === undefined) {
         throw new InvalidRequestError(
           "MyFatoorah refund requires amount (invoice does not expose remaining)",
@@ -292,11 +348,16 @@ export class MyFatoorahGateway extends BaseGateway {
           'MyFatoorah myfatoorahKeyType must be "InvoiceId" or "PaymentId"',
         );
       }
+      if (keyType === "InvoiceId" && id.length >= 14) {
+        throw new InvalidRequestError(
+          `MyFatoorah getPayment gatewayPaymentId "${id}" looks like a PaymentId (use myfatoorahKeyType: "PaymentId" for the callback paymentId)`,
+        );
+      }
       const { data, raw } = await this.myfatoorahRequest(
         "POST",
         "/v2/GetPaymentStatus",
         { Key: id, KeyType: keyType },
-        { signal: p.signal, retry: true },
+        { signal: p.signal, retry: true, postSubmit: false },
       );
       return this.mapGetPaymentResult(data, raw);
     });
@@ -413,6 +474,7 @@ export class MyFatoorahGateway extends BaseGateway {
         body: jsonParseFailed ? { body: responseText } : data,
         method,
         headers: response.headers,
+        postSubmit,
       });
     }
 
@@ -422,6 +484,7 @@ export class MyFatoorahGateway extends BaseGateway {
       responseText,
       jsonParseFailed,
       data,
+      postSubmit,
     });
 
     const raw = data;
@@ -650,17 +713,73 @@ export class MyFatoorahGateway extends BaseGateway {
     );
   }
 
-  /** `TransactionDetails.Amount.ValueInDisplayCurrency` in the request currency. */
+  /** Amount in request currency; picks the matching ValueIn* field by currency. */
   private createResultAmount(
     transactionDetails: Record<string, unknown>,
     currency: string,
   ): number | undefined {
     const amount = asRecord(transactionDetails.Amount);
-    // Official nests Amount under TransactionDetails.Amount; legacy same.
-    const value =
-      amount.ValueInDisplayCurrency ??
-      amount.Value ??
-      (transactionDetails as Record<string, unknown>).Amount;
+    const requested = normalizeMyFatoorahCurrency(currency) ?? currency.trim().toUpperCase();
+    const payCurrency =
+      normalizeMyFatoorahCurrency(amount.PayCurrency) ??
+      (typeof amount.PayCurrency === "string"
+        ? amount.PayCurrency.trim().toUpperCase()
+        : undefined);
+    const displayCurrency =
+      normalizeMyFatoorahCurrency(amount.DisplayCurrency) ??
+      (typeof amount.DisplayCurrency === "string"
+        ? amount.DisplayCurrency.trim().toUpperCase()
+        : undefined);
+    const baseCurrency =
+      normalizeMyFatoorahCurrency(amount.BaseCurrency) ??
+      (typeof amount.BaseCurrency === "string"
+        ? amount.BaseCurrency.trim().toUpperCase()
+        : undefined);
+    let value: unknown;
+    if (
+      payCurrency !== undefined &&
+      payCurrency === requested &&
+      amount.ValueInPayCurrency !== undefined
+    ) {
+      value = amount.ValueInPayCurrency;
+    } else if (
+      displayCurrency !== undefined &&
+      displayCurrency === requested &&
+      amount.ValueInDisplayCurrency !== undefined
+    ) {
+      value = amount.ValueInDisplayCurrency;
+    } else if (
+      baseCurrency !== undefined &&
+      baseCurrency === requested &&
+      amount.ValueInBaseCurrency !== undefined
+    ) {
+      value = amount.ValueInBaseCurrency;
+    } else {
+      // Fallback: legacy Value or plain Amount number; only use display if currencies match or missing
+      value =
+        amount.ValueInDisplayCurrency ??
+        amount.Value ??
+        (transactionDetails as Record<string, unknown>).Amount;
+      // If fallback picked a ValueIn* but its currency mismatches requested, omit rather than publish wrong currency
+      if (
+        value === amount.ValueInPayCurrency &&
+        payCurrency !== undefined &&
+        payCurrency !== requested
+      )
+        return undefined;
+      if (
+        value === amount.ValueInDisplayCurrency &&
+        displayCurrency !== undefined &&
+        displayCurrency !== requested
+      )
+        return undefined;
+      if (
+        value === amount.ValueInBaseCurrency &&
+        baseCurrency !== undefined &&
+        baseCurrency !== requested
+      )
+        return undefined;
+    }
     return this.parseMajor(value, currency);
   }
 
@@ -882,64 +1001,21 @@ export class MyFatoorahGateway extends BaseGateway {
       // Contingency: the Idempotency-Key header is only honored in KWT/SAU.
       // On a provider validation rejection elsewhere, retry once without the
       // header; `ExternalIdentifier` still carries the caller key for replay.
-      // Provider validation failures carry `validationErrors` as [{status, body: {ValidationErrors:[{Name,Error}]}}].
-      // Local pre-request validation errors never trigger this retry.
-      if (
-        error instanceof InvalidRequestError &&
-        error.validationErrors !== undefined &&
-        error.validationErrors.length > 0
-      ) {
-        const hasIdempotencyValidationError = error.validationErrors.some((entry) => {
-          if (entry !== null && typeof entry === "object" && !Array.isArray(entry)) {
-            const rec = entry as Record<string, unknown>;
-            const body = rec.body as unknown;
-            if (body !== null && typeof body === "object" && !Array.isArray(body)) {
-              const validationErrors = (body as Record<string, unknown>).ValidationErrors;
-              if (Array.isArray(validationErrors)) {
-                for (const ve of validationErrors) {
-                  if (ve !== null && typeof ve === "object" && !Array.isArray(ve)) {
-                    const veRec = ve as Record<string, unknown>;
-                    const name = typeof veRec.Name === "string" ? veRec.Name : "";
-                    const err = typeof veRec.Error === "string" ? veRec.Error : "";
-                    if (
-                      name.toLowerCase().includes("idempotency") ||
-                      err.toLowerCase().includes("idempotency")
-                    ) {
-                      return true;
-                    }
-                  }
-                }
-              }
-            }
-            // Fallback: check direct Name on wrapper or full JSON for idempotency
-            const name = (rec as Record<string, unknown>).Name;
-            if (typeof name === "string" && name.toLowerCase().includes("idempotency")) {
-              return true;
-            }
-          }
-          try {
-            return JSON.stringify(entry).toLowerCase().includes("idempotency");
-          } catch {
-            return false;
-          }
-        });
-        if (!hasIdempotencyValidationError) throw error;
-        const retryWithoutHeader = {
-          signal: requestOptions.signal,
-          retry: requestOptions.retry,
-          postSubmit: requestOptions.postSubmit,
-          currency: requestOptions.currency,
-          isRetryable: requestOptions.isRetryable,
-        };
-        const { data, raw } = await this.myfatoorahRequest(
-          "POST",
-          "/v2/MakeRefund",
-          body,
-          retryWithoutHeader,
-        );
-        return this.mapMakeRefundResult(data, raw);
-      }
-      throw error;
+      if (!hasMyFatoorahIdempotencyValidationError(error)) throw error;
+      const retryWithoutHeader = {
+        signal: requestOptions.signal,
+        retry: requestOptions.retry,
+        postSubmit: requestOptions.postSubmit,
+        currency: requestOptions.currency,
+        isRetryable: requestOptions.isRetryable,
+      };
+      const { data, raw } = await this.myfatoorahRequest(
+        "POST",
+        "/v2/MakeRefund",
+        body,
+        retryWithoutHeader,
+      );
+      return this.mapMakeRefundResult(data, raw);
     }
   }
 

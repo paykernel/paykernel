@@ -16,13 +16,12 @@ Refund (`REFUND_STATUS_CHANGED` / `Event.Code` 2): official `Data` has **sibling
 Refund.Id={id},Refund.Status={status},Amount.ValueInBaseCurrency={amount},ReferencedInvoice.Id={id}
 ```
 
-`verifyWebhook` fails closed (`false`) when: `webhookSecret` missing, header missing, unsupported event name/code, unparseable payload, invalid Base64, or byte mismatch (constant-time).
+`verifyWebhook` fails closed (`false`) when: `webhookSecret` missing, header missing, unsupported `Event.Name` (present and unknown — does not fallback to `Event.Code`), unsupported `Event.Code` when `Name` is empty, unparseable payload, invalid Base64, or byte mismatch (constant-time). `Event.Name` is authoritative; `Code` 1/2 is only fallback when `Name` is missing.
 
 `parseWebhookEvent` normalizes:
 
-- payment: `gatewayPaymentId` = `Invoice.Id`, merchant `paymentId` = `Invoice.ExternalIdentifier` (never `UserDefinedField`); `Invoice.Status=PAID` is authoritative (`paid` regardless of `Transaction.Status` — KNET duplicate webhooks must not un-fulfill); `AUTHORIZE` → `authorized`, `FAILED` → `failed`, `CANCELED` → `cancelled`, pending invoice → `pending`. `Transaction.PaymentId` (string or number) rides `event.payment.references.relatedIds.paymentId`
-- refund: `gatewayPaymentId` = `ReferencedInvoice.Id` (official sibling; legacy `Refund.ReferencedInvoice` fallback), `gatewayObjectId` = `Refund.Id`; `REFUNDED` → `refunded`, `CANCELED` → `refund_failed`; `Amount.ValueInBaseCurrency` is read from `Data.Amount` (fallback to `Refund.Amount`)
-
+- payment: `gatewayPaymentId` = `Invoice.Id`, merchant `paymentId` = `Invoice.ExternalIdentifier` (never `UserDefinedField`); `Invoice.Status=PAID` is authoritative (`paid` regardless of `Transaction.Status` — KNET duplicate webhooks must not un-fulfill); `AUTHORIZE` → `pending` (until auth/capture is implemented), `FAILED` → `failed`, `CANCELED` → `cancelled`, pending invoice → `pending`. `Transaction.PaymentId` (string or number) rides `event.payment.references.relatedIds.paymentId`. `Data.Amount` (base/display/pay) is published as `amount`/`currency` when parseable (base preferred)
+- refund: `gatewayPaymentId` = `ReferencedInvoice.Id` (official sibling; legacy `Refund.ReferencedInvoice` fallback), `gatewayObjectId` = `Refund.Id`; `REFUNDED` → `refunded`, `CANCELED` → `refund_failed`; `Amount.ValueInBaseCurrency` is read from `Data.Amount` (fallback to `Refund.Amount`) and published as `amount`/`currency`
 Card data from `Transaction.Card` is never copied onto the normalized event beyond `rawPayload`.
 
 Fulfill only after an inbox **claim** and `status === "paid"` / `isPaidOutcome`. `handleWebhook` only verifies and normalizes.

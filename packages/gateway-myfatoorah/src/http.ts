@@ -75,9 +75,12 @@ export function mapMyFatoorahHttpFailure(input: {
   body: unknown;
   method: string;
   headers?: Headers;
+  /** True only for money-mutating calls (/v3/payments, /v2/MakeRefund). Inquiries must be false. */
+  postSubmit?: boolean;
 }): Error {
-  const { status, body, method, headers } = input;
-  const mutating = isMutatingMethod(method);
+  const { status, body, method, headers, postSubmit } = input;
+  const isPostSubmit =
+    postSubmit === true ? true : postSubmit === false ? false : isMutatingMethod(method);
   const message = myFatoorahValidationMessage(body) ?? `MyFatoorah API error (${status})`;
   const raw = { status, body };
 
@@ -89,7 +92,7 @@ export function mapMyFatoorahHttpFailure(input: {
   }
   // HTTP 5xx is classified before body codes.
   if (status >= 500) {
-    return new NetworkError(message, raw, mutating ? { afterProviderSubmit: true } : undefined);
+    return new NetworkError(message, raw, isPostSubmit ? { afterProviderSubmit: true } : undefined);
   }
   if (status === 401 || status === 403) {
     return new AuthenticationError(message, raw);
@@ -130,9 +133,16 @@ export function assertMyFatoorahSuccessEnvelope(input: {
   responseText: string;
   jsonParseFailed: boolean;
   data: unknown;
+  /** True only for money-mutating calls. Inquiries must be false. */
+  postSubmit?: boolean;
 }): void {
-  const mutating = isMutatingMethod(input.method);
-  const tag = mutating ? ({ afterProviderSubmit: true } as const) : undefined;
+  const isPostSubmit =
+    input.postSubmit === true
+      ? true
+      : input.postSubmit === false
+        ? false
+        : isMutatingMethod(input.method);
+  const tag = isPostSubmit ? ({ afterProviderSubmit: true } as const) : undefined;
   const raw = { status: input.status, body: input.responseText };
   if (input.jsonParseFailed) {
     throw new NetworkError("MyFatoorah API returned invalid JSON", raw, tag);

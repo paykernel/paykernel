@@ -73,6 +73,55 @@ describe("myfatoorah HTTP mapping", () => {
     expect((error as NetworkError).afterProviderSubmit).toBe(false);
   });
 
+  it("maps inquiry POST 500 to NetworkError without afterProviderSubmit", () => {
+    const error = mapMyFatoorahHttpFailure({
+      status: 500,
+      body: {},
+      method: "POST",
+      postSubmit: false,
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect((error as NetworkError).afterProviderSubmit).toBe(false);
+  });
+
+  it("maps mutating POST 500 to NetworkError with afterProviderSubmit when flagged", () => {
+    const error = mapMyFatoorahHttpFailure({
+      status: 500,
+      body: {},
+      method: "POST",
+      postSubmit: true,
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect((error as NetworkError).afterProviderSubmit).toBe(true);
+  });
+
+  it("rejects inquiry POST unusable 2xx bodies without afterProviderSubmit", () => {
+    expect(() =>
+      assertMyFatoorahSuccessEnvelope({
+        method: "POST",
+        status: 200,
+        responseText: "",
+        jsonParseFailed: false,
+        data: {},
+        postSubmit: false,
+      }),
+    ).toThrow(NetworkError);
+    try {
+      assertMyFatoorahSuccessEnvelope({
+        method: "POST",
+        status: 200,
+        responseText: "",
+        jsonParseFailed: false,
+        data: {},
+        postSubmit: false,
+      });
+      expect.unreachable("must throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(NetworkError);
+      expect((error as NetworkError).afterProviderSubmit).toBe(false);
+    }
+  });
+
   it("maps 401 / 403 to AuthenticationError", () => {
     expect(mapMyFatoorahHttpFailure({ status: 401, body: {}, method: "POST" })).toBeInstanceOf(
       AuthenticationError,

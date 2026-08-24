@@ -1,25 +1,28 @@
 import { InvalidRequestError } from "@paykernel/core";
 import type { MyFatoorahPaymentMethod } from "./types";
 
-const MYFATOORAH_PAYMENT_METHODS: ReadonlySet<string> = new Set([
-  "INVOICE",
-  "CARD",
-  "APPLE_PAY",
-  "GOOGLE_PAY",
-  "KNET",
-  "BENEFIT",
-  "STC_PAY",
-]);
+const MYFATOORAH_PAYMENT_METHODS: Record<string, true> = {
+  INVOICE: true,
+  CARD: true,
+  APPLE_PAY: true,
+  GOOGLE_PAY: true,
+  KNET: true,
+  BENEFIT: true,
+  STC_PAY: true,
+  MADA: true,
+  QPAY: true,
+  OMANNET: true,
+};
 
 /** PaymentMethod must be an uppercase documented method token (never a PAN). */
 export function assertMyFatoorahPaymentMethod(
   method: unknown,
 ): asserts method is MyFatoorahPaymentMethod {
-  if (typeof method !== "string" || !MYFATOORAH_PAYMENT_METHODS.has(method)) {
+  if (typeof method !== "string" || MYFATOORAH_PAYMENT_METHODS[method] !== true) {
     throw new InvalidRequestError(
-      `Unsupported MyFatoorah PaymentMethod "${String(method)}". Use ${[
-        ...MYFATOORAH_PAYMENT_METHODS,
-      ].join(", ")}.`,
+      `Unsupported MyFatoorah PaymentMethod "${String(method)}". Use ${Object.keys(
+        MYFATOORAH_PAYMENT_METHODS,
+      ).join(", ")}.`,
     );
   }
 }

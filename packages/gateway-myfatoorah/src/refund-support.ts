@@ -59,10 +59,9 @@ export function myFatoorahRefundExternalIdentifier(value: unknown): string | und
 }
 
 /**
- * Nested refund for crash-replay. Prefer `ExternalIdentifier` match (last
- * match wins). A single refund entry without an ExternalIdentifier is mapped;
- * a single entry with a **different** key, or multiple unmatched entries,
- * returns undefined so the caller fail-closes instead of posting again.
+ * Nested refund for crash-replay. Only maps when `ExternalIdentifier` matches
+ * `idempotencyKey` (last match wins). Single unkeyed entries are not mapped
+ * to an unrelated key — caller will fail-closed with already-refunded.
  */
 export function nestedRefundFromInvoice(
   refunds: unknown,
@@ -75,9 +74,6 @@ export function nestedRefundFromInvoice(
       (entry) => myFatoorahRefundExternalIdentifier(entry) === idempotencyKey,
     );
     if (matched.length > 0) return matched[matched.length - 1];
-    if (items.length === 1 && myFatoorahRefundExternalIdentifier(items[0]) === undefined) {
-      return items[0];
-    }
     return undefined;
   }
   if (items.length === 1) return items[0];

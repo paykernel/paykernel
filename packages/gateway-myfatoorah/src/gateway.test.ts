@@ -18,6 +18,7 @@ import {
   partialRefundStatusData,
   makeRefundData,
   paymentWebhook,
+  refundWebhook,
 } from "./fixtures/webhooks";
 import type { MyFatoorahCountry } from "./config";
 
@@ -271,6 +272,71 @@ describe("MyFatoorahGateway.createPayment", () => {
       gateway.createPayment({ ...createParams, metadata: { orderId: "x" } }),
     ).rejects.toThrow(InvalidRequestError);
   });
+
+  it("retries create once without Idempotency-Key on an idempotency validation error", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(
+          {
+            IsSuccess: false,
+            Message: "",
+            ValidationErrors: [{ Name: "Idempotency-Key", Error: "Header not supported" }],
+          },
+          400,
+        ),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({ ...createParams });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.length).toBe(2);
+    expect(String(calls[0]?.init?.headers?.["Idempotency-Key"] ?? "")).toBe("idem-create-1");
+    expect(calls[1]?.init?.headers?.["Idempotency-Key"]).toBeUndefined();
+  });
+
+  it("picks the currency-matching ValueIn* field on paid create", async () => {
+    const paid = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 64.772,
+          DisplayCurrency: "KWD",
+          ValueInDisplayCurrency: 800,
+          PayCurrency: "SAR",
+          ValueInPayCurrency: 800,
+        },
+      },
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paid))], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.amount).toBe(800);
+    expect(result.currency).toBe("SAR");
+  });
+
+  it("omits the paid amount when no ValueIn* field matches the request currency", async () => {
+    const paid = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 64.772,
+          DisplayCurrency: "KWD",
+          ValueInDisplayCurrency: 64.772,
+        },
+      },
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paid))], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.amount).toBeUndefined();
+  });
 });
 
 describe("MyFatoorahGateway.getPayment", () => {
@@ -347,6 +413,29 @@ describe("MyFatoorahGateway.getPayment", () => {
       InvalidRequestError,
     );
     expect(calls.length).toBe(0);
+  });
+
+  it("rejects PaymentId-shaped gatewayPaymentId with the InvoiceId default", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway([], calls);
+    await expect(gateway.getPayment({ gatewayPaymentId: "07076409988323998875" })).rejects.toThrow(
+      /PaymentId/,
+    );
+    expect(calls.length).toBe(0);
+  });
+
+  it("queries with KeyType PaymentId when requested", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData()))],
+      calls,
+    );
+    const result = await gateway.getPayment({
+      gatewayPaymentId: "07076409988323998875",
+      myfatoorahKeyType: "PaymentId",
+    });
+    expect(bodyOf(calls[0])).toEqual({ Key: "07076409988323998875", KeyType: "PaymentId" });
+    expect(result.status).toBe("paid");
   });
 });
 
@@ -512,6 +601,52 @@ describe("MyFatoorahGateway.refundPayment", () => {
     );
     expect(calls.length).toBe(0);
   });
+
+  it("throws on an unparseable refund list even with an explicit amount", async () => {
+    const refundStatus = {
+      Refunds: [{ RefundId: 22201, RefundStatus: "Refunded" }],
+    };
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(refundStatus)),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+      ],
+      calls,
+    );
+    await expect(
+      gateway.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "refund-idem-2",
+        amount: money("3.00", "SAR"),
+        currency: "SAR",
+      }),
+    ).rejects.toThrow(InvalidRequestError);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
+  it("throws on a GetRefundStatus 500 instead of returning indeterminate", async () => {
+    const calls: FetchCall[] = [];
+    const queue: (Response | Error)[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      queue.push(jsonResponse({ IsSuccess: false, Message: "boom" }, 500));
+    }
+    queue.push(jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())));
+    const gateway = createGateway(queue, calls);
+    let caught: unknown;
+    try {
+      await gateway.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "refund-idem-2",
+      });
+      expect.unreachable("must throw");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(NetworkError);
+    expect((caught as NetworkError).afterProviderSubmit).toBe(false);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
 });
 
 describe("MyFatoorahGateway.capturePayment / webhooks", () => {
@@ -533,9 +668,24 @@ describe("MyFatoorahGateway.capturePayment / webhooks", () => {
     expect(event.status).toBe("paid");
     expect(event.stableType).toBe("payment.succeeded");
     expect(event.timestamp).toBeInstanceOf(Date);
+    expect(event.amount).toBe(500);
+    expect(event.currency).toBe("KWD");
     expect(
       (event.event as { payment?: { references?: { relatedIds?: Record<string, unknown> } } })
         ?.payment?.references?.relatedIds?.paymentId,
     ).toBe("07076409988323998875");
+  });
+
+  it("parses a refund webhook into a refunded event with money and invoice identity", () => {
+    const gateway = createGateway([], []);
+    const event = gateway.parseWebhookEvent(refundWebhook());
+    expect(event.gateway).toBe("myfatoorah");
+    expect(event.gatewayPaymentId).toBe("5620277");
+    expect(event.gatewayObjectId).toBe("111147");
+    expect(event.status).toBe("refunded");
+    expect(event.stableType).toBe("refund.completed");
+    expect(event.amount).toBe(30);
+    expect(event.currency).toBe("KWD");
+    expect(event.type).toBe("refund.REFUNDED");
   });
 });

@@ -38,6 +38,15 @@ export function paymentWebhook(overrides: Record<string, unknown> = {}) {
         PaymentMethod: "CARD",
         Payer: null,
       },
+      // Official sibling Amount object (webhook-v2-payment-status-data-model)
+      Amount: {
+        BaseCurrency: "KWD",
+        ValueInBaseCurrency: 500,
+        DisplayCurrency: "KWD",
+        ValueInDisplayCurrency: 500,
+        PayCurrency: "KWD",
+        ValueInPayCurrency: 500,
+      },
     },
     ...overrides,
   };
@@ -59,7 +68,12 @@ export function refundWebhook(overrides: Record<string, unknown> = {}) {
         Id: 111147,
         Status: "REFUNDED",
       },
-      Amount: { ValueInBaseCurrency: 30, ValueInDisplayCurrency: 30 },
+      Amount: {
+        BaseCurrency: "KWD",
+        ValueInBaseCurrency: 30,
+        DisplayCurrency: "KWD",
+        ValueInDisplayCurrency: 30,
+      },
       ReferencedInvoice: { Id: 5620277 },
     },
     ...overrides,

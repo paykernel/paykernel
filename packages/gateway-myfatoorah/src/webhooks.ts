@@ -28,13 +28,18 @@ export function extractMyFatoorahSignatureHeader(
 
 export type MyFatoorahWebhookKind = "payment" | "refund";
 
-/** Webhook V2 event kinds. `Event.Name` is authoritative; `Event.Code` 1/2 is fallback only when Name is missing/unknown. */
+/** Webhook V2 event kinds. `Event.Name` is authoritative; `Event.Code` 1/2 is fallback only when Name is missing. */
 export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
   const event = myFatoorahEventRecord(payload);
   const name = typeof event.Name === "string" ? event.Name.trim().toUpperCase() : "";
   if (name === "PAYMENT_STATUS_CHANGED") return "payment";
   if (name === "REFUND_STATUS_CHANGED") return "refund";
-  // Fallback to Code only when Name is empty or unrecognized
+  if (name.length > 0) {
+    throw new InvalidRequestError(
+      `Unsupported MyFatoorah webhook event ${String(event.Name)} (PAYMENT_STATUS_CHANGED or REFUND_STATUS_CHANGED)`,
+    );
+  }
+  // Fallback to Code only when Name is empty
   const code = event.Code;
   if (code === 1) return "payment";
   if (code === 2) return "refund";

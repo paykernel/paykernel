@@ -84,7 +84,10 @@ describe("myfatoorah refund support", () => {
         RefundStatus: "Refunded",
       },
     ];
-    expect(nestedRefundFromInvoice(refunds, "any-key")).toMatchObject({
+    // Single unkeyed refund must not be mapped to an unrelated key (fail-closed)
+    expect(nestedRefundFromInvoice(refunds, "any-key")).toBeUndefined();
+    // Without a key, a single entry is still mappable
+    expect(nestedRefundFromInvoice(refunds)).toMatchObject({
       RefundId: 22201,
     });
   });

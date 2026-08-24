@@ -5,7 +5,16 @@ import type { CreatePaymentParams, GetPaymentParams, RefundParams } from "@payke
  * all-methods page; specific methods narrow the page. Never cardholder data.
  */
 export type MyFatoorahPaymentMethod =
-  "INVOICE" | "CARD" | "APPLE_PAY" | "GOOGLE_PAY" | "KNET" | "BENEFIT" | "STC_PAY";
+  | "INVOICE"
+  | "CARD"
+  | "APPLE_PAY"
+  | "GOOGLE_PAY"
+  | "KNET"
+  | "BENEFIT"
+  | "STC_PAY"
+  | "MADA"
+  | "QPAY"
+  | "OMANNET";
 
 /** Optional customer block for V3 create (all fields optional). */
 export type MyFatoorahCustomerInput = {
