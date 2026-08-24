@@ -9,6 +9,7 @@ import {
   mapHttpAbortError,
   NetworkError,
   OperationNotSupportedError,
+  PaymentAbortedError,
   toMinorUnits,
   withRetry,
   type CaptureParams,
@@ -75,6 +76,7 @@ const MYFATOORAH_REFUND_COMMENT_MAX = 500;
 const CURRENCY_CODE = /^[A-Za-z]{3}$/;
 
 function isMyFatoorahRetryableNetworkError(error: unknown): boolean {
+  if (error instanceof PaymentAbortedError) return false;
   if (error instanceof NetworkError && error.message.includes("aborted by caller")) {
     return false;
   }
@@ -223,7 +225,8 @@ export class MyFatoorahGateway extends BaseGateway {
           // all fall through to the real create below. Only caller aborts propagate.
           if (p.signal?.aborted) throw error;
           const isAbort =
-            error instanceof NetworkError && error.message.includes("aborted by caller");
+            error instanceof PaymentAbortedError ||
+            (error instanceof NetworkError && error.message.includes("aborted by caller"));
           if (isAbort) throw error;
         }
       }
@@ -319,14 +322,12 @@ export class MyFatoorahGateway extends BaseGateway {
       const invoiceAmount = this.invoiceValue(paymentStatus.data);
       // Official GetRefundStatus uses RefundStatusResult; fallback to legacy Refunds.
       // Pass the whole Data object so myFatoorahRefundItems can handle both shapes.
-      let remaining: number | undefined;
-      if (invoiceAmount !== undefined) {
-        remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
-      } else if (p.amount === undefined) {
+      if (invoiceAmount === undefined) {
         throw new InvalidRequestError(
           "MyFatoorah refund requires amount (invoice does not expose remaining)",
         );
       }
+      const remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
 
       if (remaining === 0) {
         // No matching ExternalIdentifier and nothing remaining -> already fully refunded.
@@ -338,33 +339,17 @@ export class MyFatoorahGateway extends BaseGateway {
       let outboundMajor: number;
       if (p.amount !== undefined) {
         const requested = this.myfatoorahOutboundMajor(p.amount, currency);
-        if (remaining !== undefined) {
-          // Compare via minor units to avoid IEEE float errors.
-          try {
-            const reqMinor = toMinorUnits(parseMyFatoorahAmount(requested, currency));
-            const remMinor = toMinorUnits(parseMyFatoorahAmount(remaining, currency));
-            if (reqMinor > remMinor) {
-              throw new InvalidRequestError(
-                "MyFatoorah refund amount exceeds the remaining refundable amount",
-              );
-            }
-          } catch (e) {
-            if (e instanceof InvalidRequestError) throw e;
-            // Fallback to numeric compare if Money parsing fails
-            if (requested > remaining) {
-              throw new InvalidRequestError(
-                "MyFatoorah refund amount exceeds the remaining refundable amount",
-              );
-            }
-          }
+        // Compare via minor units to avoid IEEE float errors.
+        const reqMinor = toMinorUnits(parseMyFatoorahAmount(requested, currency));
+        const remMinor = toMinorUnits(parseMyFatoorahAmount(remaining, currency));
+        if (reqMinor > remMinor) {
+          throw new InvalidRequestError(
+            "MyFatoorah refund amount exceeds the remaining refundable amount",
+          );
         }
         outboundMajor = requested;
-      } else if (remaining !== undefined) {
-        outboundMajor = remaining;
       } else {
-        throw new InvalidRequestError(
-          "MyFatoorah refund requires amount (invoice does not expose remaining)",
-        );
+        outboundMajor = remaining;
       }
 
       return this.postMyFatoorahRefund({
@@ -386,6 +371,8 @@ export class MyFatoorahGateway extends BaseGateway {
           'MyFatoorah myfatoorahKeyType must be "InvoiceId" or "PaymentId"',
         );
       }
+      // InvoiceId is at most ~10 digits (fixtures: 6 digits); PaymentId is 14–20 digits.
+      // Guard against accidental PaymentId lookup via InvoiceId keyType.
       if (keyType === "InvoiceId" && id.length >= 14) {
         throw new InvalidRequestError(
           `MyFatoorah getPayment gatewayPaymentId "${id}" looks like a PaymentId (use myfatoorahKeyType: "PaymentId" for the callback paymentId)`,
@@ -1084,7 +1071,7 @@ export class MyFatoorahGateway extends BaseGateway {
       if (!hasMyFatoorahIdempotencyValidationError(error)) throw error;
       const retryWithoutHeader = {
         signal: requestOptions.signal,
-        retry: false as const,
+        retry: true as const,
         postSubmit: requestOptions.postSubmit,
         currency: requestOptions.currency,
         isRetryable: requestOptions.isRetryable,

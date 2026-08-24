@@ -22,7 +22,7 @@ export function assertMyFatoorahPaymentMethod(
   }
 }
 
-const DISPLAY_METHOD_TOKEN = /^[a-z][a-z0-9_]*$/;
+const DISPLAY_METHOD_TOKEN = /^[a-z][a-z0-9_-]*$/;
 
 /** `DisplayPaymentMethods` entries are lowercase method tokens (`card`, `knet`, …). */
 export function assertMyFatoorahDisplayPaymentMethods(methods: string[]): void {
@@ -42,17 +42,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * PCI fence: this backend adapter only sends `SourceOfFund.SessionId` /
  * `SourceOfFund.Token`. Raw `SourceOfFund.Card`, `myfatoorahCard`,
- * `source.card`, or `Card.Number` / `SecurityCode` blobs are rejected before
+ * `source.card`, `Card.Number` / `SecurityCode` blobs are rejected before
  * any fetch. (Core `assertNoRawCardMaterial` also fences the full params.)
  */
 export function assertNoPciCardSource(params: Record<string, unknown>): void {
   const sourceOfFund = params.SourceOfFund;
-  if (isRecord(sourceOfFund)) {
-    if (sourceOfFund.Card !== undefined && sourceOfFund.Card !== null) {
-      throw new InvalidRequestError(
-        "MyFatoorah PCI SourceOfFund.Card is not accepted by this backend adapter",
-      );
-    }
+  if (isRecord(sourceOfFund) && sourceOfFund.Card !== undefined && sourceOfFund.Card !== null) {
+    throw new InvalidRequestError(
+      "MyFatoorah PCI SourceOfFund.Card is not accepted by this backend adapter",
+    );
   }
   if (params.myfatoorahCard !== undefined && params.myfatoorahCard !== null) {
     throw new InvalidRequestError(
@@ -66,15 +64,14 @@ export function assertNoPciCardSource(params: Record<string, unknown>): void {
     );
   }
   const card = params.Card;
-  if (isRecord(card)) {
-    if (
-      (card.Number !== undefined && card.Number !== null) ||
-      (card.SecurityCode !== undefined && card.SecurityCode !== null)
-    ) {
-      throw new InvalidRequestError(
-        "MyFatoorah PCI card details are not accepted by this backend adapter",
-      );
-    }
+  if (
+    isRecord(card) &&
+    ((card.Number !== undefined && card.Number !== null) ||
+      (card.SecurityCode !== undefined && card.SecurityCode !== null))
+  ) {
+    throw new InvalidRequestError(
+      "MyFatoorah PCI card details are not accepted by this backend adapter",
+    );
   }
 }
 

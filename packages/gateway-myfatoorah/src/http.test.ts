@@ -58,9 +58,20 @@ describe("myfatoorah HTTP mapping", () => {
       status: 500,
       body: { IsSuccess: false, Message: "boom" },
       method: "POST",
+      postSubmit: true,
     });
     expect(error).toBeInstanceOf(NetworkError);
     expect((error as NetworkError).afterProviderSubmit).toBe(true);
+  });
+
+  it("maps POST 500 without postSubmit flag to NetworkError without afterProviderSubmit (safe default)", () => {
+    const error = mapMyFatoorahHttpFailure({
+      status: 500,
+      body: { IsSuccess: false, Message: "boom" },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(NetworkError);
+    expect((error as NetworkError).afterProviderSubmit).toBe(false);
   });
 
   it("maps GET 500 to NetworkError without afterProviderSubmit", () => {
@@ -162,10 +173,19 @@ describe("myfatoorah HTTP mapping", () => {
     expect(error).toBeInstanceOf(InvalidRequestError);
   });
 
-  it("maps unknown client failures to GatewayApiError", () => {
+  it("maps unknown client failures to InvalidRequestError when IsSuccess false on 4xx", () => {
     const error = mapMyFatoorahHttpFailure({
       status: 400,
       body: { IsSuccess: false, Message: "Something" },
+      method: "POST",
+    });
+    expect(error).toBeInstanceOf(InvalidRequestError);
+  });
+
+  it("maps unknown client failures to GatewayApiError when IsSuccess true", () => {
+    const error = mapMyFatoorahHttpFailure({
+      status: 400,
+      body: { IsSuccess: true, Message: "Something" },
       method: "POST",
     });
     expect(error).toBeInstanceOf(GatewayApiError);

@@ -58,6 +58,11 @@ function padMyFatoorahAmountToken(amount: number, currency: string): string {
       `MyFatoorah amount for ${currency.toUpperCase()} is not a JSON number token`,
     );
   }
+  if (padded.startsWith("-")) {
+    throw new InvalidRequestError(
+      `MyFatoorah amount for ${currency.toUpperCase()} must be greater than 0`,
+    );
+  }
   return padded;
 }
 
@@ -83,11 +88,10 @@ export function stringifyMyFatoorahJsonBody(
     const orderRec = order as Record<string, unknown>;
     const orderAmount = orderRec.Amount;
     const orderCurrency = orderRec.Currency;
-    if (
-      typeof orderAmount === "number" &&
-      typeof orderCurrency === "string" &&
-      orderCurrency.trim().length > 0
-    ) {
+    if (typeof orderAmount === "number") {
+      if (typeof orderCurrency !== "string" || orderCurrency.trim().length === 0) {
+        throw new InvalidRequestError("MyFatoorah Order.Amount requires Order.Currency");
+      }
       const padded = padMyFatoorahAmountToken(orderAmount, orderCurrency);
       const placeholder = `${MYFATOORAH_JSON_AMOUNT_PLACEHOLDER}${patches.length}`;
       patches.push({ placeholder, padded });
@@ -96,11 +100,12 @@ export function stringifyMyFatoorahJsonBody(
   }
 
   let topAmountPlaceholder: string | undefined;
-  if (
-    typeof body.Amount === "number" &&
-    typeof currency === "string" &&
-    currency.trim().length > 0
-  ) {
+  if (typeof body.Amount === "number") {
+    if (typeof currency !== "string" || currency.trim().length === 0) {
+      throw new InvalidRequestError(
+        "MyFatoorah top-level Amount requires a currency for ISO padding",
+      );
+    }
     const padded = padMyFatoorahAmountToken(body.Amount, currency);
     const placeholder = `${MYFATOORAH_JSON_AMOUNT_PLACEHOLDER}${patches.length}`;
     patches.push({ placeholder, padded });

@@ -3,9 +3,13 @@ const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
   KD: "KWD",
   "K.D.": "KWD",
   "K.D": "KWD",
+  "KD.": "KWD",
+  "K.D..": "KWD",
   SR: "SAR",
   "S.R.": "SAR",
   "S.R": "SAR",
+  "SR.": "SAR",
+  "S.R..": "SAR",
 };
 
 const CURRENCY_CODE = /^[A-Z]{3}$/;

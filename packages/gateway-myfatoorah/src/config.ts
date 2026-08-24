@@ -116,12 +116,19 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
   if (parsed.hostname.length === 0 || parsed.host === "") {
     throw new InvalidRequestError(`${field} must be an HTTPS URL`);
   }
+  if (parsed.username.length > 0 || parsed.password.length > 0) {
+    throw new InvalidRequestError(`${field} must not contain credentials`);
+  }
   const host = parsed.hostname.toLowerCase();
   if (
     host === "localhost" ||
     host === "127.0.0.1" ||
     host === "::1" ||
-    host.endsWith(".localhost")
+    host.endsWith(".localhost") ||
+    host === "0.0.0.0" ||
+    host.startsWith("10.") ||
+    host.startsWith("192.168.") ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
   ) {
     throw new InvalidRequestError(`${field} must not be localhost (MyFatoorah rejects non-public hosts)`);
   }
@@ -130,6 +137,17 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
 export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig {
   assertMyFatoorahApiToken(config.apiToken);
   assertMyFatoorahCountry(config.country);
+  if (config.live !== undefined && typeof config.live !== "boolean") {
+    throw new InvalidRequestError("myfatoorah.live must be a boolean");
+  }
+  if (
+    config.webhookSecret !== undefined &&
+    typeof config.webhookSecret === "string" &&
+    config.webhookSecret.length > 0 &&
+    config.webhookSecret.trim().length === 0
+  ) {
+    throw new InvalidRequestError("myfatoorah.webhookSecret must be a non-empty string when provided");
+  }
   const copied: MyFatoorahConfig = {
     apiToken: config.apiToken.trim(),
     country: config.country,

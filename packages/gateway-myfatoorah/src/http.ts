@@ -81,7 +81,7 @@ export function mapMyFatoorahHttpFailure(input: {
 }): Error {
   const { status, body, method, headers, postSubmit } = input;
   const isPostSubmit =
-    postSubmit === true ? true : postSubmit === false ? false : isMutatingMethod(method);
+    postSubmit === true ? true : postSubmit === false ? false : false;
   const message = myFatoorahValidationMessage(body) ?? `MyFatoorah API error (${status})`;
   const raw = { status, body };
 
@@ -102,6 +102,9 @@ export function mapMyFatoorahHttpFailure(input: {
     return new ResourceNotFoundError(message, raw);
   }
   if (!myFatoorahIsSuccess(body) && myFatoorahValidationErrors(body) !== undefined) {
+    return new InvalidRequestError(message, [raw]);
+  }
+  if (!myFatoorahIsSuccess(body) && status >= 400 && status < 500) {
     return new InvalidRequestError(message, [raw]);
   }
   return new GatewayApiError(message, "myfatoorah", raw);
@@ -138,11 +141,7 @@ export function assertMyFatoorahSuccessEnvelope(input: {
   postSubmit?: boolean;
 }): void {
   const isPostSubmit =
-    input.postSubmit === true
-      ? true
-      : input.postSubmit === false
-        ? false
-        : isMutatingMethod(input.method);
+    input.postSubmit === true ? true : input.postSubmit === false ? false : false;
   const tag = isPostSubmit ? ({ afterProviderSubmit: true } as const) : undefined;
   const raw = { status: input.status, body: input.responseText };
   if (input.jsonParseFailed) {

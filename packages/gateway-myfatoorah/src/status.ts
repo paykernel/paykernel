@@ -10,6 +10,11 @@ const INVOICE_STATUS: Record<string, PaymentStatus> = {
   PENDING: "pending",
   CANCELED: "cancelled",
   CANCELLED: "cancelled",
+  REFUNDED: "refunded",
+  PARTIALLY_REFUNDED: "refunded",
+  "PARTIALLY-REFUNDED": "refunded",
+  "PARTIALLY REFUNDED": "refunded",
+  PARTIALLYREFUNDED: "refunded",
 };
 
 const REFUND_STATUS: Record<string, RefundStatus> = {

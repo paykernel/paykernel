@@ -4,12 +4,14 @@ Unknown provider values fail closed to `failed`.
 
 ## Invoice (`Invoice.Status` / `InvoiceStatus`)
 
-| MyFatoorah               | Payment status |
-| ------------------------ | -------------- |
-| `PAID` / `Paid`          | `paid`         |
-| `PENDING`                | `pending`      |
-| `CANCELED` / `CANCELLED` | `cancelled`    |
-| anything else            | `failed`       |
+| MyFatoorah                                        | Payment status |
+| ------------------------------------------------- | -------------- |
+| `PAID` / `Paid`                                   | `paid`         |
+| `PENDING`                                         | `pending`      |
+| `CANCELED` / `CANCELLED`                          | `cancelled`    |
+| `REFUNDED`                                        | `refunded`     |
+| `PARTIALLY_REFUNDED` / `PARTIALLY-REFUNDED` etc.  | `refunded`     |
+| anything else                                     | `failed`       |
 
 ## Transaction (`Transaction.Status` / `TransactionStatus`)
 

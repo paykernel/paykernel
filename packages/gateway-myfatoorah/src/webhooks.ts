@@ -173,7 +173,7 @@ export function computeMyFatoorahSignature(canonical: string, webhookSecret: str
   return bytesToBase64(hmacSha256(webhookSecret, canonical));
 }
 
-const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=|[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]{3})?$/;
 
 /**
  * Constant-time verification of a Webhook V2 signature.
