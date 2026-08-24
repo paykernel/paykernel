@@ -1,4 +1,5 @@
 import { InvalidRequestError } from "@paykernel/core";
+import { assertMyFatoorahPaymentMethod } from "./sources";
 import type { MyFatoorahPaymentMethod } from "./types";
 
 export const MYFATOORAH_DEFAULT_TIMEOUT_MS = 30_000;
@@ -86,7 +87,6 @@ export function assertMyFatoorahTimeoutMs(timeoutMs: unknown): asserts timeoutMs
     throw new InvalidRequestError("myfatoorah.timeoutMs must be a finite number > 0");
   }
 }
-
 /** MyFatoorah will not redirect/webhook to non-HTTPS URLs. */
 export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts value is string {
   if (typeof value !== "string" || value.trim().length === 0) {
@@ -101,6 +101,9 @@ export function assertMyFatoorahHttpsUrl(value: unknown, field: string): asserts
   if (parsed.protocol !== "https:") {
     throw new InvalidRequestError(`${field} must be an HTTPS URL`);
   }
+  if (parsed.hostname.length === 0 || parsed.host === "") {
+    throw new InvalidRequestError(`${field} must be an HTTPS URL`);
+  }
 }
 
 export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig {
@@ -112,7 +115,10 @@ export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig
   };
   if (config.live !== undefined) copied.live = config.live === true;
   if (config.webhookSecret !== undefined) {
-    copied.webhookSecret = config.webhookSecret.trim();
+    const trimmed = config.webhookSecret.trim();
+    if (trimmed.length > 0) {
+      copied.webhookSecret = trimmed;
+    }
   }
   if (config.timeoutMs !== undefined) {
     assertMyFatoorahTimeoutMs(config.timeoutMs);
@@ -123,6 +129,7 @@ export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig
     copied.webhookUrl = config.webhookUrl.trim();
   }
   if (config.defaultPaymentMethod !== undefined) {
+    assertMyFatoorahPaymentMethod(config.defaultPaymentMethod);
     copied.defaultPaymentMethod = config.defaultPaymentMethod;
   }
   return copied;

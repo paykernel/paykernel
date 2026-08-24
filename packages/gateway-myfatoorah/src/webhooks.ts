@@ -136,9 +136,10 @@ export function verifyMyFatoorahSignature(
   webhookSecret: string | undefined,
   provided: string | undefined,
 ): boolean {
-  if (provided === undefined || provided.length === 0) return false;
-  if (webhookSecret === undefined || webhookSecret.length === 0) return false;
-  if (!BASE64_RE.test(provided)) return false;
+  const trimmedProvided = typeof provided === "string" ? provided.trim() : undefined;
+  if (trimmedProvided === undefined || trimmedProvided.length === 0) return false;
+  if (webhookSecret === undefined || webhookSecret.trim().length === 0) return false;
+  if (!BASE64_RE.test(trimmedProvided)) return false;
 
   let canonical: string;
   try {
@@ -146,12 +147,12 @@ export function verifyMyFatoorahSignature(
   } catch {
     return false;
   }
-  const computed = computeMyFatoorahSignature(canonical, webhookSecret);
+  const computed = computeMyFatoorahSignature(canonical, webhookSecret.trim());
 
   let providedBytes: Uint8Array;
   let computedBytes: Uint8Array;
   try {
-    providedBytes = base64ToBytes(provided);
+    providedBytes = base64ToBytes(trimmedProvided);
     computedBytes = base64ToBytes(computed);
   } catch {
     return false;

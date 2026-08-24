@@ -40,7 +40,9 @@ export function myFatoorahPaymentWebhookStatus(
   if (invoice === "paid") {
     return mapMyFatoorahTransactionEvidence(transactionStatus) === "success" ? "paid" : "failed";
   }
-  if (invoice === "pending") return "pending";
+  if (invoice === "pending") {
+    return mapMyFatoorahTransactionEvidence(transactionStatus) === "authorized" ? "authorized" : "pending";
+  }
   if (invoice === "cancelled" || invoice === "failed") return invoice;
   switch (mapMyFatoorahTransactionEvidence(transactionStatus)) {
     case "authorized":
@@ -150,12 +152,7 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
     type: nativeType,
     ...(provider !== undefined ? { provider } : {}),
     ...(nested !== undefined ? { event: nested } : {}),
-    payloadHash: hashWebhookPayload({
-      id,
-      object: "invoice",
-      status: typeof invoice.Status === "string" ? invoice.Status : "",
-      created: myFatoorahWebhookTimestamp(payload).toISOString(),
-    }),
+    payloadHash: hashWebhookPayload(payload),
   };
 }
 
@@ -208,11 +205,6 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
     type: nativeType,
     ...(provider !== undefined ? { provider } : {}),
     ...(nested !== undefined ? { event: nested } : {}),
-    payloadHash: hashWebhookPayload({
-      id,
-      object: "refund",
-      status: typeof refund.Status === "string" ? refund.Status : "",
-      created: timestamp.toISOString(),
-    }),
+    payloadHash: hashWebhookPayload(payload),
   };
 }

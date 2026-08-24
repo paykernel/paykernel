@@ -116,7 +116,7 @@ export function stringifyMyFatoorahJsonBody(
   }
   let serialized = JSON.stringify(withPlaceholders);
   for (const patch of patches) {
-    serialized = serialized.replace(`"Amount":"${patch.placeholder}"`, `"Amount":${patch.padded}`);
+    serialized = serialized.split(`"Amount":"${patch.placeholder}"`).join(`"Amount":${patch.padded}`);
   }
   return serialized;
 }

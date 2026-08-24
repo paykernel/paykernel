@@ -123,6 +123,13 @@ export class MyFatoorahGateway extends BaseGateway {
   async createPayment(params: MyFatoorahCreatePaymentParams): Promise<GatewayPaymentResult> {
     return this.executeWithHooks("createPayment", params, async (p) => {
       const idempotencyKey = this.assertMutationKey(p.idempotencyKey, "createPayment");
+      if ((p as unknown as Record<string, unknown>).offSession === true) {
+        throw new OperationNotSupportedError(this.name, "createPayment", {
+          capability: "paymentMethods",
+          claimedSupport: false,
+        });
+      }
+      assertNoPciCardSource(p as unknown as Record<string, unknown>);
       // `authorization` is unclaimed; the base-class post-hook gate rejects
       // `capture: false` first. Explicit fail-closed guard for direct callers.
       if (p.capture === false) {
@@ -159,18 +166,10 @@ export class MyFatoorahGateway extends BaseGateway {
       const idempotencyKey = this.assertMutationKey(p.idempotencyKey, "refundPayment");
       const invoiceId = this.assertInvoiceId(p.gatewayPaymentId, "refundPayment");
 
-      const refundStatus = await this.myfatoorahRequest(
-        "POST",
-        "/v2/GetRefundStatus",
-        { KeyType: "InvoiceId", Key: invoiceId },
-        { signal: p.signal, retry: true },
-      );
-      const paymentStatus = await this.myfatoorahRequest(
-        "POST",
-        "/v2/GetPaymentStatus",
-        { KeyType: "InvoiceId", Key: invoiceId },
-        { signal: p.signal, retry: true },
-      );
+      const [refundStatus, paymentStatus] = await Promise.all([
+        this.myfatoorahRequest("POST", "/v2/GetRefundStatus", { KeyType: "InvoiceId", Key: invoiceId }, { signal: p.signal, retry: true }),
+        this.myfatoorahRequest("POST", "/v2/GetPaymentStatus", { KeyType: "InvoiceId", Key: invoiceId }, { signal: p.signal, retry: true }),
+      ]);
 
       const currency = this.refundCurrency(p, paymentStatus.data);
       this.assertCurrencyMatch(p.currency, currency, "refund");
@@ -463,8 +462,9 @@ export class MyFatoorahGateway extends BaseGateway {
       }
       return out;
     }
-    if (typeof params.customerId === "string" && params.customerId.length > 0) {
-      return { Reference: params.customerId };
+    if (typeof params.customerId === "string") {
+      const trimmedCustomerId = params.customerId.trim();
+      if (trimmedCustomerId.length > 0) return { Reference: trimmedCustomerId };
     }
     return undefined;
   }
@@ -784,6 +784,18 @@ export class MyFatoorahGateway extends BaseGateway {
         error.validationErrors !== undefined &&
         error.validationErrors.length > 0
       ) {
+        const hasIdempotencyValidationError = error.validationErrors.some((v) => {
+          const name = (v as unknown as Record<string, unknown>).Name;
+          if (typeof name === "string" && String(name).toLowerCase().includes("idempotency")) {
+            return true;
+          }
+          try {
+            return JSON.stringify(v).toLowerCase().includes("idempotency");
+          } catch {
+            return false;
+          }
+        });
+        if (!hasIdempotencyValidationError) throw error;
         const retryWithoutHeader = {
           signal: requestOptions.signal,
           retry: requestOptions.retry,

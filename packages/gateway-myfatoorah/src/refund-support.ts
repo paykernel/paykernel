@@ -47,7 +47,7 @@ export function myFatoorahRefundExternalIdentifier(value: unknown): string | und
     return undefined;
   }
   const id = (value as Record<string, unknown>).ExternalIdentifier;
-  return typeof id === "string" && id.length > 0 ? id : undefined;
+  return typeof id === "string" && id.trim().length > 0 ? id.trim() : undefined;
 }
 
 /**
