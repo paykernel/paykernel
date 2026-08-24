@@ -81,6 +81,14 @@ export function withRelatedIdsOnPaymentEvent(
   };
 }
 
+/**
+ * Webhook `Amount` uses the portal's base currency (e.g. KWD) while create/getPayment
+ * Amounts are in the requested pay/display currency (e.g. SAR). Webhook surfaced
+ * `amount`/`currency` is therefore intentionally the base amount — keep base preference
+ * here. create/getPayment prefer pay → display → base by request currency; webhook-map
+ * prefers base → display → pay. This drift is by design (webhook vs. checkout currency
+ * differ). Currency aliases (KD→KWD, SR→SAR) are normalized via normalizeMyFatoorahCurrency.
+ */
 function webhookMoneyFromAmountRecord(
   amount: unknown,
 ): { amount: number; currency: string } | undefined {
@@ -99,7 +107,7 @@ function webhookMoneyFromAmountRecord(
       return undefined;
     }
   };
-  // Prefer base currency, then display, then pay
+  // Prefer base currency (webhook amount is always base), then display, then pay
   const base = tryParse(rec.ValueInBaseCurrency, rec.BaseCurrency);
   if (base !== undefined) return base;
   const display = tryParse(rec.ValueInDisplayCurrency, rec.DisplayCurrency);
@@ -115,9 +123,27 @@ function webhookMoneyFromAmountRecord(
   return undefined;
 }
 
+/**
+ * Coerce raw JSON string bodies for webhook helpers. Mirrors webhooks.ts/coerceWebhookPayload
+ * so both layers accept either object or raw string (e.g. raw HTTP body).
+ */
+function coerceWebhookPayload(payload: unknown): unknown {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (trimmed.length === 0) return payload;
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      throw new InvalidRequestError("MyFatoorah webhook payload is not valid JSON");
+    }
+  }
+  return payload;
+}
+
 /** Webhook timestamp: `Event.CreationDate` ISO string, fail-closed. */
 export function myFatoorahWebhookTimestamp(payload: unknown): Date {
-  const event = asRecord((payload as Record<string, unknown>)?.Event);
+  const normalized = coerceWebhookPayload(payload);
+  const event = asRecord((normalized as Record<string, unknown>).Event);
   const created = event.CreationDate;
   if (typeof created !== "string" || created.trim().length === 0) {
     throw new InvalidRequestError("MyFatoorah webhook missing Event.CreationDate");
@@ -130,7 +156,8 @@ export function myFatoorahWebhookTimestamp(payload: unknown): Date {
 }
 
 function myFatoorahEventReference(payload: unknown): string {
-  const event = asRecord((payload as Record<string, unknown>)?.Event);
+  const normalized = coerceWebhookPayload(payload);
+  const event = asRecord((normalized as Record<string, unknown>).Event);
   const reference = event.Reference;
   if (typeof reference !== "string" || reference.trim().length === 0) {
     throw new InvalidRequestError("MyFatoorah webhook missing Event.Reference");
@@ -139,10 +166,11 @@ function myFatoorahEventReference(payload: unknown): string {
 }
 
 export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEvent {
-  if (myFatoorahWebhookKind(payload) !== "payment") {
+  const normalized = coerceWebhookPayload(payload);
+  if (myFatoorahWebhookKind(normalized) !== "payment") {
     throw new InvalidRequestError("Expected a PAYMENT_STATUS_CHANGED webhook");
   }
-  const data = asRecord((payload as Record<string, unknown>)?.Data);
+  const data = asRecord((normalized as Record<string, unknown>).Data);
   const invoice = asRecord(data.Invoice);
   const transaction = asRecord(data.Transaction);
 
@@ -157,8 +185,8 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
   const transactionPaymentId = stringOrNumberId(transaction.PaymentId);
   const nativeType = `invoice.${typeof invoice.Status === "string" ? invoice.Status : "UNKNOWN"}`;
   const stable = inferMyFatoorahStableType("invoice", status);
-  const timestamp = myFatoorahWebhookTimestamp(payload);
-  const id = myFatoorahEventReference(payload);
+  const timestamp = myFatoorahWebhookTimestamp(normalized);
+  const id = myFatoorahEventReference(normalized);
   const money = webhookMoneyFromAmountRecord(data.Amount);
 
   const legacy: WebhookEvent = {
@@ -169,7 +197,7 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
     gatewayPaymentId: invoiceId,
     status,
     timestamp,
-    rawPayload: payload,
+    rawPayload: normalized,
     ...(money !== undefined ? { amount: money.amount, currency: money.currency } : {}),
   };
 
@@ -191,15 +219,16 @@ export function parseMyFatoorahPaymentWebhookEvent(payload: unknown): WebhookEve
     type: nativeType,
     ...(provider !== undefined ? { provider } : {}),
     ...(nested !== undefined ? { event: nested } : {}),
-    payloadHash: hashWebhookPayload(payload),
+    payloadHash: hashWebhookPayload(normalized),
   };
 }
 
 export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEvent {
-  if (myFatoorahWebhookKind(payload) !== "refund") {
+  const normalized = coerceWebhookPayload(payload);
+  if (myFatoorahWebhookKind(normalized) !== "refund") {
     throw new InvalidRequestError("Expected a REFUND_STATUS_CHANGED webhook");
   }
-  const data = asRecord((payload as Record<string, unknown>)?.Data);
+  const data = asRecord((normalized as Record<string, unknown>).Data);
   const refund = asRecord(data.Refund);
   // Official shape has ReferencedInvoice as sibling of Refund; legacy nests it under Refund.
   const referencedInvoice = asRecord(
@@ -217,8 +246,8 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
   const status = mapMyFatoorahRefundPaymentStatus(refund.Status);
   const nativeType = `refund.${typeof refund.Status === "string" ? refund.Status : "UNKNOWN"}`;
   const stable = inferMyFatoorahStableType("refund", status);
-  const timestamp = myFatoorahWebhookTimestamp(payload);
-  const id = myFatoorahEventReference(payload);
+  const timestamp = myFatoorahWebhookTimestamp(normalized);
+  const id = myFatoorahEventReference(normalized);
   const refundMoney = webhookMoneyFromAmountRecord(
     data.Amount !== undefined ? data.Amount : refund.Amount,
   );
@@ -238,7 +267,7 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
     gatewayObjectId: refundId,
     status,
     timestamp,
-    rawPayload: payload,
+    rawPayload: normalized,
     ...(refundMoney !== undefined
       ? { amount: refundMoney.amount, currency: refundMoney.currency }
       : {}),
@@ -259,6 +288,6 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
     type: nativeType,
     ...(provider !== undefined ? { provider } : {}),
     ...(nested !== undefined ? { event: nested } : {}),
-    payloadHash: hashWebhookPayload(payload),
+    payloadHash: hashWebhookPayload(normalized),
   };
 }

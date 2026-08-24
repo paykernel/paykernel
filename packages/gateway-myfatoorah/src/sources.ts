@@ -77,3 +77,41 @@ export function assertNoPciCardSource(params: Record<string, unknown>): void {
     }
   }
 }
+
+/**
+ * Resolve MyFatoorah V3 `Customer.Reference` (CustomerIdentifier).
+ *
+ * Official V3 contract: `Invoice.ExternalIdentifier` (webhook `paymentId`) is
+ * populated from `Customer.Reference`, NOT from `Order.ExternalIdentifier` alone.
+ * To make webhooks correlatable, Customer.Reference must be the merchant
+ * orderId — or an explicit `myfatoorahCustomer.reference` override.
+ *
+ * NEVER use `customerId` (opaque user/session id) as Reference. That field
+ * belongs to PayKernel's generic customer model, not MyFatoorah's per-order
+ * CustomerIdentifier. Using it breaks webhook `paymentId` correlation and
+ * leaks internal user ids to the provider.
+ *
+ * Priority: 1) explicit `myfatoorahCustomer.reference` (trimmed non-empty)
+ *           2) `orderId` (trimmed non-empty)
+ *           → `undefined` when neither is provided (no fallback to customerId).
+ *
+ * This helper is owned by Stream B; Stream A should call it from
+ * `gateway.ts#serializeCustomer` / `buildCreateBody` and remove the legacy
+ * `customerId → Reference` branch. Keeping the branch here documented as
+ * intentionally absent prevents regressions.
+ *
+ * @see gateway.ts#buildCreateBody for the Order.ExternalIdentifier + Customer.Reference wiring.
+ */
+export function resolveMyFatoorahCustomerReference(input: {
+  orderId?: string | undefined;
+  myfatoorahCustomerReference?: string | undefined;
+  /** Accepted but intentionally ignored — never becomes Reference. Documented to prevent regression. */
+  customerId?: string | undefined;
+}): string | undefined {
+  const explicit = input.myfatoorahCustomerReference;
+  if (typeof explicit === "string" && explicit.trim().length > 0) return explicit.trim();
+  const order = input.orderId;
+  if (typeof order === "string" && order.trim().length > 0) return order.trim();
+  return undefined;
+}
+

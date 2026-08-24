@@ -28,7 +28,7 @@ export type MyFatoorahCustomerInput = {
  * MyFatoorah-only fields. Do not add these keys to core `CreatePaymentParams`.
  */
 export type MyFatoorahCreatePaymentParams = CreatePaymentParams & {
-  /** Customer details. Optional. `customerId` becomes `{ Reference }` when omitted. */
+  /** Customer details. Optional. When omitted, `orderId` (if set) becomes `{ Reference }`; `customerId` never becomes `Customer.Reference`. */
   myfatoorahCustomer?: MyFatoorahCustomerInput;
   /**
    * PaymentMethod on V3 create. Omitted (and no config default): the hosted

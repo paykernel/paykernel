@@ -59,10 +59,11 @@ export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
 }
 
 function myFatoorahEventRecord(payload: unknown): Record<string, unknown> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+  const normalized = coerceWebhookPayload(payload);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
     throw new InvalidRequestError("MyFatoorah webhook payload must be a JSON object");
   }
-  const event = (payload as { Event?: unknown }).Event;
+  const event = asRecord(normalized).Event;
   if (event === null || typeof event !== "object" || Array.isArray(event)) {
     throw new InvalidRequestError("MyFatoorah webhook missing Event");
   }
@@ -70,21 +71,44 @@ function myFatoorahEventRecord(payload: unknown): Record<string, unknown> {
 }
 
 function myFatoorahDataRecord(payload: unknown): Record<string, unknown> {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+  const normalized = coerceWebhookPayload(payload);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
     throw new InvalidRequestError("MyFatoorah webhook payload must be a JSON object");
   }
-  const data = (payload as { Data?: unknown }).Data;
+  const data = asRecord(normalized).Data;
   if (data === null || typeof data !== "object" || Array.isArray(data)) {
     throw new InvalidRequestError("MyFatoorah webhook missing Data");
   }
   return data as Record<string, unknown>;
 }
 
+
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (value !== null && typeof value === "object" && !Array.isArray(value)) {
     return value as Record<string, unknown>;
   }
   return {};
+}
+
+/**
+ * Coerce a raw webhook body (string) to parsed JSON.
+ * Gateways receive Buffer/string bodies; paykernel normalizes to object before verify,
+ * but direct callers may still pass a raw JSON string. On bad JSON throw
+ * InvalidRequestError (canonical helpers) — verifyMyFatoorahSignature catches and
+ * returns false (fail-closed).
+ */
+function coerceWebhookPayload(payload: unknown): unknown {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (trimmed.length === 0) return payload;
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      throw new InvalidRequestError("MyFatoorah webhook payload is not valid JSON");
+    }
+  }
+  return payload;
 }
 
 /** Canonical field: numbers/strings as sent; null / missing → empty string. */
@@ -100,7 +124,8 @@ export function myFatoorahCanonicalField(value: unknown): string {
  * `Invoice.Id,Invoice.Status,Transaction.Status,Transaction.PaymentId,Invoice.ExternalIdentifier`
  */
 export function canonicalMyFatoorahPaymentString(payload: unknown): string {
-  const data = myFatoorahDataRecord(payload);
+  const normalized = coerceWebhookPayload(payload);
+  const data = myFatoorahDataRecord(normalized);
   const invoice = asRecord(data.Invoice);
   const transaction = asRecord(data.Transaction);
   return (
@@ -120,7 +145,8 @@ export function canonicalMyFatoorahPaymentString(payload: unknown): string {
  * with sibling (official) preferred.
  */
 export function canonicalMyFatoorahRefundString(payload: unknown): string {
-  const data = myFatoorahDataRecord(payload);
+  const normalized = coerceWebhookPayload(payload);
+  const data = myFatoorahDataRecord(normalized);
   const refund = asRecord(data.Refund);
   // Official: Data.Amount and Data.ReferencedInvoice are siblings of Refund.
   // Legacy: they were nested under Refund. Prefer sibling when present.
@@ -137,11 +163,13 @@ export function canonicalMyFatoorahRefundString(payload: unknown): string {
 }
 
 export function canonicalMyFatoorahString(payload: unknown): string {
-  const kind = myFatoorahWebhookKind(payload);
+  const normalized = coerceWebhookPayload(payload);
+  const kind = myFatoorahWebhookKind(normalized);
   return kind === "payment"
-    ? canonicalMyFatoorahPaymentString(payload)
-    : canonicalMyFatoorahRefundString(payload);
+    ? canonicalMyFatoorahPaymentString(normalized)
+    : canonicalMyFatoorahRefundString(normalized);
 }
+
 
 /** Webhook V2 signature: Base64(HMAC-SHA256(secret, canonicalString)). */
 export function computeMyFatoorahSignature(canonical: string, webhookSecret: string): string {
@@ -166,9 +194,23 @@ export function verifyMyFatoorahSignature(
   if (webhookSecret === undefined || webhookSecret.trim().length === 0) return false;
   if (!BASE64_RE.test(trimmedProvided)) return false;
 
+  // Accept raw JSON string bodies (e.g. raw HTTP body before JSON middleware).
+  // On bad JSON fail closed (false) rather than throwing.
+  let normalizedPayload: unknown = payload;
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (trimmed.length > 0) {
+      try {
+        normalizedPayload = JSON.parse(trimmed) as unknown;
+      } catch {
+        return false;
+      }
+    }
+  }
+
   let canonical: string;
   try {
-    canonical = canonicalMyFatoorahString(payload);
+    canonical = canonicalMyFatoorahString(normalizedPayload);
   } catch {
     return false;
   }

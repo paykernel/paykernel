@@ -1,0 +1,5 @@
+---
+"@paykernel/gateway-myfatoorah": patch
+---
+
+Fix MyFatoorah residual review findings (docs + fixed behavior): MF-CREATE-REPLAY (CustomerReference lookup before replay outside KWT/SAU, no double-charge), MF-CUSTOMER-REF (`Customer: { Reference = orderId }` or `myfatoorahCustomer.reference`; `customerId` not `ExternalIdentifier` and does not become `Customer.Reference`), MF-SANDBOX-BASE (sandbox base always KWD when `live: false`; first-refund inference only when `live: true`), MF-GETPAYMENT-BASE-MIX (`getPayment` pay-first with `PaidCurrencyValue`/`TransationValue` → `InvoiceValue` fallback, never base+pay mix, last success), MF-CREATE-AMOUNT-FALLBACK (pay/display/base `ValueIn*` chosen by matching request currency, otherwise omitted), MF-PAYMENTCOMPLETED-REDIRECT (`PaymentCompleted: true` alone is `paid`, `PaymentURL` ignored; pending invoice stays `pending`), MF-WEBHOOK-RAW (raw string bodies parsed before verify), MF-WEBHOOK-MONEY-DRIFT (webhook amount is base, create/`getPayment` amount is pay when available).

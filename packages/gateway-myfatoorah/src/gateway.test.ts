@@ -39,6 +39,7 @@ function createGateway(
     webhookUrl?: string;
     defaultPaymentMethod?: string;
     timeoutMs?: number;
+    live?: boolean;
   } = {},
 ): MyFatoorahGateway {
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -101,7 +102,10 @@ describe("MyFatoorahGateway.createPayment", () => {
   it("sends config webhookUrl and PaymentMethod / language / customer", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
-      [jsonResponse(myfatoorahEnvelope(initiatedCreateData()))],
+      [
+        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
       calls,
       { webhookUrl: "https://merchant.example/webhook", defaultPaymentMethod: "KNET" },
     );
@@ -111,7 +115,10 @@ describe("MyFatoorahGateway.createPayment", () => {
       myfatoorahLanguage: "EN",
       orderId: "ord_01",
     });
-    const body = bodyOf(calls[0]);
+    // MF-CREATE-REPLAY: first call is GetPaymentStatus CustomerReference, second is v3/payments
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
+    expect(bodyOf(calls[0])).toEqual({ Key: "ord_01", KeyType: "CustomerReference" });
+    const body = bodyOf(calls[1]);
     expect(body.PaymentMethod).toBe("KNET");
     expect(body.Language).toBe("EN");
     expect(body.Order).toEqual({
@@ -131,7 +138,21 @@ describe("MyFatoorahGateway.createPayment", () => {
   });
 
   it("maps PaymentCompleted + paid evidence to succeeded / paid without redirect", async () => {
-    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paidCreateData()))], []);
+    const paid = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
+        Amount: {
+          BaseCurrency: "SAR",
+          ValueInBaseCurrency: 10.5,
+          DisplayCurrency: "SAR",
+          ValueInDisplayCurrency: 10.5,
+          PayCurrency: "SAR",
+          ValueInPayCurrency: 10.5,
+        },
+      },
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paid))], []);
     const result = await gateway.createPayment({ ...createParams });
     expect(isPaidOutcome(result)).toBe(true);
     expect(result.outcome).toBe("succeeded");
@@ -147,7 +168,14 @@ describe("MyFatoorahGateway.createPayment", () => {
       InvoiceStatus: "PAID",
       TransactionDetails: {
         Status: "SUCCESS",
-        Amount: { ValueInBaseCurrency: 10.5, ValueInDisplayCurrency: 10.5 },
+        Amount: {
+          BaseCurrency: "SAR",
+          ValueInBaseCurrency: 10.5,
+          DisplayCurrency: "SAR",
+          ValueInDisplayCurrency: 10.5,
+          PayCurrency: "SAR",
+          ValueInPayCurrency: 10.5,
+        },
       },
     });
     const gateway = createGateway([jsonResponse(myfatoorahEnvelope(legacy))], []);
@@ -886,3 +914,234 @@ describe("MyFatoorahGateway.capturePayment / webhooks", () => {
     expect(event.currency).toBe("KWD");
   });
 });
+
+describe("MyFatoorahGateway MF fixes", () => {
+  it("MF-CREATE-REPLAY: ARE country with orderId existing → no POST /v3/payments", async () => {
+    const calls: FetchCall[] = [];
+    const existing = paidInvoiceStatusData({
+      InvoiceId: 777777,
+      InvoiceStatus: "Paid",
+      InvoiceValue: 10.5,
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "07076409988323998877",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "10.500",
+          Currency: "SAR",
+          TransationValue: "10.500",
+        },
+      ],
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(existing))], calls, {
+      country: "ARE",
+    });
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_123",
+      myfatoorahCustomer: { reference: "ord_replay_123" },
+    });
+    expect(result.gatewayId).toBe("777777");
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
+    expect(bodyOf(calls[0])).toEqual({ Key: "ord_replay_123", KeyType: "CustomerReference" });
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-CREATE-REPLAY: ARE country with orderId missing → continues to POST /v3/payments", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_new_456",
+    });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.length).toBe(2);
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
+    expect(calls[1]?.url).toBe("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-SANDBOX-BASE: sandbox always KWD (ARE sandbox infers KWD, not AED)", async () => {
+    const calls: FetchCall[] = [];
+    const gatewaySandbox = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gatewaySandbox.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "sandbox-base-1",
+    });
+    expect(result.status).toBe("pending");
+    const gatewaySandbox2 = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+      ],
+      [],
+      { country: "ARE" },
+    );
+    await expect(
+      gatewaySandbox2.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "sandbox-base-2",
+        amount: money("1.00", "AED"),
+        currency: "AED",
+      }),
+    ).rejects.toThrow(/base currency.*KWD/);
+    const gatewayLive = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData({ InvoiceValue: 100 }))),
+      ],
+      [],
+      { country: "ARE", live: true },
+    );
+    await expect(
+      gatewayLive.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "live-base-1",
+        amount: money("1.00", "KWD"),
+        currency: "KWD",
+      }),
+    ).rejects.toThrow(/base currency.*AED/);
+  });
+
+  it("MF-GETPAYMENT-BASE-MIX: InvoiceValue 64.772 base with SAR transaction → publishes KWD or omits, never 64.772 SAR", async () => {
+    const data = paidInvoiceStatusData({
+      InvoiceValue: 64.772,
+      InvoiceStatus: "Paid",
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "t_sar",
+          Currency: "SAR",
+          TransationValue: undefined,
+          PaidCurrency: undefined,
+          PaidCurrencyValue: undefined,
+        },
+      ],
+    });
+    (data as Record<string, unknown>).InvoiceTransactions = data.Transactions;
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    const isWrongPair = result.currency === "SAR" && result.amount === 64.772;
+    expect(isWrongPair).toBe(false);
+    if (result.amount !== undefined && result.currency !== undefined) {
+      expect(result.currency).toBe("KWD");
+      expect(result.amount).toBe(64.772);
+    } else {
+      expect(result.amount).toBeUndefined();
+    }
+  });
+
+  it("MF-CREATE-AMOUNT-FALLBACK: bare Value fallback not used as request currency", async () => {
+    const paid = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 64.772,
+          DisplayCurrency: "KWD",
+          ValueInDisplayCurrency: 64.772,
+          Value: 999,
+        } as unknown as Record<string, unknown>,
+      },
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paid))], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.amount).toBeUndefined();
+    expect(result.currency).toBeUndefined();
+  });
+
+  it("MF-PAYMENTCOMPLETED-REDIRECT: PaymentCompleted true without nested statuses → paid, not requires_action", async () => {
+    const paid = {
+      InvoiceId: 915102,
+      PaymentCompleted: true,
+      PaymentURL: "https://sandbox.pg.apitest.myfatoorah.com/payment/result?invoice=915102&result=paid",
+      CustomerReference: "payref1",
+      UserDefinedField: "order_01",
+      PaymentId: "07076409988323998875",
+      TransactionDetails: {},
+    };
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(paid))], []);
+    const result = await gateway.createPayment({ ...createParams });
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.status).toBe("paid");
+    expect(result.outcome).toBe("succeeded");
+    expect(result.redirectUrl).toBeUndefined();
+    expect(result.nextAction).toBeUndefined();
+  });
+
+  it("lower: picks last success transaction not first", async () => {
+    const data = paidInvoiceStatusData({
+      Transactions: [
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "first_111",
+          Currency: "SAR",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "10.00",
+        },
+        {
+          TransactionStatus: "Succss",
+          PaymentId: "last_999",
+          Currency: "SAR",
+          PaidCurrency: "SAR",
+          PaidCurrencyValue: "20.00",
+        },
+      ],
+    });
+    const gateway = createGateway([jsonResponse(myfatoorahEnvelope(data))], []);
+    const result = await gateway.getPayment({ gatewayPaymentId: "915102" });
+    expect(result.references?.relatedIds?.paymentId).toBe("last_999");
+    expect(result.amount).toBe(20);
+    expect(result.currency).toBe("SAR");
+  });
+
+  it("lower: existingRefund found doesn't await paymentStatus (survives 500)", async () => {
+    const refundStatus = partialRefundStatusData({
+      Refunds: [
+        {
+          RefundId: 22201,
+          ExternalIdentifier: "refund-idem-survives",
+          InvoiceId: 915102,
+          Amount: 2.5,
+          RefundStatus: "Pending",
+        },
+      ],
+    });
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(refundStatus)),
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+        jsonResponse({ IsSuccess: false, Message: "boom" }, 500),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-idem-survives",
+    });
+    expect(result.gatewayRefundId).toBe("22201");
+    expect(result.status).toBe("pending");
+    expect(calls.length).toBe(1);
+    expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetRefundStatus");
+  });
+});
+

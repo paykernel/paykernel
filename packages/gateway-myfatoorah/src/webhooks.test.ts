@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { InvalidRequestError } from "@paykernel/core";
 import {
   canonicalMyFatoorahPaymentString,
   canonicalMyFatoorahRefundString,
@@ -7,10 +8,15 @@ import {
   myFatoorahWebhookKind,
   verifyMyFatoorahSignature,
 } from "./webhooks";
-import { MYFATOORAH_TEST_WEBHOOK_SECRET, paymentWebhook, refundWebhook } from "./fixtures/webhooks";
+import {
+  MYFATOORAH_TEST_WEBHOOK_SECRET,
+  paymentWebhook,
+  refundWebhook,
+} from "./fixtures/webhooks";
 import { MyFatoorahGateway } from "./gateway";
 import { HooksManager } from "@paykernel/core";
 import { MYFATOORAH_TEST_API_TOKEN } from "./fixtures/webhooks";
+import { resolveMyFatoorahCustomerReference } from "./sources";
 
 function gateway() {
   return new MyFatoorahGateway(
@@ -128,5 +134,81 @@ describe("myfatoorah webhook signatures", () => {
     expect(verifyMyFatoorahSignature(payload, MYFATOORAH_TEST_WEBHOOK_SECRET, signature)).toBe(
       true,
     );
+  });
+
+  it("verifies raw JSON string payloads and fails closed on bad JSON", () => {
+    const payload = paymentWebhook();
+    const raw = JSON.stringify(payload);
+    const signature = computeMyFatoorahSignature(
+      canonicalMyFatoorahPaymentString(payload),
+      MYFATOORAH_TEST_WEBHOOK_SECRET,
+    );
+    // raw string succeeds
+    expect(verifyMyFatoorahSignature(raw, MYFATOORAH_TEST_WEBHOOK_SECRET, signature)).toBe(true);
+    expect(verifyMyFatoorahSignature(`  ${raw}  `, MYFATOORAH_TEST_WEBHOOK_SECRET, signature)).toBe(
+      true,
+    );
+    expect(gateway().verifyWebhook(raw, signature)).toBe(true);
+    // bad JSON fails closed (false, not throw)
+    expect(verifyMyFatoorahSignature("not-json{", MYFATOORAH_TEST_WEBHOOK_SECRET, signature)).toBe(
+      false,
+    );
+    expect(verifyMyFatoorahSignature("{", MYFATOORAH_TEST_WEBHOOK_SECRET, "abcd")).toBe(false);
+    // canonical helpers throw InvalidRequestError on bad JSON
+    expect(() => canonicalMyFatoorahPaymentString("not-json{")).toThrow(InvalidRequestError);
+    expect(() => myFatoorahWebhookKind("not-json{")).toThrow(InvalidRequestError);
+  });
+
+  it("canonical helpers parse raw JSON string (payment/refund)", () => {
+    const pay = paymentWebhook();
+    const payRaw = JSON.stringify(pay);
+    expect(canonicalMyFatoorahPaymentString(payRaw)).toBe(canonicalMyFatoorahPaymentString(pay));
+    const refund = refundWebhook();
+    const refundRaw = JSON.stringify(refund);
+    expect(canonicalMyFatoorahRefundString(refundRaw)).toBe(
+      canonicalMyFatoorahRefundString(refund),
+    );
+  });
+});
+
+describe("myfatoorah customer reference", () => {
+  it("prefers explicit myfatoorahCustomer.reference, then orderId, never customerId", () => {
+    expect(
+      resolveMyFatoorahCustomerReference({
+        orderId: "ord_123",
+        myfatoorahCustomerReference: "explicit_ref",
+        customerId: "cust_999",
+      }),
+    ).toBe("explicit_ref");
+    expect(
+      resolveMyFatoorahCustomerReference({ orderId: "ord_123", customerId: "cust_999" }),
+    ).toBe("ord_123");
+    expect(resolveMyFatoorahCustomerReference({ customerId: "cust_999" })).toBeUndefined();
+    expect(
+      resolveMyFatoorahCustomerReference({ orderId: "  ", customerId: "cust_999" }),
+    ).toBeUndefined();
+    expect(
+      resolveMyFatoorahCustomerReference({
+        orderId: "ord_123",
+        myfatoorahCustomerReference: "  ",
+        customerId: "cust_999",
+      }),
+    ).toBe("ord_123");
+    expect(
+      resolveMyFatoorahCustomerReference({
+        orderId: "  ord_123  ",
+        myfatoorahCustomerReference: "  explicit  ",
+      }),
+    ).toBe("explicit");
+    expect(resolveMyFatoorahCustomerReference({ orderId: "  ord_trim  " })).toBe("ord_trim");
+  });
+
+  it("trims and ignores empty strings", () => {
+    expect(
+      resolveMyFatoorahCustomerReference({ myfatoorahCustomerReference: "", orderId: "" }),
+    ).toBeUndefined();
+    expect(
+      resolveMyFatoorahCustomerReference({ myfatoorahCustomerReference: "   ", orderId: "   " }),
+    ).toBeUndefined();
   });
 });

@@ -5,10 +5,13 @@ import {
   buildProviderReferences,
   combineAbortSignals,
   createTimeoutSignal,
+  GatewayApiError,
   InvalidRequestError,
   mapHttpAbortError,
   NetworkError,
   OperationNotSupportedError,
+  RateLimitError,
+  ResourceNotFoundError,
   toMinorUnits,
   withRetry,
   type CaptureParams,
@@ -48,6 +51,7 @@ import {
   assertMyFatoorahDisplayPaymentMethods,
   assertMyFatoorahPaymentMethod,
   assertNoPciCardSource,
+  resolveMyFatoorahCustomerReference,
 } from "./sources";
 import {
   mapMyFatoorahInvoiceOutcome,
@@ -197,6 +201,40 @@ export class MyFatoorahGateway extends BaseGateway {
         });
       }
       assertMyFatoorahHttpsUrl(p.callbackUrl, "callbackUrl");
+      // MF-CREATE-REPLAY: before POST /v3/payments, if Customer.Reference will be set,
+      // attempt GetPaymentStatus with KeyType CustomerReference to reuse existing invoice.
+      const replayReference = this.customerReferenceForReplay(p);
+      if (replayReference !== undefined) {
+        try {
+          const { data, raw } = await this.myfatoorahRequest(
+            "POST",
+            "/v2/GetPaymentStatus",
+            { Key: replayReference, KeyType: "CustomerReference" },
+            { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
+          );
+          const existingInvoiceId = stringOrNumberId(data.InvoiceId);
+          if (existingInvoiceId !== undefined) {
+            return this.mapGetPaymentResult(data, raw);
+          }
+        } catch (error) {
+          // 404 / IsSuccess false / missing Data -> no existing invoice, continue to create.
+          // Swallow inquiry failures and proceed to create; only propagate caller abort.
+          if (p.signal?.aborted) throw error;
+          const isAbort = error instanceof NetworkError && error.message.includes("aborted by caller");
+          if (isAbort) throw error;
+          if (error instanceof ResourceNotFoundError || error instanceof InvalidRequestError) {
+            // continue to create
+          } else if (
+            error instanceof NetworkError ||
+            error instanceof GatewayApiError ||
+            error instanceof RateLimitError
+          ) {
+            // Network/5xx after retries — still try to create rather than fail the whole operation
+          } else {
+            // Unknown shape -> also continue to create (fail open for replay, fail closed for create)
+          }
+        }
+      }
       const body = this.buildCreateBody(p);
       // Idempotency-Key is only honored in KWT/SAU — outside those countries,
       // after-submit retries risk double-charge, so only retry before submit.
@@ -258,31 +296,16 @@ export class MyFatoorahGateway extends BaseGateway {
       const idempotencyKey = this.assertMutationKey(p.idempotencyKey, "refundPayment");
       const invoiceId = this.assertInvoiceId(p.gatewayPaymentId, "refundPayment");
 
-      const [refundStatus, paymentStatus] = await Promise.all([
-        this.myfatoorahRequest(
-          "POST",
-          "/v2/GetRefundStatus",
-          { KeyType: "InvoiceId", Key: invoiceId },
-          // Data is nullable per OpenAPI — no refunds yet is a valid empty history.
-          { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
-        ),
-        this.myfatoorahRequest(
-          "POST",
-          "/v2/GetPaymentStatus",
-          { KeyType: "InvoiceId", Key: invoiceId },
-          { signal: p.signal, retry: true, postSubmit: false },
-        ),
-      ]);
-
-      const currency = this.refundCurrency(p, refundStatus.data);
-      this.assertCurrencyMatch(p.currency, currency, "refund");
-
-
-      const invoiceAmount = this.invoiceValue(paymentStatus.data);
-      // Official GetRefundStatus uses RefundStatusResult; fallback to legacy Refunds.
-      // Pass the whole Data object so myFatoorahRefundItems can handle both shapes.
+      // Fetch GetRefundStatus first — if an existing refund with this idempotencyKey is found,
+      // return immediately without awaiting GetPaymentStatus (cheap path).
+      const refundStatus = await this.myfatoorahRequest(
+        "POST",
+        "/v2/GetRefundStatus",
+        { KeyType: "InvoiceId", Key: invoiceId },
+        // Data is nullable per OpenAPI — no refunds yet is a valid empty history.
+        { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
+      );
       const refundsRaw: unknown = refundStatus.data;
-
       // MF-CRIT-1: ExternalIdentifier is not provider-deduped. Check for an existing
       // refund with the same idempotencyKey before any MakeRefund, even when
       // remaining > 0, to avoid double-refunding on partial-replay / crash-retry.
@@ -291,6 +314,19 @@ export class MyFatoorahGateway extends BaseGateway {
         return this.mapNestedRefundObject(existingRefund);
       }
 
+      const paymentStatus = await this.myfatoorahRequest(
+        "POST",
+        "/v2/GetPaymentStatus",
+        { KeyType: "InvoiceId", Key: invoiceId },
+        { signal: p.signal, retry: true, postSubmit: false },
+      );
+
+      const currency = this.refundCurrency(p, refundStatus.data);
+      this.assertCurrencyMatch(p.currency, currency, "refund");
+
+      const invoiceAmount = this.invoiceValue(paymentStatus.data);
+      // Official GetRefundStatus uses RefundStatusResult; fallback to legacy Refunds.
+      // Pass the whole Data object so myFatoorahRefundItems can handle both shapes.
       let remaining: number | undefined;
       if (invoiceAmount !== undefined) {
         remaining = myFatoorahRemainingRefundMajor(invoiceAmount, refundsRaw, currency);
@@ -628,11 +664,22 @@ export class MyFatoorahGateway extends BaseGateway {
       if (Object.keys(out).length === 0) return undefined;
       return out;
     }
-    if (typeof params.customerId === "string") {
-      const trimmedCustomerId = params.customerId.trim();
-      if (trimmedCustomerId.length > 0) return { Reference: trimmedCustomerId };
-    }
+    // Customer.Reference is the webhook paymentId (Invoice.ExternalIdentifier).
+    // Per official V3 it must be orderId or explicit myfatoorahCustomer.reference — never customerId.
+    // buildCreateBody already injects orderId as Customer.Reference when needed; serializeCustomer
+    // therefore must NOT map customerId → Reference. Use sources.ts/resolveMyFatoorahCustomerReference
+    // for the canonical priority logic.
     return undefined;
+  }
+
+  private customerReferenceForReplay(
+    params: MyFatoorahCreatePaymentParams,
+  ): string | undefined {
+    return resolveMyFatoorahCustomerReference({
+      orderId: params.orderId,
+      myfatoorahCustomerReference: params.myfatoorahCustomer?.reference,
+      customerId: typeof params.customerId === "string" ? params.customerId : undefined,
+    });
   }
 
   private buildSourceOfFund(
@@ -694,9 +741,9 @@ export class MyFatoorahGateway extends BaseGateway {
     const invoiceStatus = mapMyFatoorahInvoiceStatus(invoiceStatusRaw);
     const transactionEvidence = mapMyFatoorahTransactionEvidence(transactionStatusRaw);
 
-    const paidEvidence =
-      paymentCompleted && (invoiceStatus === "paid" || transactionEvidence === "success");
-
+    // MF-PAYMENTCOMPLETED-REDIRECT: PaymentCompleted true is definitive paid evidence
+    // even when nested statuses are missing; PaymentURL then is Result URL, not checkout.
+    const paidEvidence = paymentCompleted;
     const paymentId = this.paymentIdFromData(data);
     const references = buildProviderReferences({
       gateway: "myfatoorah",
@@ -792,30 +839,9 @@ export class MyFatoorahGateway extends BaseGateway {
     ) {
       value = amount.ValueInBaseCurrency;
     } else {
-      // Fallback: legacy Value or plain Amount number; only use display if currencies match or missing
-      value =
-        amount.ValueInDisplayCurrency ??
-        amount.Value ??
-        (transactionDetails as Record<string, unknown>).Amount;
-      // If fallback picked a ValueIn* but its currency mismatches requested, omit rather than publish wrong currency
-      if (
-        value === amount.ValueInPayCurrency &&
-        payCurrency !== undefined &&
-        payCurrency !== requested
-      )
-        return undefined;
-      if (
-        value === amount.ValueInDisplayCurrency &&
-        displayCurrency !== undefined &&
-        displayCurrency !== requested
-      )
-        return undefined;
-      if (
-        value === amount.ValueInBaseCurrency &&
-        baseCurrency !== undefined &&
-        baseCurrency !== requested
-      )
-        return undefined;
+      // MF-CREATE-AMOUNT-FALLBACK: if no ValueIn* currency matched request, omit amount.
+      // Do not use bare Value/Amount as request currency — avoids publishing KWD base as SAR, etc.
+      return undefined;
     }
     return this.parseMajor(value, currency);
   }
@@ -861,13 +887,13 @@ export class MyFatoorahGateway extends BaseGateway {
           ? "paid"
           : invoiceStatus;
 
-    // Amount: prefer PaidCurrency/PaidCurrencyValue (pay currency) when present to match create's
-    // pay-currency publishing; fall back to InvoiceValue + base Currency otherwise.
+    // Amount: MF-GETPAYMENT-BASE-MIX — never pair InvoiceValue (base) with transaction pay Currency.
+    // Prefer PaidCurrency/PaidCurrencyValue, else TransationValue/Currency (transaction Currency), else InvoiceValue with base Currency field.
     let currency: string | undefined;
     let amount: number | undefined;
     if (successTransaction !== undefined) {
       const paidCurrency = normalizeMyFatoorahCurrency(successTransaction.PaidCurrency);
-      const paidValue = successTransaction.PaidCurrencyValue ?? successTransaction.TransationValue;
+      const paidValue = successTransaction.PaidCurrencyValue;
       if (paidCurrency !== undefined && paidValue !== undefined) {
         const parsedPaid = this.parseMajor(paidValue, paidCurrency);
         if (parsedPaid !== undefined) {
@@ -876,14 +902,38 @@ export class MyFatoorahGateway extends BaseGateway {
         }
       }
       if (currency === undefined) {
-        currency = this.transactionCurrency(successTransaction);
+        const txCurrency = normalizeMyFatoorahCurrency(successTransaction.Currency);
+        const txValue = successTransaction.TransationValue;
+        if (txCurrency !== undefined && txValue !== undefined) {
+          const parsedTx = this.parseMajor(txValue, txCurrency);
+          if (parsedTx !== undefined) {
+            currency = txCurrency;
+            amount = parsedTx;
+          }
+        }
+      }
+      if (currency === undefined) {
         const invoiceAmount = this.invoiceValue(data);
-        if (currency !== undefined && invoiceAmount !== undefined) {
-          amount = this.parseMajor(invoiceAmount, currency);
+        if (invoiceAmount !== undefined) {
+          const baseCurrency =
+            normalizeMyFatoorahCurrency((data as Record<string, unknown>).Currency) ??
+            normalizeMyFatoorahCurrency((data as Record<string, unknown>).BaseCurrency) ??
+            normalizeMyFatoorahCurrency((data as Record<string, unknown>).InvoiceCurrency) ??
+            (this.myfatoorahConfig.live === true
+              ? MYFATOORAH_COUNTRY_CURRENCY[this.myfatoorahConfig.country]
+              : "KWD");
+          // Guard: if PaidCurrency was missing, we must not have already used InvoiceValue+SAR via tier2.
+          // Tier2 already handled pay currency via TransationValue, so tier3 uses base only.
+          if (baseCurrency !== undefined) {
+            const parsedBase = this.parseMajor(invoiceAmount, baseCurrency);
+            if (parsedBase !== undefined) {
+              currency = baseCurrency;
+              amount = parsedBase;
+            }
+          }
         }
       }
     }
-
     const transactionPaymentId = this.successTransactionPaymentId(successTransaction);
     const references = buildProviderReferences({
       gateway: "myfatoorah",
@@ -916,15 +966,15 @@ export class MyFatoorahGateway extends BaseGateway {
       (Array.isArray(data.InvoiceTransactions) ? data.InvoiceTransactions : undefined) ??
       (Array.isArray(data.Transactions) ? data.Transactions : undefined);
     if (candidates === undefined) return undefined;
+    let lastMatch: Record<string, unknown> | undefined;
     for (const transaction of candidates) {
       const rec = asRecord(transaction);
       if (mapMyFatoorahTransactionEvidence(rec.TransactionStatus) === "success") {
-        return rec;
+        lastMatch = rec;
       }
     }
-    return undefined;
+    return lastMatch;
   }
-
   private successTransactionPaymentId(
     transaction: Record<string, unknown> | undefined,
   ): string | undefined {
@@ -982,7 +1032,11 @@ export class MyFatoorahGateway extends BaseGateway {
       }
     }
     // No BaseCurrency yet (first refund, empty history): the portal country fixes the base currency.
-    const inferredBase = MYFATOORAH_COUNTRY_CURRENCY[this.myfatoorahConfig.country];
+    // Sandbox always KWD (country host is ignored there).
+    const inferredBase =
+      this.myfatoorahConfig.live === true
+        ? MYFATOORAH_COUNTRY_CURRENCY[this.myfatoorahConfig.country]
+        : "KWD";
     const requested = typeof params.currency === "string" ? params.currency.trim() : "";
     if (requested.length > 0) {
       const normReq = normalizeMyFatoorahCurrency(requested);
