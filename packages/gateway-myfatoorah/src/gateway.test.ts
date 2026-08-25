@@ -181,14 +181,17 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(result.amount).toBe(10.5);
   });
 
-  it("retries post-submit network errors on create only for KWT/SAU", async () => {
+  it("retries post-submit network errors on create only for KWT/SAU — timeout abort is indeterminate", async () => {
+    // C1/C2: KWT/SAU POST has Idempotency-Key, so a true post-submit timeout
+    // (fetch aborted after headers sent) must retry withRetry (maxAttempts 3)
+    // and then surface indeterminate with gatewayId = idempotencyKey/orderId.
+    // Pre-send TypeError (connect/DNS) is now tagged afterProviderSubmit=false
+    // and would be retryable but NOT indeterminate — use AbortError here to
+    // exercise the post-submit path after our fix.
     const calls: FetchCall[] = [];
+    const timeoutAbort = () => new DOMException("MyFatoorah API request timed out after 10000ms", "AbortError");
     const gateway = createGateway(
-      [
-        new TypeError("connect ECONNREFUSED"),
-        new TypeError("connect ECONNREFUSED"),
-        new TypeError("connect ECONNREFUSED"),
-      ],
+      [timeoutAbort(), timeoutAbort(), timeoutAbort()],
       calls,
       { country: "KWT" },
     );
@@ -197,16 +200,43 @@ describe("MyFatoorahGateway.createPayment", () => {
     expect(calls.length).toBe(3);
   });
 
-  it("does not retry post-submit network errors on create outside KWT/SAU", async () => {
+  it("does not mark pre-send connect/DNS TypeError as postSubmit indeterminate outside KWT/SAU — retries then throws retryable NetworkError", async () => {
+    // C1/C2 fix: fetch TypeError (connect ECONNREFUSED / DNS) before bytes sent
+    // is now afterProviderSubmit=false. Outside KWT/SAU the POST uses
+    // isMyFatoorahRetryableBeforeSubmit, so it retries (withRetry) instead of
+    // immediate indeterminate with orderId gatewayId. After retries exhausted
+    // it throws NetworkError (retryable pre-submit), not indeterminate.
     const calls: FetchCall[] = [];
     const gateway = createGateway(
-      [jsonResponse({ IsSuccess: false, Message: "Not found" }, 404), new TypeError("connect ECONNREFUSED")],
+      [
+        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+        new TypeError("connect ECONNREFUSED"),
+        new TypeError("connect ECONNREFUSED"),
+        new TypeError("connect ECONNREFUSED"),
+      ],
       calls,
       { country: "BHR" },
     );
-    const result = await gateway.createPayment({ ...createParams, orderId: "ord_bhr_1" });
-    expect(result.outcome).toBe("indeterminate");
-    expect(calls.length).toBe(2);
+    await expect(gateway.createPayment({ ...createParams, orderId: "ord_bhr_1" })).rejects.toBeInstanceOf(
+      NetworkError,
+    );
+    // 1 preflight (404 not-found → allow create) + 3 POST attempts (withRetry maxAttempts 3)
+    expect(calls.length).toBe(4);
+    // Verify the thrown NetworkError is not postSubmit-tagged
+    try {
+      await createGateway(
+        [
+          jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+          new TypeError("connect ECONNREFUSED"),
+          new TypeError("connect ECONNREFUSED"),
+          new TypeError("connect ECONNREFUSED"),
+        ],
+        [],
+        { country: "BHR" },
+      ).createPayment({ ...createParams, orderId: "ord_bhr_1" });
+    } catch (error) {
+      expect((error as NetworkError).afterProviderSubmit).toBe(false);
+    }
   });
 
   it("returns indeterminate when a mutating 2xx has no InvoiceId", async () => {
@@ -372,6 +402,10 @@ describe("MyFatoorahGateway.createPayment", () => {
   });
 
   it("does not auto-retry the headerless create POST after submit (MF-CRIT-2)", async () => {
+    // Headerless retry (KWT header not supported) uses retry:false to avoid double-charge
+    // fan-out. A true post-submit timeout (abort after headers) must still be
+    // indeterminate. Pre-send TypeError would now be retryable pre-submit, not
+    // indeterminate — use AbortError to exercise the post-submit path.
     const calls: FetchCall[] = [];
     const gateway = createGateway(
       [
@@ -383,8 +417,8 @@ describe("MyFatoorahGateway.createPayment", () => {
           },
           200,
         ),
-        new TypeError("connect ECONNREFUSED"),
-        new TypeError("connect ECONNREFUSED"), // must never be consumed
+        new DOMException("MyFatoorah API request timed out after 10000ms", "AbortError"),
+        new TypeError("connect ECONNREFUSED"), // must never be consumed (retry:false)
       ],
       calls,
       { country: "KWT" },
@@ -1398,6 +1432,26 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
   });
 
+  it("MF-CREATE-REPLAY: ARE lookup 429 surfaces RateLimitError (not indeterminate)", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    await expect(
+      gateway.createPayment({
+        ...createParams,
+        orderId: "ord_replay_429_lookup",
+      }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
   it("unkeyed ARE create does not retry 429 on /v3/payments", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -1417,6 +1471,70 @@ describe("MyFatoorahGateway MF fixes", () => {
     ).rejects.toBeInstanceOf(RateLimitError);
     expect(calls.filter((c) => c.url.endsWith("/v3/payments")).length).toBe(1);
   });
+describe("myfatoorah PaymentCompleted string handling (I7) and isPaidOutcome amount-optional (I8)", () => {
+  it("accepts string \"true\" (case-insensitive, trimmed) as paid via PaymentCompleted", async () => {
+    for (const raw of ["true", " True ", "TRUE", " true "] as const) {
+      const calls: FetchCall[] = [];
+      const data = paidCreateData({ PaymentCompleted: raw });
+      const gw = createGateway([jsonResponse(myfatoorahEnvelope(data))], calls);
+      const result = await gw.createPayment({ ...createParams });
+      expect(isPaidOutcome(result)).toBe(true);
+      expect(result.status).toBe("paid");
+    }
+    // string "false" must not be treated as paid
+    {
+      const calls: FetchCall[] = [];
+      const data = paidCreateData({
+        PaymentCompleted: "false",
+        PaymentURL: "https://sandbox.pg.apitest.myfatoorah.com/Checkout/Gateway/915102/redirect",
+      });
+      // When not paid, gateway expects redirect; provide PaymentURL to avoid indeterminate
+      const gw = createGateway([jsonResponse(myfatoorahEnvelope(data))], calls);
+      const result = await gw.createPayment({ ...createParams });
+      expect(isPaidOutcome(result)).toBe(false);
+      expect(result.status).toBe("pending");
+    }
+  });
+
+  it("PaymentCompleted true with no matching ValueIn* omits amount but still paid (I8)", async () => {
+    const calls: FetchCall[] = [];
+    // Request SAR but only KWD base present — amount must be omitted to avoid KWD-as-SAR drift
+    const data = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 64.772,
+          DisplayCurrency: "KWD",
+          ValueInDisplayCurrency: 64.772,
+          // no PayCurrency SAR at all
+        },
+      },
+    });
+    const gw = createGateway([jsonResponse(myfatoorahEnvelope(data))], calls);
+    const result = await gw.createPayment({ ...createParams }); // createParams currency SAR
+    expect(isPaidOutcome(result)).toBe(true);
+    expect(result.status).toBe("paid");
+    expect(result.amount).toBeUndefined();
+    expect(result.currency).toBeUndefined();
+    // Same with completely empty Amount (no currencies) — still paid, no amount
+    const calls2: FetchCall[] = [];
+    const data2 = paidCreateData({
+      TransactionDetails: {
+        Invoice: { Status: "PAID" },
+        Transaction: { Status: "SUCCESS" },
+        Amount: {},
+      },
+    });
+    const gw2 = createGateway([jsonResponse(myfatoorahEnvelope(data2))], calls2);
+    const result2 = await gw2.createPayment({ ...createParams });
+    expect(isPaidOutcome(result2)).toBe(true);
+    expect(result2.status).toBe("paid");
+    expect(result2.amount).toBeUndefined();
+  });
+});
+
 
   it("MF-SANDBOX-BASE: ARE sandbox first refund without currency infers KWD and posts MakeRefund", async () => {
     const calls: FetchCall[] = [];

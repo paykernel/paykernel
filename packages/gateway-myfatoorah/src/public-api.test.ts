@@ -10,11 +10,11 @@ describe("public API runtime surface", () => {
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.immediateCapture).toBe(true);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.refunds).toBe(true);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.partialRefunds).toBe(true);
+    expect(myfatoorah.MYFATOORAH_CAPABILITIES.tokenization).toBe(true);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.authorization).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.partialCapture).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.voids).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.hostedCheckout).toBe(false);
-    expect(myfatoorah.MYFATOORAH_CAPABILITIES.tokenization).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.customers).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.paymentMethods).toBe(false);
     expect(myfatoorah.MYFATOORAH_CAPABILITIES.marketplaceSplits).toBe(false);

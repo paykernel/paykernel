@@ -13,6 +13,8 @@ Unknown provider values fail closed to `failed`.
 | `PARTIALLY_REFUNDED` / `PARTIALLY-REFUNDED` etc.  | `partially_refunded`  |
 | anything else                                     | `failed`       |
 
+> **Note:** `POST /v2/GetPaymentStatus` per official https://docs.myfatoorah.com/docs/get-payment-status only returns `Pending` / `Paid` / `Canceled`. `REFUNDED` / `PARTIALLY_REFUNDED` are **never** returned by `GetPaymentStatus` (I3 — `getPayment` cannot observe refunds; invoice stays `Paid` after refund) and are observed only via `REFUND_STATUS_CHANGED` webhooks or `GetRefundStatus`. The rows above cover the shared `mapMyFatoorahInvoiceStatus` / webhook map.
+
 ## Transaction (`Transaction.Status` / `TransactionStatus`)
 
 | MyFatoorah                                   | Evidence                                                        |
@@ -43,4 +45,4 @@ Unknown provider values fail closed to `failed`.
 
 ## `getPayment` invoice
 
-`getPayment` (`POST /v2/GetPaymentStatus`) maps `InvoiceStatus=PENDING` → `pending` **regardless of the last transaction's `TransactionStatus`** (`FAILED`/`AUTHORIZE`/`INPROGRESS` all stay `pending` because the invoice is retryable). Only `PAID` + a `SUCCESS`/`SUCCSS` transaction (last success, not first) becomes `paid`. `PAID` without a success transaction stays `pending` (official: Paid requires a `Succss` transaction). `REFUNDED` / `PARTIALLY_REFUNDED` stay those statuses with `outcome: succeeded` (settled, not fulfillable — `isPaidOutcome` is false).
+`getPayment` (`POST /v2/GetPaymentStatus`) maps `InvoiceStatus=PENDING` → `pending` **regardless of the last transaction's `TransactionStatus`** (`FAILED`/`AUTHORIZE`/`INPROGRESS` all stay `pending` because the invoice is retryable). Only `PAID` + a `SUCCESS`/`SUCCSS` transaction (last success, not first) becomes `paid`. `PAID` without a success transaction stays `pending` (official: Paid requires a `Succss` transaction). `REFUNDED` / `PARTIALLY_REFUNDED` stay those statuses with `outcome: succeeded` (settled, not fulfillable — `isPaidOutcome` is false) when seen via webhooks/shared mapper; **`GetPaymentStatus` itself never returns `REFUNDED` — after a full refund the invoice still reads `Paid` (use `GetRefundStatus` / `REFUND_STATUS_CHANGED`; do not treat `Paid` as refund-observation).**

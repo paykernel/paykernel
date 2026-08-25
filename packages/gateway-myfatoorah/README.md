@@ -49,15 +49,15 @@ if (result.outcome === "succeeded" && result.status === "paid") {
 }
 ```
 
-`MyFatoorahGateway.createPayment` accepts MyFatoorah-only `myfatoorah*` fields (`myfatoorahCustomer`, `myfatoorahPaymentMethod`, `myfatoorahDisplayPaymentMethods`, `myfatoorahLanguage`, `myfatoorahWebhookUrl`, `myfatoorahSessionId`, `myfatoorahToken`) as `MyFatoorahCreatePaymentParams`. With `defaultGateway: "myfatoorah"`, or a MYFATOORAH-only `gateways` map without `defaultGateway`, `payments.createPayment({ myfatoorahCustomer, … })` is typed the same way (core does not add `myfatoorah*` to `CreatePaymentParams`). Two or more gateways still need `defaultGateway` or a named `gateway` argument. `createPayment` **requires** `idempotencyKey` (no minted UUID). Request JSON amounts are ISO-padded numbers (`10.50`), not strings. `gatewayId` is the InvoiceId; `getPayment` uses `POST /v2/GetPaymentStatus`.
+`MyFatoorahGateway.createPayment` accepts MyFatoorah-only `myfatoorah*` fields (`myfatoorahCustomer`, `myfatoorahPaymentMethod`, `myfatoorahDisplayPaymentMethods`, `myfatoorahLanguage`, `myfatoorahWebhookUrl`, `myfatoorahSessionId`, `myfatoorahToken`) as `MyFatoorahCreatePaymentParams`. With `defaultGateway: "myfatoorah"`, or a MYFATOORAH-only `gateways` map without `defaultGateway`, `payments.createPayment({ myfatoorahCustomer, … })` is typed the same way (core does not add `myfatoorah*` to `CreatePaymentParams`). Two or more gateways still need `defaultGateway` or a named `gateway` argument. `createPayment` **requires** `idempotencyKey` (no minted UUID). Request JSON amounts are ISO-padded number tokens (`10.50` SAR, `1.200` KWD), never strings. `gatewayId` is the InvoiceId; `getPayment` uses `POST /v2/GetPaymentStatus` (`InvoiceId`/`PaymentId` via `myfatoorahKeyType`); `PaymentURL` → `requires_action` + `redirectUrl`. Outside KWT/SAU `orderId` or `myfatoorahCustomer.reference` is required (CustomerReference replay).
 
 ## Capabilities
 
-Claimed: `payments`, `immediateCapture`, `refunds`, `partialRefunds`.
+Claimed: `payments`, `immediateCapture`, `refunds`, `partialRefunds`, `tokenization` (via `myfatoorahToken` / `myfatoorahSessionId` → `SourceOfFund.Token` / `SessionId`; direct `SourceOfFund.Card` PAN is still rejected).
 
-Unclaimed (fail-closed): `authorization`, `partialCapture`, `voids`, `hostedCheckout`, `tokenization`, `customers`, `paymentMethods`, `marketplaceSplits`, `disputes`, `paymentLinks`, `providerRecurring`.
+Unclaimed (fail-closed): `authorization`, `partialCapture`, `voids`, `hostedCheckout`, `customers`, `paymentMethods`, `marketplaceSplits`, `disputes`, `paymentLinks`, `providerRecurring`.
 
-`PaymentURL` is a **redirect**, not a Checkout Session product.
+`PaymentURL` is a **redirect**, not a Checkout Session product. `gateway.ts` length/duplication is intentional for this gate — split deferred and documented.
 
 ## Docs
 

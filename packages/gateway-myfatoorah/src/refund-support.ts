@@ -82,7 +82,8 @@ export function nestedRefundFromInvoice(
 
 /**
  * Remaining refundable major units, or 0 when fully refunded.
- * Refunds whose status is `Refunded` / `Pending` count; `Canceled` does not.
+ * Only refunds whose normalized status is `REFUNDED` or `PENDING` count;
+ * `CANCELED`/`CANCELLED`, `FAILED`, `REJECTED`, and unknown statuses are ignored.
  * When the refund list is missing/empty, remaining equals the invoice amount
  * (no refunds yet). Throws when the invoice amount itself is unparseable
  * or refund amounts are malformed — never returns undefined.
@@ -109,7 +110,7 @@ export function myFatoorahRemainingRefundMajor(
       throw new InvalidRequestError("MyFatoorah refunds list has no parseable amounts");
     }
     const normalized = myFatoorahRefundStatus(item).trim().toUpperCase();
-    if (normalized === "CANCELED" || normalized === "CANCELLED") continue;
+    if (normalized !== "REFUNDED" && normalized !== "PENDING") continue;
     const rec = item as Record<string, unknown>;
     // Amount may be a plain number (legacy) or an object (official sibling Amount),
     // or an official RefundAmount / ValueInBaseCurrency field.

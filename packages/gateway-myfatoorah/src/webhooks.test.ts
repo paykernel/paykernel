@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { InvalidRequestError } from "@paykernel/core";
+import { HooksManager, InvalidRequestError } from "@paykernel/core";
+import {
+  MYFATOORAH_TEST_API_TOKEN,
+  MYFATOORAH_TEST_WEBHOOK_SECRET,
+  paymentWebhook,
+  refundWebhook,
+} from "./fixtures/webhooks";
+import { MyFatoorahGateway } from "./gateway";
+import { resolveMyFatoorahCustomerReference } from "./sources";
 import {
   canonicalMyFatoorahPaymentString,
   canonicalMyFatoorahRefundString,
@@ -8,11 +16,10 @@ import {
   myFatoorahWebhookKind,
   verifyMyFatoorahSignature,
 } from "./webhooks";
-import { MYFATOORAH_TEST_WEBHOOK_SECRET, paymentWebhook, refundWebhook } from "./fixtures/webhooks";
-import { MyFatoorahGateway } from "./gateway";
-import { HooksManager } from "@paykernel/core";
-import { MYFATOORAH_TEST_API_TOKEN } from "./fixtures/webhooks";
-import { resolveMyFatoorahCustomerReference } from "./sources";
+import {
+  parseMyFatoorahPaymentWebhookEvent,
+  parseMyFatoorahRefundWebhookEvent,
+} from "./webhook-map";
 
 function gateway() {
   return new MyFatoorahGateway(
@@ -104,6 +111,29 @@ describe("myfatoorah webhook signatures", () => {
       false,
     );
     expect(() => myFatoorahWebhookKind(unknown)).toThrow();
+  });
+
+  it("unsupported webhook codes 3-7 (BALANCE_TRANSFERRED etc) verify false but parse throws unsupported", () => {
+    // https://docs.myfatoorah.com/docs/webhook-v2 — codes 3-7 are not payment/refund
+    for (const code of [3, 4, 5, 6, 7, "3", "7"]) {
+      const payload = {
+        Event: { Code: code, Reference: `WH-${code}`, CreationDate: "2025-02-18T11:21:25.476Z" },
+        Data: {},
+      };
+      const sig = computeMyFatoorahSignature("", MYFATOORAH_TEST_WEBHOOK_SECRET);
+      expect(verifyMyFatoorahSignature(payload, MYFATOORAH_TEST_WEBHOOK_SECRET, sig)).toBe(false);
+      expect(() => myFatoorahWebhookKind(payload)).toThrow(InvalidRequestError);
+      expect(() => myFatoorahWebhookKind(payload)).toThrow(/Unsupported/);
+      // gateway parse also throws unsupported (not signature failure)
+      expect(() => gateway().parseWebhookEvent(payload)).toThrow(InvalidRequestError);
+    }
+    // Name authoritative: BALANCE_TRANSFERRED with Code 1 still unsupported
+    const named = {
+      Event: { Name: "BALANCE_TRANSFERRED", Code: 1, Reference: "WH-BAL", CreationDate: "2025-02-18T11:21:25.476Z" },
+      Data: {},
+    };
+    expect(verifyMyFatoorahSignature(named, MYFATOORAH_TEST_WEBHOOK_SECRET, "abcd")).toBe(false);
+    expect(() => myFatoorahWebhookKind(named)).toThrow(/Unsupported/);
   });
 
   it("extracts the signature header case-insensitively", () => {
@@ -205,3 +235,141 @@ describe("myfatoorah customer reference", () => {
     ).toBeUndefined();
   });
 });
+
+describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
+  it("prefers ValueInBaseCurrency over display/pay (base drift)", () => {
+    const payload = paymentWebhook({
+      Data: {
+        Invoice: { Id: 6409988, Status: "PAID", ExternalIdentifier: "order_1" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay1" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 10,
+          DisplayCurrency: "SAR",
+          ValueInDisplayCurrency: 20,
+          PayCurrency: "SAR",
+          ValueInPayCurrency: 30,
+        },
+      },
+    });
+    const event = parseMyFatoorahPaymentWebhookEvent(payload);
+    expect(event.amount).toBe(10);
+    expect(event.currency).toBe("KWD");
+  });
+
+  it("aliases KD → KWD and SR → SAR in webhook amounts", () => {
+    const kdPayload = paymentWebhook({
+      Data: {
+        Invoice: { Id: 1, Status: "PAID", ExternalIdentifier: "order_kd" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay_kd" },
+        Amount: {
+          BaseCurrency: "KD",
+          ValueInBaseCurrency: "12,345.000",
+          DisplayCurrency: "KD",
+          ValueInDisplayCurrency: "12,345.000",
+        },
+      },
+    });
+    const kdEvent = parseMyFatoorahPaymentWebhookEvent(kdPayload);
+    expect(kdEvent.currency).toBe("KWD");
+    expect(kdEvent.amount).toBe(12345);
+
+    const srPayload = refundWebhook({
+      Data: {
+        Refund: { Id: 111, Status: "REFUNDED" },
+        Amount: {
+          BaseCurrency: "SR",
+          ValueInBaseCurrency: 30,
+          DisplayCurrency: "SR",
+          ValueInDisplayCurrency: 30,
+        },
+        ReferencedInvoice: { Id: 5620277, ExternalIdentifier: "order_sr" },
+      },
+    });
+    const srEvent = parseMyFatoorahRefundWebhookEvent(srPayload);
+    expect(srEvent.currency).toBe("SAR");
+    expect(srEvent.amount).toBe(30);
+  });
+
+  it("falls back to display when base missing, and does not use top-level Amount as pay", () => {
+    const displayOnly = paymentWebhook({
+      Data: {
+        Invoice: { Id: 2, Status: "PAID", ExternalIdentifier: "order_disp" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay_disp" },
+        Amount: {
+          DisplayCurrency: "KWD",
+          ValueInDisplayCurrency: 7.5,
+          PayCurrency: "SAR",
+          ValueInPayCurrency: 90,
+        },
+      },
+    });
+    const dispEvent = parseMyFatoorahPaymentWebhookEvent(displayOnly);
+    expect(dispEvent.amount).toBe(7.5);
+    expect(dispEvent.currency).toBe("KWD");
+
+    // Fallback legacy Value should not be mistaken for pay when base/display/pay are missing
+    const legacy = paymentWebhook({
+      Data: {
+        Invoice: { Id: 3, Status: "PAID", ExternalIdentifier: "order_legacy" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay_legacy" },
+        Amount: {
+          Value: 999,
+          Currency: "KWD",
+        },
+      },
+    });
+    const legacyEvent = parseMyFatoorahPaymentWebhookEvent(legacy);
+    expect(legacyEvent.amount).toBe(999);
+    expect(legacyEvent.currency).toBe("KWD");
+
+    // When ValueInBaseCurrency exists, legacy Value is ignored (base wins)
+    const withBaseAndLegacy = paymentWebhook({
+      Data: {
+        Invoice: { Id: 4, Status: "PAID", ExternalIdentifier: "order_both" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay_both" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 11,
+          Value: 999,
+          Currency: "SAR",
+        },
+      },
+    });
+    const bothEvent = parseMyFatoorahPaymentWebhookEvent(withBaseAndLegacy);
+    expect(bothEvent.amount).toBe(11);
+    expect(bothEvent.currency).toBe("KWD");
+  });
+
+  it("handles comma thousand-separated amounts in webhook Amount", () => {
+    const payload = paymentWebhook({
+      Data: {
+        Invoice: { Id: 5, Status: "PAID", ExternalIdentifier: "order_comma" },
+        Transaction: { Status: "SUCCESS", PaymentId: "pay_comma" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: "12,345.000",
+        },
+      },
+    });
+    const event = parseMyFatoorahPaymentWebhookEvent(payload);
+    expect(event.amount).toBe(12345);
+    expect(event.currency).toBe("KWD");
+  });
+
+  it("PAID webhook is paid regardless of Transaction FAILED (KNET duplicate)", () => {
+    const payload = paymentWebhook({
+      Data: {
+        Invoice: { Id: 6409988, Status: "PAID", ExternalIdentifier: "order_knet" },
+        Transaction: { Status: "FAILED", PaymentId: "pay_knet_dup" },
+        Amount: {
+          BaseCurrency: "KWD",
+          ValueInBaseCurrency: 500,
+        },
+      },
+    });
+    const event = parseMyFatoorahPaymentWebhookEvent(payload);
+    expect(event.status).toBe("paid");
+  });
+});
+

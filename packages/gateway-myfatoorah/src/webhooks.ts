@@ -32,7 +32,14 @@ export function extractMyFatoorahSignatureHeader(
 
 export type MyFatoorahWebhookKind = "payment" | "refund";
 
-/** Webhook V2 event kinds. `Event.Name` is authoritative; `Event.Code` 1/2 is fallback only when Name is missing. */
+/**
+ * Webhook V2 event kinds. `Event.Name` is authoritative; `Event.Code` 1/2 is fallback only when Name is missing.
+ * Official V2 emits other codes 3-7 (`BALANCE_TRANSFERRED` etc per https://docs.myfatoorah.com/docs/webhook-v2)
+ * which are not payment/refund and are treated as unsupported — `myFatoorahWebhookKind` throws
+ * `InvalidRequestError(unsupported event)` for them; `verifyMyFatoorahSignature` catches that
+ * and returns `false` (fail-closed) so unsupported events are not mistaken for bad signatures,
+ * while `parseWebhookEvent` surfaces the unsupported error as `InvalidRequestError`.
+ */
 export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
   const event = myFatoorahEventRecord(payload);
   const name = typeof event.Name === "string" ? event.Name.trim().toUpperCase() : "";
@@ -43,7 +50,8 @@ export function myFatoorahWebhookKind(payload: unknown): MyFatoorahWebhookKind {
       `Unsupported MyFatoorah webhook event ${String(event.Name)} (PAYMENT_STATUS_CHANGED or REFUND_STATUS_CHANGED)`,
     );
   }
-  // Fallback to Code only when Name is empty — accept number or string "1"/"2"
+  // Fallback to Code only when Name is empty — accept number or string "1"/"2".
+  // Codes 3-7 are other V2 events (e.g. BALANCE_TRANSFERRED) and must throw unsupported.
   const codeRaw = event.Code;
   const codeNum =
     typeof codeRaw === "number"
@@ -179,7 +187,10 @@ const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=
  * Constant-time verification of a Webhook V2 signature.
  *
  * Fails closed (`false`): missing/empty secret, missing/empty header,
- * unsupported event, unparseable payload, invalid Base64, or byte mismatch.
+ * unsupported event (codes 3-7 BALANCE_TRANSFERRED etc → false here, but
+ * `parseWebhookEvent` throws `InvalidRequestError(unsupported)` for clarity),
+ * unparseable payload, invalid Base64, or byte mismatch.
+ * For supported events, any canonical-generation failure also fails closed.
  */
 export function verifyMyFatoorahSignature(
   payload: unknown,

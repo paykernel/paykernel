@@ -7,10 +7,12 @@ import {
   combineAbortSignals,
   createTimeoutSignal,
   InvalidRequestError,
+  isAbortError,
   mapHttpAbortError,
   NetworkError,
   OperationNotSupportedError,
   PaymentAbortedError,
+  RateLimitError,
   ResourceNotFoundError,
   toMinorUnits,
   withRetry,
@@ -255,6 +257,14 @@ export class MyFatoorahGateway extends BaseGateway {
             // invoice. Return indeterminate with the real InvoiceId so callers
             // can getPayment — do not throw (BaseGateway would remap gatewayId
             // to orderId / idempotencyKey).
+            // I1: GetPaymentStatus has no PaymentURL and GET /v3/invoices/{id}
+            // returns "No invoices match this InvoiceId" when there are no
+            // InvoiceTransactions (official). A pending invoice's PaymentURL
+            // cannot be recovered via inquiry — caller must have persisted
+            // PaymentURL before ACK; after a crash query GetPaymentStatus for
+            // status but the redirect is lost. To let the customer pay, create
+            // a new invoice with a new orderId / CustomerReference (new
+            // CustomerReference value, not a replay of the same one).
             return applyIndeterminatePaymentOutcome({
               gateway: this.name,
               gatewayId: existingInvoiceId,
@@ -278,6 +288,11 @@ export class MyFatoorahGateway extends BaseGateway {
           if (isAbort) throw error;
           if (this.isCreateReplayNotFound(error)) {
             // True not-found — safe to create the first invoice.
+          } else if (error instanceof RateLimitError) {
+            // I2: GetPaymentStatus 429 is rate-limited (official warning). Surface
+            // retryAfter so callers can backoff and retry the same orderId/idempotencyKey.
+            // Do NOT convert to indeterminate; still no second POST.
+            throw error;
           } else if (error instanceof NetworkError && error.afterProviderSubmit === true) {
             throw error;
           } else {
@@ -566,20 +581,26 @@ export class MyFatoorahGateway extends BaseGateway {
 
     let response: Response;
     let responseText = "";
+    let responseReceived = false;
     try {
       response = await this.fetch(
         `${resolveMyFatoorahBaseUrl(this.myfatoorahConfig)}${path}`,
         init,
       );
+      responseReceived = true;
       responseText = await response.text();
     } catch (error) {
+      // C1/C2: Do not mark pre-send TypeError/DNS/connect as afterProviderSubmit.
+      // Only an abort (timeout/caller abort) after a mutating POST may have been accepted.
+      // responseReceived stays false when fetch throws before headers.
+      const shouldTagPostSubmit = postSubmit && (responseReceived || isAbortError(error));
       throw mapHttpAbortError(error, {
         callerSignal,
         timeoutSignal,
         timeoutMessage: `MyFatoorah API request timed out after ${timeoutMs}ms`,
         networkMessage: "Failed to reach MyFatoorah API",
         callerAbortMessage: "MyFatoorah API request aborted by caller signal",
-        afterProviderSubmit: postSubmit,
+        afterProviderSubmit: shouldTagPostSubmit,
       });
     } finally {
       clear();
@@ -819,7 +840,10 @@ export class MyFatoorahGateway extends BaseGateway {
     requestCurrency: string,
   ): GatewayPaymentResult {
     const invoiceId = this.requireInvoiceId(data);
-    const paymentCompleted = data.PaymentCompleted === true;
+    const paymentCompletedRaw = data.PaymentCompleted;
+    const paymentCompleted =
+      paymentCompletedRaw === true ||
+      (typeof paymentCompletedRaw === "string" && paymentCompletedRaw.trim().toLowerCase() === "true");
     const paymentUrl = typeof data.PaymentURL === "string" ? data.PaymentURL.trim() : "";
 
     // Official V3 paid body nests Invoice status under TransactionDetails.Invoice.Status

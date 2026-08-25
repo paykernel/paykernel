@@ -149,6 +149,13 @@ function isNonPublicIpv4(octets: [number, number, number, number]): boolean {
   return false;
 }
 
+/**
+ * Non-public hosts: localhost, private IPv4 (10/8, 192.168/16, 172.16/12, …),
+ * link-local, loopback, ULA/link-local IPv6, and IPv4-mapped. Hostnames like
+ * `10.example.com` are intentionally allowed — `parseIpv4Literal` only flags
+ * true quadruple-numeric literals (see factory.test.ts "accepts a public
+ * hostname that starts with 10.").
+ */
 function isMyFatoorahNonPublicHost(host: string): boolean {
   if (host === "localhost" || host.endsWith(".localhost")) return true;
   const ipv4 = parseIpv4Literal(host);
@@ -173,13 +180,13 @@ export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig
   if (config.live !== undefined && typeof config.live !== "boolean") {
     throw new InvalidRequestError("myfatoorah.live must be a boolean");
   }
-  if (
-    config.webhookSecret !== undefined &&
-    typeof config.webhookSecret === "string" &&
-    config.webhookSecret.length > 0 &&
-    config.webhookSecret.trim().length === 0
-  ) {
-    throw new InvalidRequestError("myfatoorah.webhookSecret must be a non-empty string when provided");
+  if (config.webhookSecret !== undefined) {
+    if (typeof config.webhookSecret !== "string") {
+      throw new InvalidRequestError("myfatoorah.webhookSecret must be a non-empty string when provided");
+    }
+    if (config.webhookSecret.length > 0 && config.webhookSecret.trim().length === 0) {
+      throw new InvalidRequestError("myfatoorah.webhookSecret must be a non-empty string when provided");
+    }
   }
   const copied: MyFatoorahConfig = {
     apiToken: config.apiToken.trim(),
@@ -187,7 +194,7 @@ export function copyMyFatoorahConfig(config: MyFatoorahConfig): MyFatoorahConfig
   };
   if (config.live !== undefined) copied.live = config.live === true;
   if (config.webhookSecret !== undefined) {
-    const trimmed = config.webhookSecret.trim();
+    const trimmed = (config.webhookSecret as string).trim();
     if (trimmed.length > 0) {
       copied.webhookSecret = trimmed;
     }

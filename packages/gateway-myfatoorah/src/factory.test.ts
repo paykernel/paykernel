@@ -85,6 +85,30 @@ describe("myfatoorahGateway", () => {
     expect(copied.webhookSecret).toBe(MYFATOORAH_TEST_WEBHOOK_SECRET);
   });
 
+  it("rejects non-string webhookSecret", () => {
+    expect(() =>
+      copyMyFatoorahConfig({
+        apiToken: MYFATOORAH_TEST_API_TOKEN,
+        country: "KWT",
+        webhookSecret: 123 as unknown as string,
+      }),
+    ).toThrow(InvalidRequestError);
+    expect(() =>
+      copyMyFatoorahConfig({
+        apiToken: MYFATOORAH_TEST_API_TOKEN,
+        country: "KWT",
+        webhookSecret: true as unknown as string,
+      }),
+    ).toThrow(InvalidRequestError);
+    expect(() =>
+      myfatoorahGateway({
+        apiToken: MYFATOORAH_TEST_API_TOKEN,
+        country: "KWT",
+        webhookSecret: 123 as unknown as string,
+      }),
+    ).toThrow(InvalidRequestError);
+  });
+
   it("rejects non-positive timeoutMs on the factory and the gateway", () => {
     expect(() =>
       myfatoorahGateway({
