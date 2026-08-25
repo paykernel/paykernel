@@ -34,7 +34,12 @@ export const MYFATOORAH_LIVE_API_BASE_URL: Record<MyFatoorahCountry, string> = {
   EGY: "https://api-eg.myfatoorah.com",
 };
 
-/** Base currency for each portal country (ISO Lookups). */
+/**
+ * Base currency for each portal country (ISO Lookups).
+ * See https://docs.myfatoorah.com/docs/iso-lookups:
+ * KWT → KWD, SAU → SAR, ARE → AED, QAT → QAR, BHR → BHD, OMN → OMR, JOR → JOD, EGY → EGP.
+ * Sandbox (`live: false`) base is always KWD regardless of `country` (country host is ignored there).
+ */
 export const MYFATOORAH_COUNTRY_CURRENCY: Record<MyFatoorahCountry, string> = {
   KWT: "KWD",
   BHR: "BHD",

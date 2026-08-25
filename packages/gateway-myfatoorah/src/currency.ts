@@ -1,4 +1,10 @@
-/** MyFatoorah V2 aliases: official samples use "KD" for KWD and "SR" for SAR. */
+/**
+ * MyFatoorah V2 aliases: official samples use "KD" for KWD and "SR" for SAR
+ * (including dotted variants `K.D.`/`S.R.`). Webhook `Data.Amount` is base
+ * currency (e.g. KWD) and may use `KD` — normalized here and in
+ * `webhook-map.ts:webhookMoneyFromAmountRecord` which prefers base → display → pay.
+ * See `docs/money.md` MF-WEBHOOK-MONEY-DRIFT and `docs/status-mapping.md`.
+ */
 const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
   KD: "KWD",
   "K.D.": "KWD",
@@ -14,7 +20,7 @@ const MYFATOORAH_CURRENCY_ALIASES: Record<string, string> = {
 
 const CURRENCY_CODE = /^[A-Z]{3}$/;
 
-/** Normalize a provider currency token to ISO 4217, or undefined when unusable. */
+/** Normalize a provider currency token to ISO 4217, or undefined when unusable. Handles `KD`/`SR` aliases and dotted variants. */
 export function normalizeMyFatoorahCurrency(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim().toUpperCase();

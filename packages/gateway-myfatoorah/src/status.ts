@@ -28,7 +28,17 @@ export function normalizeMyFatoorahStatus(status: unknown): string {
   return typeof status === "string" ? status.trim().toUpperCase() : "";
 }
 
-/** Invoice / `InvoiceStatus` → payment status. Unknown fails closed to `failed`. */
+/**
+ * Invoice / `InvoiceStatus` → payment status. Unknown fails closed to `failed`.
+ *
+ * Shared between `getPayment` (`POST /v2/GetPaymentStatus`) and webhook parsing
+ * (`PAYMENT_STATUS_CHANGED` via `myFatoorahPaymentWebhookStatus`). Per
+ * https://docs.myfatoorah.com/docs/get-payment-status, `GetPaymentStatus`
+ * **never** returns `REFUNDED`/`PARTIALLY_REFUNDED` — those rows exist only for
+ * `REFUND_STATUS_CHANGED` webhooks / `GetRefundStatus`. After a refund the
+ * invoice stays `Paid` (refund-blind); callers must use `GetRefundStatus` or
+ * `REFUND_STATUS_CHANGED` to observe refunds (see `docs/status-mapping.md` I3).
+ */
 export function mapMyFatoorahInvoiceStatus(status: unknown): PaymentStatus {
   return INVOICE_STATUS[normalizeMyFatoorahStatus(status)] ?? "failed";
 }
@@ -77,7 +87,13 @@ export function mapMyFatoorahInvoiceOutcome(status: PaymentStatus): PaymentOpera
   return "succeeded";
 }
 
-/** Stable Phase 7 names so attachPaymentEvent can map a custom gateway. */
+/**
+ * Stable Phase 7 names so `attachPaymentEvent` can map a custom gateway.
+ * `refund` and `invoice` kinds share the same `PaymentStatus` domain — `paid`
+ * remains terminal per https://docs.myfatoorah.com/docs/v3-updating-payment-status-guidelines;
+ * refund `refunded`/`partially_refunded` are surfaced via `REFUND_STATUS_CHANGED`
+ * or `GetRefundStatus`, not `GetPaymentStatus` (refund-blind).
+ */
 export function inferMyFatoorahStableType(
   kind: "invoice" | "refund",
   status: PaymentStatus,

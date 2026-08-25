@@ -228,13 +228,53 @@ export class MyFatoorahGateway extends BaseGateway {
         this.myfatoorahConfig.country === "KWT" || this.myfatoorahConfig.country === "SAU";
       // MF-CREATE-REPLAY: only when the header is omitted. CustomerReference is
       // not unique — reuse a Paid invoice only when amount+currency match.
-      // Pending / mismatch / inquiry 5xx / 429 / non-404 4xx fail closed
-      // (indeterminate) instead of creating a second invoice.
+      // Pending / mismatch / refunded / partially_refunded fail closed
+      // (indeterminate) instead of creating a second invoice. Cancelled/Failed
+      // (including Expired→failed via mapMyFatoorahInvoiceStatus) are terminal
+      // and allow a new invoice with the same CustomerReference.
+      // CustomerReference returns last invoice per https://docs.myfatoorah.com/docs/payment-inquiry
+      // and status mapping per docs/status-mapping.md (CANCELED/CANCELLED→cancelled,
+      // REFUNDED/PARTIALLY_REFUNDED→refunded/partially_refunded, unknown/Expired→failed).
       const replayReference = this.customerReferenceForReplay(p);
       if (!idempotencySupported && replayReference === undefined) {
         throw new InvalidRequestError(
           "MyFatoorah createPayment requires orderId or myfatoorahCustomer.reference outside KWT/SAU (Idempotency-Key is omitted; CustomerReference is the replay key)",
         );
+      }
+      // I5 optional hardening (KWT/SAU 250m): best-effort reuse of Paid matching
+      // invoice without blocking creation on failures. Prevents double-charge
+      // after 250m Idempotency-Key expiry while preserving header dedupe.
+      // Only Paid+matching amount+currency is reused; Pending/mismatch/5xx/429
+      // fall through to normal POST. Abort is rethrown — not swallowed.
+      if (idempotencySupported && replayReference !== undefined) {
+        try {
+          const { data: kwtData, raw: kwtRaw } = await this.myfatoorahRequest(
+            "POST",
+            "/v2/GetPaymentStatus",
+            { Key: replayReference, KeyType: "CustomerReference" },
+            { signal: p.signal, retry: true, postSubmit: false },
+          );
+          const kwtInvoiceId = stringOrNumberId(kwtData.InvoiceId);
+          if (kwtInvoiceId !== undefined) {
+            const kwtStatusRaw =
+              typeof kwtData.InvoiceStatus === "string" ? kwtData.InvoiceStatus : "";
+            const kwtStatus = mapMyFatoorahInvoiceStatus(kwtStatusRaw);
+            if (kwtStatus === "paid" && this.replayInvoiceMatchesRequest(kwtData, p)) {
+              return this.mapGetPaymentResult(kwtData, kwtRaw);
+            }
+          }
+        } catch (error) {
+          if (p.signal?.aborted) throw error;
+          const isAbort =
+            error instanceof PaymentAbortedError ||
+            (error instanceof NetworkError && error.message.includes("aborted by caller"));
+          if (isAbort) throw error;
+          if (error instanceof RateLimitError) {
+            // Best-effort hardening: RateLimit on KWT preflight must not block
+            // creation — header dedupes within window, so fall through to POST.
+          }
+          // All other lookup failures — fall through to normal POST.
+        }
       }
       if (replayReference !== undefined && !idempotencySupported) {
         try {
@@ -252,34 +292,47 @@ export class MyFatoorahGateway extends BaseGateway {
             if (invoiceStatus === "paid" && this.replayInvoiceMatchesRequest(data, p)) {
               return this.mapGetPaymentResult(data, raw);
             }
-            // Any other invoice for this CustomerReference (Pending, Paid with a
-            // different amount, refunded, …) must not create a second chargeable
-            // invoice. Return indeterminate with the real InvoiceId so callers
-            // can getPayment — do not throw (BaseGateway would remap gatewayId
-            // to orderId / idempotencyKey).
-            // I1: GetPaymentStatus has no PaymentURL and GET /v3/invoices/{id}
-            // returns "No invoices match this InvoiceId" when there are no
-            // InvoiceTransactions (official). A pending invoice's PaymentURL
-            // cannot be recovered via inquiry — caller must have persisted
-            // PaymentURL before ACK; after a crash query GetPaymentStatus for
-            // status but the redirect is lost. To let the customer pay, create
-            // a new invoice with a new orderId / CustomerReference (new
-            // CustomerReference value, not a replay of the same one).
+            // Cancelled / failed (including Expired→failed) are terminal — allow
+            // creating a new invoice with the same CustomerReference. Only
+            // pending, refunded, partially_refunded, and paid mismatch block.
+            if (invoiceStatus === "cancelled" || invoiceStatus === "failed") {
+              // fall through to POST /v3/payments
+            } else {
+              // Any other invoice for this CustomerReference (Pending, Paid with a
+              // different amount, refunded, …) must not create a second chargeable
+              // invoice. Return indeterminate with the real InvoiceId so callers
+              // can getPayment — do not throw (BaseGateway would remap gatewayId
+              // to orderId / idempotencyKey).
+              // I1: GetPaymentStatus has no PaymentURL and GET /v3/invoices/{id}
+              // returns "No invoices match this InvoiceId" when there are no
+              // InvoiceTransactions (official). A pending invoice's PaymentURL
+              // cannot be recovered via inquiry — caller must have persisted
+              // PaymentURL before ACK; after a crash query GetPaymentStatus for
+              // status but the redirect is lost. To let the customer pay, create
+              // a new invoice with a new orderId / CustomerReference (new
+              // CustomerReference value, not a replay of the same one).
+              return applyIndeterminatePaymentOutcome({
+                gateway: this.name,
+                gatewayId: existingInvoiceId,
+                message:
+                  invoiceStatus === "pending"
+                    ? "MyFatoorah createPayment found a pending invoice for this CustomerReference; refusing to create a second invoice"
+                    : "MyFatoorah createPayment found an existing invoice for this CustomerReference that does not match the request; refusing to create a second invoice",
+                errorName: "NetworkError",
+              });
+            }
+          } else {
+            // No InvoiceId in lookup response — fail closed with replayReference
+            // (CustomerReference) instead of throwing tagged NetworkError which
+            // BaseGateway would remap to orderId/idempotencyKey.
             return applyIndeterminatePaymentOutcome({
               gateway: this.name,
-              gatewayId: existingInvoiceId,
+              gatewayId: replayReference,
               message:
-                invoiceStatus === "pending"
-                  ? "MyFatoorah createPayment found a pending invoice for this CustomerReference; refusing to create a second invoice"
-                  : "MyFatoorah createPayment found an existing invoice for this CustomerReference that does not match the request; refusing to create a second invoice",
+                "MyFatoorah createPayment replay lookup returned no InvoiceId; refusing to create a second invoice",
               errorName: "NetworkError",
             });
           }
-          throw new NetworkError(
-            "MyFatoorah createPayment replay lookup returned no InvoiceId; refusing to create a second invoice",
-            { body: raw },
-            { afterProviderSubmit: true },
-          );
         } catch (error) {
           if (p.signal?.aborted) throw error;
           const isAbort =
@@ -293,14 +346,17 @@ export class MyFatoorahGateway extends BaseGateway {
             // retryAfter so callers can backoff and retry the same orderId/idempotencyKey.
             // Do NOT convert to indeterminate; still no second POST.
             throw error;
-          } else if (error instanceof NetworkError && error.afterProviderSubmit === true) {
-            throw error;
           } else {
-            throw new NetworkError(
-              "MyFatoorah createPayment replay lookup failed; refusing to create a second invoice",
-              error,
-              { afterProviderSubmit: true },
-            );
+            // 5xx / generic lookup failures: return indeterminate with
+            // replayReference (CustomerReference) directly instead of throwing
+            // NetworkError{afterProviderSubmit:true} which BaseGateway would
+            // map to indeterminate with providerObjectId = orderId/idempotencyKey.
+            return applyIndeterminatePaymentOutcome({
+              gateway: this.name,
+              gatewayId: replayReference,
+              message: "MyFatoorah createPayment replay lookup failed; refusing to create a second invoice",
+              errorName: "NetworkError",
+            });
           }
         }
       }
@@ -476,7 +532,10 @@ export class MyFatoorahGateway extends BaseGateway {
           'MyFatoorah myfatoorahKeyType must be "InvoiceId" or "PaymentId"',
         );
       }
-      // InvoiceId is at most ~10 digits (fixtures: 6 digits); PaymentId is 14–20 digits.
+      // InvoiceId guard: real InvoiceIds are ~6-10 digits per fixtures (e.g., 915102),
+      // PaymentId is 14–20 digits (often "07..." prefix). Heuristic length >=14
+      // catches PaymentId vs InvoiceId mixups; future InvoiceId growth beyond 14
+      // would need myfatoorahKeyType override. Error hints at myfatoorahKeyType.
       // Guard against accidental PaymentId lookup via InvoiceId keyType.
       if (keyType === "InvoiceId" && id.length >= 14) {
         throw new InvalidRequestError(
@@ -1317,6 +1376,11 @@ export class MyFatoorahGateway extends BaseGateway {
       );
     }
     const key = this.assertInvoiceId(params.gatewayPaymentId, "refundPayment");
+    // InvoiceId guard: real InvoiceIds are ~6-10 digits per fixtures, PaymentId
+    // 14–20 digits. Length >=14 heuristic treats long id as PaymentId; future
+    // growth beyond 14 would need myfatoorahKeyType override. Error hints at
+    // myfatoorahKeyType. Alternative heuristic: check "07" prefix or length>12
+    // and not all zeros — kept minimal per assignment.
     if (keyType === "InvoiceId" && key.length >= 14) {
       throw new InvalidRequestError(
         `MyFatoorah refundPayment gatewayPaymentId "${key}" looks like a PaymentId (use myfatoorahKeyType: "PaymentId" for the callback paymentId)`,

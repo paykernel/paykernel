@@ -1,6 +1,7 @@
 import { fromMinorUnits, InvalidRequestError, toMinorUnits, type Money } from "@paykernel/core";
 import { myFatoorahMajorNumber, parseMyFatoorahAmount } from "./money";
 
+/** Parse a MyFatoorah money value (number or decimal string) for a currency, or undefined when missing. */
 export function readMyFatoorahMoney(value: unknown, currency: string): Money | undefined {
   if (typeof value === "number" && Number.isFinite(value)) {
     return parseMyFatoorahAmount(value, currency);
@@ -87,6 +88,9 @@ export function nestedRefundFromInvoice(
  * When the refund list is missing/empty, remaining equals the invoice amount
  * (no refunds yet). Throws when the invoice amount itself is unparseable
  * or refund amounts are malformed — never returns undefined.
+ * Uses `readMyFatoorahMoney` + `parseMyFatoorahAmount` consistently so
+ * InvoiceValue as number (`0.85`) vs string (`"12,345.000"` with grouping commas)
+ * is stripped via `parseMyFatoorahAmount` and validated with `rounding:reject`.
  */
 export function myFatoorahRemainingRefundMajor(
   invoiceAmount: unknown,
@@ -141,7 +145,11 @@ export function myFatoorahRemainingRefundMajor(
 /**
  * Extract the account base currency from a GetRefundStatus payload.
  * Prefers the first `BaseCurrency` / `Currency` on a `RefundStatusResult` entry,
- * falling back to undefined when not present.
+ * falling back to `InvoiceCurrency` / `BaseCurrency` / `Currency` at the Data root.
+ * Returns undefined when history is empty (e.g., `RefundStatusResult: []` or `Data: null`)
+ * so the caller can infer from `country`/`live` — sandbox `live:false` always `KWD`
+ * regardless of `country` (country host is ignored there), live `live:true` uses
+ * `MYFATOORAH_COUNTRY_CURRENCY[country]` (ISO Lookups: https://docs.myfatoorah.com/docs/iso-lookups).
  */
 export function myFatoorahRefundBaseCurrency(refundData: unknown): string | undefined {
   const items = myFatoorahRefundItems(refundData);
@@ -163,7 +171,7 @@ export function myFatoorahRefundBaseCurrency(refundData: unknown): string | unde
   }
   if (refundData !== null && typeof refundData === "object" && !Array.isArray(refundData)) {
     const rec = refundData as Record<string, unknown>;
-    const invCur = rec.InvoiceCurrency ?? rec.BaseCurrency;
+    const invCur = rec.InvoiceCurrency ?? rec.BaseCurrency ?? rec.Currency;
     if (typeof invCur === "string" && invCur.trim().length > 0) return invCur.trim().toUpperCase();
   }
   return undefined;

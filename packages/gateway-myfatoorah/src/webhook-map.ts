@@ -30,11 +30,26 @@ function stringOrNumberId(value: unknown): string | undefined {
 
 /**
  * Payment-domain status from a `PAYMENT_STATUS_CHANGED` event.
- * Invoice `PAID` is authoritative — it stays `paid` regardless of the
- * Transaction status (KNET can emit duplicate/aux transaction statuses).
- * A pending invoice stays pending even when transaction is `AUTHORIZE`
- * (auth/capture not implemented; no fulfilled authorized state). Customer
- * can retry the same invoice when transaction failed.
+ *
+ * Stateless mapper — does NOT remember prior webhook state. Invoice `PAID`
+ * is authoritative per https://docs.myfatoorah.com/docs/v3-updating-payment-status-guidelines
+ * and stays `paid` regardless of Transaction status (KNET can emit
+ * duplicate/aux transaction statuses). A pending invoice stays pending even
+ * when transaction is `AUTHORIZE` (auth/capture not implemented; no fulfilled
+ * authorized state). Customer can retry the same invoice when transaction failed.
+ *
+ * Paid is terminal: this mapper returns `paid` for `PAID` accurately, but it
+ * cannot downgrade a prior `paid` if a later webhook delivers `PENDING` —
+ * callers must enforce terminal Paid at the application/inbox layer
+ * (e.g. `PaymentClient.handleWebhook` inbox `claim` + ignore `pending`/`failed`
+ * after `paid` for the same `Invoice.Id`/`ExternalIdentifier`).
+ * See `docs/webhooks.md#paid-is-terminal` and
+ * https://docs.myfatoorah.com/docs/v3-updating-payment-status-guidelines.
+ *
+ * Unknown invoice status (→ `failed` via shared `mapMyFatoorahInvoiceStatus`)
+ * stays `failed` and never becomes `paid` via transaction evidence alone:
+ * `UNKNOWN` + `SUCCESS` → `failed` (fail-closed). Only explicit `PAID` maps
+ * to `paid`. Shared with `getPayment` via `mapMyFatoorahInvoiceStatus`.
  */
 export function myFatoorahPaymentWebhookStatus(
   invoiceStatus: unknown,
@@ -65,6 +80,30 @@ export function myFatoorahPaymentWebhookStatus(
   }
 }
 
+/**
+ * Whether a MyFatoorah payment status is terminal Paid.
+ * Use at the application/inbox layer to ensure a previously fulfilled
+ * `paid` order is not un-fulfilled by a later `pending`/`failed` webhook
+ * for the same `Invoice.Id`/`ExternalIdentifier` (stateless mapper cannot
+ * enforce this). See `docs/webhooks.md#paid-is-terminal`.
+ * @see https://docs.myfatoorah.com/docs/v3-updating-payment-status-guidelines
+ */
+export function isMyFatoorahPaidTerminal(status: PaymentStatus): boolean {
+  return status === "paid";
+}
+
+/**
+ * Attach `Transaction.PaymentId` (gateway paymentId) to the `payment` event's
+ * `references.relatedIds.paymentId`.
+ *
+ * `paymentId` (merchant `paymentId` / `Invoice.ExternalIdentifier`) itself is
+ * set from `Invoice.ExternalIdentifier` which is `Customer.Reference` (orderId
+ * or explicit `myfatoorahCustomer.reference`) — see `sources.ts` and
+ * `gateway.ts#buildCreateBody` where `orderId` is sent as both
+ * `Order.ExternalIdentifier` and `Customer.Reference` so the webhook reliably
+ * carries it for `paymentId` correlation. `Transaction.PaymentId` is the
+ * provider's payment attempt id and rides `relatedIds` instead.
+ */
 export function withRelatedIdsOnPaymentEvent(
   event: NonNullable<WebhookEvent["event"]>,
   relatedIds: { paymentId?: string | undefined },
@@ -94,7 +133,9 @@ export function withRelatedIdsOnPaymentEvent(
  * `amount`/`currency` is therefore intentionally the base amount — keep base preference
  * here. create/getPayment prefer pay → display → base by request currency; webhook-map
  * prefers base → display → pay. This drift is by design (webhook vs. checkout currency
- * differ). Currency aliases (KD→KWD, SR→SAR) are normalized via normalizeMyFatoorahCurrency.
+ * differ; see `docs/money.md` MF-WEBHOOK-MONEY-DRIFT). Currency aliases (KD→KWD, SR→SAR
+ * and dotted variants `K.D.` / `S.R.`) are normalized via `normalizeMyFatoorahCurrency`
+ * and amounts handle grouping commas (`12,345.000`) via `parseMyFatoorahAmount`.
  */
 function webhookMoneyFromAmountRecord(
   amount: unknown,

@@ -6,7 +6,7 @@ import { partialRefundStatusData } from "./fixtures/webhooks";
 describe("myfatoorah refund support", () => {
   it("computes remaining from InvoiceValue minus non-canceled refunds", () => {
     const data = partialRefundStatusData();
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(8);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0.6); // 0.85 − 0.25
   });
   it("ignores canceled refunds in the sum", () => {
     const data = partialRefundStatusData();
@@ -15,23 +15,23 @@ describe("myfatoorah refund support", () => {
       ExternalIdentifier: "canceled-1",
       Comment: null,
       InvoiceId: 915102,
-      Amount: 3,
+      Amount: 0.5,
       ServiceChargeOnCustomer: 0,
       RefundStatus: "Canceled",
     });
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(8);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0.6);
   });
 
   it("ignores FAILED, REJECTED and unknown statuses in remaining", () => {
     const data = partialRefundStatusData();
-    // Existing Refunded 2.5 => remaining 8. FAILED/REJECTED/unknown must not subtract.
+    // Existing Refunded 0.25 => remaining 0.6. FAILED/REJECTED/unknown must not subtract.
     data.Refunds.push(
       {
         RefundId: 22298,
         ExternalIdentifier: "failed-1",
         Comment: null,
         InvoiceId: 915102,
-        Amount: 5,
+        Amount: 0.5,
         ServiceChargeOnCustomer: 0,
         RefundStatus: "Failed",
       },
@@ -40,7 +40,7 @@ describe("myfatoorah refund support", () => {
         ExternalIdentifier: "rejected-1",
         Comment: null,
         InvoiceId: 915102,
-        Amount: 1,
+        Amount: 0.1,
         ServiceChargeOnCustomer: 0,
         RefundStatus: "Rejected",
       },
@@ -54,18 +54,18 @@ describe("myfatoorah refund support", () => {
         RefundStatus: "SomethingWeird",
       },
     );
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(8);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0.6);
   });
 
   it("counts only REFUNDED and PENDING, pending aliases included", () => {
-    // Invoice 10.500, Refunded 2.5 + Pending 1.0 + Failed 5 => remaining 7 (10.5 - 3.5)
+    // Invoice 0.850, Refunded 0.25 + Pending 0.10 + Failed 0.50 => remaining 0.50 (0.85 - 0.35)
     const data = partialRefundStatusData();
     data.Refunds.push({
       RefundId: 22295,
       ExternalIdentifier: "pending-1",
       Comment: null,
       InvoiceId: 915102,
-      Amount: 1,
+      Amount: 0.1,
       ServiceChargeOnCustomer: 0,
       RefundStatus: "PENDING",
     });
@@ -74,11 +74,11 @@ describe("myfatoorah refund support", () => {
       ExternalIdentifier: "failed-2",
       Comment: null,
       InvoiceId: 915102,
-      Amount: 5,
+      Amount: 0.5,
       ServiceChargeOnCustomer: 0,
       RefundStatus: "FAILED",
     });
-    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(7);
+    expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0.5);
   });
 
   it("parses thousand-separated amounts via comma stripping for remaining", () => {
@@ -105,14 +105,13 @@ describe("myfatoorah refund support", () => {
         ExternalIdentifier: "refund-idem-1",
         Comment: null,
         InvoiceId: 915102,
-        Amount: 10.5,
+        Amount: 0.85,
         ServiceChargeOnCustomer: 0,
         RefundStatus: "Refunded",
       },
     ];
     expect(myFatoorahRemainingRefundMajor(data.InvoiceAmount, data.Refunds, "KWD")).toBe(0);
   });
-
   it("throws when remaining is negative", () => {
     const data = partialRefundStatusData();
     data.Refunds = [

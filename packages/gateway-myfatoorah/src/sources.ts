@@ -83,6 +83,12 @@ export function assertNoPciCardSource(params: Record<string, unknown>): void {
  * To make webhooks correlatable, Customer.Reference must be the merchant
  * orderId — or an explicit `myfatoorahCustomer.reference` override.
  *
+ * `gateway.ts#buildCreateBody` sends `orderId` as **both**
+ * `Order.ExternalIdentifier` and `Customer.Reference` (both carry `orderId` when
+ * no explicit `myfatoorahCustomer.reference`). Webhook `Data.Invoice` contains
+ * `ExternalIdentifier` (= `Customer.Reference` = `orderId`); the inbox can
+ * correlate via either identifier, but `paymentId` is always `Customer.Reference`.
+ *
  * NEVER use `customerId` (opaque user/session id) as Reference. That field
  * belongs to PayKernel's generic customer model, not MyFatoorah's per-order
  * CustomerIdentifier. Using it breaks webhook `paymentId` correlation and
@@ -95,6 +101,7 @@ export function assertNoPciCardSource(params: Record<string, unknown>): void {
  *           per-order CustomerIdentifier.
  *
  * @see gateway.ts#buildCreateBody for the Order.ExternalIdentifier + Customer.Reference wiring.
+ * @see docs/webhooks.md for `paymentId` correlation and docs/overview.md for the dual-send contract.
  */
 export function resolveMyFatoorahCustomerReference(input: {
   orderId?: string | undefined;

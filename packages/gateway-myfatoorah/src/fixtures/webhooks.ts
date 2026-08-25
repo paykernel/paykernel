@@ -109,10 +109,19 @@ export function paidCreateData(overrides: Record<string, unknown> = {}) {
     // Official V3 shape only — statuses nested under TransactionDetails.
     // The legacy flat shape (top-level InvoiceStatus + TransactionDetails.Status)
     // has a dedicated regression test that passes both via overrides.
+    // Realistic KWD base vs SAR pay split: invoice base 0.85 KWD = 10.5 SAR pay.
+    // This makes tests fail if someone mistakenly refunds the pay amount (SAR) as base (KWD).
     TransactionDetails: {
       Invoice: { Status: "PAID" },
       Transaction: { Status: "SUCCESS", PaymentId: "07076409988323998875" },
-      Amount: { ValueInBaseCurrency: 10.5, ValueInDisplayCurrency: 10.5 },
+      Amount: {
+        BaseCurrency: "KWD",
+        ValueInBaseCurrency: 0.85,
+        DisplayCurrency: "KWD",
+        ValueInDisplayCurrency: 0.85,
+        PayCurrency: "SAR",
+        ValueInPayCurrency: 10.5,
+      },
     },
     ...overrides,
   };
@@ -147,13 +156,19 @@ export function paidInvoiceStatusData(overrides: Record<string, unknown> = {}) {
     InvoiceReference: "1310001",
     CreatedDate: "2025-02-18T11:00:00.000Z",
     ExpiryDate: "2025-02-25T11:00:00.000Z",
-    InvoiceValue: 10.5,
+    // InvoiceValue is base currency (KWD), not pay currency. Realistic split:
+    // 0.85 KWD base == 10.5 SAR pay (rate ~12.35). PaidCurrencyValue stays 10.5 SAR.
+    InvoiceValue: 0.85,
     Comments: null,
     CustomerName: "Ada Lovelace",
     CustomerMobile: "96550000000",
     CustomerEmail: "ada@example.com",
     UserDefinedField: "order_01",
-    InvoiceDisplayValue: "10.500",
+    InvoiceDisplayValue: "0.850",
+    // Explicit base currency for the invoice; sandbox fallback is KWD anyway.
+    InvoiceCurrency: "KWD",
+    BaseCurrency: "KWD",
+    Currency: "KWD",
     InvoiceItems: [],
     InvoiceTransactions: [tx],
     Transactions: [tx],
@@ -171,29 +186,32 @@ export function paidInvoiceStatusData(overrides: Record<string, unknown> = {}) {
 
 /** V2 GetRefundStatus `Data` for a partially refunded invoice — provides both official and legacy shapes. */
 export function partialRefundStatusData(overrides: Record<string, unknown> = {}) {
+  // Realistic KWD base: invoice 0.85 KWD, refunded 0.25 KWD => remaining 0.60 KWD.
+  // Pay is SAR 10.5 but refunds are base-only; using 0.25 makes pay-vs-base bug visible
+  // (if someone passes 10.5 SAR as refund, remaining would go negative and throw).
   const legacyRefund = {
     RefundId: 22201,
     ExternalIdentifier: "refund-idem-1",
     Comment: null,
     InvoiceId: 915102,
-    Amount: 2.5,
+    Amount: 0.25,
     ServiceChargeOnCustomer: 0,
     RefundStatus: "Refunded",
   };
   const officialRefund = {
     RefundId: 22201,
     RefundStatus: "Refunded",
-    Amount: 2.5,
+    Amount: 0.25,
     BaseCurrency: "KWD",
     ExternalIdentifier: "refund-idem-1",
     InvoiceId: 915102,
     ServiceChargeOnCustomer: 0,
-    RefundAmount: 2.5,
+    RefundAmount: 0.25,
   };
   const base: Record<string, unknown> = {
     InvoiceId: 915102,
     InvoiceStatus: "PARTIALLY_REFUNDED",
-    InvoiceAmount: 10.5,
+    InvoiceAmount: 0.85,
     RefundStatusResult: [officialRefund],
     Refunds: [legacyRefund],
   };
