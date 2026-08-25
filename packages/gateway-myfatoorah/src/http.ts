@@ -3,6 +3,7 @@ import {
   GatewayApiError,
   InvalidRequestError,
   NetworkError,
+  PaymentAbortedError,
   RateLimitError,
   ResourceNotFoundError,
   parseRetryAfterSeconds,
@@ -174,12 +175,20 @@ export function isMyFatoorahRetryableError(error: unknown): boolean {
 
 /**
  * Retry predicate for unkeyed mutations (create outside KWT/SAU, MakeRefund).
- * Only pre-send `NetworkError` (connect fail) is retryable. `RateLimitError`
- * and post-submit `NetworkError` are not — the POST already left the process.
+ * Only a pre-send `NetworkError` without a caller abort is retryable.
+ * `RateLimitError`, post-submit `NetworkError`, and caller aborts are not —
+ * the POST already left the process or the caller cancelled it.
  * Inquiries still use {@link isMyFatoorahRetryableError} (429 retry is correct).
+ * Mirrors `isMyFatoorahRetryableNetworkError` in `gateway.ts`.
  */
 export function isMyFatoorahRetryableBeforeSubmit(error: unknown): boolean {
-  return error instanceof NetworkError && error.afterProviderSubmit !== true;
+  if (error instanceof PaymentAbortedError) return false;
+  if (error instanceof NetworkError) {
+    if (error.afterProviderSubmit === true) return false;
+    if (error.message.toLowerCase().includes("aborted by caller")) return false;
+    return true;
+  }
+  return false;
 }
 
 /**

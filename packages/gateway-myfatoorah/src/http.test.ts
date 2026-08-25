@@ -4,6 +4,7 @@ import {
   GatewayApiError,
   InvalidRequestError,
   NetworkError,
+  PaymentAbortedError,
   RateLimitError,
   ResourceNotFoundError,
 } from "@paykernel/core";
@@ -130,6 +131,13 @@ describe("myfatoorah HTTP mapping", () => {
       isMyFatoorahRetryableBeforeSubmit(
         new NetworkError("timeout", undefined, { afterProviderSubmit: true }),
       ),
+    ).toBe(false);
+    expect(isMyFatoorahRetryableBeforeSubmit(new PaymentAbortedError())).toBe(false);
+    expect(
+      isMyFatoorahRetryableBeforeSubmit(new NetworkError("aborted by caller")),
+    ).toBe(false);
+    expect(
+      isMyFatoorahRetryableBeforeSubmit(new NetworkError("Aborted by Caller")),
     ).toBe(false);
   });
 
