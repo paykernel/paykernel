@@ -22,7 +22,8 @@
     "@paykernel/webhooks": "workspace:*",
     "@paykernel/reconciliation": "workspace:*",
     "@paykernel/testkit": "workspace:*",
-    "@paykernel/store-sqlite": "workspace:*"
+    "@paykernel/store-sqlite": "workspace:*",
+    "@paykernel/integration-http": "workspace:*"
   },
   "devDependencies": {
     "@types/bun": "latest",

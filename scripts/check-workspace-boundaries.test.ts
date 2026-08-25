@@ -12,6 +12,7 @@ import {
   checkAdapterRootEntry,
   checkCoreDependencies,
   checkGatewayPackageDependencies,
+  checkIntegrationPackageDependencies,
   checkInternalPrivate,
   checkPhase10DependencyMatrix,
   checkPortableSourceImports,
@@ -21,6 +22,7 @@ import {
   findCycles,
   isAdapterPackageName,
   isGatewayPackageName,
+  isIntegrationPackageName,
   isInternalPackagePath,
   isPortablePackage,
   isTestFile,
@@ -1094,6 +1096,91 @@ describe("Phase 23 gateway packages", () => {
   });
 });
 
+describe("Phase 24 integration packages", () => {
+  it("treats @paykernel/integration-* as integration packages", () => {
+    expect(isIntegrationPackageName("@paykernel/integration-http")).toBe(true);
+    expect(isIntegrationPackageName("@paykernel/integration-hono")).toBe(true);
+    expect(isIntegrationPackageName("@paykernel/core")).toBe(false);
+  });
+
+  it("allows integration-http with core+webhooks and testkit dev-only", () => {
+    const pkg = makePackage({
+      name: "@paykernel/integration-http",
+      relDir: "packages/integration-http",
+      manifest: {
+        name: "@paykernel/integration-http",
+        dependencies: {
+          "@paykernel/core": "workspace:*",
+          "@paykernel/webhooks": "workspace:*",
+        },
+        devDependencies: { "@paykernel/testkit": "workspace:*" },
+      },
+    });
+    expect(checkIntegrationPackageDependencies(pkg)).toEqual([]);
+    expect(checkPhase10DependencyMatrix(pkg)).toEqual([]);
+  });
+
+  it("rejects integration-http depending on hono or store", () => {
+    const pkg = makePackage({
+      name: "@paykernel/integration-http",
+      relDir: "packages/integration-http",
+      manifest: {
+        name: "@paykernel/integration-http",
+        dependencies: {
+          "@paykernel/core": "workspace:*",
+          "@paykernel/webhooks": "workspace:*",
+          "@paykernel/integration-hono": "workspace:*",
+          "@paykernel/store-sqlite": "workspace:*",
+        },
+      },
+    });
+    const violations = checkIntegrationPackageDependencies(pkg);
+    expect(violations.some((v) => v.rule === "a/integration-http-only")).toBe(true);
+  });
+
+  it("rejects integration-hono depending on webhooks directly", () => {
+    const pkg = makePackage({
+      name: "@paykernel/integration-hono",
+      relDir: "packages/integration-hono",
+      manifest: {
+        name: "@paykernel/integration-hono",
+        dependencies: {
+          "@paykernel/integration-http": "workspace:*",
+          "@paykernel/webhooks": "workspace:*",
+        },
+      },
+    });
+    const violations = checkIntegrationPackageDependencies(pkg);
+    expect(violations.some((v) => v.rule === "a/integration-http-only")).toBe(true);
+  });
+
+  it("rejects core depending on integration-http", () => {
+    const pkg = makePackage({
+      name: "@paykernel/core",
+      relDir: "packages/core",
+      manifest: {
+        name: "@paykernel/core",
+        dependencies: { "@paykernel/integration-http": "workspace:*" },
+      },
+    });
+    const violations = checkCoreDependencies(pkg);
+    expect(violations.some((v) => v.rule === "a/core-no-integration")).toBe(true);
+  });
+
+  it("rejects webhooks depending on integration", () => {
+    const pkg = makePackage({
+      name: "@paykernel/webhooks",
+      relDir: "packages/webhooks",
+      manifest: {
+        name: "@paykernel/webhooks",
+        dependencies: { "@paykernel/integration-http": "workspace:*" },
+      },
+    });
+    const violations = checkPhase10DependencyMatrix(pkg);
+    expect(violations.some((v) => v.rule === "a/webhooks-no-integration")).toBe(true);
+  });
+});
+
 describe("live monorepo packages", () => {
   it("discovers core, webhooks, reconciliation, observability, routing, testkit, sql-store, adapters and passes the full boundary suite", () => {
     const root = join(import.meta.dir, "..");
@@ -1106,6 +1193,11 @@ describe("live monorepo packages", () => {
     expect(names.has("@paykernel/routing")).toBe(true);
     expect(names.has("@paykernel/gateway-tap")).toBe(true);
     expect(names.has("@paykernel/gateway-myfatoorah")).toBe(true);
+    expect(names.has("@paykernel/integration-http")).toBe(true);
+    expect(names.has("@paykernel/integration-hono")).toBe(true);
+    expect(names.has("@paykernel/integration-elysia")).toBe(true);
+    expect(names.has("@paykernel/integration-express")).toBe(true);
+    expect(names.has("@paykernel/integration-cloudflare-workers")).toBe(true);
     expect(names.has("@paykernel/testkit")).toBe(true);
     expect(names.has("@paykernel/internal-sql-store")).toBe(true);
     expect(names.has("@paykernel/store-postgres")).toBe(true);
@@ -1120,6 +1212,16 @@ describe("live monorepo packages", () => {
       (p) => p.name === "@paykernel/gateway-myfatoorah",
     )!;
     expect(isPortablePackage(myfatoorah)).toBe(true);
+    const http = packages.find((p) => p.name === "@paykernel/integration-http")!;
+    expect(isPortablePackage(http)).toBe(true);
+    const hono = packages.find((p) => p.name === "@paykernel/integration-hono")!;
+    expect(isPortablePackage(hono)).toBe(true);
+    const elysia = packages.find((p) => p.name === "@paykernel/integration-elysia")!;
+    expect(isPortablePackage(elysia)).toBe(true);
+    const express = packages.find((p) => p.name === "@paykernel/integration-express")!;
+    expect(isPortablePackage(express)).toBe(false);
+    const cf = packages.find((p) => p.name === "@paykernel/integration-cloudflare-workers")!;
+    expect(isPortablePackage(cf)).toBe(true);
     expect(runChecks(packages, root)).toEqual([]);
   });
 });

@@ -1,0 +1,69 @@
+{
+  "name": "@paykernel/integration-elysia",
+  "version": "0.1.0-next.0",
+  "description": "Thin Elysia adapter for @paykernel/integration-http webhook handling (parse none).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "typecheck:types": "tsc -p tsconfig.type-tests.json --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/integration-http": "workspace:*"
+  },
+  "peerDependencies": {
+    "elysia": ">=1"
+  },
+  "devDependencies": {
+    "@paykernel/testkit": "workspace:*",
+    "@types/bun": "latest",
+    "elysia": "^1.4.29",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "elysia",
+    "webhooks",
+    "integration",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/integration-elysia"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/integration-elysia#readme",
+  "paymentsSdk": {
+    "portable": true
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

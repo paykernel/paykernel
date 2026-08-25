@@ -1,6 +1,5 @@
 import {
   createPaymentClient,
-  InvalidWebhookError,
   NetworkError,
   money,
   stripeGateway,
@@ -10,7 +9,6 @@ import {
   type GatewayPaymentResult,
   type Money,
   type PaymentGateway,
-  type WebhookEvent,
 } from "@paykernel/core";
 import {
   buildLocalPaymentSnapshot,
@@ -28,15 +26,14 @@ import {
 import { mockGateway, type ScriptedPaymentOutcome } from "@paykernel/testkit";
 import {
   createWebhookInboxEngine,
-  resolveInboxPayloadHash,
-  type ProcessVerifiedInput,
   type WebhookInboxEngine,
+  type WebhookHandler,
 } from "@paykernel/webhooks";
 import {
   createBunSqliteStoresInMemory,
   migrateSqliteAdapter,
 } from "@paykernel/store-sqlite/bun";
-import { mapInboxOutcome } from "./http-policy";
+import { processWebhookHttp, type WebhookClient } from "@paykernel/integration-http";
 import { CHECKOUT_STRIPE_WEBHOOK_SECRET } from "./stripe-webhook";
 import type {
   CheckoutHttpResult,
@@ -135,6 +132,13 @@ export type CheckoutKernel = {
   /** Test hook: process due recon jobs. Not a production API. */
   reconcileDue(): Promise<CheckoutHttpResult>;
   close(): void;
+  /** Webhook composition for framework adapters — do not export secrets. */
+  webhook: {
+    gateway: "stripe";
+    client: WebhookClient;
+    engine: WebhookInboxEngine;
+    handler: WebhookHandler;
+  };
 };
 
 function systemClock(): Clock {
@@ -165,23 +169,6 @@ function isPaidFulfillmentEvent(event: unknown): boolean {
   );
 }
 
-function metadataOrderId(raw: unknown): string | undefined {
-  if (raw === null || typeof raw !== "object") return undefined;
-  const data = (raw as { data?: unknown }).data;
-  if (data === null || typeof data !== "object") return undefined;
-  const object = (data as { object?: unknown }).object;
-  if (object === null || typeof object !== "object") return undefined;
-  const metadata = (object as { metadata?: unknown }).metadata;
-  if (metadata === null || typeof metadata !== "object") return undefined;
-  const bag = metadata as Record<string, unknown>;
-  if (typeof bag.orderId === "string" && bag.orderId.length > 0) {
-    return bag.orderId;
-  }
-  if (typeof bag.paymentId === "string" && bag.paymentId.length > 0) {
-    return bag.paymentId;
-  }
-  return undefined;
-}
 
 function jsonError(status: number, error: string): CheckoutHttpResult {
   return { status, body: { error } };
@@ -336,61 +323,6 @@ export async function createCheckoutKernel(
     return typeof ref === "string" && ref.length > 0 ? ref : undefined;
   }
 
-  type OrderForPaidWebhook =
-    | { kind: "ok"; order: CheckoutOrderRecord }
-    | { kind: "mismatch" }
-    | { kind: "missing" };
-
-  /**
-   * Bind webhook PI first, then match. Metadata orderId alone must not
-   * fulfill a mock-charged order whose stored gatewayPaymentId differs.
-   */
-  function findOrderForEvent(
-    webhookEvent: WebhookEvent,
-    event: unknown,
-  ): OrderForPaidWebhook {
-    const webhookPi =
-      typeof webhookEvent.gatewayPaymentId === "string" &&
-      webhookEvent.gatewayPaymentId.length > 0
-        ? webhookEvent.gatewayPaymentId
-        : undefined;
-    if (webhookPi === undefined) {
-      return { kind: "missing" };
-    }
-
-    const byGw = findByGatewayPaymentId(webhookPi);
-    if (byGw) {
-      return { kind: "ok", order: byGw };
-    }
-
-    const candidates: CheckoutOrderRecord[] = [];
-    const seen = new Set<string>();
-    const add = (row: CheckoutOrderRecord | undefined): void => {
-      if (row && !seen.has(row.orderId)) {
-        seen.add(row.orderId);
-        candidates.push(row);
-      }
-    };
-    if (webhookEvent.paymentId) add(orders.get(webhookEvent.paymentId));
-    const fromMeta = metadataOrderId(webhookEvent.rawPayload);
-    if (fromMeta) add(orders.get(fromMeta));
-    const fromRef = eventInternalReference(event);
-    if (fromRef) add(orders.get(fromRef));
-
-    let sawMismatch = false;
-    for (const candidate of candidates) {
-      if (candidate.gatewayPaymentId === undefined) {
-        return { kind: "ok", order: candidate };
-      }
-      if (candidate.gatewayPaymentId === webhookPi) {
-        return { kind: "ok", order: candidate };
-      }
-      sawMismatch = true;
-    }
-    if (sawMismatch) return { kind: "mismatch" };
-    return { kind: "missing" };
-  }
-
   function fulfill(order: CheckoutOrderRecord, gatewayPaymentId?: string): void {
     if (fulfillThrows) {
       throw new Error("checkout kernel fulfillThrows");
@@ -508,60 +440,93 @@ export async function createCheckoutKernel(
     return { status: 200, body };
   }
 
+  const webhookHandler: WebhookHandler = async (ctx) => {
+    if (fulfillThrows) {
+      throw new Error("checkout kernel fulfillThrows");
+    }
+    if (!isPaidFulfillmentEvent(ctx.event)) return;
+    // Extract gatewayPaymentId from PaymentEvent payment.references.providerObjectId
+    let gatewayPaymentId: string | undefined;
+    if (ctx.event !== null && typeof ctx.event === "object" && "payment" in ctx.event) {
+      const payment = (ctx.event as { payment?: unknown }).payment;
+      if (payment !== null && typeof payment === "object" && "references" in payment) {
+        const refs = (payment as { references?: unknown }).references;
+        if (refs !== null && typeof refs === "object" && "providerObjectId" in refs) {
+          const id = (refs as { providerObjectId?: unknown }).providerObjectId;
+          if (typeof id === "string" && id.length > 0) gatewayPaymentId = id;
+        }
+      }
+    }
+    // Fallback to direct gatewayPaymentId if PaymentEvent was wrapped as WebhookEvent
+    if (!gatewayPaymentId && ctx.event !== null && typeof ctx.event === "object" && "gatewayPaymentId" in ctx.event) {
+      const v = (ctx.event as { gatewayPaymentId?: unknown }).gatewayPaymentId;
+      if (typeof v === "string" && v.length > 0) gatewayPaymentId = v;
+    }
+    if (!gatewayPaymentId) return;
+
+    const byGw = findByGatewayPaymentId(gatewayPaymentId);
+    if (byGw) {
+      fulfill(byGw, gatewayPaymentId);
+      return;
+    }
+
+    // Fallback via internalReference (orderId)
+    let internalRef: string | undefined;
+    if (ctx.event !== null && typeof ctx.event === "object" && "payment" in ctx.event) {
+      const payment = (ctx.event as { payment?: unknown }).payment;
+      if (payment !== null && typeof payment === "object" && "references" in payment) {
+        const refs = (payment as { references?: unknown }).references;
+        if (refs !== null && typeof refs === "object" && "internalReference" in refs) {
+          const r = (refs as { internalReference?: unknown }).internalReference;
+          if (typeof r === "string" && r.length > 0) internalRef = r;
+        }
+      }
+    }
+    if (!internalRef) {
+      internalRef = eventInternalReference(ctx.event);
+    }
+    if (internalRef) {
+      const candidate = orders.get(internalRef);
+      if (candidate) {
+        if (candidate.gatewayPaymentId === undefined) {
+          fulfill(candidate, gatewayPaymentId);
+          return;
+        }
+        if (candidate.gatewayPaymentId === gatewayPaymentId) {
+          fulfill(candidate);
+          return;
+        }
+        return;
+      }
+    }
+
+    throw new Error("no local order for paid webhook");
+  };
+
   async function handleStripeWebhook(
     rawBody: string,
     signature: string | null,
   ): Promise<CheckoutHttpResult> {
-    if (signature === null || signature.length === 0) {
-      return jsonError(400, "invalid_webhook");
-    }
-
-    let webhookEvent: WebhookEvent;
-    try {
-      webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
-    } catch (err) {
-      if (err instanceof InvalidWebhookError) {
-        return jsonError(400, "invalid_webhook");
-      }
-      throw err;
-    }
-
-    const hashInput: Parameters<typeof resolveInboxPayloadHash>[0] = {};
-    if (webhookEvent.payloadHash !== undefined && webhookEvent.payloadHash.length > 0) {
-      hashInput.eventPayloadHash = webhookEvent.payloadHash;
-    } else {
-      hashInput.payloadForHash = webhookEvent.rawPayload ?? webhookEvent;
-    }
-
-    const processInput: ProcessVerifiedInput = {
+    const result = await processWebhookHttp({
       gateway: "stripe",
-      providerEventId: webhookEvent.id,
-      payloadHash: resolveInboxPayloadHash(hashInput),
-      handler: async (ctx) => {
-        if (!isPaidFulfillmentEvent(ctx.event)) return;
-        const webhookPi = webhookEvent.gatewayPaymentId;
-        if (typeof webhookPi !== "string" || webhookPi.length === 0) {
-          return;
-        }
-        const found = findOrderForEvent(webhookEvent, ctx.event);
-        if (found.kind === "mismatch") return;
-        if (found.kind === "missing") {
-          throw new Error("no local order for paid webhook");
-        }
-        fulfill(found.order, webhookPi);
-      },
-    };
-    if (webhookEvent.event !== undefined) {
-      processInput.event = webhookEvent.event;
-    } else {
-      processInput.event = webhookEvent;
+      rawBody,
+      headers: signature ? { "stripe-signature": signature } : {},
+      client,
+      engine,
+      handler: webhookHandler,
+      ackPolicy: { kind: "provider_redelivery" },
+    });
+    // Adapt WebhookHttpResult to CheckoutHttpResult (body is outcome or error)
+    if ("error" in result.body) {
+      return { status: result.status, body: { error: result.body.error } };
     }
-
-    const outcome = await engine.processVerified(processInput);
-    return {
-      status: mapInboxOutcome(outcome),
-      body: { outcome: outcome.outcome },
-    };
+    if (result.body.reason !== undefined) {
+      return { status: result.status, body: { outcome: result.body.outcome, reason: result.body.reason } };
+    }
+    if (result.body.retryable !== undefined) {
+      return { status: result.status, body: { outcome: result.body.outcome, retryable: result.body.retryable } };
+    }
+    return { status: result.status, body: { outcome: result.body.outcome } };
   }
 
   /** Test hook: inject a paid provider snapshot. Not a production API. */
@@ -641,5 +606,11 @@ export async function createCheckoutKernel(
     markProviderPaid,
     reconcileDue,
     close,
+    webhook: {
+      gateway: "stripe" as const,
+      client: client as unknown as WebhookClient,
+      engine,
+      handler: webhookHandler,
+    },
   };
 }

@@ -37,8 +37,11 @@ export const PORTABLE_PACKAGE_DIRS = [
   "packages/store-contracts",
   "packages/gateway-tap",
   "packages/gateway-myfatoorah",
+  "packages/integration-http",
+  "packages/integration-hono",
+  "packages/integration-elysia",
+  "packages/integration-cloudflare-workers",
 ] as const;
-
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------

@@ -160,58 +160,47 @@ const engine = createWebhookInboxEngine({
 });
 
 export async function onStripeWebhook(rawBody: string, signature: string) {
-  const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
-
-  const outcome = await engine.processVerified({
+  // Raw-body-safe: pass raw string directly; do not JSON.parse/stringify.
+  const result = await processWebhookHttp({
     gateway: "stripe",
-    providerEventId: webhookEvent.id,
-    payloadHash: resolveInboxPayloadHash({
-      eventPayloadHash: webhookEvent.payloadHash,
-      payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
-    }),
-    // PaymentEvent lives on webhookEvent.event. Paymob keys need
-    // payment.status / refund.status / provider.eventType from that object.
-    event: webhookEvent.event ?? webhookEvent,
+    rawBody,
+    headers: { "stripe-signature": signature },
+    client,
+    engine,
     handler: async (ctx) => {
-      // Rematch can demote payment.succeeded / capture.completed when domain
-      // status is refunded, failed, cancelled, authorized, or open money.
       if (!isPaidFulfillmentEvent(ctx.event)) return;
-      const gatewayPaymentId = webhookEvent.gatewayPaymentId;
-      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+      // Extract gatewayPaymentId from PaymentEvent payment.references.providerObjectId
+      const event = ctx.event as { payment?: { references?: { providerObjectId?: string; internalReference?: string } } };
+      const gatewayPaymentId = event.payment?.references?.providerObjectId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) return;
+      // Simple lookup: try gatewayPaymentId, then internalReference
+      const byGw = findOrderByGatewayPaymentId(gatewayPaymentId);
+      if (byGw) {
+        await fulfillOrder(byGw, gatewayPaymentId);
         return;
       }
-      const found = findOrderForEvent(webhookEvent, ctx.event);
-      if (found.kind === "mismatch") return;
-      if (found.kind === "missing") {
-        throw new Error("no local order for paid webhook");
+      const ref = event.payment?.references?.internalReference;
+      if (ref) {
+        const candidate = findOrderById(ref);
+        if (candidate) {
+          await fulfillOrder(candidate, gatewayPaymentId);
+          return;
+        }
       }
-      await fulfillOrder(found.order, gatewayPaymentId);
+      throw new Error("no local order for paid webhook");
     },
   });
-
-  return mapInboxOutcome(outcome);
+  return { status: result.status };
 }
 
-function mapInboxOutcome(outcome: WebhookProcessingOutcome) {
-  // You own HTTP. The engine never ACKs for you.
-  switch (outcome.outcome) {
-    case "processed":
-    case "duplicate_completed":
-      return { status: 200 };
-    case "already_processing":
-      return { status: 503 };
-    case "scheduled_for_retry":
-      // 200 only when a durable worker owns the row (`parked` / `handler_retry`).
-      // `not_available` and inline engines: prefer provider redelivery.
-      return { status: outcome.reason === "not_available" ? 503 : 200 };
-    case "handler_failed":
-      return { status: outcome.retryable ? 500 : 200 };
-    case "invalid_webhook":
-      return { status: 400 };
-    case "payload_conflict":
-      return { status: 409 };
-  }
-}
+// For Express, use expressRawJson() only on the webhook route:
+// app.post("/webhooks/stripe", expressRawJson(), expressWebhook({ gateway: "stripe", client, engine, handler }));
+
+import { mapInboxOutcome, processWebhookHttp } from "@paykernel/integration-http";
+// HTTP mapping lives in @paykernel/integration-http, not in webhooks.
+// Use processWebhookHttp for raw-body-safe handling, or mapInboxOutcome(outcome) for custom adapters.
+// Default is fail-closed provider_redelivery (never 200 for scheduled_for_retry); pass { kind: "durable_worker" } when a worker is guaranteed.
+// Framework helpers: honoWebhook (Hono), elysiaWebhook (Elysia, parse:"none"), expressWebhook + expressRawJson (Express), handleCloudflareWebhook (Workers).
 ```
 
 **Hash rule:** prefer `webhookEvent.payloadHash`. If you must hash, hash the **same object shape** the gateway hashed (`rawPayload` / parsed event). Do **not** fall back to `hashWebhookPayload(rawBody)` — that mix is `payload_conflict` / idle supersede. `resolveInboxPayloadHash` throws if both inputs are missing.

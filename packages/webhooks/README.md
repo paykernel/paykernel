@@ -72,6 +72,9 @@ const outcome = await engine.processVerified({
 
 // Map outcome → HTTP in YOUR framework adapter — not inside this package.
 // Engine is HTTP-agnostic; policy below is recommended, not hardcoded.
+import { mapInboxOutcome } from "@paykernel/integration-http";
+// Ready-made mapping: mapInboxOutcome(outcome) // provider_redelivery default; mapInboxOutcome(outcome, { kind: "durable_worker" }) for persisted deferrals
+
 switch (outcome.outcome) {
   case "processed":
   case "duplicate_completed":

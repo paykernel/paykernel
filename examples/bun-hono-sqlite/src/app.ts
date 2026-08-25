@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { honoWebhook } from "@paykernel/integration-hono";
 import {
   checkoutJsonResponse,
   createCheckoutHandlers,
@@ -35,12 +36,15 @@ export function createHonoCheckoutApp(
     }
   });
 
-  app.post("/webhooks/stripe", async (c) => {
-    const request = c.req.raw;
-    const raw = await request.text();
-    const signature = request.headers.get("stripe-signature");
-    return checkoutJsonResponse(await handlers.handleStripeWebhook(raw, signature));
-  });
+  app.post(
+    "/webhooks/stripe",
+    honoWebhook({
+      gateway: kernel.webhook.gateway,
+      client: kernel.webhook.client,
+      engine: kernel.webhook.engine,
+      handler: kernel.webhook.handler,
+    }),
+  );
 
   // Test hook only — unauthenticated. Do not deploy this route.
   app.post("/internal/reconcile", async () => {

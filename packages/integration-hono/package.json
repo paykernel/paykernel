@@ -1,0 +1,69 @@
+{
+  "name": "@paykernel/integration-hono",
+  "version": "0.1.0-next.0",
+  "description": "Thin Hono adapter for @paykernel/integration-http webhook handling (raw-body safe).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "bun build ./src/index.ts --outdir ./dist --target node --format esm --packages external && bun run build:types",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "typecheck:types": "tsc -p tsconfig.type-tests.json --noEmit",
+    "prepublishOnly": "bun run build"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/integration-http": "workspace:*"
+  },
+  "peerDependencies": {
+    "hono": ">=4"
+  },
+  "devDependencies": {
+    "@paykernel/testkit": "workspace:*",
+    "@types/bun": "latest",
+    "hono": "^4.13.3",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "hono",
+    "webhooks",
+    "integration",
+    "paykernel"
+  ],
+  "author": "Abdelrahman Shaheen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paykernel/paykernel.git",
+    "directory": "packages/integration-hono"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "homepage": "https://github.com/paykernel/paykernel/tree/main/packages/integration-hono#readme",
+  "paymentsSdk": {
+    "portable": true
+  },
+  "bugs": {
+    "url": "https://github.com/paykernel/paykernel/issues"
+  }
+}

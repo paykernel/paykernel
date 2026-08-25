@@ -32,6 +32,11 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── package.json              # paymentsSdk.portable: true; optional peer @opentelemetry/api
 │   │   └── README.md
 │   ├── routing/                      # @paykernel/routing (Phase 21; portable; publishable)
+│   ├── integration-http/             # @paykernel/integration-http (Phase 24; portable; publishable)
+│   ├── integration-hono/             # @paykernel/integration-hono (Phase 24; portable; publishable)
+│   ├── integration-elysia/           # @paykernel/integration-elysia (Phase 24; portable; publishable)
+│   ├── integration-express/          # @paykernel/integration-express (Phase 24; node-only; publishable)
+│   ├── integration-cloudflare-workers/ # @paykernel/integration-cloudflare-workers (Phase 24; portable; publishable)
 │   ├── gateway-tap/                  # @paykernel/gateway-tap (Phase 23; portable Tap adapter; not a built-in)
 │   │   ├── src/                      # router, route builder, matchers, safe fallback eligibility
 │   │   ├── dist/
@@ -102,8 +107,10 @@ paykernel/                         # private workspace root (not published)
 │       └── README.md
 ├── examples/                         # private consumer apps (not published)
 │   ├── checkout-kernel/              # @paykernel/example-checkout-kernel (shared composition)
-│   ├── bun-hono-sqlite/              # thin Hono fetch host
-│   └── bun-elysia-sqlite/            # thin Elysia fetch host
+│   ├── bun-hono-sqlite/              # thin Hono fetch host (via integration-hono)
+│   ├── bun-elysia-sqlite/            # thin Elysia fetch host (via integration-elysia)
+│   ├── express-sqlite/               # thin Express host (via integration-express)
+│   └── cloudflare-workers-fetch/     # thin Workers fetch host (via integration-cloudflare-workers)
 ├── docs/
 │   ├── monorepo.md                   # this guide
 │   ├── workspace-boundaries.md       # package boundary policy + gate
@@ -183,7 +190,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 
 | Command                            | Purpose                                                                                      |
 | ---------------------------------- | -------------------------------------------------------------------------------------------- |
-| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
+| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → integration-http → integration-hono/elysia/express/cloudflare-workers → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
 | `bun run build:types`              | Emit declaration files (same order, including reconciliation, observability, routing, and adapters) |
 | `bun test`                         | Run core + store-contracts + testkit + webhooks + reconciliation + observability + routing + sql-foundation + internal-sql-store + store-* adapters + `examples` |
 | `bun run test:examples`            | Example apps only (`bun test examples`)                                                      |
@@ -211,7 +218,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 | `bun run baseline`                 | Regenerate Phase 0 API + package baselines                                                   |
 | `bun run changeset`                | Record a Changeset for the next release                                                      |
 
-**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only), then `store-contracts` (zero workspace deps), then `testkit` (core + webhooks + reconciliation + store-contracts; re-exports contracts for BC), then `sql-foundation` (publishable relational foundation), then `internal/sql-store` (private thin re-export), then `store-postgres` / `store-sqlite` / `store-turso` / `store-d1` / `store-durable-objects` (runtime: store-contracts + sql-foundation; testkit dev-only), then `store-redis` (runtime: store-contracts only; **not** sql-foundation).
+**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only), then `integration-http` (core + webhooks), then `integration-hono`/`integration-elysia`/`integration-express`/`integration-cloudflare-workers` (each depends on integration-http only), then `store-contracts` (zero workspace deps), then `testkit` (core + webhooks + reconciliation + store-contracts; re-exports contracts for BC), then `sql-foundation` (publishable relational foundation), then `internal/sql-store` (private thin re-export), then `store-postgres` / `store-sqlite` / `store-turso` / `store-d1` / `store-durable-objects` (runtime: store-contracts + sql-foundation; testkit dev-only), then `store-redis` (runtime: store-contracts only; **not** sql-foundation).
 
 Package-local work:
 

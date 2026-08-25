@@ -1,4 +1,5 @@
 import { Elysia } from "elysia";
+import { elysiaWebhook } from "@paykernel/integration-elysia";
 import {
   checkoutJsonResponse,
   createCheckoutHandlers,
@@ -46,15 +47,13 @@ export function createElysiaCheckoutApp(
     noParse,
   );
 
-  app.post(
-    "/webhooks/stripe",
-    async ({ request }) => {
-      const rawBody = await request.text();
-      const signature =
-        request.headers.get("stripe-signature") ?? request.headers.get("Stripe-Signature");
-      return checkoutJsonResponse(await handlers.handleStripeWebhook(rawBody, signature));
-    },
-    noParse,
+  app.use(
+    elysiaWebhook("/webhooks/stripe", {
+      gateway: kernel.webhook.gateway,
+      client: kernel.webhook.client,
+      engine: kernel.webhook.engine,
+      handler: kernel.webhook.handler,
+    }),
   );
 
   // Test hook only — unauthenticated. Do not deploy this route.

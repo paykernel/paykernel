@@ -30,13 +30,20 @@ paykernel/
 │   ├── store-durable-objects/# @paykernel/store-durable-objects (Phase 17; multi-host partitioned SQLite DO; cloudflare-only)
 │   ├── store-*/              # further storage adapters
 │   ├── gateway-tap/          # @paykernel/gateway-tap (Phase 23; portable Tap Payments adapter)
-│   └── gateway-myfatoorah/   # @paykernel/gateway-myfatoorah (Phase 23; portable MyFatoorah adapter)
+│   ├── gateway-myfatoorah/   # @paykernel/gateway-myfatoorah (Phase 23; portable MyFatoorah adapter)
+│   ├── integration-http/     # @paykernel/integration-http (Phase 24; portable HTTP mapping)
+│   ├── integration-hono/     # @paykernel/integration-hono (Phase 24; portable Hono adapter)
+│   ├── integration-elysia/   # @paykernel/integration-elysia (Phase 24; portable Elysia adapter)
+│   ├── integration-express/  # @paykernel/integration-express (Phase 24; node-only Express adapter)
+│   └── integration-cloudflare-workers/ # @paykernel/integration-cloudflare-workers (Phase 24; portable Workers adapter)
 ├── internal/                 # private workspaces only (must not publish)
 │   └── sql-store/            # @paykernel/internal-sql-store (thin re-export of sql-foundation)
 ├── examples/                 # private consumer apps (not scanned by the checker)
 │   ├── checkout-kernel/      # @paykernel/example-checkout-kernel
-│   ├── bun-hono-sqlite/      # thin Hono host
-│   └── bun-elysia-sqlite/    # thin Elysia host
+│   ├── bun-hono-sqlite/      # thin Hono host (via integration-hono)
+│   ├── bun-elysia-sqlite/    # thin Elysia host (via integration-elysia)
+│   ├── express-sqlite/       # thin Express host (via integration-express)
+│   └── cloudflare-workers-fetch/ # thin Workers fetch host (via integration-cloudflare-workers)
 ├── scripts/
 │   └── check-workspace-boundaries.ts
 └── docs/
@@ -44,7 +51,7 @@ paykernel/
     └── adapter-selection.md      # Phase 18 matrix + decision tree (capability honesty)
 ```
 
-Root `package.json` is private (`paykernel`) and is never published. Workspaces: `["packages/*", "internal/*", "examples/*"]`. Publishable surface: `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/gateway-tap`, `@paykernel/gateway-myfatoorah`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters and extra gateways may publish on their own cadence). Internal packages (e.g. `internal/sql-store`) and example apps under `examples/*` are **never** published.
+Root `package.json` is private (`paykernel`) and is never published. Workspaces: `["packages/*", "internal/*", "examples/*"]`. Publishable surface: `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/opentelemetry`, `@paykernel/routing`, `@paykernel/gateway-tap`, `@paykernel/gateway-myfatoorah`, `@paykernel/integration-http`, `@paykernel/integration-hono`, `@paykernel/integration-elysia`, `@paykernel/integration-express`, `@paykernel/integration-cloudflare-workers`, `@paykernel/store-contracts`, `@paykernel/sql-foundation`, `@paykernel/testkit`, `@paykernel/store-postgres`, `@paykernel/store-redis`, `@paykernel/store-sqlite`, `@paykernel/store-turso`, `@paykernel/store-d1`, and `@paykernel/store-durable-objects` (adapters and extra gateways may publish on their own cadence). Internal packages (e.g. `internal/sql-store`) and example apps under `examples/*` are **never** published.
 
 **Name / ownership honesty:**
 
@@ -75,6 +82,7 @@ Root `package.json` is private (`paykernel`) and is never published. Workspaces:
 | Reconciliation (Phase 19) | `@paykernel/reconciliation` is **portable** (`paymentsSdk.portable: true`). Depends only on `core`. Must **not** depend on testkit, webhooks, observability, routing, adapters, Redis, or DB drivers. Owns domain primitives (target/snapshots/results, safe lookup, decision-only policy, store-backed scheduler, `createPaymentReconciler`) and dual-owns a structurally compatible `ReconciliationStore`. Docs: [`overview.md`](../packages/reconciliation/docs/overview.md), [`scheduling.md`](../packages/reconciliation/docs/scheduling.md), [`crash-boundaries.md`](../packages/reconciliation/docs/crash-boundaries.md). |
 | Observability (Phase 20)  | `@paykernel/opentelemetry` is **portable** (`paymentsSdk.portable: true`). Depends only on `core` among workspace packages. Optional peer `@opentelemetry/api` (never hard-required; root import works without OTEL). Must **not** depend on testkit, webhooks, reconciliation, routing, adapters, Redis, or `internal/sql-store`. **Core must never depend on observability or `@opentelemetry/*`.** App composes redacting sinks / metrics / tracers; webhooks and reconciliation stay free of a hard observability dep. Docs: [`overview.md`](../packages/observability/docs/overview.md), [`opentelemetry.md`](../packages/observability/docs/opentelemetry.md), core [`telemetry.md`](../packages/core/docs/telemetry.md). |
 | Routing (Phase 21)        | `@paykernel/routing` is **portable** (`paymentsSdk.portable: true`). Depends only on `core` among workspace packages. **Select-only** — never calls `createPayment` / capture / refund. Must **not** depend on testkit, webhooks, reconciliation, observability, adapters, Redis, or `internal/sql-store`. **Core must never depend on routing.** App composes `decision.gateway` into `PaymentClient.createPayment(..., gateway)` and telemetry. Docs: [`overview.md`](../packages/routing/docs/overview.md), [`routing-inputs.md`](../packages/routing/docs/routing-inputs.md), [`selection.md`](../packages/routing/docs/selection.md), [`safe-fallback.md`](../packages/routing/docs/safe-fallback.md), [`telemetry.md`](../packages/routing/docs/telemetry.md). |
+| Framework integrations (Phase 24) | `@paykernel/integration-http` is **portable** (`paymentsSdk.portable: true`). Depends only on `core` + `webhooks`. Must **not** depend on reconciliation, observability, routing, store adapters, sql-foundation, gateways, or Redis. Framework wrappers (`integration-hono`, `integration-elysia`, `integration-express`, `integration-cloudflare-workers`) are thin: depend only on `integration-http` among workspace packages (`testkit` dev-only). `integration-express` is `paymentsSdk.runtime: "node-only"` (not portable); others are portable. Must **not** depend on each other or on core/webhooks/reconciliation/observability/routing/store/gateway. **Core/webhooks/reconciliation/observability/routing/gateways must not depend on integration packages.** |
 | Extra gateways (Phase 23) | `@paykernel/gateway-*` packages are **portable** when they set `paymentsSdk.portable: true` (honored by `isPortablePackage` before the gateway-name exclusion). Runtime workspace dep: **core only**. `@paykernel/testkit` is **devDependency** for conformance. Must **not** depend on webhooks, reconciliation, routing, observability, store adapters, or sql-foundation. **Core must never depend on gateway packages.** Shipped adapters: [`@paykernel/gateway-tap`](../packages/gateway-tap/README.md), [`@paykernel/gateway-myfatoorah`](../packages/gateway-myfatoorah/README.md). Built-ins stay in core for 0.x. |
 | Testkit                   | May depend on `core`, `webhooks`, and optionally `reconciliation` (assignability / dual-type proofs only). **Core must never depend on testkit.** Webhooks, reconciliation, observability, and routing production code must never import testkit.                                                                                                                                                                                                  |
 | Store contracts (Phase 9) | Lease-aware `IdempotencyStore` / `WebhookInboxStore` / `ReconciliationStore`, error taxonomy, and adapter manifests live in publishable **`@paykernel/store-contracts`**. `@paykernel/testkit` re-exports them for BC and hosts conformance suites + NON_PRODUCTION memory factories. Phase 10 webhooks dual-owns `WebhookInboxStore`; Phase 19 reconciliation dual-owns `ReconciliationStore` (no domain→testkit import). Distinct from core 0.x `IdempotencyStore` (get/set/reserve). See [`packages/store-contracts/docs/contracts.md`](../packages/store-contracts/docs/contracts.md). |
@@ -127,6 +135,11 @@ Allowed workspace edges today:
 - `routing → core`
 - `gateway-tap → core` (testkit dev-only)
 - `gateway-myfatoorah → core` (testkit dev-only)
+- `integration-http → core`, `integration-http → webhooks` (testkit dev-only)
+- `integration-hono → integration-http` (testkit dev-only; portable)
+- `integration-elysia → integration-http` (testkit dev-only; portable)
+- `integration-express → integration-http` (testkit dev-only; node-only)
+- `integration-cloudflare-workers → integration-http` (testkit dev-only; portable)
 - `testkit → core`, `testkit → webhooks`, `testkit → reconciliation`, `testkit → store-contracts` (re-exports contracts; assignability / integration proofs)
 - `store-postgres → store-contracts`, `store-postgres → sql-foundation` (testkit dev-only)
 - `store-redis → store-contracts` only (no sql-foundation; testkit dev-only)

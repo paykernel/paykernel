@@ -6,14 +6,16 @@ Kernel lives in [`checkout-kernel`](./checkout-kernel) (`@paykernel/example-chec
 
 | Directory | Package | Role |
 | --- | --- | --- |
-| [`checkout-kernel`](./checkout-kernel) | `@paykernel/example-checkout-kernel` | Shared kernel, route helpers, Stripe fixtures, HTTP policy, `runCheckoutHttpScenarios` |
-| [`bun-hono-sqlite`](./bun-hono-sqlite) | `@paykernel/example-bun-hono-sqlite` | Thin Hono `fetch` adapter |
-| [`bun-elysia-sqlite`](./bun-elysia-sqlite) | `@paykernel/example-bun-elysia-sqlite` | Thin Elysia `fetch` adapter |
+| [`checkout-kernel`](./checkout-kernel) | `@paykernel/example-checkout-kernel` | Shared kernel, route helpers, Stripe fixtures, HTTP policy (`mapInboxOutcome` re-exported from `@paykernel/integration-http`), `runCheckoutHttpScenarios` |
+| [`bun-hono-sqlite`](./bun-hono-sqlite) | `@paykernel/example-bun-hono-sqlite` | Thin Hono `fetch` adapter (via `@paykernel/integration-hono`) |
+| [`bun-elysia-sqlite`](./bun-elysia-sqlite) | `@paykernel/example-bun-elysia-sqlite` | Thin Elysia `fetch` adapter (via `@paykernel/integration-elysia`) |
+| [`express-sqlite`](./express-sqlite) | `@paykernel/example-express-sqlite` | Thin Express adapter (via `@paykernel/integration-express`, `expressAppToFetch` for tests) |
+| [`cloudflare-workers-fetch`](./cloudflare-workers-fetch) | `@paykernel/example-cloudflare-workers-fetch` | Thin Workers `fetch` adapter (via `@paykernel/integration-cloudflare-workers`, `handleCloudflareWebhook`) |
 
 ## Honesty
 
 - Local SQLite (`@paykernel/store-sqlite`) is **single-host only**. These examples use **in-memory** Bun SQLite (`createBunSqliteStoresInMemory`) after an explicit `migrateSqliteAdapter`. `:memory:` is one process, not multi-host.
-- HTTP status codes live in the checkout kernel (`mapInboxOutcome`), **not** in `@paykernel/webhooks`.
+- HTTP status codes live in `@paykernel/integration-http` (`mapInboxOutcome` re-exported by checkout kernel), **not** in `@paykernel/webhooks`.
 - Fulfillment runs only after an inbox claim, and only when the rematched event is `payment.succeeded` / `capture.completed` with `payment.status === "paid"`. Stripe metadata `orderId` cannot fulfill a mock-charged order whose stored `gatewayPaymentId` differs; a missing stored id is bound from the webhook PI then matched.
 - Charges use the **server catalog** amount. Provider recon snapshots use `getPayment` money (currency published with major-unit amounts), never `order.amount` or client JSON.
 - Never fulfill in `onWebhookVerified`. Never `createPayment` again after an indeterminate create — lookup + `decideReconciliationPolicy` only.

@@ -382,3 +382,6 @@ const outcome = await engine.processVerified({
 
 Core **must not** depend on `@paykernel/webhooks`. Apps that need inbox
 behavior add the webhooks package as a separate dependency.
+
+
+> **HTTP mapping:** map outcomes with `mapInboxOutcome` from `@paykernel/integration-http`; do not add status codes to `@paykernel/webhooks` or `@paykernel/core`.

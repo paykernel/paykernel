@@ -30,7 +30,9 @@ const CORE_PACKAGE_NAME = "@paykernel/core";
 /** Forbidden dependency name patterns for core. */
 const CORE_FORBIDDEN_NAME_RE = /^@paykernel\/(store|provider|gateway)-/;
 
-/** Path fragments that core must not depend on via file:/workspace paths. */
+/** Phase 24 — integration packages (`@paykernel/integration-*`). */
+const INTEGRATION_HTTP_PACKAGE_NAME = "@paykernel/integration-http";
+const INTEGRATION_PACKAGE_RE = /^@paykernel\/integration-/;
 const CORE_FORBIDDEN_PATH_FRAGMENTS = [
   `${sep}packages${sep}adapter-`,
   `${sep}packages${sep}store-`,
@@ -308,11 +310,15 @@ export function isAdapterPackageName(name: string): boolean {
   );
 }
 
+/** Phase 24 — framework integration packages. */
+export function isIntegrationPackageName(name: string): boolean {
+  return INTEGRATION_PACKAGE_RE.test(name);
+}
+
 /** First-party extra gateway packages (`@paykernel/gateway-tap`, …). */
 export function isGatewayPackageName(name: string): boolean {
   return /^@paykernel\/gateway-/.test(name);
 }
-
 export function isInternalPackagePath(relDir: string): boolean {
   const n = relDir.replace(/\\/g, "/");
   return (
@@ -347,14 +353,24 @@ export function isPortablePackage(pkg: WorkspacePackage): boolean {
     pkg.name === "@paykernel/routing" ||
     pkg.name === "@paykernel/testkit" ||
     pkg.name === "@paykernel/store-contracts" ||
-    pkg.name === "@paykernel/sql-foundation"
+    pkg.name === "@paykernel/sql-foundation" ||
+    pkg.name === "@paykernel/integration-http" ||
+    pkg.name === "@paykernel/integration-hono" ||
+    pkg.name === "@paykernel/integration-elysia" ||
+    pkg.name === "@paykernel/integration-cloudflare-workers"
   ) {
     return true;
   }
+  if (pkg.name === "@paykernel/integration-express") return false;
   // Default: packages under packages/ that are not adapters/gateways are portable
   // unless marked otherwise. Adapters often need driver-specific subpaths.
   if (isAdapterPackageName(pkg.name)) return false;
   if (/^@paykernel\/(provider|gateway)-/.test(pkg.name)) return false;
+  if (isIntegrationPackageName(pkg.name) && pkg.name !== INTEGRATION_HTTP_PACKAGE_NAME) {
+    // Fallback for future integration-* wrappers: portable unless marked node-only.
+    // Already handled explicit portable:true above and express false.
+    return true;
+  }
   if (isInternalPackagePath(pkg.relDir)) return false;
   // Unknown future package under packages/*: treat as portable by default.
   if (pkg.relDir.startsWith("packages/")) return true;
@@ -443,11 +459,25 @@ export function checkCoreDependencies(pkg: WorkspacePackage): Violation[] {
         message: `core must not depend on adapter/gateway package "${name}" (${field}: "${version}"). See roadmap §5.1.`,
       });
     }
+    if (isIntegrationPackageName(name)) {
+      violations.push({
+        rule: "a/core-no-integration",
+        package: pkg.name,
+        message: `core must not depend on integration package "${name}" (${field}: "${version}"). Framework adapters are app-side only.`,
+      });
+    }
     if (isForbiddenCorePathDep(version)) {
       violations.push({
         rule: "a/core-no-adapters",
         package: pkg.name,
         message: `core must not path-depend into packages/store-*, packages/adapter-*, packages/provider-*, or packages/gateway-* (${field}: "${name}": "${version}").`,
+      });
+    }
+    if (/packages\/integration-/.test(version.replace(/\\/g, "/"))) {
+      violations.push({
+        rule: "a/core-no-integration",
+        package: pkg.name,
+        message: `core must not path-depend into packages/integration-* (${field}: "${name}": "${version}").`,
       });
     }
     // Core isolation (Phase 10 / 19 / 20 / 21): no webhooks / reconciliation / observability / routing / testkit reverse deps.
@@ -553,6 +583,7 @@ export function checkGatewayPackageDependencies(
       name === STORE_CONTRACTS_PACKAGE_NAME ||
       isSqlFoundationOrInternal(name) ||
       isAdapterPackageName(name) ||
+      isIntegrationPackageName(name) ||
       (isGatewayPackageName(name) && name !== pkg.name)
     ) {
       violations.push({
@@ -569,7 +600,6 @@ export function checkGatewayPackageDependencies(
         message: `gateway package must not depend on Redis client "${name}" (${field}).`,
       });
     }
-
     const pathVersion = version.replace(/\\/g, "/");
     if (
       /packages\/webhooks/.test(pathVersion) ||
@@ -579,13 +609,136 @@ export function checkGatewayPackageDependencies(
       /packages\/store-contracts/.test(pathVersion) ||
       /packages\/sql-foundation/.test(pathVersion) ||
       /internal\/sql-store/.test(pathVersion) ||
-      /packages\/(adapter|store)-/.test(pathVersion)
+      /packages\/(adapter|store)-/.test(pathVersion) ||
+      /packages\/integration-/.test(pathVersion)
     ) {
       violations.push({
         rule: "a/gateway-core-only",
         package: pkg.name,
         message: `gateway package must not path-depend into domain/adapter packages (${field}: "${name}": "${version}").`,
       });
+    }
+  });
+  return violations;
+}
+
+/**
+ * Phase 24 — integration packages (`@paykernel/integration-*`).
+ * - integration-http runtime workspace deps: only core + webhooks (testkit dev-only).
+ * - integration-hono|elysia|express|cloudflare-workers runtime deps: only integration-http (testkit dev-only).
+ * Must not depend on each other (except http as base), nor on reconciliation/observability/routing/store/sql/gateway/redis/examples.
+ */
+export function checkIntegrationPackageDependencies(pkg: WorkspacePackage): Violation[] {
+  if (!isIntegrationPackageName(pkg.name)) return [];
+  const violations: Violation[] = [];
+  const runtimeDeps = pkg.manifest.dependencies ?? {};
+
+  if (runtimeDeps[TESTKIT_PACKAGE_NAME]) {
+    violations.push({
+      rule: "a/integration-no-runtime-testkit",
+      package: pkg.name,
+      message: `integration package must not list "${TESTKIT_PACKAGE_NAME}" in dependencies (testkit only in devDependencies).`,
+    });
+  }
+
+  eachDep(pkg.manifest, (field, name, version) => {
+    const isDevTestkit = field === "devDependencies" && name === TESTKIT_PACKAGE_NAME;
+    if (isDevTestkit) return;
+
+    if (name === TESTKIT_PACKAGE_NAME) {
+      violations.push({
+        rule: "a/integration-no-runtime-testkit",
+        package: pkg.name,
+        message: `integration package must not depend on testkit in ${field} (${field}: "${version}"). Use devDependencies only.`,
+      });
+    }
+
+    if (pkg.name === INTEGRATION_HTTP_PACKAGE_NAME) {
+      const allowed = new Set([CORE_PACKAGE_NAME, WEBHOOKS_PACKAGE_NAME]);
+      if (name.startsWith("@paykernel/") && !allowed.has(name)) {
+        violations.push({
+          rule: "a/integration-http-only",
+          package: pkg.name,
+          message: `integration-http must depend only on @paykernel/core and @paykernel/webhooks among workspace packages (found "${name}" in ${field}: "${version}").`,
+        });
+      }
+      if (isRedisClientPackageName(name)) {
+        violations.push({
+          rule: "a/integration-no-redis",
+          package: pkg.name,
+          message: `integration package must not depend on Redis client "${name}" (${field}).`,
+        });
+      }
+      const pathVersion = version.replace(/\\/g, "/");
+      if (
+        /packages\/reconciliation/.test(pathVersion) ||
+        /packages\/observability/.test(pathVersion) ||
+        /packages\/routing/.test(pathVersion) ||
+        /packages\/store-contracts/.test(pathVersion) ||
+        /packages\/sql-foundation/.test(pathVersion) ||
+        /internal\/sql-store/.test(pathVersion) ||
+        /packages\/(adapter|store)-/.test(pathVersion) ||
+        /packages\/gateway-/.test(pathVersion) ||
+        /packages\/integration-(?!http)/.test(pathVersion)
+      ) {
+        violations.push({
+          rule: "a/integration-http-only",
+          package: pkg.name,
+          message: `integration-http must not path-depend into domain/adapter/integration packages (${field}: "${name}": "${version}").`,
+        });
+      }
+      if (/examples\//.test(pathVersion)) {
+        violations.push({
+          rule: "a/integration-no-examples",
+          package: pkg.name,
+          message: `integration package must not depend on examples (${field}: "${name}": "${version}").`,
+        });
+      }
+    } else {
+      // hono | elysia | express | cloudflare-workers (and future wrappers)
+      const allowed = new Set([INTEGRATION_HTTP_PACKAGE_NAME]);
+      if (name.startsWith("@paykernel/") && !allowed.has(name)) {
+        violations.push({
+          rule: "a/integration-http-only",
+          package: pkg.name,
+          message: `integration framework package must depend only on @paykernel/integration-http among workspace packages (found "${name}" in ${field}: "${version}").`,
+        });
+      }
+      if (isRedisClientPackageName(name)) {
+        violations.push({
+          rule: "a/integration-no-redis",
+          package: pkg.name,
+          message: `integration package must not depend on Redis client "${name}" (${field}).`,
+        });
+      }
+      // Forbid sibling integration deps (except self) — http is the only allowed workspace dep, so any other integration-* is already flagged above.
+      // Path checks
+      const pathVersion = version.replace(/\\/g, "/");
+      if (
+        /packages\/core/.test(pathVersion) ||
+        /packages\/webhooks/.test(pathVersion) ||
+        /packages\/reconciliation/.test(pathVersion) ||
+        /packages\/observability/.test(pathVersion) ||
+        /packages\/routing/.test(pathVersion) ||
+        /packages\/store-contracts/.test(pathVersion) ||
+        /packages\/sql-foundation/.test(pathVersion) ||
+        /internal\/sql-store/.test(pathVersion) ||
+        /packages\/(adapter|store)-/.test(pathVersion) ||
+        /packages\/gateway-/.test(pathVersion)
+      ) {
+        violations.push({
+          rule: "a/integration-http-only",
+          package: pkg.name,
+          message: `integration framework package must not path-depend into core/domain/adapter/gateway (${field}: "${name}": "${version}"). Use @paykernel/integration-http only.`,
+        });
+      }
+      if (/examples\//.test(pathVersion)) {
+        violations.push({
+          rule: "a/integration-no-examples",
+          package: pkg.name,
+          message: `integration package must not depend on examples (${field}: "${name}": "${version}").`,
+        });
+      }
     }
   });
 
@@ -639,6 +792,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/webhooks-no-adapters",
           package: pkg.name,
           message: `webhooks must not depend on adapter/gateway package "${name}" (${field}: "${version}").`,
+        });
+      }
+      if (isIntegrationPackageName(name)) {
+        violations.push({
+          rule: "a/webhooks-no-integration",
+          package: pkg.name,
+          message: `webhooks must not depend on integration package "${name}" (${field}: "${version}"). Framework adapters are app-side only.`,
         });
       }
       if (
@@ -697,6 +857,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `webhooks must not path-depend into adapters (${field}: "${name}": "${version}").`,
         });
       }
+      if (/packages\/integration-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/webhooks-no-integration",
+          package: pkg.name,
+          message: `webhooks must not path-depend into integration (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
 
@@ -736,6 +903,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/reconciliation-no-adapters",
           package: pkg.name,
           message: `reconciliation must not depend on adapter/gateway package "${name}" (${field}: "${version}").`,
+        });
+      }
+      if (isIntegrationPackageName(name)) {
+        violations.push({
+          rule: "a/reconciliation-no-integration",
+          package: pkg.name,
+          message: `reconciliation must not depend on integration package "${name}" (${field}: "${version}"). Framework adapters are app-side only.`,
         });
       }
       if (
@@ -793,6 +967,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `reconciliation must not path-depend into adapters (${field}: "${name}": "${version}").`,
         });
       }
+      if (/packages\/integration-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/reconciliation-no-integration",
+          package: pkg.name,
+          message: `reconciliation must not path-depend into integration (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
 
@@ -832,6 +1013,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/observability-no-adapters",
           package: pkg.name,
           message: `observability must not depend on adapter/gateway package "${name}" (${field}: "${version}").`,
+        });
+      }
+      if (isIntegrationPackageName(name)) {
+        violations.push({
+          rule: "a/observability-no-integration",
+          package: pkg.name,
+          message: `observability must not depend on integration package "${name}" (${field}: "${version}"). Framework adapters are app-side only.`,
         });
       }
       if (
@@ -889,6 +1077,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `observability must not path-depend into adapters (${field}: "${name}": "${version}").`,
         });
       }
+      if (/packages\/integration-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/observability-no-integration",
+          package: pkg.name,
+          message: `observability must not path-depend into integration (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
 
@@ -928,6 +1123,13 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/routing-no-adapters",
           package: pkg.name,
           message: `routing must not depend on adapter/gateway package "${name}" (${field}: "${version}").`,
+        });
+      }
+      if (isIntegrationPackageName(name)) {
+        violations.push({
+          rule: "a/routing-no-integration",
+          package: pkg.name,
+          message: `routing must not depend on integration package "${name}" (${field}: "${version}"). Framework adapters are app-side only.`,
         });
       }
       if (
@@ -985,9 +1187,15 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `routing must not path-depend into adapters (${field}: "${name}": "${version}").`,
         });
       }
+      if (/packages\/integration-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/routing-no-integration",
+          package: pkg.name,
+          message: `routing must not path-depend into integration (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
-
   // Phase 11: sql foundation (public + private re-export) must not depend on core or domain engines.
   const relDirNorm = pkg.relDir.replace(/\\/g, "/");
   const isSqlStorePkg =
@@ -1048,6 +1256,9 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
   // Phase 23: extra gateway packages depend on core only among workspace
   // runtime packages. @paykernel/testkit is allowed in devDependencies.
   violations.push(...checkGatewayPackageDependencies(pkg));
+
+  // Phase 24: integration packages.
+  violations.push(...checkIntegrationPackageDependencies(pkg));
 
   // store-contracts: zero workspace runtime deps (portable contracts only).
   if (pkg.name === STORE_CONTRACTS_PACKAGE_NAME) {

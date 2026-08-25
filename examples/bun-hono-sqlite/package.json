@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@paykernel/example-checkout-kernel": "workspace:*",
+    "@paykernel/integration-hono": "workspace:*",
     "hono": "^4.13.3"
   },
   "devDependencies": {
