@@ -9,6 +9,9 @@ import {
 } from "@paykernel/core";
 import {
   assertMyFatoorahSuccessEnvelope,
+  isMyFatoorahInquiryNotFoundBody,
+  isMyFatoorahRetryableBeforeSubmit,
+  isMyFatoorahRetryableError,
   mapMyFatoorahHttpFailure,
   myFatoorahIsSuccess,
   readMyFatoorahData,
@@ -39,6 +42,95 @@ describe("myfatoorah HTTP mapping", () => {
     expect(myFatoorahIsSuccess({ IsSuccess: false })).toBe(false);
     expect(myFatoorahIsSuccess({ IsSuccess: "false" })).toBe(false);
     expect(myFatoorahIsSuccess(null)).toBe(false);
+  });
+
+  it("classifies official inquiry not-found envelopes without treating every IsSuccess false as empty", () => {
+    expect(
+      isMyFatoorahInquiryNotFoundBody({
+        IsSuccess: false,
+        Message: "No data matches this Key",
+        ValidationErrors: null,
+        Data: null,
+      }),
+    ).toBe(true);
+    expect(
+      isMyFatoorahInquiryNotFoundBody({
+        IsSuccess: false,
+        Message: "Not found",
+        Data: {},
+      }),
+    ).toBe(true);
+    expect(
+      isMyFatoorahInquiryNotFoundBody({
+        IsSuccess: false,
+        Message: "Validation Error",
+        ValidationErrors: [{ Name: "KeyType", Error: "KeyType is invalid" }],
+        Data: null,
+      }),
+    ).toBe(false);
+    expect(
+      isMyFatoorahInquiryNotFoundBody({
+        IsSuccess: false,
+        Message: "",
+        Data: null,
+      }),
+    ).toBe(false);
+    expect(
+      isMyFatoorahInquiryNotFoundBody({
+        IsSuccess: false,
+        Message: "Customer not found",
+        Data: null,
+      }),
+    ).toBe(false);
+    expect(isMyFatoorahInquiryNotFoundBody({ IsSuccess: true, Data: null })).toBe(false);
+  });
+
+  it("maps inquiry 2xx IsSuccess false + official not-found Message to ResourceNotFoundError", () => {
+    const body = {
+      IsSuccess: false,
+      Message: "No data matches this Key",
+      ValidationErrors: null,
+      Data: null,
+    };
+    expect(() =>
+      assertMyFatoorahSuccessEnvelope({
+        method: "POST",
+        status: 200,
+        responseText: JSON.stringify(body),
+        jsonParseFailed: false,
+        data: body,
+        postSubmit: false,
+      }),
+    ).toThrow(ResourceNotFoundError);
+  });
+
+  it("includes envelope Message on 2xx IsSuccess false that is not a not-found", () => {
+    const body = envelope({
+      IsSuccess: false,
+      Message: "Amount is not valid",
+      ValidationErrors: null,
+    });
+    expect(() =>
+      assertMyFatoorahSuccessEnvelope({
+        method: "POST",
+        status: 200,
+        responseText: JSON.stringify(body),
+        jsonParseFailed: false,
+        data: body,
+        postSubmit: false,
+      }),
+    ).toThrow(/Amount is not valid/);
+  });
+
+  it("does not retry RateLimitError before submit (unkeyed mutations)", () => {
+    expect(isMyFatoorahRetryableBeforeSubmit(new RateLimitError("myfatoorah"))).toBe(false);
+    expect(isMyFatoorahRetryableError(new RateLimitError("myfatoorah"))).toBe(true);
+    expect(isMyFatoorahRetryableBeforeSubmit(new NetworkError("connect"))).toBe(true);
+    expect(
+      isMyFatoorahRetryableBeforeSubmit(
+        new NetworkError("timeout", undefined, { afterProviderSubmit: true }),
+      ),
+    ).toBe(false);
   });
 
   it("maps 2xx IsSuccess false + ValidationErrors to InvalidRequestError", () => {

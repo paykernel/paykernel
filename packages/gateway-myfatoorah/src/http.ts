@@ -54,6 +54,63 @@ export function myFatoorahValidationMessage(body: unknown): string | undefined {
   return parts.join("; ");
 }
 
+function myFatoorahEnvelopeMessage(body: unknown): string | undefined {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
+  const message = (body as Record<string, unknown>).Message;
+  if (typeof message !== "string") return undefined;
+  const trimmed = message.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function isOfficialInquiryNotFoundMessage(message: string): boolean {
+  const normalized = message.trim().toLowerCase().replace(/\.+$/, "");
+  if (
+    normalized === "not found" ||
+    normalized === "no invoice" ||
+    normalized === "no data" ||
+    normalized === "invoice not found"
+  ) {
+    return true;
+  }
+  return (
+    normalized.includes("no data matches this key") ||
+    normalized.includes("no invoices match") ||
+    normalized.includes("no invoice found")
+  );
+}
+
+/**
+ * Official GetPaymentStatus “no invoice yet” on HTTP 2xx: IsSuccess false,
+ * no ValidationErrors, empty Data, and a not-found Message. Generic
+ * IsSuccess-false must not be treated as empty — that would create.
+ */
+export function isMyFatoorahInquiryNotFoundBody(body: unknown): boolean {
+  if (myFatoorahIsSuccess(body)) return false;
+  if (myFatoorahValidationErrors(body) !== undefined) return false;
+  const message = myFatoorahEnvelopeMessage(body);
+  if (message === undefined || !isOfficialInquiryNotFoundMessage(message)) {
+    return false;
+  }
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return false;
+  }
+  const data = (body as Record<string, unknown>).Data;
+  if (data === null || data === undefined) return true;
+  if (Array.isArray(data)) return data.length === 0;
+  if (typeof data !== "object") return false;
+  const rec = data as Record<string, unknown>;
+  const invoiceId = rec.InvoiceId;
+  if (typeof invoiceId === "string" && invoiceId.trim().length > 0) return false;
+  if (typeof invoiceId === "number" && Number.isFinite(invoiceId)) return false;
+  return Object.keys(rec).length === 0;
+}
+
+function myFatoorahFailureMessage(body: unknown, fallback: string): string {
+  return myFatoorahValidationMessage(body) ?? myFatoorahEnvelopeMessage(body) ?? fallback;
+}
+
 /** Read the envelope `Data` object, or undefined when missing / unusable. */
 export function readMyFatoorahData(body: unknown): Record<string, unknown> | undefined {
   if (body === null || typeof body !== "object" || Array.isArray(body)) {
@@ -83,7 +140,7 @@ export function mapMyFatoorahHttpFailure(input: {
   const { status, body, method, headers, postSubmit } = input;
   const isPostSubmit =
     postSubmit === true ? true : postSubmit === false ? false : false;
-  const message = myFatoorahValidationMessage(body) ?? `MyFatoorah API error (${status})`;
+  const message = myFatoorahFailureMessage(body, `MyFatoorah API error (${status})`);
   const raw = { status, body };
 
   if (status === 429) {
@@ -116,15 +173,13 @@ export function isMyFatoorahRetryableError(error: unknown): boolean {
 }
 
 /**
- * Retry predicate for mutations the provider does **not** deduplicate
- * (MakeRefund): excludes post-submit `NetworkError` so a timeout after the
- * provider accepted the refund is reconciled, not re-POSTed.
+ * Retry predicate for unkeyed mutations (create outside KWT/SAU, MakeRefund).
+ * Only pre-send `NetworkError` (connect fail) is retryable. `RateLimitError`
+ * and post-submit `NetworkError` are not — the POST already left the process.
+ * Inquiries still use {@link isMyFatoorahRetryableError} (429 retry is correct).
  */
 export function isMyFatoorahRetryableBeforeSubmit(error: unknown): boolean {
-  return (
-    isMyFatoorahRetryableError(error) &&
-    !(error instanceof NetworkError && error.afterProviderSubmit === true)
-  );
+  return error instanceof NetworkError && error.afterProviderSubmit !== true;
 }
 
 /**
@@ -155,8 +210,16 @@ export function assertMyFatoorahSuccessEnvelope(input: {
     throw new NetworkError("MyFatoorah API returned an unusable JSON body", raw, tag);
   }
   if (!myFatoorahIsSuccess(input.data)) {
-    const message =
-      myFatoorahValidationMessage(input.data) ?? "MyFatoorah API returned IsSuccess false";
+    if (isPostSubmit !== true && isMyFatoorahInquiryNotFoundBody(input.data)) {
+      throw new ResourceNotFoundError(
+        myFatoorahFailureMessage(input.data, "MyFatoorah API returned IsSuccess false"),
+        raw,
+      );
+    }
+    const message = myFatoorahFailureMessage(
+      input.data,
+      "MyFatoorah API returned IsSuccess false",
+    );
     throw new InvalidRequestError(message, [raw]);
   }
 }

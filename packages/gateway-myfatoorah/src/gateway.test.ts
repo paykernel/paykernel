@@ -792,6 +792,28 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 
+  it("does not retry the first MakeRefund POST on 429", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope({ RefundStatusResult: [] })),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    await expect(
+      gateway.refundPayment({
+        gatewayPaymentId: "915102",
+        idempotencyKey: "refund-429-1",
+        currency: "KWD",
+      }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    expect(calls.filter((c) => c.url.endsWith("/v2/MakeRefund")).length).toBe(1);
+  });
+
   it("does not auto-retry the headerless MakeRefund POST (no 429 fan-out)", async () => {
     const calls: FetchCall[] = [];
     const gateway = createGateway(
@@ -979,6 +1001,30 @@ describe("MyFatoorahGateway.refundPayment", () => {
     expect(result.gatewayRefundId).toBe("22201");
     expect(result.status).toBe("pending");
     expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
+  });
+
+  it("treats GetRefundStatus 2xx official not-found Message as empty history", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({
+          IsSuccess: false,
+          Message: "No data matches this Key",
+          ValidationErrors: null,
+          Data: null,
+        }),
+        jsonResponse(myfatoorahEnvelope(paidInvoiceStatusData())),
+        jsonResponse(myfatoorahEnvelope(makeRefundData())),
+      ],
+      calls,
+    );
+    const result = await gateway.refundPayment({
+      gatewayPaymentId: "915102",
+      idempotencyKey: "refund-nf-empty",
+      currency: "KWD",
+    });
+    expect(result.status).toBe("pending");
+    expect(calls.map((c) => c.url)).toContain("https://apitest.myfatoorah.com/v2/MakeRefund");
   });
 
   it("treats a GetRefundStatus 2xx without Data as empty history (MF-CRIT-3)", async () => {
@@ -1258,6 +1304,118 @@ describe("MyFatoorahGateway MF fixes", () => {
     expect(calls.length).toBe(2);
     expect(calls[0]?.url).toBe("https://apitest.myfatoorah.com/v2/GetPaymentStatus");
     expect(calls[1]?.url).toBe("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-CREATE-REPLAY: ARE 200 IsSuccess false official not-found Message creates once", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({
+          IsSuccess: false,
+          Message: "No data matches this Key",
+          ValidationErrors: null,
+          Data: null,
+        }),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_new_200_nf",
+    });
+    expect(result.outcome).toBe("requires_action");
+    expect(calls.map((c) => c.url)).toEqual([
+      "https://apitest.myfatoorah.com/v2/GetPaymentStatus",
+      "https://apitest.myfatoorah.com/v3/payments",
+    ]);
+  });
+
+  it("MF-CREATE-REPLAY: ARE 200 IsSuccess false generic Message fails closed", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({
+          IsSuccess: false,
+          Message: "",
+          ValidationErrors: null,
+          Data: null,
+        }),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_unknown_false",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-CREATE-REPLAY: ARE success envelope with null Data fails closed", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: true, Message: "", ValidationErrors: null, Data: null }),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_empty_data",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("MF-CREATE-REPLAY: ARE pending invoice returns indeterminate with InvoiceId", async () => {
+    const calls: FetchCall[] = [];
+    const existing = paidInvoiceStatusData({
+      InvoiceId: 777778,
+      InvoiceStatus: "Pending",
+      InvoiceValue: 10.5,
+      Transactions: [],
+    });
+    const gateway = createGateway(
+      [
+        jsonResponse(myfatoorahEnvelope(existing)),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    const result = await gateway.createPayment({
+      ...createParams,
+      orderId: "ord_replay_pending_id",
+    });
+    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(result.gatewayId).toBe("777778");
+    expect(calls.map((c) => c.url)).not.toContain("https://apitest.myfatoorah.com/v3/payments");
+  });
+
+  it("unkeyed ARE create does not retry 429 on /v3/payments", async () => {
+    const calls: FetchCall[] = [];
+    const gateway = createGateway(
+      [
+        jsonResponse({ IsSuccess: false, Message: "Not found" }, 404),
+        jsonResponse({ IsSuccess: false, Message: "rate limited" }, 429),
+        jsonResponse(myfatoorahEnvelope(initiatedCreateData())),
+      ],
+      calls,
+      { country: "ARE" },
+    );
+    await expect(
+      gateway.createPayment({
+        ...createParams,
+        orderId: "ord_are_429",
+      }),
+    ).rejects.toBeInstanceOf(RateLimitError);
+    expect(calls.filter((c) => c.url.endsWith("/v3/payments")).length).toBe(1);
   });
 
   it("MF-SANDBOX-BASE: ARE sandbox first refund without currency infers KWD and posts MakeRefund", async () => {

@@ -1,4 +1,5 @@
 import {
+  applyIndeterminatePaymentOutcome,
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
   BaseGateway,
@@ -239,7 +240,7 @@ export class MyFatoorahGateway extends BaseGateway {
             "POST",
             "/v2/GetPaymentStatus",
             { Key: replayReference, KeyType: "CustomerReference" },
-            { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
+            { signal: p.signal, retry: true, postSubmit: false },
           );
           const existingInvoiceId = stringOrNumberId(data.InvoiceId);
           if (existingInvoiceId !== undefined) {
@@ -251,15 +252,24 @@ export class MyFatoorahGateway extends BaseGateway {
             }
             // Any other invoice for this CustomerReference (Pending, Paid with a
             // different amount, refunded, …) must not create a second chargeable
-            // invoice. GetPaymentStatus has no PaymentURL for unpaid invoices.
-            throw new NetworkError(
-              invoiceStatus === "pending"
-                ? "MyFatoorah createPayment found a pending invoice for this CustomerReference; refusing to create a second invoice"
-                : "MyFatoorah createPayment found an existing invoice for this CustomerReference that does not match the request; refusing to create a second invoice",
-              { invoiceId: existingInvoiceId, invoiceStatus: invoiceStatusRaw },
-              { afterProviderSubmit: true },
-            );
+            // invoice. Return indeterminate with the real InvoiceId so callers
+            // can getPayment — do not throw (BaseGateway would remap gatewayId
+            // to orderId / idempotencyKey).
+            return applyIndeterminatePaymentOutcome({
+              gateway: this.name,
+              gatewayId: existingInvoiceId,
+              message:
+                invoiceStatus === "pending"
+                  ? "MyFatoorah createPayment found a pending invoice for this CustomerReference; refusing to create a second invoice"
+                  : "MyFatoorah createPayment found an existing invoice for this CustomerReference that does not match the request; refusing to create a second invoice",
+              errorName: "NetworkError",
+            });
           }
+          throw new NetworkError(
+            "MyFatoorah createPayment replay lookup returned no InvoiceId; refusing to create a second invoice",
+            { body: raw },
+            { afterProviderSubmit: true },
+          );
         } catch (error) {
           if (p.signal?.aborted) throw error;
           const isAbort =
@@ -355,14 +365,23 @@ export class MyFatoorahGateway extends BaseGateway {
       // Fetch GetRefundStatus first — if an existing refund with this idempotencyKey is found,
       // return immediately without awaiting GetPaymentStatus (cheap path).
       // Official GetRefundStatus keys are InvoiceId / RefundId / RefundReference — not PaymentId.
-      const refundStatus = await this.myfatoorahRequest(
-        "POST",
-        "/v2/GetRefundStatus",
-        { KeyType: "InvoiceId", Key: invoiceId },
-        // Data is nullable per OpenAPI — no refunds yet is a valid empty history.
-        { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
-      );
-      const refundsRaw: unknown = refundStatus.data;
+      let refundsRaw: unknown = {};
+      try {
+        const refundStatus = await this.myfatoorahRequest(
+          "POST",
+          "/v2/GetRefundStatus",
+          { KeyType: "InvoiceId", Key: invoiceId },
+          // Data is nullable per OpenAPI — no refunds yet is a valid empty history.
+          { signal: p.signal, retry: true, postSubmit: false, allowMissingData: true },
+        );
+        refundsRaw = refundStatus.data;
+      } catch (error) {
+        if (p.signal?.aborted) throw error;
+        // Official empty-history can be 2xx IsSuccess:false + not-found Message
+        // (same envelope as GetPaymentStatus). That is ResourceNotFoundError,
+        // not a missing invoice — treat as no refunds yet.
+        if (!(error instanceof ResourceNotFoundError)) throw error;
+      }
       // MF-CRIT-1: ExternalIdentifier is not provider-deduped. Check for an existing
       // refund with the same idempotencyKey before any MakeRefund, even when
       // remaining > 0, to avoid double-refunding on partial-replay / crash-retry.
@@ -381,7 +400,12 @@ export class MyFatoorahGateway extends BaseGateway {
               { signal: p.signal, retry: true, postSubmit: false },
             );
 
-      const currency = this.refundCurrency(p, refundStatus.data);
+      const currency = this.refundCurrency(
+        p,
+        refundsRaw !== null && typeof refundsRaw === "object" && !Array.isArray(refundsRaw)
+          ? (refundsRaw as Record<string, unknown>)
+          : undefined,
+      );
       this.assertCurrencyMatch(p.currency, currency, "refund");
 
       const invoiceAmount = this.invoiceValue(paymentStatus.data);
@@ -728,15 +752,9 @@ export class MyFatoorahGateway extends BaseGateway {
     });
   }
 
-  /** Only "not found" means "no invoice yet" — other 4xx must not create. */
+  /** Only typed not-found (HTTP 404 or official 2xx empty inquiry) may create. */
   private isCreateReplayNotFound(error: unknown): boolean {
-    if (error instanceof ResourceNotFoundError) return true;
-    if (error instanceof InvalidRequestError) {
-      const msg = error.message.toLowerCase();
-      if (msg.includes("not found") || msg.includes("no invoice") || msg.includes("no data"))
-        return true;
-    }
-    return false;
+    return error instanceof ResourceNotFoundError;
   }
 
   /** Reuse only when the existing invoice amount is in the request currency and equals it. */
