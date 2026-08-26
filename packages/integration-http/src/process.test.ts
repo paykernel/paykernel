@@ -146,9 +146,24 @@ describe("processWebhookHttp", () => {
     expect(result.status).toBe(503);
     expect(result.headers["retry-after"]).toBe("3");
   });
-  it("maps scheduled_for_retry parked to 503 default and 200 durable", async () => {
-    const stubEngine = {
+  it("maps scheduled_for_retry parked to 503 default and durable guard falls back to 503 on inline", async () => {
+    const stubInline = {
       mode: "inline" as const,
+      processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processRetryable: async () => ({ items: [] }),
+      renewLease: async () => ({ ok: false, reason: "lease_lost" } as const),
+    } as unknown as WebhookInboxEngine;
+    const stubDurable = {
+      mode: "durable_retry" as const,
+      processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processRetryable: async () => ({ items: [] }),
+      renewLease: async () => ({ ok: false, reason: "lease_lost" } as const),
+    } as unknown as WebhookInboxEngine;
+    const stubDurableNoWorker = {
+      mode: "durable_retry" as const,
+      workerGuaranteed: false,
       processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
       processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
       processRetryable: async () => ({ items: [] }),
@@ -165,22 +180,94 @@ describe("processWebhookHttp", () => {
       rawBody: '{"a":1}',
       headers: { "stripe-signature": "sig" },
       client,
-      engine: stubEngine,
+      engine: stubInline,
       handler: async () => {},
     });
     expect(r1.status).toBe(503);
     expect(r1.body).toEqual({ outcome: "scheduled_for_retry", reason: "parked" });
 
+    // inline + durable_worker should fallback to 503, not silently ACK
+    const warnSpy: unknown[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnSpy.push(args.join(" "));
     const r2 = await processWebhookHttp({
       gateway: "stripe",
       rawBody: '{"a":1}',
       headers: { "stripe-signature": "sig" },
       client,
-      engine: stubEngine,
+      engine: stubInline,
       handler: async () => {},
       ackPolicy: { kind: "durable_worker" },
     });
-    expect(r2.status).toBe(200);
+    console.warn = origWarn;
+    expect(r2.status).toBe(503);
+    expect(warnSpy.join(" ")).toContain("durable_worker");
+
+    // durable_retry + durable_worker should be 200
+    const r3 = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine: stubDurable,
+      handler: async () => {},
+      ackPolicy: { kind: "durable_worker" },
+    });
+    expect(r3.status).toBe(200);
+
+    // durable_retry but workerGuaranteed false should also fallback to 503
+    const r4 = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine: stubDurableNoWorker,
+      handler: async () => {},
+      ackPolicy: { kind: "durable_worker" },
+    });
+    expect(r4.status).toBe(503);
+  });
+
+  it("handles handler_retry with durable_worker guard", async () => {
+    const stubInline = {
+      mode: "inline" as const,
+      processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
+      processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
+      processRetryable: async () => ({ items: [] }),
+      renewLease: async () => ({ ok: false, reason: "lease_lost" } as const),
+    } as unknown as WebhookInboxEngine;
+    const stubDurable = {
+      mode: "durable_retry" as const,
+      processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
+      processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
+      processRetryable: async () => ({ items: [] }),
+      renewLease: async () => ({ ok: false, reason: "lease_lost" } as const),
+    } as unknown as WebhookInboxEngine;
+    const client: WebhookClient = {
+      async handleWebhook() {
+        return { id: "evt_hr", payloadHash: "ph", event: {} };
+      },
+    };
+    const rInline = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine: stubInline,
+      handler: async () => {},
+      ackPolicy: { kind: "durable_worker" },
+    });
+    expect(rInline.status).toBe(503);
+    const rDurable = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine: stubDurable,
+      handler: async () => {},
+      ackPolicy: { kind: "durable_worker" },
+    });
+    expect(rDurable.status).toBe(200);
   });
 
   it("fails closed on missing providerEventId as 500 not 400", async () => {
@@ -233,5 +320,118 @@ describe("processWebhookHttp", () => {
       "paypal-cert-url": "url",
       "paypal-auth-algo": "algo",
     });
+  });
+
+  it("returns 400 early when paypal headers missing", async () => {
+    const { engine } = makeEngine();
+    let called = false;
+    const client: WebhookClient = {
+      async handleWebhook() {
+        called = true;
+        return { id: "evt_paypal", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "paypal",
+      rawBody: '{"a":1}',
+      headers: {},
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(400);
+    expect(result.body).toEqual({ error: "invalid_webhook" });
+    expect(called).toBe(false);
+  });
+
+  it("returns 400 early when paypal headers partially missing", async () => {
+    const { engine } = makeEngine();
+    let called = false;
+    const client: WebhookClient = {
+      async handleWebhook() {
+        called = true;
+        return { id: "evt_paypal", payloadHash: "ph", event: {} };
+      },
+    };
+    const headers: Record<string, string> = {
+      "paypal-transmission-id": "tid",
+      "paypal-transmission-time": "t",
+      // missing sig, cert-url, auth-algo
+    };
+    const result = await processWebhookHttp({
+      gateway: "paypal",
+      rawBody: '{"a":1}',
+      headers,
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(400);
+    expect(called).toBe(false);
+  });
+
+  it("returns 400 early when paymob both header and query missing", async () => {
+    const { engine } = makeEngine();
+    let called = false;
+    const client: WebhookClient = {
+      async handleWebhook() {
+        called = true;
+        return { id: "evt_paymob", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "paymob",
+      rawBody: '{"a":1}',
+      headers: {},
+      query: {},
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(400);
+    expect(called).toBe(false);
+  });
+
+  it("passes paymob when hmac in header", async () => {
+    const { engine } = makeEngine();
+    let seenSig: unknown = null;
+    const client: WebhookClient = {
+      async handleWebhook(_g, _p, sig) {
+        seenSig = sig;
+        return { id: "evt_paymob", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "paymob",
+      rawBody: '{"obj":{"a":1}}',
+      headers: { hmac: "header_hmac" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(200);
+    expect(seenSig).toBe("header_hmac");
+  });
+
+  it("passes paymob when hmac in query", async () => {
+    const { engine } = makeEngine();
+    let seenSig: unknown = null;
+    const client: WebhookClient = {
+      async handleWebhook(_g, _p, sig) {
+        seenSig = sig;
+        return { id: "evt_paymob", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "paymob",
+      rawBody: '{"obj":{"a":1}}',
+      headers: {},
+      query: { hmac: "query_hmac" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(200);
+    expect(seenSig).toBe("query_hmac");
   });
 });

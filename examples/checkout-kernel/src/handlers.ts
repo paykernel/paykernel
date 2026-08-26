@@ -19,9 +19,18 @@ export type CheckoutHandlers = {
 };
 
 export function checkoutJsonResponse(result: CheckoutHttpResult): Response {
+  const headers = new Headers();
+  if (result.headers) {
+    for (const [k, v] of Object.entries(result.headers)) {
+      headers.set(k, v);
+    }
+  }
+  if (!headers.has("content-type")) {
+    headers.set("content-type", "application/json; charset=utf-8");
+  }
   return new Response(JSON.stringify(result.body), {
     status: result.status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers,
   });
 }
 
@@ -136,7 +145,17 @@ export async function dispatchCheckoutRequest(
       );
     }
     if (method === "GET" && path.startsWith("/orders/")) {
-      const orderId = decodeURIComponent(path.slice("/orders/".length));
+      const prefix = "/orders/";
+      const rest = path.slice(prefix.length);
+      if (rest.length === 0 || rest.includes("/")) {
+        return checkoutJsonResponse({ status: 404, body: { error: "not_found" } });
+      }
+      let orderId: string;
+      try {
+        orderId = decodeURIComponent(rest);
+      } catch {
+        return checkoutJsonResponse({ status: 400, body: { error: "invalid_order_id" } });
+      }
       return checkoutJsonResponse(handlers.getOrder(orderId));
     }
   } catch (err) {

@@ -69,12 +69,23 @@ export function createExpressCheckoutApp(
     res.send(await response.text());
   });
 
-  app.get("/orders/:orderId", async (req, res) => {
-    const result = handlers.getOrder(req.params.orderId);
-    const response = checkoutJsonResponse(result);
-    res.status(response.status);
-    for (const [k, v] of response.headers.entries()) res.setHeader(k, v);
-    res.send(await response.text());
+  app.get("/orders/:orderId", async (req, res, next) => {
+    try {
+      const result = handlers.getOrder(req.params.orderId);
+      const response = checkoutJsonResponse(result);
+      res.status(response.status);
+      for (const [k, v] of response.headers.entries()) res.setHeader(k, v);
+      res.send(await response.text());
+    } catch (err) {
+      if (err instanceof URIError) {
+        const response = checkoutJsonResponse({ status: 400, body: { error: "invalid_order_id" } });
+        res.status(response.status);
+        for (const [k, v] of response.headers.entries()) res.setHeader(k, v);
+        res.send(await response.text());
+        return;
+      }
+      next(err as unknown as Error);
+    }
   });
 
   // Test hook only — unauthenticated. Do not deploy this route.
@@ -109,9 +120,40 @@ export function createExpressCheckoutApp(
     res.send(await response.text());
   });
 
+  // JSON 404 for unmatched routes (instead of Express default HTML)
+  app.use((_req, res) => {
+    res.status(404).json({ error: "not_found" });
+  });
+
+
+  // Map `express.json()` and param decode failures to JSON (instead of HTML)
+  app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err instanceof SyntaxError) {
+      const maybe = err as unknown as { type?: string; status?: number; body?: unknown };
+      if (maybe.type === "entity.parse.failed" || maybe.status === 400) {
+        res.status(400).json({ error: "invalid_json" });
+        return;
+      }
+      if (maybe.body !== undefined) {
+        res.status(400).json({ error: "invalid_json" });
+        return;
+      }
+    }
+    if (err instanceof URIError) {
+      res.status(400).json({ error: "invalid_order_id" });
+      return;
+    }
+    next(err as unknown as Error);
+  });
+
   return app;
 }
-
+/**
+ * Test helper for `runCheckoutHttpScenarios`: wraps an Express app for `fetch`-style tests
+ * via an ephemeral loopback port per request (listen(0)). Each `fetch(req)` starts a
+ * per-request HTTP server on 127.0.0.1:0, proxies the request, then closes the server.
+ * Not "without a network port" — it binds an ephemeral loopback port per request.
+ */
 export function expressAppToFetch(app: express.Application): CheckoutFetchApp {
   return {
     async fetch(req: Request): Promise<Response> {

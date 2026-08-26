@@ -31,6 +31,7 @@ export type CheckoutHttpOptions = {
 
 export type CheckoutHttpResult = {
   status: number;
+  headers?: Record<string, string>;
   body: unknown;
 };
 

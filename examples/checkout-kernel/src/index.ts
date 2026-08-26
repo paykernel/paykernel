@@ -2,6 +2,8 @@ export {
   createCheckoutKernel,
   type CheckoutKernel,
   type CreateCheckoutKernelOptions,
+  type CheckoutStoresBundle,
+  type CheckoutStoreFactory,
 } from "./kernel";
 export {
   createCheckoutHandlers,

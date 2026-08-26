@@ -1,5 +1,26 @@
+/**
+ * Header bag accepted by HTTP helpers — either a `Headers` instance or a
+ * plain record. Lookup is case-insensitive; see `getHeader` and
+ * `headerBagToLowerRecord` (process.ts) which both lower-case keys and pick
+ * the first array value. Documented invariant: `getHeader(bag, k)` equals
+ * `headerBagToLowerRecord(bag)[k.toLowerCase()]` when present.
+ */
 export type HeaderBag = Headers | Record<string, string | string[] | undefined>;
 
+/**
+ * Retrieve a header value case-insensitively.
+ *
+ * - For `Headers` instances: checks `headers.get(lower)` then fallback
+ *   case-insensitive scan via `forEach`, so both `"Stripe-Signature"` and
+ *   `"stripe-signature"` match.
+ * - For record bags: iterates entries and compares `k.toLowerCase() === lower`,
+ *   returning the first array entry or string value. Empty strings/arrays
+ *   return `undefined` (treated as missing for signature guards).
+ *
+ * This is intentionally consistent with `headerBagToLowerRecord` which
+ * lower-cases all keys and picks the first value — both normalize case the
+ * same way.
+ */
 export function getHeader(
   headers: HeaderBag,
   name: string,

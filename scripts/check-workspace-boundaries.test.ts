@@ -133,6 +133,17 @@ describe("classifyPortableImport", () => {
     ["cloudflare:workers", false],
     ["fs", false],
     ["path", false],
+    ["crypto", false],
+    ["buffer", false],
+    ["url", false],
+    ["util", false],
+    ["events", false],
+    ["assert", false],
+    ["querystring", false],
+    ["string_decoder", false],
+    ["timers", false],
+    ["tty", false],
+    ["constants", false],
     ["bun:test", false],
   ] as const)("rejects non-portable specifier %s", (spec, ok) => {
     expect(classifyPortableImport(spec).ok).toBe(ok);
@@ -933,8 +944,8 @@ describe("on-disk fixture packages", () => {
     const adapter = packages.find((p) => p.name.includes("store-postgres"))!;
     const violations = checkAdapterRootEntry(adapter, root);
     expect(violations.some((v) => v.message.includes('"postgres"'))).toBe(true);
-    // drizzle-orm/pg-core is a subpath; root package name is still checked as bare "drizzle-orm"
-    // only when imported as "drizzle-orm". Document that bare optional drivers are banned:
+    // LN-10: drizzle-orm/pg-core subpath must also be flagged via prefix check (drizzle-orm + drizzle-orm/)
+    expect(violations.some((v) => v.message.includes("drizzle-orm"))).toBe(true);
     writeFileSync(
       join(packageDir, "src", "index.ts"),
       `import { sql } from "drizzle-orm";\nexport { sql };\n`,

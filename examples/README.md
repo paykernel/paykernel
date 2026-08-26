@@ -9,8 +9,8 @@ Kernel lives in [`checkout-kernel`](./checkout-kernel) (`@paykernel/example-chec
 | [`checkout-kernel`](./checkout-kernel) | `@paykernel/example-checkout-kernel` | Shared kernel, route helpers, Stripe fixtures, HTTP policy (`mapInboxOutcome` re-exported from `@paykernel/integration-http`), `runCheckoutHttpScenarios` |
 | [`bun-hono-sqlite`](./bun-hono-sqlite) | `@paykernel/example-bun-hono-sqlite` | Thin Hono `fetch` adapter (via `@paykernel/integration-hono`) |
 | [`bun-elysia-sqlite`](./bun-elysia-sqlite) | `@paykernel/example-bun-elysia-sqlite` | Thin Elysia `fetch` adapter (via `@paykernel/integration-elysia`) |
-| [`express-sqlite`](./express-sqlite) | `@paykernel/example-express-sqlite` | Thin Express adapter (via `@paykernel/integration-express`, `expressAppToFetch` for tests) |
-| [`cloudflare-workers-fetch`](./cloudflare-workers-fetch) | `@paykernel/example-cloudflare-workers-fetch` | Thin Workers `fetch` adapter (via `@paykernel/integration-cloudflare-workers`, `handleCloudflareWebhook`) |
+| [`express-sqlite`](./express-sqlite) | `@paykernel/example-express-sqlite` | Thin Express adapter (via `@paykernel/integration-express`, `expressAppToFetch` via ephemeral loopback port per request `listen(0)` — no fixed port) |
+| [`cloudflare-workers-fetch`](./cloudflare-workers-fetch) | `@paykernel/example-cloudflare-workers-fetch` | Thin Workers `fetch` adapter (via `@paykernel/integration-cloudflare-workers`, `handleCloudflareWebhook`; production injects D1/DO via `createCheckoutKernel({ stores | storeFactory | executor })`) |
 
 ## Honesty
 

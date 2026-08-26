@@ -79,6 +79,15 @@ describe("classifyPortableSpecifier", () => {
     ["cloudflare:workers", false],
     ["crypto", false],
     ["buffer", false],
+    ["url", false],
+    ["util", false],
+    ["events", false],
+    ["assert", false],
+    ["querystring", false],
+    ["string_decoder", false],
+    ["timers", false],
+    ["tty", false],
+    ["constants", false],
     ["fs", false],
   ] as const)("rejects %s", (spec, ok) => {
     expect(classifyPortableSpecifier(spec).ok).toBe(ok);
@@ -144,14 +153,23 @@ describe("scanCoreDist (live monorepo, when built)", () => {
 });
 
 describe("PORTABLE_PACKAGE_DIRS", () => {
-  it("includes core, webhooks, store-contracts, gateway-tap, and gateway-myfatoorah", () => {
+  it("includes core, webhooks, reconciliation, observability, routing, store-contracts, sql-foundation, testkit, gateway-tap, and gateway-myfatoorah", () => {
     expect([...PORTABLE_PACKAGE_DIRS]).toEqual(
       expect.arrayContaining([
         "packages/core",
         "packages/webhooks",
+        "packages/reconciliation",
+        "packages/observability",
+        "packages/routing",
         "packages/store-contracts",
+        "packages/sql-foundation",
+        "packages/testkit",
         "packages/gateway-tap",
         "packages/gateway-myfatoorah",
+        "packages/integration-http",
+        "packages/integration-hono",
+        "packages/integration-elysia",
+        "packages/integration-cloudflare-workers",
       ]),
     );
   });

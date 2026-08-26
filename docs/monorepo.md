@@ -109,8 +109,8 @@ paykernel/                         # private workspace root (not published)
 │   ├── checkout-kernel/              # @paykernel/example-checkout-kernel (shared composition)
 │   ├── bun-hono-sqlite/              # thin Hono fetch host (via integration-hono)
 │   ├── bun-elysia-sqlite/            # thin Elysia fetch host (via integration-elysia)
-│   ├── express-sqlite/               # thin Express host (via integration-express)
-│   └── cloudflare-workers-fetch/     # thin Workers fetch host (via integration-cloudflare-workers)
+│   ├── express-sqlite/               # thin Express host (via integration-express, ephemeral loopback listen(0) — no fixed port)
+│   └── cloudflare-workers-fetch/     # thin Workers fetch host (via integration-cloudflare-workers, production D1/DO via createCheckoutKernel({ stores | storeFactory | executor }))
 ├── docs/
 │   ├── monorepo.md                   # this guide
 │   ├── workspace-boundaries.md       # package boundary policy + gate

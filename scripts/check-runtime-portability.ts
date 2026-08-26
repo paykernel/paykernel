@@ -34,7 +34,12 @@ const ROOT = resolve(dirname(SCRIPT_PATH), "..");
 export const PORTABLE_PACKAGE_DIRS = [
   "packages/core",
   "packages/webhooks",
+  "packages/reconciliation",
+  "packages/observability",
+  "packages/routing",
   "packages/store-contracts",
+  "packages/sql-foundation",
+  "packages/testkit",
   "packages/gateway-tap",
   "packages/gateway-myfatoorah",
   "packages/integration-http",

@@ -33,6 +33,11 @@ import {
   createBunSqliteStoresInMemory,
   migrateSqliteAdapter,
 } from "@paykernel/store-sqlite/bun";
+import {
+  createSqliteStores,
+  type SqliteExecutor,
+  type SqliteStoresBundle,
+} from "@paykernel/store-sqlite";
 import { processWebhookHttp, type WebhookClient } from "@paykernel/integration-http";
 import { CHECKOUT_STRIPE_WEBHOOK_SECRET } from "./stripe-webhook";
 import type {
@@ -108,6 +113,16 @@ function providerSnapshotFromGetPayment(
   return buildProviderPaymentSnapshot(input);
 }
 
+/** Bundle shape injected into the checkout kernel (SqliteStoresBundle + optional close). */
+export type CheckoutStoresBundle = SqliteStoresBundle & {
+  close?: () => void;
+};
+
+/** Factory that produces a stores bundle from the kernel clock. */
+export type CheckoutStoreFactory = (
+  clock: Clock,
+) => CheckoutStoresBundle | Promise<CheckoutStoresBundle>;
+
 export type CreateCheckoutKernelOptions = {
   /** FIFO mock `createPayment` outcomes (scripted). */
   scriptCreate?: readonly ScriptedPaymentOutcome[];
@@ -116,6 +131,12 @@ export type CreateCheckoutKernelOptions = {
   /** Throw in the inbox fulfill handler before marking the order paid. */
   fulfillThrows?: boolean;
   clock?: Clock;
+  /** Optional SQLite executor to build stores from (e.g., Node/D1). If `stores` or `storeFactory` is set this is ignored. */
+  executor?: SqliteExecutor;
+  /** Optional pre-built stores bundle (e.g., D1/DO). When provided, its `executor` is migrated if present. */
+  stores?: CheckoutStoresBundle;
+  /** Optional factory producing a stores bundle from the resolved clock. Precedence: storeFactory > stores > executor > in-memory Bun SQLite. */
+  storeFactory?: CheckoutStoreFactory;
 };
 
 export type CheckoutKernel = {
@@ -191,12 +212,40 @@ export async function createCheckoutKernel(
   const clock = options.clock ?? systemClock();
   const fulfillThrows = options.fulfillThrows === true;
 
-  const stores = createBunSqliteStoresInMemory({ clock });
-  try {
-    await migrateSqliteAdapter(stores.executor);
-  } catch (err) {
-    stores.close();
-    throw err;
+  let stores: CheckoutStoresBundle;
+  let storesClose: (() => void) | undefined;
+  if (options.storeFactory) {
+    const produced = await options.storeFactory(clock);
+    stores = produced;
+    if (typeof produced.close === "function") {
+      storesClose = produced.close.bind(produced);
+    }
+  } else if (options.stores) {
+    stores = options.stores;
+    if (typeof options.stores.close === "function") {
+      storesClose = options.stores.close.bind(options.stores);
+    }
+  } else if (options.executor) {
+    stores = createSqliteStores({ executor: options.executor, clock }) as CheckoutStoresBundle;
+    storesClose = undefined;
+  } else {
+    const mem = createBunSqliteStoresInMemory({ clock });
+    stores = mem as CheckoutStoresBundle;
+    storesClose = mem.close.bind(mem);
+  }
+  if (stores.executor) {
+    try {
+      await migrateSqliteAdapter(stores.executor);
+    } catch (err) {
+      if (storesClose) {
+        try {
+          storesClose();
+        } catch {
+          // ignore close error during migrate failure
+        }
+      }
+      throw err;
+    }
   }
 
   const mockOptions: Parameters<typeof mockGateway>[0] = {
@@ -524,17 +573,17 @@ export async function createCheckoutKernel(
       handler: webhookHandler,
       ackPolicy: { kind: "provider_redelivery" },
     });
-    // Adapt WebhookHttpResult to CheckoutHttpResult (body is outcome or error)
+    // Adapt WebhookHttpResult to CheckoutHttpResult, preserving retry-after and x-request-id
     if ("error" in result.body) {
-      return { status: result.status, body: { error: result.body.error } };
+      return { status: result.status, headers: result.headers, body: { error: result.body.error } };
     }
     if (result.body.reason !== undefined) {
-      return { status: result.status, body: { outcome: result.body.outcome, reason: result.body.reason } };
+      return { status: result.status, headers: result.headers, body: { outcome: result.body.outcome, reason: result.body.reason } };
     }
     if (result.body.retryable !== undefined) {
-      return { status: result.status, body: { outcome: result.body.outcome, retryable: result.body.retryable } };
+      return { status: result.status, headers: result.headers, body: { outcome: result.body.outcome, retryable: result.body.retryable } };
     }
-    return { status: result.status, body: { outcome: result.body.outcome } };
+    return { status: result.status, headers: result.headers, body: { outcome: result.body.outcome } };
   }
 
   /** Test hook: inject a paid provider snapshot. Not a production API. */
@@ -602,7 +651,21 @@ export async function createCheckoutKernel(
   function close(): void {
     if (closed) return;
     closed = true;
-    stores.close();
+    if (storesClose) {
+      try {
+        storesClose();
+      } catch {
+        // ignore close error
+      }
+      return;
+    }
+    if (typeof stores.close === "function") {
+      try {
+        stores.close();
+      } catch {
+        // ignore
+      }
+    }
   }
 
   return {

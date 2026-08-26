@@ -42,8 +42,8 @@ paykernel/
 │   ├── checkout-kernel/      # @paykernel/example-checkout-kernel
 │   ├── bun-hono-sqlite/      # thin Hono host (via integration-hono)
 │   ├── bun-elysia-sqlite/    # thin Elysia host (via integration-elysia)
-│   ├── express-sqlite/       # thin Express host (via integration-express)
-│   └── cloudflare-workers-fetch/ # thin Workers fetch host (via integration-cloudflare-workers)
+│   ├── express-sqlite/       # thin Express host (via integration-express, ephemeral loopback listen(0) — no fixed port)
+│   └── cloudflare-workers-fetch/ # thin Workers fetch host (via integration-cloudflare-workers, production D1/DO via createCheckoutKernel({ stores | storeFactory | executor }))
 ├── scripts/
 │   └── check-workspace-boundaries.ts
 └── docs/
@@ -151,14 +151,14 @@ Allowed workspace edges today:
 
 ### b) Portable production source import policy
 
-Portable packages (core, webhooks, reconciliation, observability, routing, extra `gateway-*` packages with `paymentsSdk.portable: true`, and testkit — unless marked node-only via `paymentsSdk.runtime: "node-only"` in package.json) must not import, in **production** files under `src/`:
+Portable packages scanned by `scripts/check-runtime-portability.ts` (`PORTABLE_PACKAGE_DIRS`: `packages/core`, `packages/webhooks`, `packages/reconciliation`, `packages/observability`, `packages/routing`, `packages/store-contracts`, `packages/sql-foundation`, `packages/testkit`, `packages/gateway-tap`, `packages/gateway-myfatoorah`, `packages/integration-http`, `packages/integration-hono`, `packages/integration-elysia`, `packages/integration-cloudflare-workers`) — plus any extra `gateway-*` with `paymentsSdk.portable: true` — unless marked node-only via `paymentsSdk.runtime: "node-only"` (e.g. `integration-express` is `node-only` and excluded) must not import, in **production** files under `src/`:
 
 - **Any** `node:`, `bun:`, or `cloudflare:` protocol builtin (Phase 8: allowlist is **empty**)
-- filesystem / process network Node builtins as bare names: `'fs'`, `'path'`, `'http'`, …
+- filesystem / process / network Node builtins as bare names: `fs`, `fs/promises`, `path`, `child_process`, `net`, `http`, `https`, `http2`, `cluster`, `worker_threads`, `dgram`, `dns`, `os`, `tls`, `zlib`, `stream`, `readline`, `v8`, `vm`, `module`, `perf_hooks`, `async_hooks`, `inspector`, `trace_events`, `crypto`, `buffer`, `url`, `util`, `events`, `assert`, `querystring`, `string_decoder`, `timers`, `tty`, `constants` (11 additional: `crypto`, `buffer`, `url`, `util`, `events`, `assert`, `querystring`, `string_decoder`, `timers`, `tty`, `constants`)
 - `bun:sqlite`, `node:sqlite`
 - `cloudflare:workers` (and similar CF-only protocol imports)
 
-**No allowlist** for `node:crypto` / `node:buffer` in portable production sources.
+**No allowlist** for `node:crypto` / `node:buffer` / `node:url` / `node:util` etc in portable production sources.
 Use pure helpers / Web APIs (`packages/core/src/runtime/crypto-portable.ts`). Tests
 (`*.test.ts`, `*.spec.ts`, `*.types.test.ts`) may still use `node:crypto` /
 `node:fs` for fixtures and `bun:test`. Production files must not import `bun:test`.
@@ -166,7 +166,7 @@ Use pure helpers / Web APIs (`packages/core/src/runtime/crypto-portable.ts`). Te
 Published core dist is also gated by `bun run check:runtime-portability` (fails if
 `dist/**/*.js` contains `node:` imports). See [runtime.md](../packages/core/docs/runtime.md).
 
-**Note:** `store-postgres`, `store-redis`, `store-sqlite`, and `store-turso` are marked `paymentsSdk.runtime: "node-or-bun"` / non-portable for driver bindings; `store-d1` and `store-durable-objects` are `paymentsSdk.runtime: "cloudflare-only"` / non-portable (structural D1/DO types; no static `cloudflare:workers` on root). Portable rules above still apply to core/webhooks/reconciliation/observability/routing/testkit. Adapter **root** entries remain free of optional drivers / Workers protocol imports as documented.
+**Note:** `store-postgres`, `store-redis`, `store-sqlite`, and `store-turso` are marked `paymentsSdk.runtime: "node-or-bun"` / non-portable for driver bindings; `store-d1` and `store-durable-objects` are `paymentsSdk.runtime: "cloudflare-only"` / non-portable (structural D1/DO types; no static `cloudflare:workers` on root). `integration-express` is `paymentsSdk.runtime: "node-only"` / non-portable (Express peer). Portable rules above still apply to core/webhooks/reconciliation/observability/routing/testkit/gateway-*/integration-http/hono/elysia/cloudflare-workers/store-contracts/sql-foundation. Adapter **root** entries remain free of optional drivers / Workers protocol imports as documented.
 
 ### c) Adapter root entry must not pull optional drivers
 

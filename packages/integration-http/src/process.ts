@@ -95,6 +95,15 @@ function toRawBodyString(rawBody: string | Uint8Array): string {
   if (typeof rawBody === "string") return rawBody;
   return new TextDecoder().decode(rawBody);
 }
+/**
+ * Normalize a `HeaderBag` to a lower-cased `Record<string, string>`.
+ * Case-insensitive: header names are lower-cased, array values use the first
+ * string entry. This is intentionally consistent with `getHeader` from
+ * `./headers.ts` — both are case-insensitive and select the first value for
+ * multi-value headers. Documented invariant:
+ * `headerBagToLowerRecord(bag)[k.toLowerCase()]` equals `getHeader(bag, k)`
+ * when present. Used for `headerRecord` bridged to `client.handleWebhook`.
+ */
 function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
   const out: Record<string, string> = {};
   if (headers instanceof Headers) {
@@ -143,8 +152,51 @@ function maybeParsedBody(rawBodyString: string): unknown {
   return rawBodyString;
 }
 function hasOnWebhookVerifiedHook(client: WebhookClient): boolean {
-  const anyClient = client as unknown as { hooksManager?: { hooks?: Record<string, unknown> } };
-  return Boolean(anyClient.hooksManager?.hooks?.["onWebhookVerified"]);
+  const anyClient = client as unknown as Record<string, unknown>;
+  const has = (obj: unknown): boolean =>
+    !!obj &&
+    typeof obj === "object" &&
+    "onWebhookVerified" in (obj as Record<string, unknown>) &&
+    !!(obj as Record<string, unknown>)["onWebhookVerified"];
+
+  // Direct shapes: client.hooks / client.hookHandlers / client.onWebhookVerified
+  if (has(anyClient["hooks"])) return true;
+  if (has(anyClient["hookHandlers"])) return true;
+  if (anyClient["onWebhookVerified"]) return true;
+
+  const hm = anyClient["hooksManager"] as Record<string, unknown> | undefined;
+  if (hm) {
+    if (has(hm["hooks"])) return true;
+    const getHooks = hm["getHooks"] as (() => Record<string, unknown>) | undefined;
+    if (typeof getHooks === "function") {
+      try {
+        if (has(getHooks.call(hm))) return true;
+      } catch {
+        // getHooks may throw — ignore, treat as no hook
+      }
+    }
+    for (const v of Object.values(hm)) {
+      if (has(v)) return true;
+    }
+  }
+
+  const getHooks = anyClient["getHooks"] as (() => Record<string, unknown>) | undefined;
+  if (typeof getHooks === "function") {
+    try {
+      if (has(getHooks.call(anyClient))) return true;
+    } catch {
+      // ignore
+    }
+  }
+
+  // Fallback scan for any nested object that looks like a hooks container
+  for (const v of Object.values(anyClient)) {
+    if (!v || typeof v !== "object") continue;
+    const rec = v as Record<string, unknown>;
+    if ("hooks" in rec && has(rec["hooks"])) return true;
+    if ("hookHandlers" in rec && has(rec["hookHandlers"])) return true;
+  }
+  return false;
 }
 
 /**
@@ -187,6 +239,40 @@ export async function processWebhookHttp(
     profile.required === true &&
     (extracted === undefined || (typeof extracted === "string" && extracted.length === 0))
   ) {
+    return {
+      status: 400,
+      headers: { "x-request-id": correlationId },
+      body: { error: "invalid_webhook" },
+    };
+  }
+  if (profile?.kind === "headers") {
+    // PayPal: all listed headers are required; missing any => 400 early (timing-consistent: single branch)
+    const needed = profile.headers;
+    let missing = false;
+    if (extracted === undefined) {
+      missing = true;
+    } else if (typeof extracted === "object" && extracted !== null) {
+      const rec = extracted as Record<string, string>;
+      for (const h of needed) {
+        const lower = h.toLowerCase();
+        const v = rec[lower];
+        if (typeof v !== "string" || v.length === 0) {
+          missing = true;
+          break;
+        }
+      }
+    } else {
+      missing = true;
+    }
+    if (missing) {
+      return {
+        status: 400,
+        headers: { "x-request-id": correlationId },
+        body: { error: "invalid_webhook" },
+      };
+    }
+  }
+  if (profile?.kind === "header_or_query" && extracted === undefined) {
     return {
       status: 400,
       headers: { "x-request-id": correlationId },
@@ -301,7 +387,23 @@ export async function processWebhookHttp(
     };
   }
 
-  const status = mapInboxOutcome(outcome, ackPolicy);
+  let status = mapInboxOutcome(outcome, ackPolicy);
+  if (
+    outcome.outcome === "scheduled_for_retry" &&
+    (outcome.reason === "parked" || outcome.reason === "handler_retry") &&
+    ackPolicy.kind === "durable_worker"
+  ) {
+    const eng = input.engine as unknown as { mode?: unknown; workerGuaranteed?: unknown };
+    const modeOk = eng.mode === "durable_retry";
+    const hasWorkerProp = typeof eng === "object" && eng !== null && "workerGuaranteed" in eng;
+    const workerOk = !hasWorkerProp || eng.workerGuaranteed === true;
+    if (!modeOk || !workerOk) {
+      console.warn(
+        '[paykernel] durable_worker policy requires engine.mode="durable_retry" + workerGuaranteed; falling back to 503',
+      );
+      status = 503;
+    }
+  }
   const headers: Record<string, string> = { "x-request-id": correlationId };
   const seconds = retryAfterSeconds(outcome);
   if (status === 503 && seconds !== undefined) {

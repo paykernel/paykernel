@@ -84,6 +84,17 @@ const PORTABLE_BANNED_BARE_BUILTINS = new Set([
   "async_hooks",
   "inspector",
   "trace_events",
+  "crypto",
+  "buffer",
+  "url",
+  "util",
+  "events",
+  "assert",
+  "querystring",
+  "string_decoder",
+  "timers",
+  "tty",
+  "constants",
 ]);
 
 /** Optional peer drivers that adapter root entries must not statically import. */
@@ -106,6 +117,13 @@ const ADAPTER_OPTIONAL_DRIVERS = new Set([
   // D1 adapter uses structural D1DatabaseLike types — never static-import Workers protocol.
   "cloudflare:workers",
 ]);
+
+function isOptionalDriverImport(spec: string): boolean {
+  for (const driver of ADAPTER_OPTIONAL_DRIVERS) {
+    if (spec === driver || spec.startsWith(`${driver}/`)) return true;
+  }
+  return false;
+}
 
 const DEP_FIELDS = [
   "dependencies",
@@ -523,6 +541,37 @@ export function checkCoreDependencies(pkg: WorkspacePackage): Violation[] {
         message: `core must not depend on OpenTelemetry package "${name}" (${field}: "${version}"). Optional OTEL bridge lives in @paykernel/opentelemetry only.`,
       });
     }
+    // LN-02/LN-05: core must not hard-depend on framework packages (app-side only — peerDependencies in wrappers).
+    if (
+      field === "dependencies" &&
+      (name === "hono" ||
+        name === "elysia" ||
+        name === "express" ||
+        name === "@hono/node-server" ||
+        name === "cloudflare:workers")
+    ) {
+      violations.push({
+        rule: "a/core-no-framework",
+        package: pkg.name,
+        message: `core must not hard-depend on framework "${name}" (${field}: "${version}"). Frameworks are app-side only (use peerDependencies in integration wrappers).`,
+      });
+    }
+    // AB-05: packages must never depend on examples (consumer apps)
+    if (name.startsWith("@paykernel/example-")) {
+      violations.push({
+        rule: "a/core-no-examples",
+        package: pkg.name,
+        message: `core must not depend on example package "${name}" (${field}: "${version}"). Examples are consumer apps; packages must stay free of example deps.`,
+      });
+    }
+    const corePathVersion = version.replace(/\\/g, "/");
+    if (/examples\//.test(corePathVersion) || /@paykernel\/example-/.test(corePathVersion)) {
+      violations.push({
+        rule: "a/core-no-examples",
+        package: pkg.name,
+        message: `core must not path-depend into examples (${field}: "${name}": "${version}").`,
+      });
+    }
   });
 
   return violations;
@@ -653,6 +702,22 @@ export function checkIntegrationPackageDependencies(pkg: WorkspacePackage): Viol
       });
     }
 
+    // LN-02/LN-05: wrappers must not hard-depend on framework packages (peerDependencies only)
+    if (
+      field === "dependencies" &&
+      (name === "hono" ||
+        name === "elysia" ||
+        name === "express" ||
+        name === "@hono/node-server" ||
+        name === "cloudflare:workers")
+    ) {
+      violations.push({
+        rule: "a/integration-no-framework-hard-dep",
+        package: pkg.name,
+        message: `integration package must not hard-depend on framework "${name}" in dependencies (use peerDependencies).`,
+      });
+    }
+
     if (pkg.name === INTEGRATION_HTTP_PACKAGE_NAME) {
       const allowed = new Set([CORE_PACKAGE_NAME, WEBHOOKS_PACKAGE_NAME]);
       if (name.startsWith("@paykernel/") && !allowed.has(name)) {
@@ -724,7 +789,8 @@ export function checkIntegrationPackageDependencies(pkg: WorkspacePackage): Viol
         /packages\/sql-foundation/.test(pathVersion) ||
         /internal\/sql-store/.test(pathVersion) ||
         /packages\/(adapter|store)-/.test(pathVersion) ||
-        /packages\/gateway-/.test(pathVersion)
+        /packages\/gateway-/.test(pathVersion) ||
+        /packages\/integration-(?!http)/.test(pathVersion)
       ) {
         violations.push({
           rule: "a/integration-http-only",
@@ -864,6 +930,20 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `webhooks must not path-depend into integration (${field}: "${name}": "${version}").`,
         });
       }
+      if (name.startsWith("@paykernel/example-")) {
+        violations.push({
+          rule: "a/webhooks-no-examples",
+          package: pkg.name,
+          message: `webhooks must not depend on example package "${name}" (${field}: "${version}"). Examples are consumer apps.`,
+        });
+      }
+      if (/examples\//.test(pathVersion) || /@paykernel\/example-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/webhooks-no-examples",
+          package: pkg.name,
+          message: `webhooks must not path-depend into examples (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
 
@@ -972,6 +1052,20 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/reconciliation-no-integration",
           package: pkg.name,
           message: `reconciliation must not path-depend into integration (${field}: "${name}": "${version}").`,
+        });
+      }
+      if (name.startsWith("@paykernel/example-")) {
+        violations.push({
+          rule: "a/reconciliation-no-examples",
+          package: pkg.name,
+          message: `reconciliation must not depend on example package "${name}" (${field}: "${version}"). Examples are consumer apps.`,
+        });
+      }
+      if (/examples\//.test(pathVersion) || /@paykernel\/example-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/reconciliation-no-examples",
+          package: pkg.name,
+          message: `reconciliation must not path-depend into examples (${field}: "${name}": "${version}").`,
         });
       }
     });
@@ -1084,6 +1178,20 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `observability must not path-depend into integration (${field}: "${name}": "${version}").`,
         });
       }
+      if (name.startsWith("@paykernel/example-")) {
+        violations.push({
+          rule: "a/observability-no-examples",
+          package: pkg.name,
+          message: `observability must not depend on example package "${name}" (${field}: "${version}"). Examples are consumer apps.`,
+        });
+      }
+      if (/examples\//.test(pathVersion) || /@paykernel\/example-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/observability-no-examples",
+          package: pkg.name,
+          message: `observability must not path-depend into examples (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
 
@@ -1194,6 +1302,20 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           message: `routing must not path-depend into integration (${field}: "${name}": "${version}").`,
         });
       }
+      if (name.startsWith("@paykernel/example-")) {
+        violations.push({
+          rule: "a/routing-no-examples",
+          package: pkg.name,
+          message: `routing must not depend on example package "${name}" (${field}: "${version}"). Examples are consumer apps.`,
+        });
+      }
+      if (/examples\//.test(pathVersion) || /@paykernel\/example-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/routing-no-examples",
+          package: pkg.name,
+          message: `routing must not path-depend into examples (${field}: "${name}": "${version}").`,
+        });
+      }
     });
   }
   // Phase 11: sql foundation (public + private re-export) must not depend on core or domain engines.
@@ -1229,6 +1351,20 @@ export function checkPhase10DependencyMatrix(pkg: WorkspacePackage): Violation[]
           rule: "a/sql-store-no-core-webhooks",
           package: pkg.name,
           message: `sql foundation must not path-depend into core, webhooks, reconciliation, testkit, or store-contracts (${field}: "${name}": "${version}").`,
+        });
+      }
+      if (name.startsWith("@paykernel/example-")) {
+        violations.push({
+          rule: "a/sql-store-no-examples",
+          package: pkg.name,
+          message: `sql foundation must not depend on example package "${name}" (${field}: "${version}").`,
+        });
+      }
+      if (/examples\//.test(pathVersion) || /@paykernel\/example-/.test(pathVersion)) {
+        violations.push({
+          rule: "a/sql-store-no-examples",
+          package: pkg.name,
+          message: `sql foundation must not path-depend into examples (${field}: "${name}": "${version}").`,
         });
       }
     });
@@ -1467,7 +1603,7 @@ export function checkAdapterRootEntry(pkg: WorkspacePackage, root: string = ROOT
     }
 
     for (const spec of extractImportSpecifiers(source)) {
-      if (ADAPTER_OPTIONAL_DRIVERS.has(spec)) {
+      if (isOptionalDriverImport(spec)) {
         violations.push({
           rule: "c/adapter-root-drivers",
           package: pkg.name,

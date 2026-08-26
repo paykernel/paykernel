@@ -8,7 +8,7 @@ Read in this order. Package guides stay next to the code they describe.
 | --- | --- |
 | [Getting started](./getting-started.md) | First payment, then production composition (inbox + store + reconcile) |
 | [Adapter selection](./adapter-selection.md) | Choosing PostgreSQL / Redis / SQLite / Turso / D1 / Durable Objects |
-| [Examples](../examples/README.md) | Private Bun checkout kernel + thin Hono/Elysia hosts (single-host in-memory SQLite) |
+| [Examples](../examples/README.md) | Private Bun/SQLite checkout kernel + 4 thin hosts (Hono/Elysia/Express ephemeral loopback + Cloudflare Workers fetch) over single-host in-memory SQLite |
 | Root [README](../README.md) | Package map and install commands |
 
 ## Consumer packages

@@ -5,20 +5,32 @@
   },
   "include": [],
   "references": [
-    {
-      "path": "./packages/core"
-    },
-    {
-      "path": "./packages/webhooks"
-    },
-    {
-      "path": "./packages/reconciliation"
-    },
-    {
-      "path": "./packages/testkit"
-    },
-    {
-      "path": "./internal/sql-store"
-    }
+    { "path": "./packages/core" },
+    { "path": "./packages/webhooks" },
+    { "path": "./packages/reconciliation" },
+    { "path": "./packages/observability" },
+    { "path": "./packages/routing" },
+    { "path": "./packages/integration-http" },
+    { "path": "./packages/integration-hono" },
+    { "path": "./packages/integration-elysia" },
+    { "path": "./packages/integration-express" },
+    { "path": "./packages/integration-cloudflare-workers" },
+    { "path": "./packages/gateway-tap" },
+    { "path": "./packages/gateway-myfatoorah" },
+    { "path": "./packages/store-contracts" },
+    { "path": "./packages/sql-foundation" },
+    { "path": "./packages/testkit" },
+    { "path": "./packages/store-postgres" },
+    { "path": "./packages/store-redis" },
+    { "path": "./packages/store-sqlite" },
+    { "path": "./packages/store-turso" },
+    { "path": "./packages/store-d1" },
+    { "path": "./packages/store-durable-objects" },
+    { "path": "./internal/sql-store" },
+    { "path": "./examples/checkout-kernel" },
+    { "path": "./examples/bun-hono-sqlite" },
+    { "path": "./examples/bun-elysia-sqlite" },
+    { "path": "./examples/express-sqlite" },
+    { "path": "./examples/cloudflare-workers-fetch" }
   ]
 }
