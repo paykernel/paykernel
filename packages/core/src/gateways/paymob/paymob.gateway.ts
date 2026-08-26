@@ -1219,8 +1219,9 @@ export class PaymobGateway extends BaseGateway {
    * @see https://developers.paymob.com/paymob-docs/developers/webhook-callbacks-and-hmac
    */
   verifyWebhook(payload: unknown, signature?: string): boolean {
-    const redirectPayload = this.asRedirectWebhookPayload(payload);
-    const structuredPayload = payload as PaymobWebhookPayload | PaymobCardTokenWebhookPayload;
+    const normalized = this.coercePaymobPayload(payload);
+    const redirectPayload = this.asRedirectWebhookPayload(normalized);
+    const structuredPayload = normalized as PaymobWebhookPayload | PaymobCardTokenWebhookPayload;
 
     if (!this.paymobConfig.hmacSecret) {
       if (this.paymobConfig.allowUnverifiedWebhooks) {
@@ -1229,8 +1230,8 @@ export class PaymobGateway extends BaseGateway {
           return false;
         }
         this.logger.warn("[Paymob] Webhook verification explicitly disabled");
-        return this.isTransactionWebhook(payload) ||
-          this.isCardTokenWebhook(payload) ||
+        return this.isTransactionWebhook(normalized) ||
+          this.isCardTokenWebhook(normalized) ||
           Boolean(redirectPayload);
       }
       this.logger.warn("[Paymob] No HMAC secret configured");
@@ -1248,11 +1249,11 @@ export class PaymobGateway extends BaseGateway {
       return false;
     }
 
-    const dataString = this.isCardTokenWebhook(structuredPayload)
-      ? this.buildCardTokenHmacString(structuredPayload.obj)
+    const dataString = this.isCardTokenWebhook(normalized)
+      ? this.buildCardTokenHmacString((normalized as PaymobCardTokenWebhookPayload).obj)
       : redirectPayload
         ? this.buildRedirectHmacString(redirectPayload)
-        : this.buildHmacString((structuredPayload as PaymobWebhookPayload).obj);
+        : this.buildHmacString((normalized as PaymobWebhookPayload).obj);
 
     // Calculate expected HMAC (pure portable HMAC-SHA512 — no node:crypto)
     const calculatedHmac = hmacSha512Hex(
@@ -1295,21 +1296,22 @@ export class PaymobGateway extends BaseGateway {
    * TOKEN → setup_completed, void/refund flags, …).
    */
   parseWebhookEvent(payload: unknown): WebhookEvent {
-    if (this.isCardTokenWebhook(payload)) {
-      return this.parseCardTokenWebhookEvent(payload);
+    const normalized = this.coercePaymobPayload(payload);
+    if (this.isCardTokenWebhook(normalized)) {
+      return this.parseCardTokenWebhookEvent(normalized as PaymobCardTokenWebhookPayload);
     }
 
-    const redirectPayload = this.asRedirectWebhookPayload(payload);
+    const redirectPayload = this.asRedirectWebhookPayload(normalized);
     if (redirectPayload) {
-      return this.parseRedirectWebhookEvent(redirectPayload, payload);
+      return this.parseRedirectWebhookEvent(redirectPayload, normalized);
     }
 
-    const normalized = this.normalizeTransactionWebhook(payload);
-    if (!normalized) {
+    const normalizedTxn = this.normalizeTransactionWebhook(normalized);
+    if (!normalizedTxn) {
       throw new InvalidWebhookError("Invalid Paymob transaction webhook payload");
     }
-    const raw = payload as PaymobWebhookPayload;
-    const obj = normalized.obj;
+    const raw = normalized as PaymobWebhookPayload;
+    const obj = normalizedTxn.obj;
     // HMAC does not cover is_captured / captured_amount / refunded_amount_cents.
     // is_refund / is_void are HMAC aliases only when current-state is absent.
     // When is_refunded / is_voided is present (true or false), the action alias
@@ -1335,10 +1337,10 @@ export class PaymobGateway extends BaseGateway {
     // to relatedIds.refundId / captureId. Parent order correlation is applied to
     // references.parentId (+ relatedIds.orderId) only after attachPaymentEvent.
     const txnId = String(obj.id);
-    const signedOrderId = this.readSignedPaymobOrderId(normalized.rawObj);
+    const signedOrderId = this.readSignedPaymobOrderId(normalizedTxn.rawObj);
     const legacy: WebhookEvent = {
       id: this.paymobWebhookEventId(txnId, "TRANSACTION"),
-      type: normalized.type,
+      type: normalizedTxn.type,
       gateway: "paymob",
       paymentId: undefined,
       gatewayPaymentId: txnId,
@@ -3536,6 +3538,28 @@ export class PaymobGateway extends BaseGateway {
     return "processing";
   }
 
+  private coercePaymobPayload(payload: unknown): unknown {
+    if (typeof payload === "string") {
+      const trimmed = payload.trim();
+      if (trimmed.length === 0) return payload;
+      try {
+        return JSON.parse(trimmed) as unknown;
+      } catch {
+        return payload;
+      }
+    }
+    if (payload instanceof Uint8Array) {
+      const text = new TextDecoder().decode(payload).trim();
+      if (text.length === 0) return payload;
+      try {
+        return JSON.parse(text) as unknown;
+      } catch {
+        return payload;
+      }
+    }
+    return payload;
+  }
+
   private recordOrUndefined(value: unknown): Record<string, unknown> | undefined {
     return value && typeof value === "object" && !Array.isArray(value)
       ? value as Record<string, unknown>
@@ -3568,6 +3592,26 @@ export class PaymobGateway extends BaseGateway {
   private recordFromUnknown(value: unknown): Record<string, unknown> | undefined {
     if (value instanceof URLSearchParams) {
       return Object.fromEntries(value.entries());
+    }
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed.length === 0) return undefined;
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        return this.recordOrUndefined(parsed);
+      } catch {
+        return undefined;
+      }
+    }
+    if (value instanceof Uint8Array) {
+      const text = new TextDecoder().decode(value).trim();
+      if (text.length === 0) return undefined;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        return this.recordOrUndefined(parsed);
+      } catch {
+        return undefined;
+      }
     }
 
     return this.recordOrUndefined(value);
@@ -3679,7 +3723,8 @@ export class PaymobGateway extends BaseGateway {
   }
 
   private normalizeTransactionWebhook(payload: unknown): PaymobNormalizedTransactionWebhook | undefined {
-    const raw = this.recordOrUndefined(payload);
+    const normalized = this.coercePaymobPayload(payload);
+    const raw = this.recordOrUndefined(normalized);
     const rawObj = this.recordOrUndefined(raw?.obj);
     if (!rawObj) {
       return undefined;
@@ -3736,7 +3781,8 @@ export class PaymobGateway extends BaseGateway {
   }
 
   private isCardTokenWebhook(payload: unknown): payload is PaymobCardTokenWebhookPayload {
-    const raw = this.recordOrUndefined(payload);
+    const normalized = this.coercePaymobPayload(payload);
+    const raw = this.recordOrUndefined(normalized);
     const obj = this.recordOrUndefined(raw?.obj);
     if (!obj) {
       return false;

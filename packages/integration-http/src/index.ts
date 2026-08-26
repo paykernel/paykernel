@@ -15,7 +15,9 @@ export {
   processWebhookHttp,
   webhookHttpResultToResponse,
   createWebhookOperationContext,
+  /** WEBHOOKS-2: verifier with no onWebhookVerified fulfillment — see process.ts WebhookClient. */
   type WebhookClient,
   type WebhookHttpResult,
+  /** WEBHOOKS-2: client must have no onWebhookVerified fulfillment — see process.ts. */
   type ProcessWebhookHttpInput,
 } from "./process";

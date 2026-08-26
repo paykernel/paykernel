@@ -1153,12 +1153,31 @@ export class MoyasarGateway extends BaseGateway {
       return false;
     }
 
-    if (!this.isRecord(payload) || typeof payload.secret_token !== "string") {
-      return false;
+    let normalized: unknown = payload;
+    if (typeof payload === "string") {
+      const trimmed = payload.trim();
+      if (trimmed.length === 0) return false;
+      try {
+        normalized = JSON.parse(trimmed) as unknown;
+      } catch {
+        return false;
+      }
+    } else if (payload instanceof Uint8Array) {
+      const text = new TextDecoder().decode(payload).trim();
+      if (text.length === 0) return false;
+      try {
+        normalized = JSON.parse(text) as unknown;
+      } catch {
+        return false;
+      }
     }
 
+    if (!this.isRecord(normalized)) return false;
+    const record = normalized;
+    if (typeof record.secret_token !== "string") return false;
+
     return this.constantTimeEquals(
-      payload.secret_token,
+      record.secret_token,
       this.moyasarConfig.webhookSecret,
     );
   }
@@ -1649,19 +1668,42 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   private assertMoyasarWebhookPayload(payload: unknown): MoyasarWebhookPayload {
-    if (!this.isRecord(payload)) {
+    let normalized: unknown = payload;
+    if (typeof payload === "string") {
+      const trimmed = payload.trim();
+      if (trimmed.length === 0) {
+        throw new InvalidWebhookError("Invalid Moyasar webhook payload");
+      }
+      try {
+        normalized = JSON.parse(trimmed) as unknown;
+      } catch {
+        throw new InvalidWebhookError("Invalid Moyasar webhook payload");
+      }
+    } else if (payload instanceof Uint8Array) {
+      const text = new TextDecoder().decode(payload).trim();
+      if (text.length === 0) {
+        throw new InvalidWebhookError("Invalid Moyasar webhook payload");
+      }
+      try {
+        normalized = JSON.parse(text) as unknown;
+      } catch {
+        throw new InvalidWebhookError("Invalid Moyasar webhook payload");
+      }
+    }
+    if (!this.isRecord(normalized)) {
       throw new InvalidWebhookError("Invalid Moyasar webhook payload");
     }
 
-    const data = payload.data;
+    const record = normalized;
+    const data = record.data;
     if (!this.isRecord(data)) {
       throw new InvalidWebhookError("Invalid Moyasar webhook payload: missing data");
     }
 
     if (
-      typeof payload.id !== "string" ||
-      typeof payload.type !== "string" ||
-      typeof payload.created_at !== "string" ||
+      typeof record.id !== "string" ||
+      typeof record.type !== "string" ||
+      typeof record.created_at !== "string" ||
       typeof data.id !== "string" ||
       typeof data.status !== "string" ||
       typeof data.amount !== "number" ||
@@ -1670,7 +1712,7 @@ export class MoyasarGateway extends BaseGateway {
       throw new InvalidWebhookError("Invalid Moyasar webhook payload fields");
     }
 
-    return payload as unknown as MoyasarWebhookPayload;
+    return record as unknown as MoyasarWebhookPayload;
   }
 
   /**

@@ -177,6 +177,13 @@ function jsonError(status: number, error: string): CheckoutHttpResult {
 /**
  * In-memory Bun SQLite checkout kernel.
  * Migrates explicitly; injects one clock into Stripe runtime, stores, and inbox.
+ *
+ * WEBHOOKS-2: `client` is created with **no `onWebhookVerified` hooks** —
+ * fulfillment belongs only in the inbox `handler` after claim (see
+ * `webhookHandler` below and `docs/getting-started.md` “Never fulfill in
+ * onWebhookVerified”). The kernel exposes `webhook.client`/`engine`/`handler`
+ * for `processWebhookHttp`-style composition, not direct `handleWebhook` with
+ * fulfillment hooks.
  */
 export async function createCheckoutKernel(
   options: CreateCheckoutKernelOptions = {},
@@ -210,6 +217,8 @@ export async function createCheckoutKernel(
     create: () => mock as PaymentGateway<"mock">,
   };
 
+  // WEBHOOKS-2: no onWebhookVerified hooks — fulfillment only in webhookHandler after inbox claim.
+  // See docs/getting-started.md “Never fulfill in onWebhookVerified”.
   const client = createPaymentClient({
     gateways: {
       mock: mockAdapter,
@@ -221,7 +230,6 @@ export async function createCheckoutKernel(
     defaultGateway: "mock",
     runtime: { clock },
   });
-
   const engine: WebhookInboxEngine = createWebhookInboxEngine({
     store: stores.webhookInbox,
     mode: "inline",

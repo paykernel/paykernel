@@ -11,8 +11,12 @@ import {
 } from "@paykernel/example-checkout-kernel";
 
 /**
- * Thin Hono checkout adapter. Stripe HMAC is verified on Request.text();
- * do not use c.req.json() or any body parser on /webhooks/stripe.
+ * Thin Hono checkout adapter. Stripe HMAC is verified on `Request.text()` via
+ * `processWebhookHttp` (raw-body-safe `engine.processWithVerifier` with
+ * `client.handleWebhook` as verify-only verifier, then inbox claim).
+ * Do not use `c.req.json()` or any body parser on `/webhooks/stripe`.
+ * WEBHOOKS-2: fulfillment lives only in `kernel.webhook.handler` after the
+ * inbox claim — never in `onWebhookVerified` (see docs/getting-started.md).
  *
  * `/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count`
  * are test hooks. They are unauthenticated — do not deploy them.

@@ -1,6 +1,6 @@
 import { InvalidWebhookError, createOperationContext, type OperationContext } from "@paykernel/core";
 import { resolveInboxPayloadHash, type WebhookInboxEngine, type WebhookHandler, type WebhookProcessingOutcome } from "@paykernel/webhooks";
-import { getHeader, resolveCorrelationId } from "./headers";
+import { resolveCorrelationId } from "./headers";
 import { mapInboxOutcome, retryAfterSeconds, type InboxHttpAckPolicy } from "./http-policy";
 import { GATEWAY_WEBHOOK_SIGNATURE, extractWebhookSignature, type GatewayWebhookSignatureProfile } from "./signature";
 import type { HeaderBag } from "./headers";
@@ -9,6 +9,24 @@ function hasBody(value: unknown): value is { body: unknown } {
   return typeof value === "object" && value !== null && "body" in value;
 }
 
+/**
+ * Minimal webhook verifier surface accepted by {@link processWebhookHttp}.
+ *
+ * **WEBHOOKS-2 invariant — no fulfillment in `onWebhookVerified`:** `client`
+ * MUST be a `PaymentClient` with **no `onWebhookVerified` fulfillment / money
+ * side effects**. Verification can succeed before the inbox claim/lease, so a
+ * hook that fulfills would run as `["verified_hook","inbox_handler"]` before
+ * dedupe. Fulfillment belongs **only** in the `handler` passed to
+ * `processWebhookHttp` (or `engine.processWithVerifier` / `processRetryable`)
+ * after the inbox claim. See `docs/getting-started.md` “Never fulfill in
+ * onWebhookVerified”. This type is intentionally structural to avoid a hard
+ * `@paykernel/core` peer cycle, but at runtime the passed `client` SHOULD be
+ * a `PaymentClient` created by `createPaymentClient` with no
+ * `onWebhookVerified` hooks that mutate orders/inventory/payments (metrics-
+ * only is allowed; even that will emit a `console.warn` via the inbox path).
+ * If a runtime guard detects such hooks it MUST warn, not throw, to avoid
+ * breaking existing callers.
+ */
 export type WebhookClient = {
   handleWebhook(
     gateway: string,
@@ -22,12 +40,19 @@ export type WebhookHttpResult = {
   headers: Record<string, string>;
   body: { outcome: string; reason?: string; retryable?: boolean } | { error: "invalid_webhook" };
 };
-
 export type ProcessWebhookHttpInput = {
   gateway: string;
   rawBody: string | Uint8Array;
   headers: HeaderBag;
   query?: Record<string, string | undefined>;
+  /**
+   * Verifier client — MUST be a `PaymentClient` with no `onWebhookVerified`
+   * fulfillment. See {@link WebhookClient} and `docs/getting-started.md`
+   * “Never fulfill in onWebhookVerified”. Fulfillment belongs only in
+   * `handler` after the inbox claim/lease; the `verifyAndNormalize` path
+   * must stay verify-only (WEBHOOKS-2). A warn-only runtime check may
+   * `console.warn` if hooks are detected, but never throws.
+   */
   client: WebhookClient;
   engine: WebhookInboxEngine;
   handler: WebhookHandler;
@@ -87,7 +112,59 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
   }
   return out;
 }
+/**
+ * Stripe/PayPal/MyFatoorah verify HMAC over the raw string/bytes — the
+ * signature is computed from the exact byte payload sent by the provider.
+ * Tap/Moyasar/Paymob verify HMAC over fields extracted from the parsed JSON
+ * object — passing the raw string to their verifiers would always fail.
+ *
+ * ProcessWebhookHttp is gateway-agnostic and receives `rawBody` as
+ * `string | Uint8Array` via `toRawBodyString`. For string-HMAC gateways we
+ * keep the raw string byte-exact (Stripe needs exact bytes). For object-HMAC
+ * gateways we defensively try to parse the raw string to an object/array and
+ * pass the parsed value when valid; otherwise we fall back to the raw string
+ * (fail-closed) so verification still runs and returns 400 rather than 500.
+ * This makes both string-accepting and object-only gateway implementations
+ * work regardless of fix ordering (Slice A vs Slice B).
+ */
+const OBJECT_HMAC_GATEWAYS: Record<string, true> = {
+  tap: true,
+  moyasar: true,
+  paymob: true,
+};
 
+function maybeParsedBody(rawBodyString: string): unknown {
+  try {
+    const parsed = JSON.parse(rawBodyString);
+    if (parsed !== null && typeof parsed === "object") return parsed;
+  } catch {
+    // Invalid JSON — fall back to raw string (verifier will fail-closed to 400)
+  }
+  return rawBodyString;
+}
+function hasOnWebhookVerifiedHook(client: WebhookClient): boolean {
+  const anyClient = client as unknown as { hooksManager?: { hooks?: Record<string, unknown> } };
+  return Boolean(anyClient.hooksManager?.hooks?.["onWebhookVerified"]);
+}
+
+/**
+ * Verify a webhook via `client.handleWebhook` and claim/lease it via
+ * `engine.processWithVerifier`. Maps engine outcomes to HTTP status via
+ * `mapInboxOutcome`.
+ *
+ * **WEBHOOKS-2:** `input.client` MUST be a `PaymentClient` with **no
+ * `onWebhookVerified` fulfillment**. Fulfillment belongs only in
+ * `input.handler` after the inbox claim (see {@link WebhookClient} and
+ * `docs/getting-started.md` “Never fulfill in onWebhookVerified”). The
+ * `verifyAndNormalize` callback is verify-only; if a runtime check detects
+ * `onWebhookVerified` hooks it will `console.warn` (never throw) so existing
+ * callers keep working but operators see the invariant violation.
+ *
+ * **String vs object:** Stripe/PayPal/MyFatoorah HMAC over raw bytes; Tap/
+ * Moyasar/Paymob HMAC over parsed fields — those verifiers accept string
+ * payloads and parse internally, and this helper also parses rawBody for those
+ * three gateways so both old and new gateway implementations verify.
+ */
 export async function processWebhookHttp(
   input: ProcessWebhookHttpInput,
 ): Promise<WebhookHttpResult> {
@@ -137,10 +214,28 @@ export async function processWebhookHttp(
           throw new Error("invalid raw wrapper");
         }
         const body = raw.body;
+        // Defensive bridge: Stripe/PayPal/MyFatoorah keep raw string (byte-exact HMAC).
+        // Tap/Moyasar/Paymob need parsed object/array for field-based HMAC. Try
+        // parsing the raw string when the gateway is object-HMAC; fall back to
+        // string on invalid JSON (fail-closed — verifier returns 400).
+        const gatewayKey = input.gateway.toLowerCase();
+        let payloadForVerify: unknown = body;
+        if (OBJECT_HMAC_GATEWAYS[gatewayKey]) {
+          const parsed = maybeParsedBody(body);
+          if (parsed !== body) payloadForVerify = parsed;
+        }
+        // WEBHOOKS-2 warn-only guard: client MUST have no onWebhookVerified fulfillment.
+        // Fulfillment belongs in `handler` after inbox claim. Warn, never throw.
+        if (hasOnWebhookVerifiedHook(input.client)) {
+          console.warn(
+            "[paykernel] WEBHOOKS-2: ProcessWebhookHttpInput.client has onWebhookVerified hooks; " +
+              "fulfillment must be in handler after inbox claim. See docs/getting-started.md \"Never fulfill in onWebhookVerified\".",
+          );
+        }
         try {
           const rawEvent: unknown = await input.client.handleWebhook(
             input.gateway,
-            body,
+            payloadForVerify,
             signatureOrHeaders,
             headerRecord,
           );

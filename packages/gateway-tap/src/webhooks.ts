@@ -6,6 +6,32 @@ import {
 import { formatTapIsoAmount, parseTapAmount } from "./money";
 import type { TapApiObject, TapObjectKind } from "./types";
 
+export function coerceTapPayload(payload: unknown): unknown {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    if (trimmed.length === 0) {
+      throw new InvalidRequestError("Tap webhook payload must be a JSON object");
+    }
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      throw new InvalidRequestError("Tap webhook payload is not valid JSON");
+    }
+  }
+  if (payload instanceof Uint8Array) {
+    const text = new TextDecoder().decode(payload).trim();
+    if (text.length === 0) {
+      throw new InvalidRequestError("Tap webhook payload must be a JSON object");
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new InvalidRequestError("Tap webhook payload is not valid JSON");
+    }
+  }
+  return payload;
+}
+
 export type TapHashFields = {
   id: string;
   amount: string;
@@ -82,10 +108,11 @@ function tapHashableObject(
 }
 
 export function hashFieldsFromTapObject(payload: unknown): TapHashFields {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+  const normalized = coerceTapPayload(payload);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
     throw new InvalidRequestError("Tap webhook payload must be a JSON object");
   }
-  const obj = payload as TapApiObject;
+  const obj = normalized as TapApiObject;
   const kind = tapHashableObject(obj);
   const id = requiredString(obj.id, "id");
   const currency = requiredString(obj.currency, "currency").toUpperCase();
@@ -140,10 +167,11 @@ export function verifyTapHashstring(
 }
 
 export function tapObjectKind(payload: unknown): TapObjectKind {
-  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+  const normalized = coerceTapPayload(payload);
+  if (normalized === null || typeof normalized !== "object" || Array.isArray(normalized)) {
     throw new InvalidRequestError("Tap webhook payload must be a JSON object");
   }
-  const object = (payload as TapApiObject).object;
+  const object = (normalized as TapApiObject).object;
   if (object === "charge" || object === "authorize" || object === "refund") {
     return object;
   }

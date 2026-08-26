@@ -12,8 +12,11 @@ import {
 import { createServer } from "node:http";
 
 /**
- * Thin Express checkout adapter. Stripe HMAC is verified on raw body;
- * do not use express.json() on /webhooks/stripe.
+ * Thin Express checkout adapter. Stripe HMAC is verified on raw body via
+ * `processWebhookHttp` (verify-only `handleWebhook` + inbox claim);
+ * do not use `express.json()` on `/webhooks/stripe`. WEBHOOKS-2: fulfillment
+ * only in `kernel.webhook.handler` after the inbox claim — never in
+ * `onWebhookVerified` (see docs/getting-started.md).
  *
  * `/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count`
  * are test hooks. They are unauthenticated — do not deploy them.

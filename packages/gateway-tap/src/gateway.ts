@@ -71,6 +71,7 @@ import {
   withRelatedIdsOnPaymentEvent,
 } from "./webhook-map";
 import {
+  coerceTapPayload,
   extractHashstringHeader,
   tapCreatedRaw,
   tapObjectKind,
@@ -400,13 +401,14 @@ export class TapGateway extends BaseGateway {
   }
 
   parseWebhookEvent(payload: unknown): WebhookEvent {
-    if (payload !== null && typeof payload === "object" && !Array.isArray(payload)) {
-      if ((payload as TapApiObject).object === "invoice") {
-        return parseTapInvoiceWebhookEvent(payload as TapApiObject);
+    const normalized = coerceTapPayload(payload);
+    if (normalized !== null && typeof normalized === "object" && !Array.isArray(normalized)) {
+      if ((normalized as TapApiObject).object === "invoice") {
+        return parseTapInvoiceWebhookEvent(normalized as TapApiObject);
       }
     }
-    const kind = tapObjectKind(payload);
-    const obj = payload as TapApiObject;
+    const kind = tapObjectKind(normalized);
+    const obj = normalized as TapApiObject;
     const id = this.requireString(obj.id, "id");
     const currency =
       typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
@@ -445,7 +447,7 @@ export class TapGateway extends BaseGateway {
       gatewayPaymentId: chargeId,
       status,
       timestamp: created,
-      rawPayload: payload,
+      rawPayload: normalized,
     };
     if (kind === "refund") legacy.gatewayObjectId = id;
     if (amount !== undefined) legacy.amount = amount;

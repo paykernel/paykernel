@@ -150,8 +150,10 @@ const client = createPaymentClient({
     }),
   },
   defaultGateway: "stripe",
+  // WEBHOOKS-2: no onWebhookVerified fulfillment here — fulfillment belongs only
+  // in the handler passed to processWebhookHttp after the inbox claim. See
+  // “Never fulfill in onWebhookVerified” above.
 });
-
 // `inline` does not require a processRetryable worker.
 // `durable_retry` is only safe to ACK if that worker is guaranteed.
 const engine = createWebhookInboxEngine({

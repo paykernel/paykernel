@@ -18,7 +18,10 @@ function invalidJsonResponse(): Response {
 
 /**
  * Thin Elysia adapter over {@link createCheckoutHandlers}.
- * Stripe webhook reads `request.text()` with `parse: "none"` — no JSON body parser.
+ * Stripe webhook reads `request.text()` with `parse: "none"` — no JSON body
+ * parser — then `processWebhookHttp` (verify-only `handleWebhook` + inbox
+ * claim). WEBHOOKS-2: fulfillment only in `kernel.webhook.handler` after claim,
+ * never in `onWebhookVerified` (see docs/getting-started.md).
  *
  * `/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count`
  * are test hooks. They are unauthenticated — do not deploy them.

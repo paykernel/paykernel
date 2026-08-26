@@ -37,7 +37,7 @@ import {
 
 Hosts stay thin: `createCheckoutKernel()`, then `createCheckoutHandlers(kernel)` plus `readRequestJson` / `checkoutJsonResponse` (or `createCheckoutFetchApp` / `dispatchCheckoutRequest` for a framework-less `fetch`).
 
-Webhook routes **must** read the raw body **before** any JSON parser, then pass it through the kernel (which calls `handleWebhook("stripe", raw, sig)`):
+Webhook routes **must** read the raw body **before** any JSON parser, then pass it through the kernel (which calls `processWebhookHttp` — raw-body-safe `engine.processWithVerifier` with `client.handleWebhook` as verify-only verifier, then inbox claim; fulfillment only in the `handler` after claim):
 
 ```typescript
 const raw = await request.text(); // Hono: c.req.text() — never c.req.json()
