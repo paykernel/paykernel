@@ -2,7 +2,7 @@ import { InvalidWebhookError, createOperationContext, type OperationContext } fr
 import { resolveInboxPayloadHash, type WebhookInboxEngine, type WebhookHandler, type WebhookProcessingOutcome } from "@paykernel/webhooks";
 import { resolveCorrelationId } from "./headers";
 import { mapInboxOutcome, retryAfterSeconds, type InboxHttpAckPolicy } from "./http-policy";
-import { GATEWAY_WEBHOOK_SIGNATURE, extractWebhookSignature, type GatewayWebhookSignatureProfile } from "./signature";
+import { GATEWAY_WEBHOOK_SIGNATURE, OBJECT_HMAC_GATEWAYS, extractWebhookSignature, type GatewayWebhookSignatureProfile } from "./signature";
 import type { HeaderBag } from "./headers";
 
 function hasBody(value: unknown): value is { body: unknown } {
@@ -108,14 +108,14 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
   const out: Record<string, string> = {};
   if (headers instanceof Headers) {
     headers.forEach((v, k) => {
-      out[k.toLowerCase()] = v;
+      if (v.length > 0) out[k.toLowerCase()] = v;
     });
     return out;
   }
   for (const [k, v] of Object.entries(headers)) {
     if (Array.isArray(v)) {
-      if (v.length > 0 && typeof v[0] === "string") out[k.toLowerCase()] = v[0]!;
-    } else if (typeof v === "string") {
+      if (v.length > 0 && typeof v[0] === "string" && v[0].length > 0) out[k.toLowerCase()] = v[0]!;
+    } else if (typeof v === "string" && v.length > 0) {
       out[k.toLowerCase()] = v;
     }
   }
@@ -135,12 +135,8 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
  * (fail-closed) so verification still runs and returns 400 rather than 500.
  * This makes both string-accepting and object-only gateway implementations
  * work regardless of fix ordering (Slice A vs Slice B).
+ * OBJECT_HMAC_GATEWAYS is canonical in ./signature.ts.
  */
-const OBJECT_HMAC_GATEWAYS: Record<string, true> = {
-  tap: true,
-  moyasar: true,
-  paymob: true,
-};
 
 function maybeParsedBody(rawBodyString: string): unknown {
   try {
@@ -199,6 +195,16 @@ function hasOnWebhookVerifiedHook(client: WebhookClient): boolean {
   return false;
 }
 
+const warnedClients = new WeakSet<object>();
+function warnOnceForWebhookVerifiedHook(client: WebhookClient): void {
+  const key = client as unknown as object;
+  if (warnedClients.has(key)) return;
+  warnedClients.add(key);
+  console.warn(
+    "[paykernel] WEBHOOKS-2: ProcessWebhookHttpInput.client has onWebhookVerified hooks; " +
+      "fulfillment must be in handler after inbox claim. See docs/getting-started.md \"Never fulfill in onWebhookVerified\".",
+  );
+}
 /**
  * Verify a webhook via `client.handleWebhook` and claim/lease it via
  * `engine.processWithVerifier`. Maps engine outcomes to HTTP status via
@@ -303,20 +309,16 @@ export async function processWebhookHttp(
         // Defensive bridge: Stripe/PayPal/MyFatoorah keep raw string (byte-exact HMAC).
         // Tap/Moyasar/Paymob need parsed object/array for field-based HMAC. Try
         // parsing the raw string when the gateway is object-HMAC; fall back to
-        // string on invalid JSON (fail-closed — verifier returns 400).
         const gatewayKey = input.gateway.toLowerCase();
         let payloadForVerify: unknown = body;
-        if (OBJECT_HMAC_GATEWAYS[gatewayKey]) {
+        if (OBJECT_HMAC_GATEWAYS.has(gatewayKey)) {
           const parsed = maybeParsedBody(body);
           if (parsed !== body) payloadForVerify = parsed;
         }
         // WEBHOOKS-2 warn-only guard: client MUST have no onWebhookVerified fulfillment.
-        // Fulfillment belongs in `handler` after inbox claim. Warn, never throw.
+        // Fulfillment belongs in `handler` after inbox claim. Warn once per client, never throw.
         if (hasOnWebhookVerifiedHook(input.client)) {
-          console.warn(
-            "[paykernel] WEBHOOKS-2: ProcessWebhookHttpInput.client has onWebhookVerified hooks; " +
-              "fulfillment must be in handler after inbox claim. See docs/getting-started.md \"Never fulfill in onWebhookVerified\".",
-          );
+          warnOnceForWebhookVerifiedHook(input.client);
         }
         try {
           const rawEvent: unknown = await input.client.handleWebhook(

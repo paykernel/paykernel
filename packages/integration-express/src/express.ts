@@ -1,18 +1,12 @@
 import express from "express";
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import {
+  OBJECT_HMAC_GATEWAYS,
   processWebhookHttp,
   resolveCorrelationId,
   type ProcessWebhookHttpInput,
 } from "@paykernel/integration-http";
 
-/**
- * Object-HMAC gateways verify HMAC over fields extracted from the parsed JSON
- * object (see `integration-http/src/process.ts:130`). Keep this set in sync
- * with `OBJECT_HMAC_GATEWAYS` there; defined locally to avoid a cross-package
- * import cycle. Values are lower-cased gateway names.
- */
-const OBJECT_GATEWAYS = new Set(["tap", "moyasar", "paymob"]);
 
 /**
  * Returns `express.raw({ type: "application/json" })` middleware for webhook
@@ -62,7 +56,7 @@ export function expressWebhook(
         rawBody = body;
       } else if (body !== undefined && body !== null && typeof body === "object") {
         const gatewayLower = options.gateway.toLowerCase();
-        if (OBJECT_GATEWAYS.has(gatewayLower)) {
+        if (OBJECT_HMAC_GATEWAYS.has(gatewayLower)) {
           rawBody = JSON.stringify(body);
         } else {
           const correlationId = resolveCorrelationId(req.headers as Record<string, string | string[] | undefined>);

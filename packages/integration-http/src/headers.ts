@@ -28,19 +28,18 @@ export function getHeader(
   const lower = name.toLowerCase();
   if (headers instanceof Headers) {
     const value = headers.get(lower) ?? headers.get(name);
-    if (value !== null) return value;
+    if (value !== null) return value.length > 0 ? value : undefined;
     let found: string | undefined;
     headers.forEach((v, k) => {
-      if (found === undefined && k.toLowerCase() === lower) found = v;
+      if (found === undefined && k.toLowerCase() === lower && v.length > 0) found = v;
     });
-    return found;
+    return found?.length ? found : undefined;
   }
   for (const [k, v] of Object.entries(headers)) {
     if (k.toLowerCase() === lower) {
       if (Array.isArray(v)) {
-        return v.length > 0 ? v[0] : undefined;
+        return v.length > 0 && typeof v[0] === "string" && v[0].length > 0 ? v[0] : undefined;
       }
-      if (typeof v === "string" && v.length > 0) return v;
       if (typeof v === "string") return v.length > 0 ? v : undefined;
       return undefined;
     }

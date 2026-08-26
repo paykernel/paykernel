@@ -32,6 +32,9 @@ export const GATEWAY_WEBHOOK_SIGNATURE: Record<
   moyasar: { kind: "payload" },
 };
 
+/** Gateways that verify HMAC over parsed JSON object fields (not raw bytes). Canonical for process.ts and express adapter. */
+export const OBJECT_HMAC_GATEWAYS: ReadonlySet<string> = new Set(["tap", "moyasar", "paymob"]);
+
 export function extractWebhookSignature(
   gateway: string,
   headers: HeaderBag,

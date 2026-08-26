@@ -19,7 +19,7 @@ export function elysiaWebhook(
       const url = new URL(request.url);
       const query: Record<string, string | undefined> = {};
       url.searchParams.forEach((value, key) => {
-        query[key] = value;
+        if (!(key in query)) query[key] = value;
       });
       const result = await processWebhookHttp({
         ...options,

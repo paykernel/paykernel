@@ -8,6 +8,7 @@ export { mapInboxOutcome, retryAfterSeconds, type InboxHttpAckPolicy } from "./h
 export { getHeader, resolveCorrelationId, requireStringBindings, type HeaderBag } from "./headers";
 export {
   GATEWAY_WEBHOOK_SIGNATURE,
+  OBJECT_HMAC_GATEWAYS,
   extractWebhookSignature,
   type GatewayWebhookSignatureProfile,
 } from "./signature";
