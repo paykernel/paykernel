@@ -108,15 +108,18 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
   const out: Record<string, string> = {};
   if (headers instanceof Headers) {
     headers.forEach((v, k) => {
-      if (v.length > 0) out[k.toLowerCase()] = v;
+      const lower = k.toLowerCase();
+      if (v.length > 0 && !Object.prototype.hasOwnProperty.call(out, lower)) out[lower] = v;
     });
     return out;
   }
   for (const [k, v] of Object.entries(headers)) {
+    const lower = k.toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(out, lower)) continue;
     if (Array.isArray(v)) {
-      if (v.length > 0 && typeof v[0] === "string" && v[0].length > 0) out[k.toLowerCase()] = v[0]!;
+      if (v.length > 0 && typeof v[0] === "string" && v[0].length > 0) out[lower] = v[0]!;
     } else if (typeof v === "string" && v.length > 0) {
-      out[k.toLowerCase()] = v;
+      out[lower] = v;
     }
   }
   return out;
@@ -141,56 +144,54 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
 function maybeParsedBody(rawBodyString: string): unknown {
   try {
     const parsed = JSON.parse(rawBodyString);
-    if (parsed !== null && typeof parsed === "object") return parsed;
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
   } catch {
     // Invalid JSON — fall back to raw string (verifier will fail-closed to 400)
   }
   return rawBodyString;
 }
+function hasPopulatedWebhookVerified(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object") return false;
+  if (!("onWebhookVerified" in (obj as Record<string, unknown>))) return false;
+  const v = (obj as Record<string, unknown>)["onWebhookVerified"];
+  if (!v) return false;
+  if (Array.isArray(v)) return v.length > 0;
+  if (typeof v === "object") return Object.keys(v as object).length > 0;
+  return !!v;
+}
 function hasOnWebhookVerifiedHook(client: WebhookClient): boolean {
   const anyClient = client as unknown as Record<string, unknown>;
-  const has = (obj: unknown): boolean =>
-    !!obj &&
-    typeof obj === "object" &&
-    "onWebhookVerified" in (obj as Record<string, unknown>) &&
-    !!(obj as Record<string, unknown>)["onWebhookVerified"];
-
-  // Direct shapes: client.hooks / client.hookHandlers / client.onWebhookVerified
-  if (has(anyClient["hooks"])) return true;
-  if (has(anyClient["hookHandlers"])) return true;
-  if (anyClient["onWebhookVerified"]) return true;
-
+  if (hasPopulatedWebhookVerified(anyClient["hooks"])) return true;
+  if (hasPopulatedWebhookVerified(anyClient["hookHandlers"])) return true;
+  if (hasPopulatedWebhookVerified(anyClient)) return true;
   const hm = anyClient["hooksManager"] as Record<string, unknown> | undefined;
   if (hm) {
-    if (has(hm["hooks"])) return true;
+    if (hasPopulatedWebhookVerified(hm["hooks"])) return true;
     const getHooks = hm["getHooks"] as (() => Record<string, unknown>) | undefined;
     if (typeof getHooks === "function") {
       try {
-        if (has(getHooks.call(hm))) return true;
+        if (hasPopulatedWebhookVerified(getHooks.call(hm))) return true;
       } catch {
         // getHooks may throw — ignore, treat as no hook
       }
     }
     for (const v of Object.values(hm)) {
-      if (has(v)) return true;
+      if (hasPopulatedWebhookVerified(v)) return true;
     }
   }
-
   const getHooks = anyClient["getHooks"] as (() => Record<string, unknown>) | undefined;
   if (typeof getHooks === "function") {
     try {
-      if (has(getHooks.call(anyClient))) return true;
+      if (hasPopulatedWebhookVerified(getHooks.call(anyClient))) return true;
     } catch {
       // ignore
     }
   }
-
-  // Fallback scan for any nested object that looks like a hooks container
   for (const v of Object.values(anyClient)) {
     if (!v || typeof v !== "object") continue;
     const rec = v as Record<string, unknown>;
-    if ("hooks" in rec && has(rec["hooks"])) return true;
-    if ("hookHandlers" in rec && has(rec["hookHandlers"])) return true;
+    if ("hooks" in rec && hasPopulatedWebhookVerified(rec["hooks"])) return true;
+    if ("hookHandlers" in rec && hasPopulatedWebhookVerified(rec["hookHandlers"])) return true;
   }
   return false;
 }
@@ -397,8 +398,7 @@ export async function processWebhookHttp(
   ) {
     const eng = input.engine as unknown as { mode?: unknown; workerGuaranteed?: unknown };
     const modeOk = eng.mode === "durable_retry";
-    const hasWorkerProp = typeof eng === "object" && eng !== null && "workerGuaranteed" in eng;
-    const workerOk = !hasWorkerProp || eng.workerGuaranteed === true;
+    const workerOk = eng.workerGuaranteed === true;
     if (!modeOk || !workerOk) {
       console.warn(
         '[paykernel] durable_worker policy requires engine.mode="durable_retry" + workerGuaranteed; falling back to 503',

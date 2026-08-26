@@ -156,6 +156,7 @@ describe("processWebhookHttp", () => {
     } as unknown as WebhookInboxEngine;
     const stubDurable = {
       mode: "durable_retry" as const,
+      workerGuaranteed: true as const,
       processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
       processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
       processRetryable: async () => ({ items: [] }),
@@ -226,8 +227,26 @@ describe("processWebhookHttp", () => {
       ackPolicy: { kind: "durable_worker" },
     });
     expect(r4.status).toBe(503);
-  });
 
+    // durable_retry without workerGuaranteed (strict: missing => 503)
+    const stubDurableMissing = {
+      mode: "durable_retry" as const,
+      processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "parked" } as const),
+      processRetryable: async () => ({ items: [] }),
+      renewLease: async () => ({ ok: false, reason: "lease_lost" } as const),
+    } as unknown as WebhookInboxEngine;
+    const r5 = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine: stubDurableMissing,
+      handler: async () => {},
+      ackPolicy: { kind: "durable_worker" },
+    });
+    expect(r5.status).toBe(503);
+  });
   it("handles handler_retry with durable_worker guard", async () => {
     const stubInline = {
       mode: "inline" as const,
@@ -238,6 +257,7 @@ describe("processWebhookHttp", () => {
     } as unknown as WebhookInboxEngine;
     const stubDurable = {
       mode: "durable_retry" as const,
+      workerGuaranteed: true as const,
       processWithVerifier: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
       processVerified: async () => ({ outcome: "scheduled_for_retry", reason: "handler_retry" } as const),
       processRetryable: async () => ({ items: [] }),
@@ -433,5 +453,73 @@ describe("processWebhookHttp", () => {
     });
     expect(result.status).toBe(200);
     expect(seenSig).toBe("query_hmac");
+  });
+
+  it("maybeParsedBody does not parse arrays for object-HMAC gateways", async () => {
+    const { engine } = makeEngine();
+    let seenPayload: unknown = null;
+    const client: WebhookClient = {
+      async handleWebhook(_g, p) {
+        seenPayload = p;
+        return { id: "evt_arr", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "tap",
+      rawBody: "[1,2]",
+      headers: { hashstring: "sig" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(200);
+    expect(typeof seenPayload).toBe("string");
+    expect(seenPayload).toBe("[1,2]");
+  });
+
+  it("headerBag first-wins invariant for duplicate case keys", async () => {
+    const { engine } = makeEngine();
+    let seenHeaders: Record<string, string> | undefined;
+    const client: WebhookClient = {
+      async handleWebhook(_g, _p, _sig, headers) {
+        seenHeaders = headers;
+        return { id: "evt_dup", payloadHash: "ph", event: {} };
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "Stripe-Signature": "first", "stripe-signature": "second" } as Record<string, string>,
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(200);
+    // getHeader would return "first", headerBag lower record must match
+    expect(seenHeaders?.["stripe-signature"]).toBe("first");
+  });
+
+  it("does not warn on empty onWebhookVerified array (hasHook false-positive fix)", async () => {
+    const { engine } = makeEngine();
+    const warnSpy: unknown[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnSpy.push(args.join(" "));
+    const client = {
+      async handleWebhook() {
+        return { id: "evt_warn", payloadHash: "ph", event: {} };
+      },
+      hooks: { onWebhookVerified: [] },
+    } as unknown as WebhookClient;
+    const result = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    console.warn = origWarn;
+    expect(result.status).toBe(200);
+    expect(warnSpy.join(" ")).not.toContain("WEBHOOKS-2");
   });
 });

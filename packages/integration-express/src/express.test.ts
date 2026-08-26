@@ -79,6 +79,25 @@ describe("expressWebhook", () => {
     expect(called).toBe(false);
   });
 
+  it("forwards object body via JSON.stringify for tap (object-HMAC)", async () => {
+    const engine = makeStubEngine() as never;
+    let seen: unknown = null;
+    const client: WebhookClient = {
+      async handleWebhook(_g, p) {
+        seen = p;
+        return { id: "evt_tap", payloadHash: "ph", event: {} };
+      },
+    };
+    const handler = expressWebhook({ gateway: "tap", client, engine: engine as never, handler: async () => {} });
+    const { req, res, promise } = mockReqRes({ amount: 100, currency: "SAR" }, { hashstring: "sig" });
+    await (handler as unknown as (req: unknown, res: unknown, next: unknown) => Promise<void>)(req, res, () => {});
+    const out = await promise;
+    expect(out.status).toBe(200);
+    // processWebhookHttp parses "[object]" then gateway receives object
+    expect(typeof seen).toBe("object");
+    expect(seen).toEqual({ amount: 100, currency: "SAR" });
+  });
+
   it("expressRawJson returns a middleware function", () => {
     const mw = expressRawJson();
     expect(typeof mw).toBe("function");
