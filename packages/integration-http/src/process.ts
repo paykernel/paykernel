@@ -93,14 +93,20 @@ export function createWebhookOperationContext(input: {
 
 function toRawBodyString(rawBody: string | Uint8Array): string {
   if (typeof rawBody === "string") return rawBody;
-  return new TextDecoder().decode(rawBody);
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
+  } catch {
+    // Invalid UTF-8 — fail-closed as invalid_webhook rather than silent replacement.
+    // Throwing InvalidWebhookError will be mapped to 400 via the verify path or outer catch classification.
+    throw new InvalidWebhookError("webhook payload is not valid utf-8");
+  }
 }
 /**
  * Normalize a `HeaderBag` to a lower-cased `Record<string, string>`.
  * Case-insensitive: header names are lower-cased, array values use the first
- * string entry. This is intentionally consistent with `getHeader` from
- * `./headers.ts` — both are case-insensitive and select the first value for
- * multi-value headers. Documented invariant:
+ * non-empty string entry (skipping empty strings). This is intentionally consistent
+ * with `getHeader` from `./headers.ts` — both are case-insensitive and select the
+ * first non-empty value for multi-value headers. Documented invariant:
  * `headerBagToLowerRecord(bag)[k.toLowerCase()]` equals `getHeader(bag, k)`
  * when present. Used for `headerRecord` bridged to `client.handleWebhook`.
  */
@@ -117,7 +123,14 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
     const lower = k.toLowerCase();
     if (Object.prototype.hasOwnProperty.call(out, lower)) continue;
     if (Array.isArray(v)) {
-      if (v.length > 0 && typeof v[0] === "string" && v[0].length > 0) out[lower] = v[0]!;
+      let picked: string | undefined;
+      for (const item of v) {
+        if (typeof item === "string" && item.length > 0) {
+          picked = item;
+          break;
+        }
+      }
+      if (picked !== undefined) out[lower] = picked;
     } else if (typeof v === "string" && v.length > 0) {
       out[lower] = v;
     }
@@ -133,9 +146,11 @@ function headerBagToLowerRecord(headers: HeaderBag): Record<string, string> {
  * ProcessWebhookHttp is gateway-agnostic and receives `rawBody` as
  * `string | Uint8Array` via `toRawBodyString`. For string-HMAC gateways we
  * keep the raw string byte-exact (Stripe needs exact bytes). For object-HMAC
- * gateways we defensively try to parse the raw string to an object/array and
+ * gateways we defensively try to parse the raw string to an object and
  * pass the parsed value when valid; otherwise we fall back to the raw string
  * (fail-closed) so verification still runs and returns 400 rather than 500.
+ * Arrays are intentionally not parsed — webhook payloads are objects and
+ * object-HMAC gateways expect object fields; an array falls back to raw string.
  * This makes both string-accepting and object-only gateway implementations
  * work regardless of fix ordering (Slice A vs Slice B).
  * OBJECT_HMAC_GATEWAYS is canonical in ./signature.ts.
@@ -228,7 +243,19 @@ export async function processWebhookHttp(
   input: ProcessWebhookHttpInput,
 ): Promise<WebhookHttpResult> {
   const correlationId = input.correlationId ?? resolveCorrelationId(input.headers);
-  const rawBodyString = toRawBodyString(input.rawBody);
+  let rawBodyString: string;
+  try {
+    rawBodyString = toRawBodyString(input.rawBody);
+  } catch (err) {
+    if (err instanceof InvalidWebhookError) {
+      return {
+        status: 400,
+        headers: { "x-request-id": correlationId },
+        body: { error: "invalid_webhook" },
+      };
+    }
+    throw err;
+  }
   const ackPolicy: InboxHttpAckPolicy = input.ackPolicy ?? { kind: "provider_redelivery" };
 
   const profile =
@@ -365,22 +392,16 @@ export async function processWebhookHttp(
             event,
           };
         } catch (err) {
-          if (err instanceof InvalidWebhookError) {
-            return { ok: false, reason: "invalid_webhook" };
-          }
+          // Let engine classify InvalidWebhookError (forgery → 400, parse/missing → 500).
           throw err;
         }
       },
       handler: input.handler,
     });
   } catch (err) {
-    if (err instanceof InvalidWebhookError) {
-      return {
-        status: 400,
-        headers: { "x-request-id": correlationId },
-        body: { error: "invalid_webhook" },
-      };
-    }
+    // processWithVerifier verify errors are already mapped to outcomes by the engine
+    // (forgery → invalid_webhook 400, parse/missing → handler_failed 500). This catch
+    // is for unexpected throws (e.g., handler or store failures) → 500 retryable.
     const status = 500;
     const headers: Record<string, string> = { "x-request-id": correlationId };
     return {
@@ -389,7 +410,6 @@ export async function processWebhookHttp(
       body: { outcome: "handler_failed", retryable: true },
     };
   }
-
   let status = mapInboxOutcome(outcome, ackPolicy);
   if (
     outcome.outcome === "scheduled_for_retry" &&

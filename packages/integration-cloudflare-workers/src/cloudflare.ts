@@ -16,6 +16,9 @@ export async function handleCloudflareWebhook(
   request: Request,
   options: Omit<ProcessWebhookHttpInput, "rawBody" | "headers" | "query">,
 ): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("method not allowed", { status: 405 });
+  }
   const rawBody = await request.text();
   const headers: Headers = request.headers;
   const url = new URL(request.url);

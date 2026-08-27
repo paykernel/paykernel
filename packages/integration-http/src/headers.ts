@@ -2,7 +2,7 @@
  * Header bag accepted by HTTP helpers — either a `Headers` instance or a
  * plain record. Lookup is case-insensitive; see `getHeader` and
  * `headerBagToLowerRecord` (process.ts) which both lower-case keys and pick
- * the first array value. Documented invariant: `getHeader(bag, k)` equals
+ * the first non-empty value. Documented invariant: `getHeader(bag, k)` equals
  * `headerBagToLowerRecord(bag)[k.toLowerCase()]` when present.
  */
 export type HeaderBag = Headers | Record<string, string | string[] | undefined>;
@@ -14,13 +14,14 @@ export type HeaderBag = Headers | Record<string, string | string[] | undefined>;
  *   case-insensitive scan via `forEach`, so both `"Stripe-Signature"` and
  *   `"stripe-signature"` match.
  * - For record bags: iterates entries and compares `k.toLowerCase() === lower`,
- *   returning the first array entry or string value. Empty strings/arrays
+ *   returning the first non-empty array entry or string value. Empty strings/arrays
  *   return `undefined` (treated as missing for signature guards).
  *
  * This is intentionally consistent with `headerBagToLowerRecord` which
- * lower-cases all keys and picks the first value — both normalize case the
+ * lower-cases all keys and picks the first non-empty value — both normalize case the
  * same way.
  */
+
 export function getHeader(
   headers: HeaderBag,
   name: string,
@@ -38,7 +39,10 @@ export function getHeader(
   for (const [k, v] of Object.entries(headers)) {
     if (k.toLowerCase() === lower) {
       if (Array.isArray(v)) {
-        return v.length > 0 && typeof v[0] === "string" && v[0].length > 0 ? v[0] : undefined;
+        for (const entry of v) {
+          if (typeof entry === "string" && entry.length > 0) return entry;
+        }
+        return undefined;
       }
       if (typeof v === "string") return v.length > 0 ? v : undefined;
       return undefined;

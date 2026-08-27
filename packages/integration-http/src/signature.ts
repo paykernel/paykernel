@@ -54,15 +54,12 @@ export function extractWebhookSignature(
     }
     case "headers": {
       const out: Record<string, string> = {};
-      let found = false;
       for (const name of resolved.headers) {
         const value = getHeader(headers, name);
-        if (value !== undefined && value.length > 0) {
-          out[name.toLowerCase()] = value;
-          found = true;
-        }
+        if (value === undefined || value.length === 0) return undefined;
+        out[name.toLowerCase()] = value;
       }
-      return found ? out : undefined;
+      return out;
     }
     case "header_or_query": {
       const headerValue = getHeader(headers, resolved.header);

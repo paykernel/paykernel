@@ -81,11 +81,11 @@ describe("processWebhookHttp", () => {
     expect(called).toBe(false);
   });
 
-  it("maps InvalidWebhookError to 400", async () => {
+  it("maps InvalidWebhookError to 400 only for forgery-class messages", async () => {
     const { engine } = makeEngine();
     const client: WebhookClient = {
       async handleWebhook() {
-        throw new InvalidWebhookError("bad_sig");
+        throw new InvalidWebhookError("invalid signature");
       },
     };
     const result = await processWebhookHttp({
@@ -98,6 +98,44 @@ describe("processWebhookHttp", () => {
     });
     expect(result.status).toBe(400);
     expect(result.body).toEqual({ error: "invalid_webhook" });
+  });
+
+  it("maps parse-stage InvalidWebhookError to 500 retryable (fail-open)", async () => {
+    const { engine } = makeEngine();
+    const client: WebhookClient = {
+      async handleWebhook() {
+        throw new InvalidWebhookError("invalid paymob webhook payload");
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(500);
+    expect(result.body).toEqual({ outcome: "handler_failed", retryable: true });
+  });
+
+  it("maps missing-config InvalidWebhookError to 500 retryable", async () => {
+    const { engine } = makeEngine();
+    const client: WebhookClient = {
+      async handleWebhook() {
+        throw new InvalidWebhookError("webhookSecret is missing");
+      },
+    };
+    const result = await processWebhookHttp({
+      gateway: "stripe",
+      rawBody: '{"a":1}',
+      headers: { "stripe-signature": "sig" },
+      client,
+      engine,
+      handler: async () => {},
+    });
+    expect(result.status).toBe(500);
+    expect(result.body).toEqual({ outcome: "handler_failed", retryable: true });
   });
 
   it("maps InvalidRequestError to 500 retryable", async () => {
