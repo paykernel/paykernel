@@ -179,22 +179,14 @@ const NonnegativeMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ctx
     );
 });
 
-const PositiveAmountInputSchema = z.union([
-    z.number().finite().positive("Amount must be a positive finite number"),
-    PositiveMoneyAmountSchema,
-]);
+const PositiveAmountInputSchema = PositiveMoneyAmountSchema;
 
 const OptionalPositiveAmountInputSchema = PositiveAmountInputSchema.optional();
 
 /**
- * Dual-accept major-unit amount that allows zero (e.g. Stripe checkout free-trial
- * line items). Deep scale checks stay in shared money helpers.
+ * Nonnegative Money amount (free-trial $0 line items) — Money-only in 1.0.
  */
-const NonnegativeAmountInputSchema = z.union([
-    z.number().finite().nonnegative("Amount must be a non-negative finite number"),
-    NonnegativeMoneyAmountSchema,
-]);
-
+const NonnegativeAmountInputSchema = NonnegativeMoneyAmountSchema;
 /**
  * When `amount` is a Money object and a top-level `currency` is present,
  * require case-insensitive currency match (deep scale checks stay in money helpers).
@@ -228,9 +220,8 @@ function refineMoneyCurrencyMatch(
     }
 }
 
-/** Split amounts are major currency units (same as createPayment amount); converted to minor units by the gateway. */
+/** Split amounts are major currency units — Money only (1.0). Signed adjustments allowed, zero rejected. */
 const MoyasarSplitMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ctx) => {
-    // Splits may be signed adjustments; only zero is rejected (parity with number arm).
     refineMoneyAmountValue(
         val,
         ctx,
@@ -240,12 +231,7 @@ const MoyasarSplitMoneyAmountSchema = MoneyAmountBaseSchema.superRefine((val, ct
 });
 
 const MoyasarPaymentSplitSchema = z.object({
-    amount: z.union([
-        z.number().finite().refine((amount) => amount !== 0, {
-            message: "Moyasar split amount cannot be zero",
-        }),
-        MoyasarSplitMoneyAmountSchema,
-    ]),
+    amount: MoyasarSplitMoneyAmountSchema,
     recipient_id: z.string().uuid("Moyasar split recipient_id must be a UUID"),
     reference: z.string().max(255).optional(),
     description: z.string().max(255).optional(),
@@ -408,13 +394,8 @@ export const MoyasarCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.
     idempotencyKey: z.string().uuid("Moyasar idempotencyKey must be a UUID because it becomes the payment ID").min(1).optional(),
     /** Backend-safe sources only — raw creditcard is rejected at schema level. */
     moyasarSource: MoyasarBackendPaymentSourceSchema.optional(),
-    tokenId: z.string().optional(), // deprecated alias for moyasarSource token
     applyCoupon: z.boolean().optional(),
     splits: z.array(MoyasarPaymentSplitSchema).optional(),
-    recipient: MoyasarAftRecipientSchema.optional(),
-    sender: MoyasarAftSenderSchema.optional(),
-}).superRefine((params, ctx) => {
-    refineMoneyCurrencyMatch(params, ctx);
 });
 
 /**

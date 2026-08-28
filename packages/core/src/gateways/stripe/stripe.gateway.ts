@@ -112,7 +112,6 @@ import {
   fromMinorUnits as sharedFromMinorUnits,
   MoneyAmountError,
   minorAmountToNumber,
-  money,
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
   type Money,
@@ -379,45 +378,36 @@ function assertStripeMinorUnitAmount(
 /**
  * Zod input types carry `exponent?: number | undefined` (exactOptionalPropertyTypes).
  * Rebuild a real {@link AmountInput} so `toStripeAmount` stays on the Money contract.
+ * 1.0 Money-only: caller must pass {@link Money}. Number is only allowed via testkit helper.
  */
 function asAmountInput(
-  amount:
-    | AmountInput
-    | number
-    | { amount: string; currency: string; exponent?: number | undefined },
+  amount: AmountInput | { amount: string; currency: string; exponent?: number | undefined },
 ): AmountInput {
-  // Legacy number compat for testkit: coerce via Money before normalization.
-  // Production params are Money only (Zod enforces).
-  if (typeof amount === "number") {
-    // Number branch coerced via money(); caller currency passed separately to toStripeAmount.
-    // Use a placeholder currency here; toStripeAmount will re-normalize with correct currency.
-    return money(String(amount), "USD") as unknown as AmountInput;
+  if (amount === null || typeof amount !== "object" || !("amount" in amount)) {
+    throw new InvalidRequestError("Stripe amount must be a Money object");
   }
-  if (amount.exponent === undefined) {
-    return { amount: amount.amount, currency: amount.currency };
+  if (typeof amount.amount !== "string") {
+    throw new InvalidRequestError("Stripe amount must be a Money object");
+  }
+  const a = amount as { amount: string; currency: string; exponent?: number | undefined };
+  if (a.exponent === undefined) {
+    return { amount: a.amount, currency: a.currency };
   }
   return {
-    amount: amount.amount,
-    currency: amount.currency,
-    exponent: amount.exponent,
+    amount: a.amount,
+    currency: a.currency,
+    exponent: a.exponent,
   };
 }
 
 function toStripeAmount(
-  amount:
-    | AmountInput
-    | number
-    | { amount: string; currency: string; exponent?: number | undefined },
+  amount: AmountInput | { amount: string; currency: string; exponent?: number | undefined },
   currency: string,
   options?: { enforceChargeLimits?: boolean; allowZero?: boolean },
 ): number {
-  // Normalize AmountInput via Money; number passthrough already coerced in asAmountInput
-  // but handle direct Money string coercion for legacy number callers without AmountInput shape
   const amountInput = asAmountInput(amount);
   const normalized = currency.toLowerCase();
   const allowZero = options?.allowZero === true;
-  // Stripe-specific exponents (ISK/UGX two-decimal specials, MGA zero-decimal,
-  // three-decimal set) stay explicit — never fold into ISO-only tables.
   const exponent = stripeCurrencyExponent(normalized);
   const parseOpts = {
     rounding: "reject" as const,
@@ -428,11 +418,7 @@ function toStripeAmount(
 
   let minor: bigint;
   try {
-    // If asAmountInput produced a USD placeholder for number input, re-create with correct currency
-    const effectiveInput: AmountInput = typeof amount === "number"
-      ? (money(String(amount), currency, parseOpts) as unknown as AmountInput)
-      : amountInput;
-    const moneyVal = normalizeAmountInput(effectiveInput, currency, parseOpts);
+    const moneyVal = normalizeAmountInput(amountInput, currency, parseOpts);
     minor = sharedToMinorUnits(moneyVal, parseOpts);
   } catch (error) {
     if (error instanceof MoneyAmountError) {

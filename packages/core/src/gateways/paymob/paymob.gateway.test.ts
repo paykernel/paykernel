@@ -449,7 +449,7 @@ describe("PaymobGateway", () => {
 
       await omGateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: 20.125,
+        amount: money("20.125", "OMR"),
         currency: "OMR",
       });
       const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
@@ -461,7 +461,7 @@ describe("PaymobGateway", () => {
     it("rejects Paymob amounts below the currency minor unit before sending requests", async () => {
       await expect(gateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: 0.004,
+        amount: money("0.004", "SAR"),
         currency: "SAR",
       })).rejects.toThrow(InvalidRequestError);
 
@@ -471,7 +471,7 @@ describe("PaymobGateway", () => {
     it("rejects Paymob amounts with more precision than the currency supports", async () => {
       await expect(gateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: 10.001,
+        amount: money("10.001", "SAR"),
         currency: "SAR",
       })).rejects.toThrow(InvalidRequestError);
 
@@ -639,7 +639,7 @@ describe("PaymobGateway", () => {
 
       await overrideGateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: 20.12,
+        amount: money("20.12", "SAR"),
         currency: "OMR",
       });
       const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
@@ -663,7 +663,7 @@ describe("PaymobGateway", () => {
 
       await overrideGateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: 20.12,
+        amount: money("20.12", "SAR"),
         currency: "OMR",
       });
       const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
@@ -683,7 +683,7 @@ describe("PaymobGateway", () => {
       await expect(
         overrideGateway.createPayment({
           ...VALID_CREATE_PARAMS,
-          amount: 20.12,
+          amount: money("20.12", "SAR"),
           currency: "OMR",
         }),
       ).rejects.toThrow(InvalidRequestError);
@@ -694,7 +694,7 @@ describe("PaymobGateway", () => {
       mockFetchSequence(jsonResponse({ id: "pi_test_123", client_secret: "csk_test_123" }));
 
       await gateway.createPayment({
-        amount: 100,
+        amount: money("100.00", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/webhook",
         idempotencyKey: "idem_123",
@@ -715,7 +715,7 @@ describe("PaymobGateway", () => {
       mockFetchSequence(jsonResponse({ id: "pi_test_123", client_secret: "csk_test_123" }));
 
       await gateway.createPayment({
-        amount: 100,
+        amount: money("100.00", "SAR"),
         currency: "SAR",
         paymobBillingData: {
           email: "customer@example.com",
@@ -787,7 +787,7 @@ describe("PaymobGateway", () => {
     it("does not send fake billing data when required customer fields are missing", async () => {
       await expect(
         gateway.createPayment({
-          amount: 100,
+          amount: money("100.00", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/webhook",
         }),
@@ -988,7 +988,7 @@ describe("PaymobGateway", () => {
 
       const result = await gateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1042,7 +1042,7 @@ describe("PaymobGateway", () => {
 
       await gateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1085,7 +1085,7 @@ describe("PaymobGateway", () => {
 
       await bothGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 100,
+        amount: money("100.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1109,7 +1109,7 @@ describe("PaymobGateway", () => {
 
       await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1149,7 +1149,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1169,7 +1169,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1221,7 +1221,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1270,7 +1270,7 @@ describe("PaymobGateway", () => {
       // HTTP 200 + missing refund id: post-submit indeterminate result, not GatewayApiError.
       const missingId = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -1347,7 +1347,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_idem_123",
       };
@@ -1373,7 +1373,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_concurrent_idem_123",
       };
@@ -1401,7 +1401,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_unknown_123",
       };
@@ -1426,7 +1426,7 @@ describe("PaymobGateway", () => {
       );
       const unknownParams = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_unknown_fence_under_pressure",
       };
@@ -1530,7 +1530,7 @@ describe("PaymobGateway", () => {
       }).idempotencyCache;
       cache.set("refundPayment:ancient_unknown", {
         fingerprint: JSON.stringify({
-          amount: 50,
+          amount: money("50.00", "SAR"),
           currency: "SAR",
           gatewayPaymentId: "123456789",
           idempotencyKey: "ancient_unknown",
@@ -1567,7 +1567,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "ancient_unknown",
       })).rejects.toThrow(InvalidRequestError);
@@ -1607,7 +1607,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_429_after_post",
       };
@@ -1635,7 +1635,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_408_after_post",
       };
@@ -1663,7 +1663,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_unknown_500",
       };
@@ -1689,7 +1689,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_retry_after_auth_failure",
       };
@@ -1716,7 +1716,7 @@ describe("PaymobGateway", () => {
 
       await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_idem_123",
       });
@@ -1774,7 +1774,7 @@ describe("PaymobGateway", () => {
       );
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "expired_unknown_refund",
       };
@@ -1834,7 +1834,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "expired_in_progress_refund",
       })).rejects.toThrow(/unknown gateway outcome/i);
@@ -1868,12 +1868,12 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
       })).rejects.toThrow(/requires idempotencyKey/);
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
       })).rejects.toThrow(/requires idempotencyKey/);
       await expect(actionGateway.voidPayment({
@@ -1892,13 +1892,13 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "no_store_capture",
       })).rejects.toThrow(/requires paymob\.idempotencyStore and idempotencyKey/);
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "no_store_refund",
       })).rejects.toThrow(/requires paymob\.idempotencyStore and idempotencyKey/);
@@ -1944,7 +1944,7 @@ describe("PaymobGateway", () => {
       );
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "expired_completed_refund",
       };
@@ -1985,7 +1985,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_store_write_fails_after_success",
       };
@@ -2019,7 +2019,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_unknown_store_write_fails",
       };
@@ -2280,7 +2280,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 20.125,
+        amount: money("20.125", "OMR"),
         currency: "OMR",
         idempotencyKey: nextMutationKey(),
       });
@@ -2300,7 +2300,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 20.125,
+        amount: money("20.125", "OMR"),
         idempotencyKey: nextMutationKey(),
       });
       const captureBody = JSON.parse(fetchCalls[2]!.init!.body as string);
@@ -2681,7 +2681,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 100,
+        amount: money("100.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -2727,7 +2727,7 @@ describe("PaymobGateway", () => {
       );
       const zero = await zeroGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -2746,7 +2746,7 @@ describe("PaymobGateway", () => {
       );
       const sparse = await sparseGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -2772,7 +2772,7 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
@@ -2814,7 +2814,7 @@ describe("PaymobGateway", () => {
       // HTTP 200 + missing success is post-submit indeterminate, not GatewayApiError.
       const malformed = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "capture_malformed_body_200",
       });
@@ -2832,7 +2832,7 @@ describe("PaymobGateway", () => {
 
       const emptyBody = await emptyGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "capture_200_empty_body",
       });
@@ -2849,7 +2849,7 @@ describe("PaymobGateway", () => {
       );
       const htmlBody = await htmlGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "capture_200_html_body",
       });
@@ -2868,7 +2868,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "capture_200_malformed_fence",
       };
@@ -2895,7 +2895,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_200_missing_id_fence",
       };
@@ -3019,7 +3019,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(AuthenticationError);
@@ -3031,7 +3031,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(AuthenticationError);
     });
@@ -3048,7 +3048,7 @@ describe("PaymobGateway", () => {
 
       await expect(rateLimitedGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(RateLimitError);
     });
@@ -3063,7 +3063,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(InsufficientFundsError);
@@ -3116,7 +3116,7 @@ describe("PaymobGateway", () => {
 
       const params = {
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_abort_after_post",
         signal: controller.signal,
@@ -3127,7 +3127,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 50,
+        amount: money("50.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_abort_after_post",
       })).rejects.toThrow(InvalidRequestError);
@@ -3934,7 +3934,7 @@ describe("PaymobGateway", () => {
         currency: "OMR",
       }));
 
-      expect(event.amount).toBe(20.125);
+      expect(event.amount).toEqual(money("20.125", "OMR"));
     });
 
     it("does not trust unsigned payment_key_claims extras for paymentId (PAYMOB-1)", () => {

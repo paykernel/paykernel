@@ -177,10 +177,8 @@ export type MoyasarBackendPaymentSource = Exclude<
  */
 export interface MoyasarPaymentSplit {
     /**
-     * Split amount in major currency units (e.g. `50` / `money("50", "SAR")`).
-     * Converted to minor units for the Moyasar API. Must be non-zero.
-     * Negative values are allowed by Moyasar where reverse splits are supported
-     * (`allowNegative` on conversion). Prefer {@link Money}; `number` is deprecated.
+     * Split amount as {@link Money} (major units). Converted to minor units for Moyasar API. Must be non-zero.
+     * Negative values are allowed where reverse splits are supported (`allowNegative` on conversion).
      */
     amount: AmountInput;
     recipient_id: string;

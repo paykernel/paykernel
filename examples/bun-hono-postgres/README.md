@@ -37,10 +37,14 @@ The kernel's Postgres tests migrate explicitly before the kernel (ops/CI only, n
 | `POST` | `/internal/provider-paid` | **Test hook only** (unauthenticated). Injects a paid provider snapshot for local recon tests. Do not deploy. |
 | `GET` | `/internal/create-count` | **Test hook only** (unauthenticated). `createPayment` call count when `enableTestHooks: true`. Do not deploy. |
 
-## Listen (optional)
+## Listen (optional) — PG required
 
 ```bash
-bun src/index.ts
+PAYMENTS_SDK_PG_URL=postgres://payments:payments@127.0.0.1:54329/payments_sdk bun src/index.ts
+# or for in-memory fallback (dev only):
+ALLOW_MEMORY_FALLBACK=1 bun src/index.ts
 ```
+
+Without `PAYMENTS_SDK_PG_URL`/`DATABASE_URL` the process exits. Set `ALLOW_MEMORY_FALLBACK=1` explicitly to run the in-memory fallback (not for production PG RC).
 
 Not used by tests. Local listen does **not** enable test hooks (`enableTestHooks` stays off). Do not deploy this example as-is.

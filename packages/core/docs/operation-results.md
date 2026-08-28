@@ -105,36 +105,15 @@ if (op.outcome === 'indeterminate') {
 }
 ```
 
-## Dual-write: `success` from `outcome`
+## 1.0: `success` removed — `outcome` required
 
-When gateways (or the testkit mock) use `applyOutcomeToGatewayResult`:
+`success: boolean` was removed in 1.0. `GatewayPaymentResult.outcome` and `GatewayRefundResult.outcome` are **required** (`PaymentOperationOutcome` / `RefundOperationOutcome`). Never branch on `success` — use `isPaidOutcome` / `outcome === 'succeeded'` with paid-like status.
 
-| `outcome` | `success` | Notes |
-| --- | --- | --- |
-| `succeeded` | `true` | Check `status` for paid vs authorized |
-| `requires_action` | `true` | API OK; customer action needed |
-| `declined` | `false` | Definitive decline |
-| `failed` | `false` | Definitive failure |
-| `indeterminate` | `false` | **Not** a decline — always `reconciliationRequired: true` |
+`applyOutcomeToGatewayResult(base, outcome)` writes `outcome` + `references` (+ `reconciliationRequired` for indeterminate) — no `success`.
 
-`success: false` + `outcome: 'indeterminate'` means “do not treat as paid,” **not** “safe to mark order failed without reconciliation.”
+`successFromOutcome` / `successFromRefundOutcome` were removed in 1.0 (use `isPaidOutcome`).
 
-`applyOutcomeToGatewayResult` attaches `reconciliationRequired: true` **only** when `outcome` is `indeterminate`. Passing `extras.reconciliationRequired` on a succeeded / requires_action / declined / failed write is ignored so stored `outcome` still matches `inferOperationOutcome` (no dual-write lie).
-
-Bare inference (no explicit `outcome`):
-
-| `success` | `status` | inferred `outcome` |
-| --- | --- | --- |
-| `true` | `paid` / `authorized` / `refunded` / `partially_refunded` | `succeeded` (fulfill only when `paid`) |
-| `true` | `partially_captured` | `requires_action` (open money) |
-| `true` | `pending` / `processing` / `approved` | `requires_action` |
-| `false` | `pending` / `processing` / `approved` | `indeterminate` (not `failed`) |
-| `false` | `paid` / `authorized` / `partially_captured` / `refunded` / `partially_refunded` | `indeterminate` (not `failed`) |
-| `false` | `refund_completed` / `refund_pending` / `reversed` | `indeterminate` (not `failed`) |
-| `false` | `failed` | `declined` |
-| `false` | `cancelled` | `failed` |
-
-### Helpers
+### Helpers (1.0)
 
 | Helper | Role |
 | --- | --- |
@@ -142,11 +121,9 @@ Bare inference (no explicit `outcome`):
 | `isRequiresActionOutcome(result)` | Customer action required |
 | `isIndeterminateOutcome(result)` | Explicit indeterminate / must reconcile |
 | `mapGatewayResultToOperationResult(result)` | Gateway shape → preferred union |
-| `applyOutcomeToGatewayResult(base, outcome)` | Dual-write `outcome` + `success` + `references` |
-| `successFromOutcome(outcome)` | Map outcome → deprecated `success` boolean |
+| `applyOutcomeToGatewayResult(base, outcome)` | Write `outcome` + `references` |
 | `inferOperationOutcome(result)` | Infer when gateway has not set `outcome` yet |
 | `buildProviderReferences(input)` | Structured provider IDs |
-
 ## Throw vs outcome (policy)
 
 Aligned with Engineering Rule 3 (uncertain outcomes must not become failure):
@@ -162,41 +139,31 @@ The testkit encodes this:
 - `{ outcome: 'indeterminate' }` → result with `outcome: 'indeterminate'`, `reconciliationRequired: true`
 - `{ outcome: 'provider_ok_client_timeout' }` → provider-side paid success retained; client throws `NetworkError`
 
-## Common inputs vs provider extensions
+## Common inputs vs provider extensions (1.0)
 
 `CommonPaymentInput` is the shared create shape **without** provider keys:
 
 ```ts
 type CommonPaymentInput = {
-  amount: AmountInput; // prefer money("10.50", "SAR")
+  amount: AmountInput; // money("10.50", "SAR")
   orderId?: string;
   description?: string;
   metadata?: PaymentMetadata;
 };
 ```
 
-`CreatePaymentParams` still allows optional `stripe*` / `moyasar*` / `paypal*` / `paymob*` fields for 0.x convenience. Prefer typed extensions (`MoyasarCreatePaymentParams`, `StripeCreatePaymentParams`, …) or extend `CommonPaymentInput` in custom adapters so common code never sees provider pollution.
-
-## Domain status unions vs legacy `PaymentStatus`
-
-Prefer domain-specific unions instead of inventing cross-domain mega statuses:
+`CreatePaymentParams` is **closed** in 1.0: only `CommonPaymentInput` + `currency` + `callbackUrl` + `capture`/`idempotencyKey`/`customerId`/`paymentMethodId`/`offSession`. Provider fields live on per-gateway `MoyasarCreatePaymentParams`, `StripeCreatePaymentParams`, `PayPalCreatePaymentParams`, `PaymobCreatePaymentParams` via `createPaymentClient` registry. `tokenId` was removed (use `moyasarSource: {type:'token', token}`).
 
 | Union | Use for |
 | --- | --- |
-| `PaymentDomainStatus` | Charge / intent lifecycle |
+| `PaymentDomainStatus` (=`PaymentStatus`) | Charge / intent lifecycle (`pending`,`paid`,...) |
 | `AuthorizationStatus` | Auth holds |
 | `CaptureStatus` | Capture lifecycle |
-| `RefundDomainStatus` (= `RefundStatus`) | Refund objects |
+| `RefundDomainStatus` (=`RefundStatus`) | Refund objects (`pending`,`completed`,`failed`) |
 | `SetupTokenStatus` | Setup / vault |
+| `WebhookEnvelopeStatus` | `WebhookEvent.status` (`PaymentDomainStatus` \| `RefundDomainStatus` \| `SetupTokenStatus`) |
+| `GatewayPaymentStatus` | `GatewayPaymentResult.status` — envelope plus legacy `refund_*`/`setup_completed` aliases for gateway internal mapping (prefer `WebhookEnvelopeStatus` values) |
 | `DisputeStatus` | Disputes |
-| `TransferStatus` / `PayoutStatus` | Transfers / payouts |
-
-Legacy `PaymentStatus` remains the 0.x mega-union (includes `refund_*` and `setup_completed`) and is **deprecated** for new modeling. Webhook payloads still use the legacy union in Phase 6 (webhook rewrite is Phase 7).
-
-## ProviderReferences
-
-Prefer structured `references: ProviderReferences` on results while dual-writing legacy flat ids:
-
 ```ts
 import { buildProviderReferences } from '@paykernel/core';
 
@@ -221,69 +188,45 @@ const references = buildProviderReferences({
 | `providerNativeStatus` | Unnormalized provider string |
 | `normalizedStatus` | SDK-normalized status |
 | `gateway` | Gateway id |
+## Refund outcomes (1.0)
 
-## Refund outcomes
+Refunds use `RefundOperationOutcome` / `RefundOperationResult` via `mapGatewayRefundToOperationResult`:
 
-Refunds use a separate discriminant (`RefundOperationOutcome` /
-`RefundOperationResult`) via `mapGatewayRefundToOperationResult`:
+| `outcome` | Typical `status` |
+| --- | --- |
+| `succeeded` | `completed` |
+| `pending` | `pending` |
+| `failed` | `failed` |
+| `indeterminate` | (ambiguous) + `reconciliationRequired: true` |
 
-| `outcome` | Typical `status` | `success` (deprecated) |
-| --- | --- | --- |
-| `succeeded` | `completed` | `true` |
-| `pending` | `pending` | `true` |
-| `failed` | `failed` | `false` |
-| `indeterminate` | (ambiguous) | `false` + `reconciliationRequired` |
-
-### Dual-write on built-in refunds (0.x)
-
-Built-in gateways (Stripe, Moyasar, PayPal, Paymob) and the testkit mock dual-write
-`outcome` + `success` on `GatewayRefundResult` via `applyOutcomeToGatewayRefundResult`,
-mirroring payment dual-write with `applyOutcomeToGatewayResult`:
-
-- `success` is derived only from outcome (`successFromRefundOutcome`) — never forged
-  from a failed status into `succeeded`.
-- `outcome: 'indeterminate'` always sets `reconciliationRequired: true`.
-- Callers may still use `mapGatewayRefundToOperationResult` / `inferRefundOperationOutcome`
-  when `outcome` is absent (older results or custom adapters).
+`applyOutcomeToGatewayRefundResult(base, outcome)` writes `outcome` (+ `reconciliationRequired` when indeterminate) — no `success`.
 
 | Helper | Role |
 | --- | --- |
-| `applyOutcomeToGatewayRefundResult(base, outcome)` | Dual-write `outcome` + `success` (+ `reconciliationRequired` when indeterminate) |
-| `successFromRefundOutcome(outcome)` | Map refund outcome → deprecated `success` boolean |
-| `inferRefundOperationOutcome(result)` | Infer / coerce when branching on refund outcomes (see below) |
+| `applyOutcomeToGatewayRefundResult(base, outcome)` | Write `outcome` (+ `reconciliationRequired` when indeterminate) |
+| `inferRefundOperationOutcome(result)` | Infer / coerce when branching on refund outcomes |
 | `mapGatewayRefundToOperationResult(result)` | Gateway refund shape → preferred refund union |
 
-**CORE-1:** `inferRefundOperationOutcome` coerces an explicit `outcome` against
-gateway `status` (same family as payment `inferOperationOutcome`). Bare
-`outcome: 'succeeded'` with `status: 'pending'` returns `'pending'`; bare
-`outcome: 'pending'` with `status: 'completed'` returns `'succeeded'`. Prefer
-`mapGatewayRefundToOperationResult` for Phase-6 union shapes; bare infer is safe
-for status-consistent branching only after this coerce.
-
-**P610-INF-2 (refunds):** `{ success: false, status: 'pending' }` (or omitted
-`success` with `pending` / `processing` / `approved`) infers **`indeterminate`**,
-not `failed`. A forged decline would invite a retry and can **double-refund**.
+**P610-INF-2 (refunds):** `{ outcome: 'indeterminate' }` or `status: 'pending'` on refund infers **`indeterminate`**, not `failed`. A forged decline would invite a retry and can **double-refund**.
 Reconcile; do not retry the mutation as a fresh failure.
 
-**CORE-INF-2:** `{ success: false, status: 'completed' }` (or omitted `success`)
-is also **`indeterminate`**, not `failed`. Status says the refund settled while
-the API flag does not — do not retry the mutation as a fresh failure.
+**CORE-INF-2:** refund with `status: 'completed'` but ambiguous outcome is **`indeterminate`**, not `failed`. Status says the refund settled while the API flag does not — do not retry the mutation as a fresh failure.
 
 Do not treat a pending refund as settled. Same Engineering Rule 3 applies after
 submit when the refund request may have been accepted.
 
-**CORE-5:** `applyOutcomeToGatewayResult` coerces stored `outcome` / `success`
+**CORE-5:** `applyOutcomeToGatewayResult` coerces stored `outcome`
 against `status`. `outcome: 'succeeded'` with `status: 'failed'` becomes
-`declined` + `success: false`; with `status: 'pending'` / `'processing'` /
+`declined`; with `status: 'pending'` / `'processing'` /
 `'approved'` it becomes `requires_action`. Callers branching on
 `result.outcome === 'succeeded'` must not see a failed or still-pending payment
 as a successful operation.
 
 **NEW-CORE-10:** `outcome: 'requires_action'` with `status: 'failed'` is stored
-and inferred as **`declined`** (`success: false`). A failed snapshot is not
-customer action — do not persist `success: true` from the requires_action table.
+and inferred as **`declined`**. A failed snapshot is not
+customer action.
 
-**NEW-CORE-9:** Payment infer treats `success: false` + `refund_completed` /
+**NEW-CORE-9:** Payment infer treats `refund_completed` /
 `refund_pending` / `reversed` as **`indeterminate`** (not a retryable `failed`).
 Refund coerce: `outcome: 'failed'` + gateway `status: 'completed'` becomes
 **`succeeded`** (status wins — a settled refund is not a fresh-fail retry).
@@ -297,8 +240,7 @@ not `getPayment('unknown')`.
 
 ## After-hook freeze
 
-Money/identity fields restored after after-hooks include (when present): `success`, `outcome`, `status`, `amount`, `gatewayId`, capture/order/authorization/refund IDs, fees, `capturedAmount`, `refundedAmount`, `clientSecret`, `references`, `decline`, `reconciliationRequired`, `providerRequestId`. Restore runs **between** composed after-hooks as well as on the client return path, so a later handler cannot see a previous hook's forged paid/status/amount. After-hooks cannot flip a paid result into declined or invent a paid status.
-
+Money/identity fields restored after after-hooks include (when present): `outcome`, `status`, `amount`, `gatewayId`, capture/order/authorization/refund IDs, fees, `capturedAmount`, `refundedAmount`, `clientSecret`, `references`, `decline`, `reconciliationRequired`, `providerRequestId`. Restore runs **between** composed after-hooks as well as on the client return path, so a later handler cannot see a previous hook's forged paid/status/amount. After-hooks cannot flip a paid result into declined or invent a paid status.
 ## Migration checklist (0.x apps)
 
 1. **Fulfillment:** replace `if (result.success)` with `if (isPaidOutcome(result))` (or `outcome === 'succeeded'` + paid-like `status`).

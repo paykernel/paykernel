@@ -362,8 +362,8 @@ describe("invalid formats and helpers", () => {
     expect(formatMoney(money("10.50", "SAR"))).toBe("10.50 SAR");
   });
 
-  it("normalizeAmountInput accepts number and Money and rejects currency mismatch", () => {
-    expect(normalizeAmountInput(10.5, "SAR")).toEqual(money("10.50", "SAR"));
+  it("normalizeAmountInput rejects number and checks currency mismatch (1.0 Money-only)", () => {
+    expect(() => normalizeAmountInput(10.5 as unknown as Money, "SAR")).toThrow(MoneyAmountError);
     expect(normalizeAmountInput(money("10.50", "SAR"), "SAR")).toEqual(
       money("10.50", "SAR"),
     );

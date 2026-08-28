@@ -1,9 +1,8 @@
 # Behavioral contracts (Phase 0 baseline)
 
-This document consolidates **current** runtime contracts of `@paykernel/core` **v0.1.0-next.0**. It is a regression baseline for integrators: retry safety, provider IDs, webhooks, statuses, hooks isolation, indeterminate outcomes, and runtime assumptions.
+This document consolidates **current** runtime contracts of `@paykernel/core` **v1.0**. It is a regression baseline for integrators: retry safety, provider IDs, webhooks, statuses, hooks isolation, indeterminate outcomes, and runtime assumptions.
 
-**Shipped architecture (not aspirational):** the SDK lives in a Bun monorepo (`packages/core`). Prefer `createPaymentClient` with `createGatewayRegistry` / gateway factories (or a `gateways` map) for new code; the legacy `new PaymentClient({ moyasar, … })` constructor remains supported and deprecated through `0.x`. See [plugin-architecture.md](./plugin-architecture.md) and [custom-gateways.md](./custom-gateways.md).
-
+**Shipped architecture (1.0):** the SDK lives in a Bun monorepo (`packages/core`). Use `createPaymentClient` with `createGatewayRegistry` / gateway factories (or a `gateways` map). The legacy `new PaymentClient({ moyasar, … })` constructor was **removed in 1.0** (use `createPaymentClient`). See [plugin-architecture.md](./plugin-architecture.md) and [custom-gateways.md](./custom-gateways.md).
 **Scope:** built-in gateways Moyasar, PayPal, Paymob, Stripe; `PaymentClient` / `createPaymentClient`; shared retry / idempotency utilities; hooks and webhooks. Later-phase surfaces (operation outcomes, money helpers, portable runtime, webhook inbox package) are documented in their own guides; this file still anchors payment mutation and webhook contracts.
 
 **Related docs:** [plugin-architecture.md](./plugin-architecture.md), [runtime.md](./runtime.md) (Phase 8 portability), [hooks.md](./hooks.md), [webhooks.md](./webhooks.md), [moyasar.md](./moyasar.md), [paypal.md](./paypal.md), [paymob.md](./paymob.md), [stripe.md](./stripe.md), [README](../README.md).
@@ -203,12 +202,12 @@ Prefer `PaymentClient.handleWebhook(gateway, payload, signatureOrHeaders?, heade
 
 ---
 
-## 4. Terminal and non-terminal `PaymentStatus` values
+## 4. Terminal and non-terminal statuses (1.0)
 
-Canonical union (`src/types/payment.types.ts`):
+Canonical union (`src/types/domain-status.ts`): `PaymentStatus` in 1.0 is `PaymentDomainStatus` only.
 
 ```typescript
-type PaymentStatus =
+type PaymentDomainStatus = // also PaymentStatus in 1.0
   | "pending"
   | "processing"
   | "authorized"
@@ -219,15 +218,11 @@ type PaymentStatus =
   | "cancelled"
   | "reversed"
   | "refunded"
-  | "partially_refunded"
-  | "refund_completed"
-  | "refund_pending"
-  | "refund_failed"
-  | "setup_completed";
+  | "partially_refunded";
+// Refunds: RefundDomainStatus = "pending" | "completed" | "failed"
+// Webhooks: WebhookEnvelopeStatus = PaymentDomainStatus | RefundDomainStatus | SetupTokenStatus
+// GatewayPaymentStatus in 1.0 = WebhookEnvelopeStatus
 ```
-
-There is **no** single exported `isTerminalStatus()` helper in v0.1.0-next.0. Classification below is the **product meaning for fulfillment guidance** used across README and gateway docs. Gateway-specific mapping tables remain authoritative for each provider.
-
 ### Non-terminal (do not treat as final “ship goods / money settled” without further checks)
 
 | Status | Typical meaning for integrators |

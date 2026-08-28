@@ -77,21 +77,21 @@ const client = createPaymentClient({ registry, defaultGateway: "moyasar" });
 
 See [plugin-architecture.md](../plugin-architecture.md) and [custom-gateways.md](../custom-gateways.md) for custom `GatewayAdapter`s.
 
-### Legacy constructor (deprecated, still supported in 0.x)
+### Legacy constructor (removed in 1.0)
 
 ```typescript
-import { PaymentClient } from "@paykernel/core";
-
-/** @deprecated Prefer createPaymentClient + factories/registry */
-const client = new PaymentClient({
-  moyasar: {
-    secretKey: process.env.MOYASAR_SECRET_KEY!,
-    webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
-  },
+// 0.x — removed in 1.0
+// const client = new PaymentClient({
+//   moyasar: { secretKey: process.env.MOYASAR_SECRET_KEY! },
+//   defaultGateway: "moyasar",
+// });
+// 1.0 — use createPaymentClient
+import { createPaymentClient, moyasarGateway } from "@paykernel/core";
+const client = createPaymentClient({
+  gateways: { moyasar: moyasarGateway({ secretKey: process.env.MOYASAR_SECRET_KEY! }) },
   defaultGateway: "moyasar",
 });
 ```
-
 ### Named runtime imports (values)
 
 ```typescript
@@ -152,11 +152,10 @@ import {
   getCurrencyExponent,
   normalizeCurrencyCode,
   isKnownCurrencyCode,
-  // Phase 6 operation outcomes + domain helpers
+  // Phase 6 operation outcomes + domain helpers (1.0: success removed, outcome required)
   mapGatewayResultToOperationResult,
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
-  successFromOutcome,
   isPaidOutcome,
   isRequiresActionOutcome,
   isIndeterminateOutcome,
@@ -165,11 +164,9 @@ import {
   paymentFromGatewayResult,
   paymentNextActionToAction,
   toPaymentErrorLike,
-  successFromRefundOutcome,
   inferRefundOperationOutcome,
   mapGatewayRefundToOperationResult,
   buildProviderReferences,
-  isPaymentDomainStatus,
   isPaidLikePaymentStatus,
   PAYMENT_DOMAIN_STATUSES,
   PAID_LIKE_PAYMENT_STATUSES,

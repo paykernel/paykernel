@@ -23,8 +23,12 @@ if (import.meta.main) {
         },
       }),
     });
-  } else {
+  } else if (process.env.ALLOW_MEMORY_FALLBACK === "1") {
+    console.warn("[paykernel] PAYMENTS_SDK_PG_URL/DATABASE_URL not set — running with in-memory fallback (ALLOW_MEMORY_FALLBACK=1). Not for production PG RC.");
     kernel = await createCheckoutKernel();
+  } else {
+    console.error("[paykernel] PAYMENTS_SDK_PG_URL or DATABASE_URL is required for bun-hono-postgres PG RC. Set ALLOW_MEMORY_FALLBACK=1 to run without Postgres (test/dev only).");
+    process.exit(1);
   }
   const app = createHonoCheckoutApp(kernel);
   const port = Number(process.env.PORT ?? 3000);
