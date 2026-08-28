@@ -21,8 +21,11 @@ import {
 import { isPaidOutcome } from "../../types/operation-result";
 import { MoyasarGateway } from "./moyasar.gateway";
 import { InMemoryIdempotencyStore } from "../../utils/idempotency";
-import { money } from "../../utils/money";
+import { money, isMoney, type Money } from "../../utils/money";
 
+function majorFromMoney(value: unknown): unknown {
+  return isMoney(value) ? Number((value as Money).amount) : value;
+}
 const CONFIG: MoyasarConfig = {
   secretKey: "sk_test_unit",
   webhookSecret: "webhook_secret",
@@ -145,7 +148,7 @@ describe("MoyasarGateway", () => {
       mockFetchJson(paymentResponse({ status: "authorized", captured: 0 }));
 
       await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         capture: false,
@@ -156,7 +159,7 @@ describe("MoyasarGateway", () => {
       });
 
       const body = lastRequestBody();
-      expect(body.amount).toBe(10000);
+      expect(majorFromMoney(body.amount)).toBe(10000);
       expect(body.callback_url).toBe("https://example.com/callback");
       expect(body.source).toEqual({
         type: "token",
@@ -168,7 +171,7 @@ describe("MoyasarGateway", () => {
     it("rejects raw credit card sources before sending cardholder data to the backend API", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/callback",
           moyasarSource: {
@@ -189,7 +192,7 @@ describe("MoyasarGateway", () => {
       mockFetchJson(paymentResponse());
 
       await createGateway().createPayment({
-        amount: 50,
+        amount: money("50", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         capture: false,
@@ -206,7 +209,7 @@ describe("MoyasarGateway", () => {
     it("requires callbackUrl for token payments", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 10,
+          amount: money("10", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "token",
@@ -221,7 +224,7 @@ describe("MoyasarGateway", () => {
     it("requires a Moyasar source before making an API request", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 10,
+          amount: money("10", "SAR"),
           currency: "SAR",
         }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
@@ -243,7 +246,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: {
@@ -252,7 +255,7 @@ describe("MoyasarGateway", () => {
         },
       });
 
-      expect(result.success).toBe(false);
+      expect(result.outcome).not.toBe("succeeded");
       expect(result.status).toBe("failed");
       expect(result.outcome).toBe("declined");
       expect(result.references?.providerObjectId).toBe(result.gatewayId);
@@ -279,7 +282,7 @@ describe("MoyasarGateway", () => {
         new HooksManager(),
         logger,
       ).createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: {
@@ -288,7 +291,7 @@ describe("MoyasarGateway", () => {
         },
       });
 
-      expect(result.success).toBe(false);
+      expect(result.outcome).not.toBe("succeeded");
       expect(result.status).toBe("failed");
       expect(warnings.some((w) => w.includes("Unmapped payment status"))).toBe(
         true,
@@ -304,7 +307,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: {
@@ -313,7 +316,7 @@ describe("MoyasarGateway", () => {
         },
       });
 
-      expect(result.success).toBe(false);
+      expect(result.outcome).not.toBe("succeeded");
       expect(result.status).toBe("failed");
     });
 
@@ -330,7 +333,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 75,
+        amount: money("75", "SAR"),
         currency: "SAR",
         moyasarSource: {
           type: "stcpay",
@@ -350,7 +353,6 @@ describe("MoyasarGateway", () => {
       // Phase 6: OTP challenge is requires_action, never succeeded
       expect(result.outcome).toBe("requires_action");
       expect(result.outcome).not.toBe("succeeded");
-      expect(result.success).toBe(true); // 0.x dual-write: API ok
       expect(result.references?.providerObjectId).toBe(result.gatewayId);
       expect(result.references?.providerNativeStatus).toBe("initiated");
     });
@@ -368,7 +370,7 @@ describe("MoyasarGateway", () => {
       );
 
       await createGateway().createPayment({
-        amount: 75,
+        amount: money("75", "SAR"),
         currency: "SAR",
         moyasarSource: {
           type: "stcpay",
@@ -382,7 +384,7 @@ describe("MoyasarGateway", () => {
     it("rejects metadata that cannot be represented safely in Moyasar metadata", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "stcpay",
@@ -400,7 +402,7 @@ describe("MoyasarGateway", () => {
     it("rejects non-string metadata values before sending the request", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "stcpay",
@@ -423,7 +425,7 @@ describe("MoyasarGateway", () => {
 
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           orderId: "order_123",
           moyasarSource: {
@@ -449,7 +451,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 1.234,
+        amount: money("1.234", "KWD"),
         currency: "KWD",
         moyasarSource: {
           type: "applepay",
@@ -458,9 +460,9 @@ describe("MoyasarGateway", () => {
       });
 
       expect(lastRequestBody().amount).toBe(1234);
-      expect(result.amount).toBe(1.234);
-      expect(result.fee).toBe(0.012);
-      expect(result.capturedAmount).toBe(1.234);
+      expect(majorFromMoney(result.amount)).toBe(1.234);
+      expect(majorFromMoney(result.fee)).toBe(0.012);
+      expect(majorFromMoney(result.capturedAmount)).toBe(1.234);
       // MOYASAR-1: currency travels with major-unit money fields
       expect(result.currency).toBe("KWD");
     });
@@ -477,7 +479,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         moyasarSource: {
           type: "applepay",
@@ -492,8 +494,8 @@ describe("MoyasarGateway", () => {
       expect(isPaidOutcome(result)).toBe(false);
       expect(result.amount).toBeUndefined();
       expect(result.capturedAmount).toBeUndefined();
-      expect(result.fee).toBe(2.5);
-      expect(result.refundedAmount).toBe(0);
+      expect(majorFromMoney(result.fee)).toBe(2.5);
+      expect(majorFromMoney(result.refundedAmount)).toBe(0);
       expect(result.currency).toBe("SAR");
     });
 
@@ -509,7 +511,7 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         moyasarSource: {
           type: "applepay",
@@ -611,9 +613,9 @@ describe("MoyasarGateway", () => {
       expect(isPaidOutcome(result)).toBe(false);
       expect(result.outcome).not.toBe("succeeded");
       expect(result.currency).toBe("SAR");
-      expect(result.amount).toBe(100);
+      expect(majorFromMoney(result.amount)).toBe(100);
       // Known captured 0 — do not invent the authorization total as captured.
-      expect(result.capturedAmount).toBe(0);
+      expect(majorFromMoney(result.capturedAmount)).toBe(0);
     });
 
     it("fail-closes provider captured + finite captured 0 on getPayment (MOYASAR-CAP-0)", async () => {
@@ -632,7 +634,7 @@ describe("MoyasarGateway", () => {
       expect(result.status).toBe("processing");
       expect(result.status).not.toBe("paid");
       expect(isPaidOutcome(result)).toBe(false);
-      expect(result.capturedAmount).toBe(0);
+      expect(majorFromMoney(result.capturedAmount)).toBe(0);
       expect(result.currency).toBe("SAR");
     });
 
@@ -649,7 +651,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(lastRequestBody().amount).toBe(1050);
-      expect(result.amount).toBe(10.5);
+      expect(majorFromMoney(result.amount)).toBe(10.5);
     });
 
     it("keeps Money.exponent through Zod so OMR override is 2012 not 20120 (P05-MONEY-1)", async () => {
@@ -724,7 +726,7 @@ describe("MoyasarGateway", () => {
     it("rejects invalid Apple Pay shape with InvalidRequestError (not GatewayApiError)", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "applepay",
@@ -739,7 +741,7 @@ describe("MoyasarGateway", () => {
     it("rejects capture:false for decrypted Apple Pay (DPAN) sources", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           capture: false,
           moyasarSource: {
@@ -759,7 +761,7 @@ describe("MoyasarGateway", () => {
     it("rejects capture:false for STC Pay sources", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           capture: false,
           moyasarSource: {
@@ -917,7 +919,7 @@ describe("MoyasarGateway", () => {
     it("requires Moyasar idempotencyKey to be a UUID", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           idempotencyKey: "order_123",
           moyasarSource: {
@@ -933,10 +935,10 @@ describe("MoyasarGateway", () => {
     it("rejects legacy tokenId values that do not match Moyasar token format", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/callback",
-          tokenId: "bad_token",
+          moyasarSource: { type: "token", token: "bad_token" },
         }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
 
@@ -946,7 +948,7 @@ describe("MoyasarGateway", () => {
     it("rejects amounts below one minor unit", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 0.001,
+          amount: money("0.001", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "applepay",
@@ -961,7 +963,7 @@ describe("MoyasarGateway", () => {
     it("rejects amounts with unsupported currency precision", async () => {
       await expect(
         createGateway().createPayment({
-          amount: 1.235,
+          amount: money("1.235", "SAR"),
           currency: "SAR",
           moyasarSource: {
             type: "applepay",
@@ -977,7 +979,7 @@ describe("MoyasarGateway", () => {
       mockFetchJson({});
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: {
@@ -992,20 +994,20 @@ describe("MoyasarGateway", () => {
       expect(result.outcome).not.toBe("declined");
       expect(result.status).not.toBe("paid");
       expect(isPaidOutcome(result)).toBe(false);
-      expect(result.success).toBe(false);
+      expect(result.outcome).not.toBe("succeeded");
       expect(result.gatewayId).not.toBeUndefined();
     });
 
     it("treats HTTP 200 missing payment.id as indeterminate even when status is paid (NEW-MOYASAR-1)", async () => {
       mockFetchJson({
         status: "paid",
-        amount: 10000,
+        amount: money("10000", "SAR"),
         currency: "SAR",
         captured: 10000,
       });
 
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
         moyasarSource: {
@@ -1068,7 +1070,7 @@ describe("MoyasarGateway", () => {
       await expect(
         createGateway().capturePayment({
           gatewayPaymentId: PAYMENT_ID,
-          amount: 1.234,
+          amount: money("10", "SAR"),
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
@@ -1102,7 +1104,7 @@ describe("MoyasarGateway", () => {
 
       const result = await createGateway().refundPayment({
         gatewayPaymentId: PAYMENT_ID,
-        amount: 1.234,
+        amount: money("1.234", "KWD"),
         currency: "KWD",
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
@@ -1110,8 +1112,8 @@ describe("MoyasarGateway", () => {
       expect(lastRequestBody().amount).toBe(1234);
       expect(result.status).toBe("completed");
       expect(result.outcome).toBe("succeeded");
-      expect(result.success).toBe(true);
-      expect(result.totalRefunded).toBe(1.234);
+      expect(result.outcome).toBe("succeeded");
+      expect(majorFromMoney(result.totalRefunded)).toBe(1.234);
       expect(result.refundedAt).toEqual(new Date("2026-05-21T10:05:00Z"));
     });
 
@@ -1128,15 +1130,15 @@ describe("MoyasarGateway", () => {
 
       const result = await createGateway().refundPayment({
         gatewayPaymentId: PAYMENT_ID,
-        amount: 40,
+        amount: money("40", "SAR"),
         currency: "SAR",
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(result.status).toBe("completed");
       expect(result.outcome).toBe("succeeded");
-      expect(result.success).toBe(true);
-      expect(result.totalRefunded).toBe(40);
+      expect(result.outcome).toBe("succeeded");
+      expect(majorFromMoney(result.totalRefunded)).toBe(40);
     });
 
     it("treats incomplete refund snapshot as pending without inventing totalRefunded=0 (MOYASAR-2)", async () => {
@@ -1159,7 +1161,7 @@ describe("MoyasarGateway", () => {
 
       expect(result.status).toBe("pending");
       expect(result.outcome).toBe("pending");
-      expect(result.success).toBe(true); // pending dual-writes success true
+      expect(result.outcome).toBe("pending"); // pending dual-writes success true in 0.x — now outcome pending
       expect(result.totalRefunded).toBeUndefined();
       expect(result.totalRefunded).not.toBe(0);
       expect(result.totalRefunded).not.toBe(100);
@@ -1178,7 +1180,7 @@ describe("MoyasarGateway", () => {
       await expect(
         createGateway().refundPayment({
           gatewayPaymentId: PAYMENT_ID,
-          amount: 50,
+          amount: money("50", "JPY"),
           currency: "JPY",
           idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
         }),
@@ -1203,7 +1205,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(result.status).toBe("partially_refunded");
-      expect(result.refundedAmount).toBe(25);
+      expect(majorFromMoney(result.refundedAmount)).toBe(25);
     });
 
     it("maps full refund of partial capture to refunded (captured baseline)", async () => {
@@ -1221,8 +1223,8 @@ describe("MoyasarGateway", () => {
       });
 
       expect(result.status).toBe("refunded");
-      expect(result.refundedAmount).toBe(30);
-      expect(result.capturedAmount).toBe(30);
+      expect(majorFromMoney(result.refundedAmount)).toBe(30);
+      expect(majorFromMoney(result.capturedAmount)).toBe(30);
     });
 
     it("maps partial refund of partial capture to partially_refunded", async () => {
@@ -1240,8 +1242,8 @@ describe("MoyasarGateway", () => {
       });
 
       expect(result.status).toBe("partially_refunded");
-      expect(result.refundedAmount).toBe(10);
-      expect(result.capturedAmount).toBe(30);
+      expect(majorFromMoney(result.refundedAmount)).toBe(10);
+      expect(majorFromMoney(result.capturedAmount)).toBe(30);
     });
 
     it("maps full refund of full capture to refunded", async () => {
@@ -1259,7 +1261,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(result.status).toBe("refunded");
-      expect(result.refundedAmount).toBe(100);
+      expect(majorFromMoney(result.refundedAmount)).toBe(100);
     });
 
     it("maps provider refunded + zero refunded amount to refund_completed (not full refunded)", async () => {
@@ -1279,7 +1281,7 @@ describe("MoyasarGateway", () => {
       expect(result.status).toBe("refund_completed");
       expect(result.status).not.toBe("refunded");
       expect(result.status).not.toBe("partially_refunded");
-      expect(result.refundedAmount).toBe(0);
+      expect(majorFromMoney(result.refundedAmount)).toBe(0);
       expect(result.outcome).toBe("requires_action");
       expect(result.outcome).not.toBe("succeeded");
     });
@@ -1383,16 +1385,16 @@ describe("MoyasarGateway", () => {
 
       const result = await createGateway().capturePayment({
         gatewayPaymentId: PAYMENT_ID,
-        amount: 30,
+        amount: money("30", "SAR"),
         currency: "SAR",
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
       expect(result.status).toBe("partially_captured");
-      expect(result.capturedAmount).toBe(30);
+      expect(majorFromMoney(result.capturedAmount)).toBe(30);
       // MOYASAR-1: currency accompanies major-unit amounts on capture path
       expect(result.currency).toBe("SAR");
-      expect(result.amount).toBe(100);
+      expect(majorFromMoney(result.amount)).toBe(100);
       // Open money story: not operation-succeeded (MOYASAR-5); still not paid-like.
       expect(result.outcome).toBe("requires_action");
       expect(result.outcome).not.toBe("succeeded");
@@ -1413,18 +1415,18 @@ describe("MoyasarGateway", () => {
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       });
 
-      expect(result.amount).toBe(100);
-      expect(result.capturedAmount).toBe(100);
+      expect(majorFromMoney(result.amount)).toBe(100);
+      expect(majorFromMoney(result.capturedAmount)).toBe(100);
       expect(result.currency).toBe("SAR");
-      expect(result.fee).toBe(2.5);
-      expect(result.refundedAmount).toBe(0);
+      expect(majorFromMoney(result.fee)).toBe(2.5);
+      expect(majorFromMoney(result.refundedAmount)).toBe(0);
     });
 
     it("requires currency for partial refunds instead of defaulting to SAR", async () => {
       await expect(
         createGateway().refundPayment({
           gatewayPaymentId: PAYMENT_ID,
-          amount: 1.234,
+          amount: { amount: "1.234", currency: "SAR" } as unknown as Money,
         idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
       }),
       ).rejects.toBeInstanceOf(InvalidRequestError);
@@ -1468,7 +1470,7 @@ describe("MoyasarGateway", () => {
 
       expect(voided.status).toBe("cancelled");
       expect(voided.outcome).toBe("succeeded");
-      expect(voided.success).toBe(true);
+      expect(voided.outcome).toBe("succeeded");
     });
 
     it("voidPayment residual paid is money-honest (not void-complete) (MOYASAR-2)", async () => {
@@ -1486,7 +1488,7 @@ describe("MoyasarGateway", () => {
       expect(notVoided.outcome).toBe("succeeded");
       // Money-honest residual: still settled funds, not void success.
       expect(isPaidOutcome(notVoided)).toBe(true);
-      expect(notVoided.amount).toBe(100);
+      expect(majorFromMoney(notVoided.amount)).toBe(100);
       expect(notVoided.currency).toBe("SAR");
     });
 
@@ -1574,7 +1576,7 @@ describe("MoyasarGateway", () => {
       let caught: unknown;
       try {
         await createGateway().createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/callback",
           moyasarSource: { type: "token", token: "token_abc" },
@@ -1744,16 +1746,16 @@ describe("MoyasarGateway", () => {
         gatewayPaymentId: PAYMENT_ID,
       });
 
-      expect(result.amount).toBe(1.234);
-      expect(result.fee).toBe(0.012);
-      expect(result.capturedAmount).toBe(1.234);
-      expect(result.refundedAmount).toBe(0);
+      expect(majorFromMoney(result.amount)).toBe(1.234);
+      expect(majorFromMoney(result.fee)).toBe(0.012);
+      expect(majorFromMoney(result.capturedAmount)).toBe(1.234);
+      expect(majorFromMoney(result.refundedAmount)).toBe(0);
       expect(result.currency).toBe("KWD");
       // Docs post-3DS check: status + amount + currency must all be present
       expect(result.status).toBe("paid");
       expect(
         result.status === "paid" &&
-          result.amount === 1.234 &&
+          (isMoney(result.amount) ? Number((result.amount as Money).amount) === 1.234 : result.amount === 1.234) &&
           result.currency === "KWD",
       ).toBe(true);
     });
@@ -1772,8 +1774,8 @@ describe("MoyasarGateway", () => {
       });
 
       expect(result.currency).toBe("SAR");
-      expect(result.amount).toBe(50);
-      expect(result.capturedAmount).toBe(50);
+      expect(majorFromMoney(result.amount)).toBe(50);
+      expect(majorFromMoney(result.capturedAmount)).toBe(50);
     });
 
     it("validates gatewayPaymentId before fetching", async () => {
@@ -1894,7 +1896,7 @@ describe("MoyasarGateway", () => {
       // cancel / retry-as-failed). executeWithHooks maps afterProviderSubmit
       // NetworkError to an indeterminate result.
       const result = await createGateway().createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: { type: "token", token: "token_test_abc" },
@@ -1918,14 +1920,14 @@ describe("MoyasarGateway", () => {
       }) as typeof fetch;
 
       const timedOut = await createGateway({ ...CONFIG, timeoutMs: 1 }).createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/callback",
         moyasarSource: { type: "token", token: "token_test_abc" },
       });
       expect(timedOut.outcome).toBe("indeterminate");
       expect(timedOut.reconciliationRequired).toBe(true);
-      expect(timedOut.success).toBe(false);
+      expect(timedOut.outcome).not.toBe("succeeded");
     });
 
     it("does not strip signal through Moyasar schema validation before HTTP", async () => {
@@ -2035,7 +2037,7 @@ describe("MoyasarGateway", () => {
 
       expect(event.type).toBe("payment_paid");
       expect(event.status).toBe("paid");
-      expect(event.amount).toBe(1.234);
+      expect(majorFromMoney(event.amount)).toBe(1.234);
       expect(event.paymentId).toBe("internal_123");
       expect(event.gatewayPaymentId).toBe(PAYMENT_ID);
     });
@@ -2145,10 +2147,10 @@ describe("MoyasarGateway", () => {
 
       expect(event.status).toBe("partially_refunded");
       // Money field is refunded slice, not full payment total (MOYASAR-1).
-      expect(event.amount).toBe(25);
+      expect(majorFromMoney(event.amount)).toBe(25);
       expect(event.event?.type).toBe("refund.completed");
       if (event.event?.type === "refund.completed") {
-        expect(event.event.refund.amount).toBe(25);
+        expect(majorFromMoney(event.event.refund.amount)).toBe(25);
       }
     });
 
@@ -2169,7 +2171,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("refunded");
-      expect(event.amount).toBe(30);
+      expect(majorFromMoney(event.amount)).toBe(30);
     });
 
     it("maps provider refunded + zero refunded amount on webhooks to refund_completed", () => {
@@ -2192,13 +2194,13 @@ describe("MoyasarGateway", () => {
       expect(event.status).not.toBe("refunded");
       expect(event.status).not.toBe("partially_refunded");
       // Explicit zero refunded is honest money (not full payment total).
-      expect(event.amount).toBe(0);
+      expect(majorFromMoney(event.amount)).toBe(0);
       // MOYASAR-1: incomplete refund_completed must not dual-write refund.completed
       // (type-only handlers would over-settle). Stripe/Paymob → refund.pending.
       expect(event.stableType).toBe("refund.pending");
       expect(event.event?.type).toBe("refund.pending");
       if (event.event?.type === "refund.pending") {
-        expect(event.event.refund.amount).toBe(0);
+        expect(majorFromMoney(event.event.refund.amount)).toBe(0);
       }
     });
 
@@ -2274,7 +2276,7 @@ describe("MoyasarGateway", () => {
 
       expect(zero.status).toBe("refund_completed");
       expect(zero.status).not.toBe("paid");
-      expect(zero.amount).toBe(0);
+      expect(majorFromMoney(zero.amount)).toBe(0);
       expect(zero.stableType).toBe("refund.pending");
       expect(zero.event?.type).toBe("refund.pending");
     });
@@ -2320,7 +2322,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("partially_captured");
-      expect(event.amount).toBe(40);
+      expect(majorFromMoney(event.amount)).toBe(40);
       // Dual-write demotion: not capture.completed (type-only over-fulfill).
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
@@ -2345,7 +2347,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("partially_captured");
-      expect(event.amount).toBe(40);
+      expect(majorFromMoney(event.amount)).toBe(40);
       // Never dual-write payment.succeeded while domain status is partial.
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");
@@ -2419,7 +2421,7 @@ describe("MoyasarGateway", () => {
 
         expect(event.status).toBe(status);
         expect(event.status).not.toBe("cancelled");
-        expect(event.amount).toBe(amount);
+        expect(majorFromMoney(event.amount)).toBe(amount);
         expect(event.currency).toBe("SAR");
         expect(event.type).toBe("payment_voided");
         expect(event.stableType).toBe("payment.processing");
@@ -2446,7 +2448,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("cancelled");
-      expect(event.amount).toBe(100);
+      expect(majorFromMoney(event.amount)).toBe(100);
       expect(event.currency).toBe("SAR");
       expect(event.type).toBe("payment_voided");
       expect(event.stableType).toBe("payment.cancelled");
@@ -2498,7 +2500,7 @@ describe("MoyasarGateway", () => {
       });
 
       expect(event.status).toBe("paid");
-      expect(event.amount).toBe(100);
+      expect(majorFromMoney(event.amount)).toBe(100);
       // Full settlement keeps payment.succeeded dual-write.
       expect(event.stableType).toBe("payment.succeeded");
       expect(event.event?.type).toBe("payment.succeeded");
@@ -2565,7 +2567,7 @@ describe("MoyasarGateway", () => {
       expect(event.stableType).not.toBe("payment.succeeded");
       expect(event.event?.type).not.toBe("payment.succeeded");
       // Do not publish the authorization total as settled captured.
-      expect(event.amount).toBe(0);
+      expect(majorFromMoney(event.amount)).toBe(0);
       expect(event.currency).toBe("SAR");
     });
 
@@ -2589,7 +2591,7 @@ describe("MoyasarGateway", () => {
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).not.toBe("payment.succeeded");
       expect(event.event?.type).not.toBe("capture.completed");
-      expect(event.amount).toBe(0);
+      expect(majorFromMoney(event.amount)).toBe(0);
       expect(event.currency).toBe("SAR");
     });
 
@@ -2938,7 +2940,7 @@ describe("MoyasarGateway", () => {
 
       const params = {
         gatewayPaymentId: PAYMENT_ID,
-        amount: 50,
+        amount: money("50", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund-key-2",
       };
@@ -2961,7 +2963,7 @@ describe("MoyasarGateway", () => {
 
       await gateway.refundPayment({
         gatewayPaymentId: PAYMENT_ID,
-        amount: 50,
+        amount: money("50", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund-key-3",
       });
@@ -2969,7 +2971,7 @@ describe("MoyasarGateway", () => {
       await expect(
         gateway.refundPayment({
           gatewayPaymentId: PAYMENT_ID,
-          amount: 60,
+          amount: money("60", "SAR"),
           currency: "SAR",
           idempotencyKey: "refund-key-3",
         }),
@@ -3028,7 +3030,7 @@ describe("MoyasarGateway", () => {
       expect(first.outcome).toBe("indeterminate");
       expect(first.reconciliationRequired).toBe(true);
       expect(first.status).not.toBe("completed");
-      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("succeeded");
       expect(first.outcome).not.toBe("pending");
       expect(first.outcome).not.toBe("succeeded");
 
@@ -3050,7 +3052,7 @@ describe("MoyasarGateway", () => {
       const gateway = createGateway({ ...CONFIG, idempotencyStore });
       mockFetchJson({
         status: "refunded",
-        amount: 10000,
+        amount: money("10000", "SAR"),
         currency: "SAR",
         refunded: 10000,
       });
@@ -3064,7 +3066,7 @@ describe("MoyasarGateway", () => {
       expect(first.outcome).toBe("indeterminate");
       expect(first.reconciliationRequired).toBe(true);
       expect(first.status).not.toBe("completed");
-      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("succeeded");
 
       const fence = await idempotencyStore.get(
         `moyasar:refundPayment:${PAYMENT_ID}:refund-key-missing-id-2xx`,
@@ -3149,7 +3151,7 @@ describe("MoyasarGateway", () => {
       expect(first.outcome).toBe("indeterminate");
       expect(first.reconciliationRequired).toBe(true);
       expect(first.status).not.toBe("completed");
-      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("succeeded");
       expect(first.outcome).not.toBe("pending");
       expect(first.outcome).not.toBe("succeeded");
 
@@ -3186,7 +3188,7 @@ describe("MoyasarGateway", () => {
       expect(first.outcome).toBe("indeterminate");
       expect(first.reconciliationRequired).toBe(true);
       expect(first.status).not.toBe("paid");
-      expect(first.success).not.toBe(true);
+      expect(first.outcome).not.toBe("succeeded");
 
       const fence = await idempotencyStore.get(
         `moyasar:capturePayment:${PAYMENT_ID}:capture-key-bad-json-2xx`,
@@ -3240,14 +3242,14 @@ describe("MoyasarGateway", () => {
       );
 
       const result = await gateway.createPayment({
-        amount: 100,
+        amount: money("100", "SAR"),
         currency: "SAR",
         callbackUrl: "https://example.com/cb",
-        tokenId: "token_abc",
+        moyasarSource: { type: "token", token: "token_abc" },
         idempotencyKey: "8f1e4d2a-1c3b-4a5e-9f60-2b7c8d9e0a11",
       });
 
-      expect(result.success).toBe(true);
+      expect(result.outcome).toBe("succeeded");
       expect(result.outcome).toBe("succeeded");
       expect(result.status).toBe("paid");
       expect(result.references?.providerObjectId).toBe(result.gatewayId);
@@ -3263,10 +3265,10 @@ describe("MoyasarGateway", () => {
 
       await expect(
         gateway.createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/cb",
-          tokenId: "token_abc",
+          moyasarSource: { type: "token", token: "token_abc" },
         }),
       ).rejects.toBeTruthy();
       // No idempotency key => no retry => exactly one call.
@@ -3296,7 +3298,7 @@ describe("MoyasarGateway", () => {
       try {
         // No idempotencyKey => no retry => fast, single attempt.
         await gateway.createPayment({
-          amount: 100,
+          amount: money("100", "SAR"),
           currency: "SAR",
           callbackUrl: "https://example.com/callback",
           moyasarSource: { type: "token", token: "token_abc" },

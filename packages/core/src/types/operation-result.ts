@@ -243,12 +243,12 @@ export function paymentNextActionToAction(
 /**
  * Build a {@link Payment} snapshot from a gateway result (+ optional gateway name).
  *
- * **CORE-1 / NEW-MONEY-1 / fail-closed money:** amount-like major-unit fields
+ * **CORE-1 / NEW-MONEY-1 / fail-closed money:** amount-like fields
  * (`amount`, `fee`, `capturedAmount`, `refundedAmount`) are copied only when
- * `result.currency` is a non-empty string **and** the value is
- * {@link Number.isFinite}. A major-unit number without currency (or NaN /
- * ±Infinity) cannot be re-scaled safely and is omitted rather than published
- * incomplete. Currency alone (no amounts) is still copied when present.
+ * `result.currency` is a non-empty string **and** the value is a valid {@link Money}
+ * (`amount` currency string + well-formed decimal). Incomplete money (Money without
+ * currency, or invalid Money) is omitted rather than published. Currency alone
+ * (no amounts) is still copied when present.
  */
 export function paymentFromGatewayResult(
     result: GatewayPaymentResult,

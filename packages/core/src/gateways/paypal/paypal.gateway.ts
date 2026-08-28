@@ -2629,11 +2629,10 @@ export class PayPalGateway extends BaseGateway {
   }
 
   private formatAmount(
-    amount: AmountInput | number,
+    amount: AmountInput,
     currency: string,
     options?: { allowZero?: boolean },
   ): string {
-    const normalizedAmount = typeof amount === "number" ? money(String(amount), currency) as unknown as AmountInput : amount;
     const normalizedCurrency = this.normalizeCurrencyCode(currency);
     // PayPal zero-decimal set (HUF/JPY/TWD) is the exponent source — not ISO.
     const scale = this.getCurrencyScale(normalizedCurrency);
@@ -2646,7 +2645,7 @@ export class PayPalGateway extends BaseGateway {
     };
 
     try {
-      const normalized = normalizeAmountInput(normalizedAmount as unknown as Money, currency, parseOpts);
+      const normalized = normalizeAmountInput(amount as unknown as Money, currency, parseOpts);
       // Convert through bigint minor units, then format canonical major string
       // (exactly `scale` fractional digits, or none when scale is 0).
       const minor = sharedToMinorUnits(normalized, parseOpts);
@@ -2864,7 +2863,7 @@ export class PayPalGateway extends BaseGateway {
         try {
           return {
             currency_code: currencyCode,
-            value: this.formatAmount(0, currencyCode, { allowZero: true }),
+            value: this.formatAmount(money("0", currencyCode), currencyCode, { allowZero: true }),
           };
         } catch {
           return undefined;
@@ -3007,7 +3006,7 @@ export class PayPalGateway extends BaseGateway {
       try {
         return {
           currency_code: faceMoney.currency_code,
-          value: this.formatAmount(0, faceMoney.currency_code, {
+          value: this.formatAmount(money("0", faceMoney.currency_code), faceMoney.currency_code, {
             allowZero: true,
           }),
         };

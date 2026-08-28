@@ -576,40 +576,19 @@ export class MoyasarGateway extends BaseGateway {
   }
 
   /**
-   * Build the source payload for Moyasar API from our typed source or legacy tokenId
+   * Build the source payload for Moyasar API from typed `moyasarSource`.
+   * `tokenId` was removed in 1.0 — pass `moyasarSource: { type: "token", token }`.
    */
   private buildSourcePayload(
     params: MoyasarCreatePaymentParams | CreatePaymentParams,
   ): Record<string, unknown> {
-    // Prefer new moyasarSource if provided
-    if ((params as unknown as MoyasarCreatePaymentParams).moyasarSource) {
-      return this.mapMoyasarSource((params as unknown as MoyasarCreatePaymentParams).moyasarSource!, params.capture);
+    const src = (params as unknown as MoyasarCreatePaymentParams).moyasarSource;
+    if (!src) {
+      throw new InvalidRequestError(
+        "moyasarSource is required for Moyasar payments — use moyasarSource: { type: \"token\", token }",
+      );
     }
-
-    // Fallback to legacy tokenId
-    if ((params as unknown as { tokenId?: string }).tokenId) {
-      const _tid = (params as unknown as { tokenId?: string }).tokenId!;
-      if (!_tid.startsWith("token_")) {
-        throw new InvalidRequestError(
-          "Moyasar tokenId must start with token_",
-        );
-      }
-
-      const sourcePayload: Record<string, unknown> = {
-        type: "token",
-        token: _tid,
-      };
-
-      if (params.capture === false) {
-        sourcePayload.manual = true;
-      }
-
-      return sourcePayload;
-    }
-
-    throw new InvalidRequestError(
-      "Either moyasarSource or tokenId must be provided for Moyasar payments",
-    );
+    return this.mapMoyasarSource(src, params.capture);
   }
 
   private buildPaymentMetadata(
@@ -1870,6 +1849,7 @@ export class MoyasarGateway extends BaseGateway {
    */
   private mapStatus(moyasarStatus: string): GatewayPaymentStatus {
     const statusMap: Record<string, GatewayPaymentStatus> = {
+      initiated: "pending",
       authorized: "authorized",
       // Zero-amount card setup / verification — not an authorization hold.
       verified: "setup_completed",
@@ -1880,7 +1860,6 @@ export class MoyasarGateway extends BaseGateway {
       refunded: "refunded",
       voided: "cancelled",
     };
-
     const mapped = statusMap[moyasarStatus];
     if (mapped === undefined) {
       this.logger.warn(
@@ -2025,9 +2004,10 @@ export class MoyasarGateway extends BaseGateway {
     }
     if (payment.status === "initiated" && payment.source.type === "stcpay") {
       return {
-        type: "moyasar_stcpay_otp" as const,
+        type: "stcpay_otp" as const,
         transactionUrl: payment.source.transaction_url ?? "",
-        mobile: (payment.source as { mobile?: string }).mobile ?? "",
+        method: "POST" as const,
+        parameter: "otp_value" as const,
       } as unknown as MoyasarStcPayOtpNextAction;
     }
     return undefined;

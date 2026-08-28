@@ -9,7 +9,7 @@
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 506907 bytes, sha256 `56352d58b64f321fefebbf4adea03e15c06e30890ef168b35d4efccd633b66d2`
+- **Bundle**: `dist/index.js` — 506708 bytes, sha256 `33b212c0f7d7002beb0f81b086b06cc08d81825020296e5c10474e8c65f5d126`
 
 ## Package
 

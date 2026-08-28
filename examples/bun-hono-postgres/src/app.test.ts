@@ -18,7 +18,7 @@ describe.skipIf(!hasPg)("hono-postgres checkout (requires PAYMENTS_SDK_PG_URL)",
       executor,
       namespace: { tablePrefix: prefix },
     });
-    await migratePostgresAdapter(executor);
+    await migratePostgresAdapter(executor, { namespace: { tablePrefix: prefix } });
     const kernel = await createCheckoutKernel({
       storeFactory: async () => ({
         ...stores,
@@ -29,7 +29,6 @@ describe.skipIf(!hasPg)("hono-postgres checkout (requires PAYMENTS_SDK_PG_URL)",
     });
     const app = createHonoCheckoutApp(kernel, { enableTestHooks: true });
     try {
-      // Basic create + webhook flow
       const createRes = await app.fetch(new Request("http://checkout.test/payments", {
         method: "POST",
         headers: { "content-type": "application/json" },

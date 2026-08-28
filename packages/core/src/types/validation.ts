@@ -365,6 +365,14 @@ export const CreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.superRe
         // H5: plain CreatePaymentParams is closed — reject provider-specific fields that belong on per-gateway schemas.
         const record = params as Record<string, unknown>;
         for (const key of Object.keys(record)) {
+            if (key === "tokenId") {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `tokenId was removed in 1.0 — use moyasarSource: { type: "token", token }`,
+                    path: [key],
+                });
+                continue;
+            }
             if (
                 key.startsWith("stripe") ||
                 key.startsWith("moyasar") ||
@@ -375,8 +383,7 @@ export const CreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.superRe
                 key === "applyCoupon" ||
                 key === "splits" ||
                 key === "recipient" ||
-                key === "sender" ||
-                key === "tokenId"
+                key === "sender"
             ) {
                 ctx.addIssue({
                     code: z.ZodIssueCode.custom,

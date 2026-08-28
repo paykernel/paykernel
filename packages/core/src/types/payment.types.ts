@@ -419,28 +419,22 @@ export type PaymentNextAction =
 /**
  * Result from gateway payment operations.
  *
- * ## Outcome vs success (Phase 6)
+ * ## Outcome (1.0)
  *
- * Prefer {@link PaymentOperationOutcome} via the `outcome` field (and helpers
- * `isPaidOutcome` / `mapGatewayResultToOperationResult`). See
+ * Discriminate on {@link PaymentOperationOutcome} via the **required** `outcome` field
+ * (and helpers `isPaidOutcome` / `mapGatewayResultToOperationResult`). See
  * `docs/operation-results.md`.
  *
- * **`success` (deprecated for fulfillment decisions):** historically means
- * "the HTTP/API call completed without transport failure", **not** "customer
- * paid". Gateways may set `success: true` for pending / 3DS / requires_action.
- * Dual-written from `outcome` when using `applyOutcomeToGatewayResult`:
- * - `succeeded` | `requires_action` → `success: true`
- * - `declined` | `failed` | `indeterminate` → `success: false`
- *
- * **Never fulfill on `success` alone.** Use `outcome === 'succeeded'` with a
- * paid-like `status` (`paid` only — not `approved` / `authorized`), or
+ * `success` was removed in 1.0 — it historically meant "HTTP/API call ok" (not "paid")
+ * and was source of false-fulfillment bugs. Use `outcome === 'succeeded'` with
+ * a paid-like `status` (`paid` only — not `approved` / `authorized`), or
  * `isPaidOutcome(result)`.
  *
  * **Indeterminate:** when present, always treat as non-terminal for money —
  * `outcome: 'indeterminate'` + `reconciliationRequired: true`. Do not treat as
  * a definitive decline.
  *
- * **After-hook freeze**: money / identity fields (`success`, `outcome`, `status`,
+ * **After-hook freeze**: money / identity fields (`outcome`, `status`,
  * `amount`, `gatewayId`, capture/order/authorization/refund IDs, `fee`,
  * `capturedAmount`, `refundedAmount`, `clientSecret`, `references`,
  * `reconciliationRequired`, `providerRequestId`, …) are restored from the
@@ -510,11 +504,10 @@ export interface GatewayPaymentResult {
  * Note: Some gateways (like Moyasar) don't have separate refund entities.
  * The refund is tracked on the payment object itself.
  *
- * ## Outcome vs success (Phase 6)
+ * ## Outcome (1.0)
  *
- * Prefer {@link import('./operation-result').RefundOperationOutcome} via optional
- * `outcome` (and `mapGatewayRefundToOperationResult`). `success` remains the 0.x
- * API-call flag; pending refunds may still set `success: true`.
+ * `outcome` is **required** — discriminate on {@link import('./operation-result').RefundOperationOutcome}
+ * (and `mapGatewayRefundToOperationResult`). `success` was removed in 1.0.
  */
 export interface GatewayRefundResult {
     /**

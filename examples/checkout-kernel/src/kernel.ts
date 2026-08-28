@@ -1,6 +1,7 @@
 import {
   createPaymentClient,
   isMoney,
+  isPaymentDomainStatus,
   NetworkError,
   money,
   stripeGateway,
@@ -9,7 +10,7 @@ import {
   type GatewayAdapter,
   type GatewayPaymentResult,
   type Money,
-  type PaymentStatus,
+  type PaymentDomainStatus,
   type PaymentGateway,
 } from "@paykernel/core";
 import {
@@ -67,12 +68,16 @@ function publishableCurrency(value: unknown): string | undefined {
  * Provider recon snapshot from `getPayment` Money only (1.0 fail-closed).
  * Incomplete money (Money without currency) fails closed; legacy number
  * major units are not accepted — return undefined so caller schedules reconcile
- * instead of forging a snapshot.
+ * instead of forging a snapshot. Non-payment domain statuses (e.g. `refund_completed`,
+ * `setup_completed`) also fail closed — reconciliation snapshot is payment-only.
  */
 function providerSnapshotFromGetPayment(
   got: GatewayPaymentResult,
 ): ProviderPaymentSnapshot | undefined {
   if (!got.gatewayId) return undefined;
+  // Reconciliation snapshot models payment lifecycle only — fail closed on
+  // refund/setup statuses that a gateway may return for related entities.
+  if (!isPaymentDomainStatus(got.status)) return undefined;
   const currency = publishableCurrency(got.currency);
   const hasAmountLike =
     got.amount !== undefined ||
@@ -85,7 +90,7 @@ function providerSnapshotFromGetPayment(
   const amount = got.amount as Money;
   const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
     gatewayPaymentId: got.gatewayId,
-    status: got.status as unknown as PaymentStatus,
+    status: got.status as PaymentDomainStatus,
     amount,
     providerStatus: got.status,
   };
