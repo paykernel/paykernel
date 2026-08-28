@@ -96,7 +96,7 @@ const MOYASAR_MAX_METADATA_KEY_LENGTH = 40;
 const MOYASAR_MAX_METADATA_VALUE_LENGTH = 500;
 
 /**
- * 0.x dual-accept amount: deprecated major-unit `number` or Money-shaped
+ * 1.0 Money-only: Money-shaped
  * `{ amount: string, currency: string, exponent?: number }`.
  *
  * CORE-2: Money arm enforces decimal form + sign at the Zod boundary so

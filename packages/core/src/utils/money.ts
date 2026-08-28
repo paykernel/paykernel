@@ -513,9 +513,11 @@ function resolveMoneyParseOptions(
 /**
  * Create a {@link Money} value from a major-unit amount.
  *
- * Prefer **string** inputs (`money("10.50", "SAR")`). `number` is accepted for
- * 0.x compatibility but is deprecated — convert via a careful string path and
- * apply the same strict decimal rules (default rounding `'reject'`).
+ * Prefer **string** inputs (`money("10.50", "SAR")`). `number` is 0.x compat —
+ * still accepted to construct Money but payment APIs (`AmountInput` is Money only
+ * in 1.0) do not accept plain numbers; use `money()` instead. Number inputs are
+ * converted via a careful string path and apply the same strict decimal rules
+ * (default rounding `'reject'`).
  *
  * Canonical `amount` is minor-aligned: exactly `exponent` fractional digits
  * (e.g. `"10.50"` for SAR), or no decimal point for zero-decimal currencies.
@@ -618,8 +620,8 @@ export function validateMoney(
  * Convert major units to integer minor units as `bigint`.
  *
  * Overloads:
- * - `toMinorUnits(money, options?)`
- * - `toMinorUnits(amount, currency, options?)`
+ * - `toMinorUnits(money, options?)` — preferred in 1.0 (Money only)
+ * - `toMinorUnits(amount, currency, options?)` — legacy string/number; prefer Money
  *
  * ALWAYS returns `bigint`. NEVER uses float multiply for the conversion path.
  */

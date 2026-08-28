@@ -93,10 +93,7 @@ export interface OperationRequestOptions {
  * ```
  */
 export type CommonPaymentInput = {
-    /**
-     * Prefer {@link Money}; plain `number` major units remain 0.x-deprecated
-     * via {@link AmountInput}.
-     */
+    /** AmountInput is Money only in 1.0 -- pass money("10.50", "SAR"). */
     amount: AmountInput;
     /** Optional order/transaction ID for your system */
     orderId?: string;
@@ -169,8 +166,8 @@ export type MoyasarBackendPaymentSource = Exclude<
  * Field names (except unit of `amount`) match Moyasar's API payload so callers
  * can copy examples from Moyasar docs without the SDK silently dropping them.
  *
- * **Amount units**: `amount` is in **major** currency units — the same unit as
- * top-level `createPayment` `amount` (e.g. `50` for 50.00 SAR). The SDK converts
+ * **Amount units**: `amount` is in **major** currency units -- the same unit as
+ * top-level `createPayment` `amount` (e.g. `money("50.00", "SAR")` for 50.00 SAR). The SDK converts
  * each split to Moyasar's minor units (halalas/fils) before calling the API.
  * Moyasar requires a non-zero split amount; negative values are allowed by the
  * API where reverse splits are supported.
@@ -319,10 +316,7 @@ export interface MoyasarConfirmStcPayOtpParams extends OperationRequestOptions {
 export interface CaptureParams extends OperationRequestOptions {
     /** Gateway's payment ID */
     gatewayPaymentId: string;
-    /**
-     * Amount to capture (optional, defaults to full amount).
-     * Prefer {@link Money}; plain `number` major units are deprecated in 0.x.
-     */
+    /** Amount to capture (optional, defaults to full amount). AmountInput is Money only in 1.0. */
     amount?: AmountInput;
     /**
      * ISO 4217 currency code. Required when providing a partial capture
@@ -354,10 +348,7 @@ export interface CaptureParams extends OperationRequestOptions {
 export interface RefundParams extends OperationRequestOptions {
     /** Gateway's payment ID to refund */
     gatewayPaymentId: string;
-    /**
-     * Amount to refund (optional, undefined = full refund).
-     * Prefer {@link Money}; plain `number` major units are deprecated in 0.x.
-     */
+    /** Amount to refund (optional, undefined = full refund). AmountInput is Money only in 1.0. */
     amount?: AmountInput;
     /** Reason for refund */
     reason?: string;

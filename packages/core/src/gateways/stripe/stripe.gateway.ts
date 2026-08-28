@@ -390,6 +390,9 @@ function asAmountInput(
     throw new InvalidRequestError("Stripe amount must be a Money object");
   }
   const a = amount as { amount: string; currency: string; exponent?: number | undefined };
+  if (typeof a.currency !== "string" || a.currency.trim().length === 0) {
+    throw new InvalidRequestError("Stripe amount must be a Money object");
+  }
   if (a.exponent === undefined) {
     return { amount: a.amount, currency: a.currency };
   }

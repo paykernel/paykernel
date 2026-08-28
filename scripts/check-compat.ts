@@ -369,17 +369,16 @@ async function main(): Promise<void> {
       for (const key of [...allKeys].sort()) {
         const cVal = (committed as Record<string, unknown>)[key];
         const gVal = (schemaGenerated as Record<string, unknown>)[key];
-        if (JSON.stringify(cVal) !== JSON.stringify(gVal)) {
-          console.error(`  ${key}: committed=${JSON.stringify(cVal)} current=${JSON.stringify(gVal)}`);
+        if (deterministicStringify(cVal) !== deterministicStringify(gVal)) {
+          console.error(`  ${key}: committed=${deterministicStringify(cVal)} current=${deterministicStringify(gVal)}`);
           if (typeof cVal === "string" && typeof gVal === "string" && cVal.length > 200) {
             console.error(`    (SQL diff truncated; run baseline:schema to see full)`);
           }
         }
       }
-      if (JSON.stringify(committed.migrations) !== JSON.stringify(schemaGenerated.migrations)) {
-        console.error(`  migrations diff: committed=${JSON.stringify(committed.migrations)} current=${JSON.stringify(schemaGenerated.migrations)}`);
+      if (deterministicStringify(committed.migrations) !== deterministicStringify(schemaGenerated.migrations)) {
+        console.error(`  migrations diff: committed=${deterministicStringify(committed.migrations)} current=${deterministicStringify(schemaGenerated.migrations)}`);
       }
-      console.error(`[check-compat] Run: bun run baseline:schema and commit`);
       failed = true;
     } else {
       console.log("[check-compat] OK schema inventory");
