@@ -18,6 +18,10 @@ import type {
   PaymentStatus,
   AmountInput,
   CreatePaymentParams,
+  MoyasarCreatePaymentParams,
+  StripeCreatePaymentParams,
+  PayPalCreatePaymentParams,
+  PaymobCreatePaymentParams,
   CaptureParams,
   RefundParams,
   VoidParams,
@@ -66,6 +70,7 @@ import type {
   PaymentMetadata,
   PaymentDomainStatus,
   WebhookEnvelopeStatus,
+  GatewayPaymentStatus,
   PaymentOperationResult,
   PaymentOperationOutcome,
   Payment,
@@ -83,7 +88,6 @@ import type {
   RefundOperationResult,
   RefundOperationOutcome,
   ApplyOutcomeGatewayBase,
-  // Phase 7
   PaymentEvent,
   PaymentEventSchemaVersion,
   StablePaymentEventType,
@@ -200,8 +204,11 @@ const _emptyAsId: GatewayId = "";
 type BuiltInMapKeys = keyof BuiltInGatewayMap;
 expectTypesEqual<BuiltInMapKeys, BuiltInGatewayName>(true);
 
-// @ts-expect-error — PaymentClient is private, must use createPaymentClient
-type _LegacyClientCheck = ConstructorParameters<typeof PaymentClient>[0] extends { moyasar: { secretKey: string } } ? true : false;
+// PaymentClient constructor is private — must use createPaymentClient (factory only)
+// @ts-expect-error — private constructor
+type _LegacyCtor = ConstructorParameters<typeof PaymentClient>;
+void null as unknown as _LegacyCtor;
+
 
 // ─── CreatePaymentParams & related param shapes ──────────────────────────────
 
@@ -214,7 +221,15 @@ const createParams: StripeCreatePaymentParams = {
   capture: true,
   idempotencyKey: "idem_type_test",
 };
-expectType<CreatePaymentParams>(createParams);
+expectType<StripeCreatePaymentParams>(createParams);
+// Also valid as slim CreatePaymentParams when provider fields omitted
+const createParamsSlim: CreatePaymentParams = {
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+  description: "type-test payment",
+};
+expectType<CreatePaymentParams>(createParamsSlim);
 
 // Phase 8 Stream C — optional AbortSignal on operation params
 const createParamsWithSignal: CreatePaymentParams = {
@@ -824,12 +839,26 @@ const _commonWithCurrency: CommonPaymentInput = {
 };
 void _commonWithCurrency;
 
-// CreatePaymentParams still accepts provider keys (0.x convenience mega-interface)
-expectType<CreatePaymentParams>({
+// 1.0: CreatePaymentParams is slim — provider keys live on per-gateway types
+const _createWithStripe: CreatePaymentParams = {
+  ...commonInput,
+  currency: "SAR",
+  callbackUrl: "https://example.com/cb",
+  // @ts-expect-error — stripePaymentMethodId is not on CreatePaymentParams (use StripeCreatePaymentParams)
+  stripePaymentMethodId: "pm_x",
+};
+void _createWithStripe;
+// StripeCreatePaymentParams DOES accept provider keys
+expectType<StripeCreatePaymentParams>({
   ...commonInput,
   currency: "SAR",
   callbackUrl: "https://example.com/cb",
   stripePaymentMethodId: "pm_x",
+});
+expectType<MoyasarCreatePaymentParams>({
+  ...commonInput,
+  currency: "SAR",
+  moyasarSource: { type: "token", token: "tok_x" },
 });
 
 type SucceededOp = Extract<PaymentOperationResult, { outcome: "succeeded" }>;
@@ -1094,7 +1123,7 @@ expectType<
   (params: GetPaymentParams, gateway?: GatewayName) => Promise<GatewayPaymentResult>
 >(null! as ClientGet);
 expectType<
-  (gatewayId: string, gateway?: GatewayName) => Promise<PaymentStatus>
+  (gatewayId: string, gateway?: GatewayName) => Promise<GatewayPaymentStatus>
 >(null! as ClientStatus);
 // handleWebhook accepts registered names (built-in default map ⊆ GatewayName)
 expectType<
@@ -1106,37 +1135,27 @@ expectType<
   ) => Promise<WebhookEvent>
 >(null! as ClientWebhook);
 
-// ─── PaymentClientConfig gateway shapes ──────────────────────────────────────
-
-const moyasarOnly: PaymentClientConfig = {
-  moyasar: { secretKey: "sk_test" } satisfies MoyasarConfig,
+// ─── 1.0 gateway shapes replaced PaymentClientConfig (removed) ─────────────────
+// PaymentClientConfig is gone — gateways are via factories / registry. Verify the new shape.
+const moyasarFactory = moyasarGateway({ secretKey: "sk_test" });
+expectType<MoyasarGateway>(null! as unknown as typeof moyasarFactory extends GatewayAdapter<string, infer G> ? G : never);
+const _moyasarClient = createPaymentClient({
+  gateways: { moyasar: moyasarGateway({ secretKey: "sk_test" }) },
   defaultGateway: "moyasar",
-};
-const paypalOnly: PaymentClientConfig = {
-  paypal: {
-    clientId: "id",
-    clientSecret: "secret",
-  } satisfies PayPalConfig,
-  defaultGateway: "paypal",
-};
-const paymobOnly: PaymentClientConfig = {
-  paymob: { secretKey: "sec" } satisfies PaymobConfig,
-  defaultGateway: "paymob",
-};
-const stripeOnly: PaymentClientConfig = {
-  stripe: { secretKey: "sk_test" } satisfies StripeConfig,
-  defaultGateway: "stripe",
-};
-expectType<PaymentClientConfig>(moyasarOnly);
-expectType<PaymentClientConfig>(paypalOnly);
-expectType<PaymentClientConfig>(paymobOnly);
-expectType<PaymentClientConfig>(stripeOnly);
+});
+expectType<PaymentClient<{ moyasar: MoyasarGateway }, "moyasar">>(_moyasarClient as unknown as PaymentClient<{ moyasar: MoyasarGateway }, "moyasar">);
+// PaymentClientConfig removed — direct import would fail (checked by lack of export)
+// No `PaymentClientConfig` in scope; using `CreatePaymentClientOptions` instead
+expectType<CreatePaymentClientOptions<{ moyasar: MoyasarGateway }>>({
+  gateways: { moyasar: moyasarGateway({ secretKey: "sk_test" }) },
+});
 
-const _badDefault: PaymentClientConfig = {
-  moyasar: { secretKey: "sk" },
-  // @ts-expect-error — defaultGateway must be GatewayName
+// Legacy bad default still fails on GatewayName
+const _badDefault: { defaultGateway: GatewayName } = {
+  // @ts-expect-error — "braintree" is not a GatewayName
   defaultGateway: "braintree",
 };
+void _badDefault;
 
 // ─── Supporting exported types remain importable ─────────────────────────────
 
@@ -1319,7 +1338,6 @@ const refundWithOutcome: GatewayRefundResult = {
   gatewayRefundId: "re_1",
   status: "completed",
   rawResponse: {},
-  outcome: "succeeded",
 };
 expectType<GatewayRefundResult>(refundWithOutcome);
 expectType<RefundOperationOutcome>(

@@ -230,6 +230,7 @@ import {
   type ReconciliationTarget,
 } from "@paykernel/reconciliation";
 import {
+  isMoney,
   money,
   NetworkError,
   type GatewayPaymentResult,
@@ -242,22 +243,6 @@ function publishableCurrency(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function moneyFromMajorUnits(
-  amount: number | undefined,
-  currency: string | undefined,
-): Money | undefined {
-  if (amount === undefined || !Number.isFinite(amount)) return undefined;
-  if (currency === undefined) return undefined;
-  try {
-    return money(amount, currency);
-  } catch {
-    return undefined;
-  }
-}
-
-function isMoneyValue(value: unknown): value is Money {
-  return typeof value === "object" && value !== null && "amount" in value && "currency" in value;
-}
 
 /** Provider recon snapshot from `getPayment` Money only. Incomplete money fails closed. */
 function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
@@ -268,9 +253,7 @@ function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
     got.capturedAmount !== undefined ||
     got.refundedAmount !== undefined;
   if (hasAmountLike && currency === undefined) return undefined;
-  const amount = isMoneyValue(got.amount)
-    ? (got.amount as Money)
-    : moneyFromMajorUnits(got.amount as unknown as number | undefined, currency);
+  const amount = isMoney(got.amount) ? got.amount : undefined;
   if (amount === undefined) return undefined;
   const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
     gatewayPaymentId: got.gatewayId,
@@ -279,16 +262,12 @@ function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
     providerStatus: got.status,
   };
   if (got.capturedAmount !== undefined) {
-    const captured = isMoneyValue(got.capturedAmount)
-      ? (got.capturedAmount as Money)
-      : moneyFromMajorUnits(got.capturedAmount as unknown as number | undefined, currency);
+    const captured = isMoney(got.capturedAmount) ? got.capturedAmount : undefined;
     if (captured === undefined) return undefined;
     input.capturedAmount = captured;
   }
   if (got.refundedAmount !== undefined) {
-    const refunded = isMoneyValue(got.refundedAmount)
-      ? (got.refundedAmount as Money)
-      : moneyFromMajorUnits(got.refundedAmount as unknown as number | undefined, currency);
+    const refunded = isMoney(got.refundedAmount) ? got.refundedAmount : undefined;
     if (refunded === undefined) return undefined;
     input.refundedAmount = refunded;
   }
