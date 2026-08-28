@@ -1,75 +1,77 @@
 # Paymob Gateway
 
-Paymob uses the Unified Intention API for hosted checkout. Amounts passed to the SDK are in **major** currency units (`AmountInput` = deprecated `number` or preferred `money("20.125", "OMR")`). Conversion to Paymob's integer minor-unit amount uses the shared money helpers (`normalizeAmountInput` / `toMinorUnits` / bigint — never float `amount * 100`) with the **ISO 4217** minor-unit exponent from `getCurrencyExponent`, plus optional merchant `currencyExponentOverrides`. Currency codes are normalized to uppercase before they are sent to Paymob. For common 2-decimal currencies like SAR, EGP, AED, and PKR that means scale ×100; for OMR (3 decimal places) that means scale ×1000 (e.g. `20.125` OMR → `20125`). See [Safe Money Model](./money.md).
-
+Paymob uses the Unified Intention API for hosted checkout. Amounts passed to the SDK are `Money` (`AmountInput = Money` — use `money("20.125", "OMR")`). Conversion to Paymob's integer minor-unit amount uses the shared money helpers (`normalizeAmountInput` / `toMinorUnits` / bigint — never float `amount * 100`) with the **ISO 4217** minor-unit exponent from `getCurrencyExponent`, plus optional merchant `currencyExponentOverrides`. Currency codes are normalized to uppercase before they are sent to Paymob. For common 2-decimal currencies like SAR, EGP, AED, and PKR that means scale ×100; for OMR (3 decimal places) that means scale ×1000 (e.g. `money("20.125","OMR")` → `20125`). See [Safe Money Model](./money.md).
 > **OMR / Oman:** the SDK defaults to the ISO exponent (×1000). Merchants integrating with a Paymob Oman account should confirm with Paymob that their account expects ISO minor units for OMR. If account-specific scaling differs, set `currencyExponentOverrides` (e.g. `{ OMR: 2 }`) after confirming with Paymob.
 
 ## Configuration
 
 ```typescript
-import { PaymentClient } from '@paykernel/core';
+import { createPaymentClient, paymobGateway } from '@paykernel/core';
 
-const client = new PaymentClient({
-  paymob: {
-    // Required for Unified Intention checkout.
-    // Also preferred for capture, refund, void, and transaction inquiry
-    // (Authorization: Token ${secretKey}, no auth_token in the request body).
-    secretKey: process.env.PAYMOB_SECRET_KEY!,
-    publicKey: process.env.PAYMOB_PUBLIC_KEY!,
+const client = createPaymentClient({
+  gateways: {
+    paymob: paymobGateway({
+      // Required for Unified Intention checkout.
+      // Also preferred for capture, refund, void, and transaction inquiry
+      // (Authorization: Token ${secretKey}, no auth_token in the request body).
+      secretKey: process.env.PAYMOB_SECRET_KEY!,
+      publicKey: process.env.PAYMOB_PUBLIC_KEY!,
 
-    // Required in production webhook handling (constructor warns if secretKey is
-    // set without hmacSecret — verification fails closed until configured).
-    hmacSecret: process.env.PAYMOB_HMAC_SECRET!,
+      // Required in production webhook handling (constructor warns if secretKey is
+      // set without hmacSecret — verification fails closed until configured).
+      hmacSecret: process.env.PAYMOB_HMAC_SECRET!,
 
-    // Required payment method/integration ID or alias
-    integrationId: 123456,
+      // Required payment method/integration ID or alias
+      integrationId: 123456,
 
-    // Required when using createPayment({ capture: false }) unless you pass
-    // paymobIntegrationId / paymobPaymentMethods per request.
-    // Dual model: SDK swaps payment_methods to this auth integration AND sets
-    // is_auth: true and payment_type: 'AUTH' on the Intention body.
-    // Sale integrationId is never used as a silent fallback for capture:false.
-    authIntegrationId: 456789,
+      // Required when using createPayment({ capture: false }) unless you pass
+      // paymobIntegrationId / paymobPaymentMethods per request.
+      // Dual model: SDK swaps payment_methods to this auth integration AND sets
+      // is_auth: true and payment_type: 'AUTH' on the Intention body.
+      // Sale integrationId is never used as a silent fallback for capture:false.
+      authIntegrationId: 456789,
 
-    // Optional legacy fallback: when secretKey is absent, capture/refund/void/inquiry
-    // exchange this apiKey via /api/auth/tokens and send auth_token (mutations) or
-    // Authorization: Bearer (inquiry). Also required for deprecated iframe checkout.
-    apiKey: process.env.PAYMOB_API_KEY,
+      // Optional legacy fallback: when secretKey is absent, capture/refund/void/inquiry
+      // exchange this apiKey via /api/auth/tokens and send auth_token (mutations) or
+      // Authorization: Bearer (inquiry). Also required for deprecated iframe checkout.
+      apiKey: process.env.PAYMOB_API_KEY,
 
-    // Required only for deprecated legacy iframe checkout
-    iframeId: process.env.PAYMOB_IFRAME_ID,
+      // Required only for deprecated legacy iframe checkout
+      iframeId: process.env.PAYMOB_IFRAME_ID,
 
-    // Optional: Region (default: 'ksa' → https://ksa.paymob.com).
-    // Egypt merchants MUST set region: 'eg' (or an explicit baseUrl such as
-    // https://accept.paymob.com); otherwise requests go to the KSA host.
-    // 'pk' is experimental/unofficial — prefer explicit baseUrl if your host differs.
-    region: 'ksa', // 'ksa' | 'eg' | 'pk' | 'om' | 'ae'
+      // Optional: Region (default: 'ksa' → https://ksa.paymob.com).
+      // Egypt merchants MUST set region: 'eg' (or an explicit baseUrl such as
+      // https://accept.paymob.com); otherwise requests go to the KSA host.
+      // 'pk' is experimental/unofficial — prefer explicit baseUrl if your host differs.
+      region: 'ksa', // 'ksa' | 'eg' | 'pk' | 'om' | 'ae'
 
-    // Optional: Custom base URL override
-    baseUrl: 'https://ksa.paymob.com',
+      // Optional: Custom base URL override
+      baseUrl: 'https://ksa.paymob.com',
 
-    // Optional: per-currency minor-unit exponent overrides (ISO codes).
-    // Only set after confirming with Paymob (notably OMR on Oman accounts).
-    // currencyExponentOverrides: { OMR: 3 },
+      // Optional: per-currency minor-unit exponent overrides (ISO codes).
+      // Only set after confirming with Paymob (notably OMR on Oman accounts).
+      // currencyExponentOverrides: { OMR: 3 },
 
-    // Optional: Request timeout in milliseconds (default: 30000)
-    timeoutMs: 30000,
+      // Optional: Request timeout in milliseconds (default: 30000)
+      timeoutMs: 30000,
 
-    // Required for capture, refund, and void (atomic reserve() + idempotencyKey).
-    // Also recommended for createPayment across workers/serverless.
-    // idempotencyStore: redisBackedPaymobIdempotencyStore,
+      // Required for capture, refund, and void (atomic reserve() + idempotencyKey).
+      // Also recommended for createPayment across workers/serverless.
+      // idempotencyStore: redisBackedPaymobIdempotencyStore,
+    }),
   },
   defaultGateway: 'paymob',
 });
 ```
 
 For local-only webhook testing without an HMAC secret, set `allowUnverifiedWebhooks: true` and run with an explicit local/test environment such as `NODE_ENV=test`, `NODE_ENV=development`, or `APP_ENV=local`. The SDK refuses unverified webhooks when the environment is production or cannot be identified as local/test; do not rely on unverified webhooks outside local development.
-
 ## Create Payment
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const result = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   callbackUrl: 'https://example.com/webhooks/paymob', // Optional per-payment notification_url
   returnUrl: 'https://example.com/payment-result',
@@ -130,9 +132,11 @@ The process-local idempotency map (limit 1000) **never FIFO-evicts in-flight, un
 > [behavioral contracts](./behavioral-contracts.md#1-operations-safe-to-retry).
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const result = await client.capturePayment({
   gatewayPaymentId: '123456789', // Paymob transaction ID
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   idempotencyKey: 'capture-order-123', // required (store + reserve + key)
 }, 'paymob');
@@ -164,9 +168,11 @@ const result = await client.voidPayment({
 ## Refund Payment
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const result = await client.refundPayment({
   gatewayPaymentId: '123456789',
-  amount: 50,
+  amount: money("50", "SAR"),
   currency: 'SAR',
   idempotencyKey: 'refund-order-123',
   // reason is accepted by the SDK refund params type for cross-gateway consistency

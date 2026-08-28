@@ -589,6 +589,15 @@ export function isMoney(value: unknown): value is Money {
 }
 
 /**
+ * True when `value` is a complete, publishable {@link Money} object:
+ * valid decimal `amount`, non-empty `currency`, and valid `exponent` when present.
+ * Central helper — use instead of local `isMoneyValue` duplicates.
+ */
+export function isCompleteMoney(value: unknown): value is Money {
+  return isMoney(value);
+}
+
+/**
  * Re-validate an unknown value as {@link Money} with optional parse options.
  * Stored {@link Money.exponent} is re-applied when options omit scale.
  */
@@ -796,19 +805,26 @@ export function moneyToMajorNumber(
 }
 
 /**
- * Normalize a 0.x {@link AmountInput}-shaped value (`number | Money`) to Money.
+ * Normalize a 1.0 {@link AmountInput}-shaped value (`Money` only) to Money.
  *
- * - `number` → deprecated path via {@link money}
  * - `Money` → re-validated; currency must match `currency` (case-insensitive)
+ * - `number` → throws {@link MoneyAmountError} (1.0 no longer accepts plain numbers on payment APIs)
  *
  * Stream B gateways should call this at mutation boundaries before `toMinorUnits`.
  */
 export function normalizeAmountInput(
-  input: number | Money,
+  input: Money,
   currency: string,
   options?: MoneyParseOptions,
 ): Money {
   const code = normalizeCurrencyCode(currency);
+
+  if (typeof (input as unknown) === "number") {
+    throwInvalidAmount(
+      "Amount must be a Money object (plain number not allowed in 1.0)",
+      "invalid_format",
+    );
+  }
 
   if (isMoneyShape(input)) {
     const inputCode = normalizeCurrencyCode(input.currency);
@@ -825,12 +841,23 @@ export function normalizeAmountInput(
     );
   }
 
-  if (typeof input === "number") {
-    return money(input, code, options);
-  }
-
   throwInvalidAmount(
-    "Amount must be a number or Money object",
+    "Amount must be a Money object",
     "invalid_format",
   );
+}
+
+/**
+ * @internal — testkit / mock fallback only. Accepts `number` for legacy mock compat.
+ * Do not use on public payment APIs — call {@link normalizeAmountInput} instead.
+ */
+export function unsafeNormalizeForTestkit(
+  input: Money | number,
+  currency: string,
+  options?: MoneyParseOptions,
+): Money {
+  if (typeof (input as unknown) === "number") {
+    return money(input as unknown as number, normalizeCurrencyCode(currency), options);
+  }
+  return normalizeAmountInput(input as Money, currency, options);
 }

@@ -5,8 +5,9 @@
 import type {
   AmountInput,
   GatewayCapabilities,
+  GatewayPaymentStatus,
+  Money,
   PaymentGateway,
-  PaymentStatus,
 } from "@paykernel/core";
 
 /**
@@ -20,33 +21,33 @@ export type GatewayConformanceFixtures = {
    * Defaults to a safe synthetic payload (no secrets).
    */
   createPayment?: {
-    /** Prefer `money("10.50", "USD")`; plain `number` majors still accepted in 0.x. */
     amount: AmountInput;
     currency: string;
     callbackUrl: string;
     capture?: boolean;
   };
   /**
-   * Amount conversion cases (major units in, major units out).
-   * When omitted, suite uses a default set (USD 10.5 / JPY 100 / KWD 1.234)
-   * for mock gateways. Amounts may be deprecated `number` or {@link AmountInput} Money.
+   * Amount conversion cases.
+   * When omitted, suite uses a default set (KWD 1.200 padded, JPY 100 zero-decimal, SAR 10.50)
+   * for mock gateways. Amounts are {@link Money} via `money("10.50", "SAR")`.
+   * `expectedMajor` defaults to a copy of `amount` (Money).
    */
   amountCases?: Array<{
     amount: AmountInput;
     currency: string;
     /**
-     * Expected major-unit amount on result.
-     * Defaults to major number derived from `amount` (Money → major number).
+     * Expected major-unit amount on result as {@link Money}.
+     * Defaults to `amount` when omitted.
      */
-    expectedMajor?: number;
+    expectedMajor?: Money;
     /** Optional expected minor-unit amount (rawResponse.amountMinor when present). */
     expectedMinor?: number;
   }>;
   /**
-   * Map of provider-native status strings to SDK {@link PaymentStatus}.
+   * Map of provider-native status strings to SDK {@link GatewayPaymentStatus}.
    * Used by status_normalization when the gateway exposes scripted statuses.
    */
-  statusMap?: Record<string, PaymentStatus>;
+  statusMap?: Record<string, GatewayPaymentStatus>;
   /** Webhook verification / parse fixtures (provider-shaped when testing built-ins). */
   webhook?: {
     validPayload: unknown;
@@ -56,8 +57,6 @@ export type GatewayConformanceFixtures = {
     invalidSignature?: string;
     malformedPayload?: unknown;
   };
-  /** @deprecated Prefer amountCases; kept for callers that set expected minor. */
-  expectedAmountMinor?: number;
 };
 
 /**

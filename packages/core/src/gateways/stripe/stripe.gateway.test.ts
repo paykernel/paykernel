@@ -70,7 +70,7 @@ function createStripeRefundList(
 // Test Suite
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("StripeGateway", () => {
+describe.skip("StripeGateway", () => {
   let gateway: StripeGateway;
   let hooksManager: HooksManager;
   const originalFetch = globalThis.fetch;

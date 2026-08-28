@@ -361,22 +361,19 @@ describe("PaymobGateway", () => {
       )).toBe(true);
     });
 
-    it("warns when the idempotency store lacks atomic reserve()", () => {
-      const warnings: unknown[][] = [];
+    it("throws when the idempotency store lacks atomic reserve() (fail-fast)", () => {
       const storeWithoutReserve: PaymobIdempotencyStore = {
         get: () => undefined,
         set: () => {},
         delete: () => {},
       };
-      new PaymobGateway(
-        { ...PAYMOB_TEST_CONFIG, idempotencyStore: storeWithoutReserve },
-        hooksManager,
-        captureLogger(warnings),
-      );
-
-      expect(warnings.some((entry) =>
-        String(entry[0]).includes("atomic reserve"),
-      )).toBe(true);
+      expect(
+        () =>
+          new PaymobGateway(
+            { ...PAYMOB_TEST_CONFIG, idempotencyStore: storeWithoutReserve },
+            hooksManager,
+          ),
+      ).toThrow(/idempotencyStore\.reserve required/);
     });
 
     it("does not warn about atomic reserve when the store implements reserve()", () => {
@@ -1846,29 +1843,19 @@ describe("PaymobGateway", () => {
       expect(fetchCalls).toHaveLength(0);
     });
 
-    it("throws when idempotencyStore lacks reserve() on mutations (PAYMOB-TOCTOU)", async () => {
+    it("throws when idempotencyStore lacks reserve() on mutations (PAYMOB-TOCTOU) — fail-fast at construction", () => {
       const storeWithoutReserve: PaymobIdempotencyStore = {
         get: () => undefined,
         set: () => {},
         delete: () => {},
       };
-      const actionGateway = new PaymobGateway(
-        { ...PAYMOB_ACTION_CONFIG, idempotencyStore: storeWithoutReserve },
-        hooksManager,
-      );
-      mockFetchSequence(
-        jsonResponse({ token: "auth_token_123" }),
-        jsonResponse({ id: 123, amount_cents: 5000, refunded_amount_cents: 0, currency: "SAR" }),
-        jsonResponse({ id: 999, success: true, refunded_amount_cents: 5000 }),
-      );
-
-      await expect(actionGateway.refundPayment({
-        gatewayPaymentId: "123456789",
-        amount: 50,
-        currency: "SAR",
-        idempotencyKey: "no_reserve_refund",
-      })).rejects.toThrow(/requires idempotencyStore\.reserve/);
-      expect(fetchCalls).toHaveLength(0);
+      expect(
+        () =>
+          new PaymobGateway(
+            { ...PAYMOB_ACTION_CONFIG, idempotencyStore: storeWithoutReserve },
+            hooksManager,
+          ),
+      ).toThrow(/idempotencyStore\.reserve required/);
     });
 
     it("fails closed when capture/refund/void omit idempotencyKey (I2-PAYMOB-MUTATION-FENCE)", async () => {

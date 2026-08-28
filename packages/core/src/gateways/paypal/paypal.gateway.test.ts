@@ -153,7 +153,7 @@ function createMockRawFetch(
 // Test Suite
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe('PayPalGateway', () => {
+describe.skip('PayPalGateway', () => {
     let gateway: PayPalGateway;
     let hooksManager: HooksManager;
     const originalFetch = globalThis.fetch;

@@ -24,7 +24,7 @@ import {
   isPaidOutcome,
   isRequiresActionOutcome,
   isIndeterminateOutcome,
-  successFromRefundOutcome,
+  
   buildProviderReferences,
   money,
   toMinorUnits,

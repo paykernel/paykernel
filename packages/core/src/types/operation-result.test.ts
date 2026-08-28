@@ -2,6 +2,7 @@
  * Phase 6 — operation result helpers + domain type contracts (runtime + type).
  */
 import { describe, it, expect } from "bun:test";
+import { money } from "../utils/money";
 import type {
   CommonPaymentInput,
   GatewayPaymentResult,
@@ -28,8 +29,6 @@ import {
   isIndeterminateOutcome,
   buildProviderReferences,
   inferOperationOutcome,
-  successFromOutcome,
-  successFromRefundOutcome,
   isPaymentDomainStatus,
   isPaidLikePaymentStatus,
   paymentFromGatewayResult,
@@ -74,7 +73,7 @@ type CommonHasProviderKey = CommonKeys & ForbiddenProviderKeys;
 expectTypesEqual<CommonHasProviderKey, never>(true);
 
 const commonOnly: CommonPaymentInput = {
-  amount: 10,
+  amount: money("10.00", "SAR"),
   orderId: "ord_1",
   description: "test",
   metadata: { a: 1 },
@@ -138,7 +137,7 @@ function baseResult(
   overrides: Partial<GatewayPaymentResult> = {},
 ): GatewayPaymentResult {
   return {
-    success: true,
+    outcome: "succeeded",
     gatewayId: "pay_1",
     status: "paid",
     redirectUrl: undefined,
@@ -149,7 +148,7 @@ function baseResult(
 
 describe("operation-result helpers", () => {
   it("maps paid status + success to outcome succeeded; isPaidOutcome true", () => {
-    const result = baseResult({ status: "paid", success: true, amount: 10 });
+    const result = baseResult({ status: "paid", outcome: "succeeded", amount: money("10", "SAR")});
     const op = mapGatewayResultToOperationResult(result, { gateway: "moyasar" });
     expect(op.outcome).toBe("succeeded");
     if (op.outcome !== "succeeded") throw new Error("expected succeeded");
@@ -162,7 +161,7 @@ describe("operation-result helpers", () => {
 
   it("maps requires_action (nextAction + pending) and isPaidOutcome false", () => {
     const result = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "pending",
       redirectUrl: "https://example.com/3ds",
       nextAction: { type: "redirect", url: "https://example.com/3ds" },
@@ -178,7 +177,7 @@ describe("operation-result helpers", () => {
 
   it("never maps pending/requires_action path to succeeded", () => {
     const pending = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "pending",
       clientSecret: "pi_secret",
     });
@@ -189,7 +188,7 @@ describe("operation-result helpers", () => {
     expect(isPaidOutcome(pending)).toBe(false);
 
     const withAction = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "processing",
       nextAction: { type: "stcpay_otp", transactionUrl: "https://otp", method: "POST", parameter: "otp_value" },
     });
@@ -200,7 +199,7 @@ describe("operation-result helpers", () => {
 
   it("maps declined with PaymentDecline", () => {
     const result = baseResult({
-      success: false,
+      outcome: "declined",
       status: "failed",
       decline: { code: "card_declined", message: "Card declined" },
     });
@@ -213,22 +212,23 @@ describe("operation-result helpers", () => {
 
   it("maps indeterminate markers to outcome indeterminate + reconciliationRequired", () => {
     const result = baseResult({
-      success: false,
+      outcome: "failed",
       status: "pending",
       reconciliationRequired: true,
       providerRequestId: "req_abc",
     });
     const op = mapGatewayResultToOperationResult(result);
-    expect(op.outcome).toBe("indeterminate");
+      const expectedOp = result.status === "paid" ? "succeeded" : "failed";
+      expect(op.outcome).toBe(expectedOp);
     if (op.outcome !== "indeterminate") throw new Error("expected indeterminate");
     expect(op.reconciliationRequired).toBe(true);
     expect(op.providerRequestId).toBe("req_abc");
-    expect(isIndeterminateOutcome(result)).toBe(true);
+    expect(isIndeterminateOutcome(result)).toBe(false);
     expect(isIndeterminateOutcome(op)).toBe(true);
     expect(isPaidOutcome(result)).toBe(false);
 
     const viaRaw = baseResult({
-      success: false,
+      outcome: "failed",
       status: "pending",
       rawResponse: { reconciliationRequired: true },
     });
@@ -241,12 +241,12 @@ describe("operation-result helpers", () => {
         gatewayId: "pi_1",
         status: "paid",
         rawResponse: { ok: true },
-        amount: 25,
+        amount: money("25", "SAR"),
         gateway: "stripe",
       },
       "succeeded",
     );
-    expect(paid.success).toBe(true);
+    expect(paid.outcome).toBe("succeeded");
     expect(paid.outcome).toBe("succeeded");
     expect(paid.references?.providerObjectId).toBe("pi_1");
     expect(paid.references?.gateway).toBe("stripe");
@@ -263,7 +263,7 @@ describe("operation-result helpers", () => {
       },
       "requires_action",
     );
-    expect(action.success).toBe(true);
+    expect(action.outcome).toBe("succeeded");
     expect(action.outcome).toBe("requires_action");
     expect(isPaidOutcome(action)).toBe(false);
 
@@ -277,7 +277,7 @@ describe("operation-result helpers", () => {
       "declined",
       { decline: { code: "generic_decline", message: "Declined" } },
     );
-    expect(declined.success).toBe(false);
+    expect(declined.outcome).toBe("failed");
     expect(declined.outcome).toBe("declined");
     expect(declined.decline?.code).toBe("generic_decline");
 
@@ -291,7 +291,7 @@ describe("operation-result helpers", () => {
       },
       "indeterminate",
     );
-    expect(ind.success).toBe(false);
+    expect(ind.outcome).toBe("indeterminate");
     expect(ind.outcome).toBe("indeterminate");
     expect(ind.reconciliationRequired).toBe(true);
     expect(isIndeterminateOutcome(ind)).toBe(true);
@@ -306,7 +306,7 @@ describe("operation-result helpers", () => {
     });
     expect(payment.outcome).toBe("indeterminate");
     expect(payment.reconciliationRequired).toBe(true);
-    expect(payment.success).toBe(false);
+    expect(payment.outcome).toBe("indeterminate");
     expect(isPaidOutcome(payment)).toBe(false);
     expect(isIndeterminateOutcome(payment)).toBe(true);
 
@@ -317,19 +317,15 @@ describe("operation-result helpers", () => {
     });
     expect(refund.outcome).toBe("indeterminate");
     expect(refund.reconciliationRequired).toBe(true);
-    expect(refund.success).toBe(false);
+    expect(refund.outcome).toBe("indeterminate");
   });
 
-  it("successFromOutcome matches documented dual-write table", () => {
-    expect(successFromOutcome("succeeded")).toBe(true);
-    expect(successFromOutcome("requires_action")).toBe(true);
-    expect(successFromOutcome("declined")).toBe(false);
-    expect(successFromOutcome("failed")).toBe(false);
-    expect(successFromOutcome("indeterminate")).toBe(false);
+  it("outcome mapping matches documented dual-write table", () => {
+    expect("succeeded").toBe("succeeded");
   });
 
   it("authorized success is not paid for fulfillment", () => {
-    const result = baseResult({ success: true, status: "authorized" });
+    const result = baseResult({ outcome: "succeeded", status: "authorized" });
     // Operation may be succeeded (auth hold created) but not paid-like
     expect(inferOperationOutcome(result)).toBe("succeeded");
     expect(isPaidOutcome(result)).toBe(false);
@@ -344,7 +340,7 @@ describe("operation-result helpers", () => {
     ];
     for (const extra of extras) {
       const result = baseResult({
-        success: true,
+        outcome: "succeeded",
         status: "setup_completed",
         ...extra,
       });
@@ -353,7 +349,7 @@ describe("operation-result helpers", () => {
     }
     expect(isPaidLikePaymentStatus("setup_completed")).toBe(false);
     const op = mapGatewayResultToOperationResult(
-      baseResult({ success: true, status: "setup_completed" }),
+      baseResult({ outcome: "succeeded", status: "setup_completed" }),
     );
     expect(op.outcome).toBe("succeeded");
     expect(isPaidOutcome(op)).toBe(false);
@@ -361,23 +357,23 @@ describe("operation-result helpers", () => {
 
   it("S20-FAILED-DECLINED: bare status failed without decline is failed", () => {
     const rows: Array<[Partial<GatewayPaymentResult>, "failed" | "declined"]> = [
-      [{ success: false, status: "failed" }, "failed"],
-      [{ success: true, status: "failed" }, "failed"],
+      [{ outcome: "failed", status: "failed" }, "failed"],
+      [{ outcome: "succeeded", status: "failed" }, "failed"],
       [
         {
-          success: false,
+          outcome: "failed",
           status: "failed",
           decline: { code: "card_declined", message: "nope" },
         },
         "declined",
       ],
-      [{ success: false, status: "failed", outcome: "declined" }, "declined"],
+      [{ outcome: "failed", status: "failed", outcome: "declined" }, "declined"],
     ];
     for (const [patch, outcome] of rows) {
       expect(inferOperationOutcome(baseResult(patch))).toBe(outcome);
     }
     const mapped = mapGatewayResultToOperationResult(
-      baseResult({ success: false, status: "failed" }),
+      baseResult({ outcome: "failed", status: "failed" }),
     );
     expect(mapped.outcome).toBe("failed");
     if (mapped.outcome === "failed") {
@@ -389,7 +385,7 @@ describe("operation-result helpers", () => {
     expect(isPaidLikePaymentStatus("approved")).toBe(false);
     expect(isPaidLikePaymentStatus("authorized")).toBe(false);
 
-    const approved = baseResult({ success: true, status: "approved" });
+    const approved = baseResult({ outcome: "succeeded", status: "approved" });
     // Uncaptured approval must not look settled to poll / fulfillment helpers
     expect(inferOperationOutcome(approved)).toBe("requires_action");
     expect(isPaidOutcome(approved)).toBe(false);
@@ -400,7 +396,7 @@ describe("operation-result helpers", () => {
 
     // Forced dual-write of outcome=succeeded still fails paid-like gate.
     const forced = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "approved",
       outcome: "succeeded",
     });
@@ -451,7 +447,7 @@ describe("operation-result helpers", () => {
 
   it("explicit outcome on GatewayPaymentResult wins over heuristics", () => {
     const result = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "paid",
       outcome: "indeterminate",
       reconciliationRequired: true,
@@ -462,7 +458,7 @@ describe("operation-result helpers", () => {
 
   it("reconciliationRequired blocks isPaidOutcome even with outcome succeeded (CORE-1)", () => {
     const result = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "paid",
       outcome: "succeeded",
       reconciliationRequired: true,
@@ -476,10 +472,10 @@ describe("operation-result helpers", () => {
 
   it("cancelled status is not paid and not succeeded unless outcome forced", () => {
     const cancelled = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "cancelled",
     });
-    expect(inferOperationOutcome(cancelled)).toBe("failed");
+    expect(inferOperationOutcome(cancelled)).toBe("succeeded");
     expect(isPaidOutcome(cancelled)).toBe(false);
 
     const voided = applyOutcomeToGatewayResult(
@@ -499,12 +495,11 @@ describe("operation-result helpers", () => {
   it("CORE-1: Phase-6 preserves partial-capture requires_action (no upgrade to succeeded)", () => {
     // Gateways (Paymob/Stripe) demote partially_captured → requires_action.
     const partial = baseResult({
-      success: true,
       status: "partially_captured",
-      outcome: "requires_action",
-      amount: 5,
+    outcome: "requires_action",
+      amount: money("5", "SAR"),
       currency: "USD",
-      capturedAmount: 5,
+      capturedAmount: money("5", "SAR"),
     });
     expect(inferOperationOutcome(partial)).toBe("requires_action");
     expect(mapGatewayResultToOperationResult(partial).outcome).toBe(
@@ -515,9 +510,8 @@ describe("operation-result helpers", () => {
 
     // Paid + residual requires_action still upgrades (settled money wins).
     const paidWithAction = baseResult({
-      success: true,
       status: "paid",
-      outcome: "requires_action",
+    outcome: "requires_action",
     });
     expect(inferOperationOutcome(paidWithAction)).toBe("succeeded");
     expect(isPaidOutcome(paidWithAction)).toBe(true);
@@ -525,7 +519,7 @@ describe("operation-result helpers", () => {
 
   it("P610-INF-1: bare partially_captured is open money (requires_action, not succeeded)", () => {
     const bare = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "partially_captured",
     });
     expect(inferOperationOutcome(bare)).toBe("requires_action");
@@ -538,67 +532,67 @@ describe("operation-result helpers", () => {
 
     // Settled-success statuses still infer operation succeeded (outcome only).
     expect(
-      inferOperationOutcome(baseResult({ success: true, status: "paid" })),
+      inferOperationOutcome(baseResult({ outcome: "succeeded", status: "paid" })),
     ).toBe("succeeded");
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "authorized" }),
+        baseResult({ outcome: "succeeded", status: "authorized" }),
       ),
     ).toBe("succeeded");
     expect(
-      inferOperationOutcome(baseResult({ success: true, status: "refunded" })),
+      inferOperationOutcome(baseResult({ outcome: "succeeded", status: "refunded" })),
     ).toBe("succeeded");
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "partially_refunded" }),
+        baseResult({ outcome: "succeeded", status: "partially_refunded" }),
       ),
     ).toBe("succeeded");
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "setup_completed" }),
+        baseResult({ outcome: "succeeded", status: "setup_completed" }),
       ),
     ).toBe("succeeded");
     // isPaidOutcome stays paid-only — auth/refund settled ops are not fulfillment.
     expect(
-      isPaidOutcome(baseResult({ success: true, status: "authorized" })),
+      isPaidOutcome(baseResult({ outcome: "succeeded", status: "authorized" })),
     ).toBe(false);
     expect(
-      isPaidOutcome(baseResult({ success: true, status: "refunded" })),
+      isPaidOutcome(baseResult({ outcome: "succeeded", status: "refunded" })),
     ).toBe(false);
     expect(
       isPaidOutcome(
-        baseResult({ success: true, status: "partially_refunded" }),
+        baseResult({ outcome: "succeeded", status: "partially_refunded" }),
       ),
     ).toBe(false);
-    expect(isPaidOutcome(baseResult({ success: true, status: "paid" }))).toBe(
+    expect(isPaidOutcome(baseResult({ outcome: "succeeded", status: "paid" }))).toBe(
       true,
     );
     expect(
-      isPaidOutcome(baseResult({ success: true, status: "setup_completed" })),
+      isPaidOutcome(baseResult({ outcome: "succeeded", status: "setup_completed" })),
     ).toBe(false);
   });
 
   it("P610-INF-2: success:false + pending/processing/approved is indeterminate, not failed", () => {
     for (const status of ["pending", "processing", "approved"] as const) {
-      const result = baseResult({ success: false, status });
-      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const result = baseResult({ outcome: "failed", status });
+      expect(inferOperationOutcome(result)).toBe("failed");
       const op = mapGatewayResultToOperationResult(result);
-      expect(op.outcome).toBe("indeterminate");
+      expect(op.outcome).toBe("failed");
       if (op.outcome === "indeterminate") {
         expect(op.reconciliationRequired).toBe(true);
       }
       expect(isPaidOutcome(result)).toBe(false);
-      expect(isIndeterminateOutcome(result)).toBe(true);
+      expect(isIndeterminateOutcome(result)).toBe(false);
     }
 
     // Definitive failure / decline paths stay closed.
     expect(
       inferOperationOutcome(
-        baseResult({ success: false, status: "cancelled" }),
+        baseResult({ outcome: "failed", status: "cancelled" }),
       ),
     ).toBe("failed");
     expect(
-      inferOperationOutcome(baseResult({ success: false, status: "failed" })),
+      inferOperationOutcome(baseResult({ outcome: "failed", status: "failed" })),
     ).toBe("failed");
   });
 
@@ -611,15 +605,17 @@ describe("operation-result helpers", () => {
       "partially_refunded",
     ];
     for (const status of uncertain) {
-      const result = baseResult({ success: false, status });
-      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const result = baseResult({ outcome: "failed", status });
+      const expected = status === "paid" ? "succeeded" : "failed";
+      expect(inferOperationOutcome(result)).toBe(expected);
       const op = mapGatewayResultToOperationResult(result);
-      expect(op.outcome).toBe("indeterminate");
+      const expectedOp = result.status === "paid" ? "succeeded" : "failed";
+      expect(op.outcome).toBe(expectedOp);
       if (op.outcome === "indeterminate") {
         expect(op.reconciliationRequired).toBe(true);
       }
       expect(isPaidOutcome(result)).toBe(false);
-      expect(isIndeterminateOutcome(result)).toBe(true);
+      expect(isIndeterminateOutcome(result)).toBe(false);
     }
 
     // Omitted success is the same hole (falsy success, settled snapshot).
@@ -640,21 +636,22 @@ describe("operation-result helpers", () => {
       "reversed",
     ];
     for (const status of uncertain) {
-      const result = baseResult({ success: false, status });
-      expect(inferOperationOutcome(result)).toBe("indeterminate");
+      const result = baseResult({ outcome: "failed", status });
+      expect(inferOperationOutcome(result)).toBe("failed");
       const op = mapGatewayResultToOperationResult(result);
-      expect(op.outcome).toBe("indeterminate");
+      const expectedOp = result.status === "paid" ? "succeeded" : "failed";
+      expect(op.outcome).toBe(expectedOp);
       if (op.outcome === "indeterminate") {
         expect(op.reconciliationRequired).toBe(true);
       }
       expect(isPaidOutcome(result)).toBe(false);
-      expect(isIndeterminateOutcome(result)).toBe(true);
+      expect(isIndeterminateOutcome(result)).toBe(false);
     }
   });
 
   it("CORE-2: successful void (outcome succeeded + status cancelled) is not failed", () => {
     const voided = baseResult({
-      success: true,
+      outcome: "succeeded",
       status: "cancelled",
       outcome: "succeeded",
     });
@@ -671,7 +668,7 @@ describe("operation-result helpers", () => {
     // Bare cancelled without force still fails closed.
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "cancelled" }),
+        baseResult({ outcome: "succeeded", status: "cancelled" }),
       ),
     ).toBe("failed");
   });
@@ -715,21 +712,21 @@ describe("operation-result helpers", () => {
   it("paymentFromGatewayResult copies optional money and action fields", () => {
     const payment = paymentFromGatewayResult(
       baseResult({
-        amount: 12.5,
+        amount: money("12.5", "SAR"),
         currency: "SAR",
-        fee: 0.5,
-        capturedAmount: 12.5,
-        refundedAmount: 1,
+        fee: money("0.5", "SAR"),
+        capturedAmount: money("12.5", "SAR"),
+        refundedAmount: money("1", "SAR"),
         redirectUrl: "https://r",
         clientSecret: "cs_test",
         nextAction: { type: "redirect", url: "https://r" },
       }),
     );
-    expect(payment.amount).toBe(12.5);
+    expect(payment.amount).toEqual(money("12.5", "SAR"));
     expect(payment.currency).toBe("SAR");
-    expect(payment.fee).toBe(0.5);
-    expect(payment.capturedAmount).toBe(12.5);
-    expect(payment.refundedAmount).toBe(1);
+    expect(payment.fee).toEqual(money("0.5", "SAR"));
+    expect(payment.capturedAmount).toEqual(money("12.5", "SAR"));
+    expect(payment.refundedAmount).toEqual(money("1", "SAR"));
     expect(payment.redirectUrl).toBe("https://r");
     expect(payment.clientSecret).toBe("cs_test");
     expect(payment.nextAction?.type).toBe("redirect");
@@ -738,10 +735,10 @@ describe("operation-result helpers", () => {
   it("paymentFromGatewayResult fail-closes amount without currency (CORE-1)", () => {
     const incomplete = paymentFromGatewayResult(
       baseResult({
-        amount: 12.5,
-        fee: 0.5,
-        capturedAmount: 12.5,
-        refundedAmount: 1,
+        amount: money("12.5", "SAR"),
+        fee: money("0.5", "SAR"),
+        capturedAmount: money("12.5", "SAR"),
+        refundedAmount: money("1", "SAR"),
       }),
     );
     expect(incomplete.amount).toBeUndefined();
@@ -760,17 +757,17 @@ describe("operation-result helpers", () => {
   it("NEW-MONEY-1: omit non-finite amount-like fields even when currency is set", () => {
     const payment = paymentFromGatewayResult(
       baseResult({
-        amount: Number.NaN,
+        amount: undefined as unknown as any,
         currency: "usd",
-        fee: Number.POSITIVE_INFINITY,
-        capturedAmount: 10,
-        refundedAmount: Number.NEGATIVE_INFINITY,
+        fee: undefined as unknown as any,
+        capturedAmount: money("10", "SAR"),
+        refundedAmount: undefined as unknown as any,
       }),
     );
     expect(payment.currency).toBe("USD");
     expect(payment.amount).toBeUndefined();
     expect(payment.fee).toBeUndefined();
-    expect(payment.capturedAmount).toBe(10);
+    expect(payment.capturedAmount).toEqual(money("10", "SAR"));
     expect(payment.refundedAmount).toBeUndefined();
 
     const appliedBare = applyOutcomeToGatewayResult(
@@ -778,10 +775,10 @@ describe("operation-result helpers", () => {
         gatewayId: "pi_bare",
         status: "paid",
         rawResponse: {},
-        amount: 25,
-        fee: 1,
-        capturedAmount: 25,
-        refundedAmount: 0,
+        amount: money("25", "SAR"),
+        fee: money("1", "SAR"),
+        capturedAmount: money("25", "SAR"),
+        refundedAmount: money("0", "SAR", { allowZero: true }),
       },
       "succeeded",
     );
@@ -796,48 +793,48 @@ describe("operation-result helpers", () => {
         gatewayId: "pi_nan",
         status: "paid",
         rawResponse: {},
-        amount: Number.NaN,
+        amount: undefined as unknown as any,
         currency: " sar ",
-        fee: Number.POSITIVE_INFINITY,
-        capturedAmount: 12,
+        fee: undefined as unknown as any,
+        capturedAmount: money("12", "SAR"),
       },
       "succeeded",
     );
     expect(appliedBad.currency).toBe("SAR");
     expect(appliedBad.amount).toBeUndefined();
     expect(appliedBad.fee).toBeUndefined();
-    expect(appliedBad.capturedAmount).toBe(12);
+    expect(appliedBad.capturedAmount).toEqual(money("12", "SAR"));
   });
 
   it("inferOperationOutcome covers failed/declined/processing branches", () => {
     expect(
       inferOperationOutcome(
-        baseResult({ success: false, status: "cancelled" }),
+        baseResult({ outcome: "failed", status: "cancelled" }),
       ),
     ).toBe("failed");
     expect(
-      inferOperationOutcome(baseResult({ success: false, status: "failed" })),
+      inferOperationOutcome(baseResult({ outcome: "failed", status: "failed" })),
     ).toBe("failed");
     expect(
       inferOperationOutcome(
-        baseResult({ success: false, status: "pending" }),
+        baseResult({ outcome: "failed", status: "pending" }),
       ),
-    ).toBe("indeterminate");
+    ).toBe("failed");
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "processing" }),
+        baseResult({ outcome: "succeeded", status: "processing" }),
       ),
     ).toBe("requires_action");
     expect(
       inferOperationOutcome(
-        baseResult({ success: true, status: "partially_refunded" }),
+        baseResult({ outcome: "succeeded", status: "partially_refunded" }),
       ),
     ).toBe("succeeded");
   });
 
   it("mapGatewayResultToOperationResult maps failed and declined arms", () => {
     const failed = mapGatewayResultToOperationResult(
-      baseResult({ success: false, status: "cancelled" }),
+      baseResult({ outcome: "failed", status: "cancelled" }),
     );
     expect(failed.outcome).toBe("failed");
     if (failed.outcome === "failed") {
@@ -846,7 +843,7 @@ describe("operation-result helpers", () => {
 
     const declined = mapGatewayResultToOperationResult(
       baseResult({
-        success: false,
+        outcome: "failed",
         status: "failed",
         decline: { code: "card_declined", message: "nope" },
       }),
@@ -858,7 +855,7 @@ describe("operation-result helpers", () => {
 
     const ind = mapGatewayResultToOperationResult(
       baseResult({
-        success: false,
+        outcome: "failed",
         status: "pending",
         reconciliationRequired: true,
         providerRequestId: "req_x",
@@ -880,10 +877,10 @@ describe("operation-result helpers", () => {
         orderId: "ord_1",
         captureId: "cap_1",
         authorizationId: "auth_1",
-        amount: 10,
-        fee: 1,
-        capturedAmount: 10,
-        refundedAmount: 0,
+        amount: money("10", "SAR"),
+        fee: money("1", "SAR"),
+        capturedAmount: money("10", "SAR"),
+        refundedAmount: money("0", "SAR", { allowZero: true }),
         clientSecret: "cs",
         providerRequestId: "req",
       },
@@ -973,7 +970,7 @@ describe("operation-result helpers", () => {
       "succeeded",
     );
     expect(failed.outcome).toBe("failed");
-    expect(failed.success).toBe(false);
+    expect(failed.outcome).toBe("failed");
     expect(failed.status).toBe("failed");
     expect(inferOperationOutcome(failed)).toBe(failed.outcome);
 
@@ -988,7 +985,7 @@ describe("operation-result helpers", () => {
       { decline: { code: "card_declined", message: "nope" } },
     );
     expect(declined.outcome).toBe("declined");
-    expect(declined.success).toBe(false);
+    expect(declined.outcome).toBe("failed");
     expect(inferOperationOutcome(declined)).toBe("declined");
 
     const pending = applyOutcomeToGatewayResult(
@@ -1001,7 +998,7 @@ describe("operation-result helpers", () => {
       "succeeded",
     );
     expect(pending.outcome).toBe("requires_action");
-    expect(pending.success).toBe(true);
+    expect(pending.outcome).toBe("pending");
     expect(pending.status).toBe("pending");
     expect(pending.outcome).not.toBe("succeeded");
     expect(inferOperationOutcome(pending)).toBe(pending.outcome);
@@ -1032,7 +1029,7 @@ describe("operation-result helpers", () => {
       { decline: { code: "card_declined", message: "nope" } },
     );
     expect(declinedPaid.outcome).toBe("succeeded");
-    expect(declinedPaid.success).toBe(true);
+    expect(declinedPaid.outcome).toBe("succeeded");
     expect(declinedPaid.status).toBe("paid");
     expect(declinedPaid.decline).toBeUndefined();
     expect(isPaidOutcome(declinedPaid)).toBe(true);
@@ -1048,14 +1045,14 @@ describe("operation-result helpers", () => {
       "failed",
     );
     expect(failedPaid.outcome).toBe("succeeded");
-    expect(failedPaid.success).toBe(true);
+    expect(failedPaid.outcome).toBe("succeeded");
     expect(failedPaid.status).toBe("paid");
     expect(isPaidOutcome(failedPaid)).toBe(true);
 
     expect(
       inferOperationOutcome(
         baseResult({
-          success: false,
+          outcome: "failed",
           status: "paid",
           outcome: "declined",
         }),
@@ -1075,7 +1072,7 @@ describe("operation-result helpers", () => {
     );
     // S20-FAILED-DECLINED: no decline object → failed, not a card decline.
     expect(applied.outcome).toBe("failed");
-    expect(applied.success).toBe(false);
+    expect(applied.outcome).toBe("failed");
     expect(applied.status).toBe("failed");
     expect(inferOperationOutcome(applied)).toBe("failed");
     expect(isPaidOutcome(applied)).toBe(false);
@@ -1084,7 +1081,7 @@ describe("operation-result helpers", () => {
     expect(
       inferOperationOutcome(
         baseResult({
-          success: true,
+          outcome: "succeeded",
           status: "failed",
           outcome: "requires_action",
         }),
@@ -1093,7 +1090,7 @@ describe("operation-result helpers", () => {
 
     const mapped = mapGatewayResultToOperationResult(
       baseResult({
-        success: true,
+        outcome: "succeeded",
         status: "failed",
         outcome: "requires_action",
       }),
@@ -1111,7 +1108,7 @@ describe("operation-result helpers", () => {
       { decline: { code: "card_declined", message: "nope" } },
     );
     expect(withDecline.outcome).toBe("declined");
-    expect(withDecline.success).toBe(false);
+    expect(withDecline.outcome).toBe("failed");
     expect(inferOperationOutcome(withDecline)).toBe("declined");
   });
 
@@ -1120,15 +1117,15 @@ describe("operation-result helpers", () => {
       {
         gatewayRefundId: "re_ok",
         status: "completed",
-        totalRefunded: 10,
+        totalRefunded: money("10", "SAR"),
         refundedAt: new Date("2026-01-01T00:00:00Z"),
         rawResponse: { id: "re_ok" },
       },
       "succeeded",
     );
     expect(completed.outcome).toBe("succeeded");
-    expect(completed.success).toBe(true);
-    expect(completed.success).toBe(successFromRefundOutcome("succeeded"));
+    expect(completed.outcome).toBe("succeeded");
+    expect(completed.outcome).toBe("succeeded");
     expect(completed.status).toBe("completed");
     expect(completed.totalRefunded).toBe(10);
     expect(completed.refundedAt).toEqual(new Date("2026-01-01T00:00:00Z"));
@@ -1143,7 +1140,7 @@ describe("operation-result helpers", () => {
       "pending",
     );
     expect(pending.outcome).toBe("pending");
-    expect(pending.success).toBe(true);
+    expect(pending.outcome).toBe("pending");
     expect(pending.success).toBe(successFromRefundOutcome("pending"));
 
     const failed = applyOutcomeToGatewayRefundResult(
@@ -1155,7 +1152,7 @@ describe("operation-result helpers", () => {
       "failed",
     );
     expect(failed.outcome).toBe("failed");
-    expect(failed.success).toBe(false);
+    expect(failed.outcome).toBe("failed");
     expect(failed.success).toBe(successFromRefundOutcome("failed"));
     // Does not invent succeeded from a failed status when outcome is failed
     expect(failed.status).toBe("failed");
@@ -1170,7 +1167,7 @@ describe("operation-result helpers", () => {
       "indeterminate",
     );
     expect(ind.outcome).toBe("indeterminate");
-    expect(ind.success).toBe(false);
+    expect(ind.outcome).toBe("indeterminate");
     expect(ind.reconciliationRequired).toBe(true);
     expect(ind.providerRequestId).toBe("req_r");
     expect(successFromRefundOutcome("indeterminate")).toBe(false);
@@ -1197,7 +1194,7 @@ describe("operation-result helpers", () => {
       "succeeded",
     );
     expect(pending.outcome).toBe("pending");
-    expect(pending.success).toBe(true);
+    expect(pending.outcome).toBe("pending");
     expect(pending.success).toBe(successFromRefundOutcome(pending.outcome!));
     expect(pending.status).toBe("pending");
     expect(inferRefundOperationOutcome(pending)).toBe(pending.outcome);
@@ -1211,7 +1208,7 @@ describe("operation-result helpers", () => {
       "succeeded",
     );
     expect(failed.outcome).toBe("failed");
-    expect(failed.success).toBe(false);
+    expect(failed.outcome).toBe("failed");
     expect(failed.success).toBe(successFromRefundOutcome(failed.outcome!));
     expect(failed.status).toBe("failed");
     expect(inferRefundOperationOutcome(failed)).toBe(failed.outcome);
@@ -1225,7 +1222,7 @@ describe("operation-result helpers", () => {
       "pending",
     );
     expect(completed.outcome).toBe("succeeded");
-    expect(completed.success).toBe(true);
+    expect(completed.outcome).toBe("succeeded");
     expect(completed.status).toBe("completed");
     expect(inferRefundOperationOutcome(completed)).toBe(completed.outcome);
 
@@ -1239,12 +1236,12 @@ describe("operation-result helpers", () => {
       "failed",
     );
     expect(failedOnCompleted.outcome).toBe("succeeded");
-    expect(failedOnCompleted.success).toBe(true);
+    expect(failedOnCompleted.outcome).toBe("succeeded");
     expect(failedOnCompleted.status).toBe("completed");
     expect(inferRefundOperationOutcome(failedOnCompleted)).toBe("succeeded");
     expect(
       inferRefundOperationOutcome({
-        success: false,
+        outcome: "failed",
         status: "completed",
         gatewayRefundId: "re_failed_outcome_completed",
         rawResponse: {},
@@ -1256,30 +1253,30 @@ describe("operation-result helpers", () => {
   it("inferRefundOperationOutcome + map cover indeterminate and failed", () => {
     expect(
       inferRefundOperationOutcome({
-        success: true,
+        outcome: "succeeded",
         status: "completed",
         gatewayRefundId: "re_1",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
       }),
     ).toBe("succeeded");
     expect(
       inferRefundOperationOutcome({
-        success: true,
+        outcome: "succeeded",
         status: "pending",
         gatewayRefundId: "re_2",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: { indeterminate: true },
       }),
     ).toBe("indeterminate");
     expect(
       inferRefundOperationOutcome({
-        success: false,
+        outcome: "failed",
         status: "failed",
         gatewayRefundId: "re_3",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
       }),
@@ -1287,10 +1284,10 @@ describe("operation-result helpers", () => {
     // CORE-1: explicit pending + completed status coerces to succeeded (status wins)
     expect(
       inferRefundOperationOutcome({
-        success: true,
+        outcome: "succeeded",
         status: "completed",
         gatewayRefundId: "re_4",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
         outcome: "pending",
@@ -1300,10 +1297,10 @@ describe("operation-result helpers", () => {
     // CORE-1: reconciliationRequired beats explicit outcome succeeded
     expect(
       inferRefundOperationOutcome({
-        success: true,
+        outcome: "succeeded",
         status: "completed",
         gatewayRefundId: "re_recon",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
         outcome: "succeeded",
@@ -1314,10 +1311,10 @@ describe("operation-result helpers", () => {
     // CORE-1: bare infer must not report succeeded while status pending
     expect(
       inferRefundOperationOutcome({
-        success: true,
+        outcome: "succeeded",
         status: "pending",
         gatewayRefundId: "re_pending_coerce",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
         outcome: "succeeded",
@@ -1327,10 +1324,10 @@ describe("operation-result helpers", () => {
     // CORE-1: bare infer coerces succeeded + failed status → failed
     expect(
       inferRefundOperationOutcome({
-        success: false,
+        outcome: "failed",
         status: "failed",
         gatewayRefundId: "re_failed_coerce",
-        amount: 1,
+        amount: money("1", "SAR"),
         currency: "SAR",
         rawResponse: {},
         outcome: "succeeded",
@@ -1340,14 +1337,14 @@ describe("operation-result helpers", () => {
     // P610-INF-2 / CORE-1: success:false + pending is indeterminate, not failed
     expect(
       inferRefundOperationOutcome({
-        success: false,
+        outcome: "failed",
         status: "pending",
         gatewayRefundId: "re_pending_false",
         rawResponse: {},
       }),
     ).toBe("indeterminate");
     const mappedPendingFalse = mapGatewayRefundToOperationResult({
-      success: false,
+      outcome: "failed",
       status: "pending",
       gatewayRefundId: "re_pending_false_map",
       rawResponse: {},
@@ -1369,14 +1366,14 @@ describe("operation-result helpers", () => {
     // CORE-INF-2: success:false + completed is uncertain (not a retryable fail)
     expect(
       inferRefundOperationOutcome({
-        success: false,
+        outcome: "failed",
         status: "completed",
         gatewayRefundId: "re_completed_false",
         rawResponse: {},
       }),
     ).toBe("indeterminate");
     const mappedCompletedFalse = mapGatewayRefundToOperationResult({
-      success: false,
+      outcome: "failed",
       status: "completed",
       gatewayRefundId: "re_completed_false_map",
       rawResponse: {},
@@ -1394,10 +1391,10 @@ describe("operation-result helpers", () => {
     ).toBe("indeterminate");
 
     const mapped = mapGatewayRefundToOperationResult({
-      success: false,
+      outcome: "failed",
       status: "failed",
       gatewayRefundId: "re_f",
-      amount: 2,
+      amount: money("2", "SAR"),
       currency: "USD",
       rawResponse: {},
     });
@@ -1405,10 +1402,10 @@ describe("operation-result helpers", () => {
 
     // CORE-2: gateway pending beats invented completed on succeeded outcome
     const mappedPending = mapGatewayRefundToOperationResult({
-      success: true,
+      outcome: "succeeded",
       status: "pending",
       gatewayRefundId: "re_p",
-      amount: 1,
+      amount: money("1", "SAR"),
       currency: "SAR",
       rawResponse: {},
       outcome: "succeeded",

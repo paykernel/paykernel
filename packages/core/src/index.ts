@@ -90,7 +90,6 @@ export type {
   PaymentNextAction,
   MoyasarStcPayOtpNextAction,
   RedirectPaymentNextAction,
-  MoyasarNextAction,
 } from "./types/payment.types";
 
 // Phase 22.1 — customers and stored payment methods
@@ -168,6 +167,8 @@ export type {
   CaptureStatus,
   RefundDomainStatus,
   SetupTokenStatus,
+  WebhookEnvelopeStatus,
+  GatewayPaymentStatus,
   DisputeStatus,
   TransferStatus,
   PayoutStatus,
@@ -204,7 +205,6 @@ export {
   applyOutcomeToGatewayRefundResult,
   applyIndeterminatePaymentOutcome,
   applyIndeterminateRefundOutcome,
-  successFromOutcome,
   isPaidOutcome,
   isRequiresActionOutcome,
   isIndeterminateOutcome,
@@ -213,7 +213,6 @@ export {
   paymentFromGatewayResult,
   paymentNextActionToAction,
   toPaymentErrorLike,
-  successFromRefundOutcome,
   inferRefundOperationOutcome,
   mapGatewayRefundToOperationResult,
 } from "./types/operation-result";
@@ -304,7 +303,6 @@ export {
 } from "./types/webhook-event-map";
 
 export type {
-  PaymentClientConfig,
   CreatePaymentClientOptions,
   GatewayAdaptersMap,
   MoyasarConfig,

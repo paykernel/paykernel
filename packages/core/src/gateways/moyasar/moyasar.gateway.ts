@@ -1,5 +1,6 @@
 // file: packages/payments/src/gateways/moyasar.gateway.ts
 
+
 import { BaseGateway } from "../base.gateway";
 import type { GatewayRuntimeDeps } from "../../runtime/payment-runtime";
 import {
@@ -24,11 +25,13 @@ import type {
   GatewayRefundResult,
   MoyasarConfirmStcPayOtpParams,
   MoyasarCreatePaymentParams,
+  MoyasarStcPayOtpNextAction,
   PaymentNextAction,
-  PaymentStatus,
+  RedirectPaymentNextAction,
   RefundParams,
   VoidParams,
 } from "../../types/payment.types";
+import type { GatewayPaymentStatus } from "../../types/domain-status";
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
@@ -79,9 +82,9 @@ import {
   fromMinorUnits as sharedFromMinorUnits,
   MoneyAmountError,
   minorAmountToNumber,
-  moneyToMajorNumber,
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
+  type Money,
 } from "../../utils/money";
 
 /**
@@ -292,7 +295,18 @@ export class MoyasarGateway extends BaseGateway {
   ) {
     super(config, hooks, logger, MOYASAR_CAPABILITIES, runtime);
     this.moyasarConfig = config;
+    this.assertIdempotencyStoreValid();
     this.warnIfIdempotencyStoreUnsafe();
+  }
+
+  private assertIdempotencyStoreValid(): void {
+    const store = this.moyasarConfig.idempotencyStore as unknown as { reserve?: unknown } | undefined;
+    if (store !== undefined && typeof store.reserve !== "function") {
+      throw new InvalidRequestError(
+        "idempotencyStore.reserve required; use InMemoryIdempotencyStore or a store with atomic reserve() (e.g. Redis SET NX or SQL unique constraint)",
+        [{ path: ["idempotencyStore"] }],
+      );
+    }
   }
 
   /**
@@ -313,14 +327,7 @@ export class MoyasarGateway extends BaseGateway {
       );
       return;
     }
-    if (!store.reserve) {
-      this.logger.warn(
-        "[Moyasar] idempotencyStore does not implement atomic reserve(). " +
-          "Capture, refund, void, and confirmStcPayOtp will throw until a store " +
-          "with atomic reserve() is provided (e.g. Redis SET NX or a SQL unique " +
-          "constraint).",
-      );
-    }
+    // Reserve shape now validated fail-fast in assertIdempotencyStoreValid(); no second warn needed.
   }
 
   /**
@@ -381,17 +388,7 @@ export class MoyasarGateway extends BaseGateway {
       );
     }
 
-    // Refuse non-atomic get-then-set multi-worker stores. Concurrent
-    // retries can both pass free-key check without atomic reserve().
-    if (!store.reserve) {
-      throw new InvalidRequestError(
-        `Moyasar ${operation} requires idempotencyStore.reserve() for atomic ` +
-          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
-          "get-then-set stores can double-apply refund/capture/void/OTP under concurrency.",
-        [{ path: ["idempotencyStore"] }],
-      );
-    }
-
+    // reserve shape validated fail-fast at construction (assertIdempotencyStoreValid); no dead TOCTOU check here.
     const key = `moyasar:${operation}:${paymentId}:${idempotencyKey}`;
     const fingerprint = fingerprintParams(fingerprintInput);
     const createdAt = this.clock.nowMs();
@@ -523,8 +520,8 @@ export class MoyasarGateway extends BaseGateway {
       }
 
       // Add coupon flag if specified
-      if (p.applyCoupon !== undefined) {
-        requestBody.apply_coupon = p.applyCoupon;
+      if ((p as unknown as MoyasarCreatePaymentParams).applyCoupon !== undefined) {
+        requestBody.apply_coupon = (p as unknown as MoyasarCreatePaymentParams).applyCoupon;
       }
 
       // Split amounts are major units in the public API; Moyasar expects minor ints.
@@ -585,13 +582,14 @@ export class MoyasarGateway extends BaseGateway {
     params: MoyasarCreatePaymentParams | CreatePaymentParams,
   ): Record<string, unknown> {
     // Prefer new moyasarSource if provided
-    if (params.moyasarSource) {
-      return this.mapMoyasarSource(params.moyasarSource, params.capture);
+    if ((params as unknown as MoyasarCreatePaymentParams).moyasarSource) {
+      return this.mapMoyasarSource((params as unknown as MoyasarCreatePaymentParams).moyasarSource!, params.capture);
     }
 
     // Fallback to legacy tokenId
-    if (params.tokenId) {
-      if (!params.tokenId.startsWith("token_")) {
+    if ((params as unknown as { tokenId?: string }).tokenId) {
+      const _tid = (params as unknown as { tokenId?: string }).tokenId!;
+      if (!_tid.startsWith("token_")) {
         throw new InvalidRequestError(
           "Moyasar tokenId must start with token_",
         );
@@ -599,7 +597,7 @@ export class MoyasarGateway extends BaseGateway {
 
       const sourcePayload: Record<string, unknown> = {
         type: "token",
-        token: params.tokenId,
+        token: _tid,
       };
 
       if (params.capture === false) {
@@ -1271,7 +1269,7 @@ export class MoyasarGateway extends BaseGateway {
    * Get payment status from Moyasar
    * @see https://docs.moyasar.com/api/payments/02-fetch-payment
    */
-  async getPaymentStatus(gatewayId: string): Promise<PaymentStatus> {
+  async getPaymentStatus(gatewayId: string): Promise<GatewayPaymentStatus> {
     const result = await this.getPayment({ gatewayPaymentId: gatewayId });
     return result.status;
   }
@@ -1512,7 +1510,7 @@ export class MoyasarGateway extends BaseGateway {
    * `isPaidOutcome` remains false either way because paid-like is `paid` only.
    */
   private mapMoyasarOutcome(
-    status: PaymentStatus,
+    status: GatewayPaymentStatus,
     nextAction: PaymentNextAction | undefined,
     redirectUrl: string | undefined,
   ): PaymentOperationOutcome {
@@ -1577,13 +1575,12 @@ export class MoyasarGateway extends BaseGateway {
     }
   }
 
-  private fromMinorUnits(amount: number, currency: string): number {
+  private fromMinorUnits(amount: number, currency: string): Money {
     // Provider responses use integer minor units; zero fees/refunds are common.
-    const money = sharedFromMinorUnits(amount, currency, {
+    return sharedFromMinorUnits(amount, currency, {
       allowZero: true,
       allowNegative: true,
     });
-    return moneyToMajorNumber(money, { allowZero: true, allowNegative: true });
   }
 
   private constantTimeEquals(left: string, right: string): boolean {
@@ -1871,10 +1868,8 @@ export class MoyasarGateway extends BaseGateway {
    * Map Moyasar provider status string to unified PaymentStatus.
    * Unmapped values fail closed as `failed` (do not treat as pending fulfillment).
    */
-  private mapStatus(moyasarStatus: string): PaymentStatus {
-    const statusMap: Record<string, PaymentStatus> = {
-      initiated: "pending",
-      pending: "pending",
+  private mapStatus(moyasarStatus: string): GatewayPaymentStatus {
+    const statusMap: Record<string, GatewayPaymentStatus> = {
       authorized: "authorized",
       // Zero-amount card setup / verification — not an authorization hold.
       verified: "setup_completed",
@@ -1922,10 +1917,9 @@ export class MoyasarGateway extends BaseGateway {
       refunded?: number;
       captured?: number;
     },
-    baseStatus?: PaymentStatus,
-  ): PaymentStatus {
-    const status = baseStatus ?? this.mapStatus(payment.status);
-    const amount = payment.amount;
+    baseStatus?: GatewayPaymentStatus,
+  ): GatewayPaymentStatus {
+    const status: GatewayPaymentStatus = baseStatus ?? this.mapStatus(payment.status);
     const refunded =
       typeof payment.refunded === "number" && Number.isFinite(payment.refunded)
         ? payment.refunded
@@ -1936,7 +1930,7 @@ export class MoyasarGateway extends BaseGateway {
         : 0;
 
     // Full refund of partial capture (refunded === captured < amount) => refunded.
-    const refundBaseline = captured > 0 ? captured : amount;
+    const refundBaseline = captured > 0 ? captured : payment.amount;
     const providerSaysRefunded =
       status === "refunded" || payment.status === "refunded";
 
@@ -1961,8 +1955,8 @@ export class MoyasarGateway extends BaseGateway {
     // Partial capture only when the base status is auth/paid (captured) family.
     if (
       captured > 0 &&
-      captured < amount &&
-      Number.isFinite(amount) &&
+      captured < payment.amount &&
+      Number.isFinite(payment.amount) &&
       (status === "authorized" ||
         status === "paid" ||
         payment.status === "authorized" ||
@@ -1999,9 +1993,9 @@ export class MoyasarGateway extends BaseGateway {
    * statuses that would otherwise false-fulfill.
    */
   private failClosedIncompleteRefundWebhookStatus(
-    status: PaymentStatus,
+    status: GatewayPaymentStatus,
     eventType: string,
-  ): PaymentStatus {
+  ): GatewayPaymentStatus {
     if (eventType !== "payment_refunded") {
       return status;
     }
@@ -2018,14 +2012,28 @@ export class MoyasarGateway extends BaseGateway {
     return "refund_completed";
   }
 
-  /**
-   * Residual / unproven domain statuses on an inconsistent `payment_voided`
-   * snapshot. Void is unproven: do not rewrite these to `cancelled` and do not
-   * dual-write `payment.cancelled` (type-only restock while funds remain).
-   * Includes incomplete paid snapshots demoted to `processing` (captured
-   * missing/zero) so CAP-0 does not flip the envelope to `payment.cancelled`.
-   */
-  private isResidualHeldWebhookStatus(status: PaymentStatus): boolean {
+  private isCardChallenge(payment: MoyasarPaymentResponse): boolean {
+    return payment.source?.type === "creditcard" && typeof payment.source?.transaction_url === "string" && payment.source.transaction_url.length > 0 && payment.status === "initiated";
+  }
+
+  private mapNextAction(payment: MoyasarPaymentResponse): PaymentNextAction | undefined {
+    if (this.isCardChallenge(payment)) {
+      return {
+        type: "redirect_to_url" as const,
+        redirectUrl: payment.source.transaction_url!,
+      } as unknown as RedirectPaymentNextAction;
+    }
+    if (payment.status === "initiated" && payment.source.type === "stcpay") {
+      return {
+        type: "moyasar_stcpay_otp" as const,
+        transactionUrl: payment.source.transaction_url ?? "",
+        mobile: (payment.source as { mobile?: string }).mobile ?? "",
+      } as unknown as MoyasarStcPayOtpNextAction;
+    }
+    return undefined;
+  }
+
+  private isResidualHeldWebhookStatus(status: string): boolean {
     return (
       status === "paid" ||
       status === "authorized" ||
@@ -2176,9 +2184,9 @@ export class MoyasarGateway extends BaseGateway {
       refunded?: number;
       captured?: number;
     },
-    status: PaymentStatus,
+    status: GatewayPaymentStatus,
     eventType: string,
-  ): number | undefined {
+  ): Money | undefined {
     const refunded =
       typeof data.refunded === "number" && Number.isFinite(data.refunded)
         ? data.refunded
@@ -2230,7 +2238,7 @@ export class MoyasarGateway extends BaseGateway {
     return this.fromMinorUnits(data.amount, data.currency);
   }
 
-  private mapNextAction(
+  private mapNextActionLegacy(
     payment: MoyasarPaymentResponse,
   ): PaymentNextAction | undefined {
     const transactionUrl = payment.source?.transaction_url;

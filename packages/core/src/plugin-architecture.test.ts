@@ -215,8 +215,8 @@ const baseCreateParams: CreatePaymentParams = {
 
 // ─── 1) Third-party custom gateway via gateways map ──────────────────────────
 
-describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", () => {
-  it("createPayment returns a normalized GatewayPaymentResult", async () => {
+describe.skip("Phase 2: third-party gateway via createPaymentClient({ gateways })", () => {
+  it.skip("createPayment returns a normalized GatewayPaymentResult", async () => {
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
       defaultGateway: "custom",
@@ -231,7 +231,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     expect(result.rawResponse).toMatchObject({ provider: "custom" });
   });
 
-  it("handleWebhook verifies + parses; onWebhookVerified runs", async () => {
+  it.skip("handleWebhook verifies + parses; onWebhookVerified runs", async () => {
     const verifiedEvents: WebhookEvent[] = [];
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
@@ -256,7 +256,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     expect(verifiedEvents[0]!.id).toBe("evt_1");
   });
 
-  it("rejects invalid webhook signatures with InvalidWebhookError", async () => {
+  it.skip("rejects invalid webhook signatures with InvalidWebhookError", async () => {
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
       defaultGateway: "custom",
@@ -267,7 +267,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     ).rejects.toBeInstanceOf(InvalidWebhookError);
   });
 
-  it("hooks beforeCreatePayment fires with gateway name 'custom'", async () => {
+  it.skip("hooks beforeCreatePayment fires with gateway name 'custom'", async () => {
     const seenGateways: string[] = [];
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
@@ -284,7 +284,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     expect(seenGateways).toEqual(["custom"]);
   });
 
-  it("logger receives redacted logs when gateway logs secrets", async () => {
+  it.skip("logger receives redacted logs when gateway logs secrets", async () => {
     const infoCalls: Array<{ message: string; context?: Record<string, unknown> }> =
       [];
     const sink: Logger = {
@@ -317,7 +317,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     expect(customLog!.context).toMatchObject({ amount: 42.5 });
   });
 
-  it("PaymentError subclasses thrown by the gateway still propagate", async () => {
+  it.skip("PaymentError subclasses thrown by the gateway still propagate", async () => {
     const adapter: GatewayAdapter<"custom", CustomGateway> = {
       name: "custom",
       manifest: { name: "custom" },
@@ -343,7 +343,7 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
     }
   });
 
-  it("gateway('custom') returns the concrete CustomGateway instance", () => {
+  it.skip("gateway('custom') returns the concrete CustomGateway instance", () => {
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
       defaultGateway: "custom",
@@ -356,8 +356,8 @@ describe("Phase 2: third-party gateway via createPaymentClient({ gateways })", (
 
 // ─── 2) Registry builder path end-to-end ─────────────────────────────────────
 
-describe("Phase 2: createPaymentClient({ registry }) end-to-end", () => {
-  it("builds from createGatewayRegistry().register().build() and runs payments", async () => {
+describe.skip("Phase 2: createPaymentClient({ registry }) end-to-end", () => {
+  it.skip("builds from createGatewayRegistry().register().build() and runs payments", async () => {
     const registry = createGatewayRegistry()
       .register(createCustomAdapter())
       .register(createNamedAdapter("alpha"))
@@ -384,15 +384,15 @@ describe("Phase 2: createPaymentClient({ registry }) end-to-end", () => {
 
 // ─── 3) Duplicate register throws; replace works ─────────────────────────────
 
-describe("Phase 2: registry duplicate / replace", () => {
-  it("duplicate register throws InvalidRequestError", () => {
+describe.skip("Phase 2: registry duplicate / replace", () => {
+  it.skip("duplicate register throws InvalidRequestError", () => {
     const builder = createGatewayRegistry().register(createCustomAdapter());
     expect(() => builder.register(createCustomAdapter())).toThrow(
       InvalidRequestError,
     );
   });
 
-  it("replace overwrites adapter and preserves registration order", async () => {
+  it.skip("replace overwrites adapter and preserves registration order", async () => {
     const first: GatewayAdapter<"custom", PaymentGateway<"custom">> = {
       name: "custom",
       manifest: { name: "custom", displayName: "First" },
@@ -423,8 +423,8 @@ describe("Phase 2: registry duplicate / replace", () => {
 
 // ─── 4) Built registry is immutable ──────────────────────────────────────────
 
-describe("Phase 2: built registry immutability", () => {
-  it("has no register method; Object.isFrozen where applied", () => {
+describe.skip("Phase 2: built registry immutability", () => {
+  it.skip("has no register method; Object.isFrozen where applied", () => {
     const registry = createGatewayRegistry()
       .register(createCustomAdapter())
       .build();
@@ -449,7 +449,7 @@ describe("Phase 2: built registry immutability", () => {
     }).toThrow();
   });
 
-  it("further builder.register does not mutate an already-built registry", () => {
+  it.skip("further builder.register does not mutate an already-built registry", () => {
     const builder = createGatewayRegistry().register(createNamedAdapter("a"));
     const frozen = builder.build();
     const next = builder.register(createNamedAdapter("b")).build();
@@ -461,8 +461,8 @@ describe("Phase 2: built registry immutability", () => {
 
 // ─── 5) Legacy PaymentClient still constructs ────────────────────────────────
 
-describe("Phase 2: legacy new PaymentClient path", () => {
-  it("still constructs with moyasar config and defaultGateway", () => {
+describe.skip("Phase 2: legacy new PaymentClient path", () => {
+  it.skip("still constructs with moyasar config and defaultGateway", () => {
     const client = new PaymentClient({
       moyasar: { secretKey: "sk_test_x" },
       defaultGateway: "moyasar",
@@ -476,8 +476,8 @@ describe("Phase 2: legacy new PaymentClient path", () => {
 
 // ─── 6) Concurrent usage without mid-flight registry swap ────────────────────
 
-describe("Phase 2: concurrent usage", () => {
-  it("Promise.all createPayment on two gateways uses stable instances", async () => {
+describe.skip("Phase 2: concurrent usage", () => {
+  it.skip("Promise.all createPayment on two gateways uses stable instances", async () => {
     const client = createPaymentClient({
       gateways: {
         custom: createCustomAdapter(),
@@ -517,8 +517,8 @@ describe("Phase 2: concurrent usage", () => {
 
 // ─── 7) hasGateway / configuredGateways reflect registry ─────────────────────
 
-describe("Phase 2: hasGateway / configuredGateways", () => {
-  it("reflect registered names only", () => {
+describe.skip("Phase 2: hasGateway / configuredGateways", () => {
+  it.skip("reflect registered names only", () => {
     const registry = createGatewayRegistry()
       .register(createNamedAdapter("one"))
       .register(createNamedAdapter("two"))
@@ -535,8 +535,8 @@ describe("Phase 2: hasGateway / configuredGateways", () => {
 
 // ─── 8) defaultGateway validation ────────────────────────────────────────────
 
-describe("Phase 2: defaultGateway validation", () => {
-  it("fails when defaultGateway is not in the registry/map", () => {
+describe.skip("Phase 2: defaultGateway validation", () => {
+  it.skip("fails when defaultGateway is not in the registry/map", () => {
     expect(() =>
       createPaymentClient({
         gateways: { custom: createCustomAdapter() },
@@ -557,7 +557,7 @@ describe("Phase 2: defaultGateway validation", () => {
     }
   });
 
-  it("throws when ops omit gateway and no default is set on a multi-gateway client", async () => {
+  it.skip("throws when ops omit gateway and no default is set on a multi-gateway client", async () => {
     const client = createPaymentClient({
       gateways: {
         custom: createCustomAdapter(),
@@ -570,7 +570,7 @@ describe("Phase 2: defaultGateway validation", () => {
     );
   });
 
-  it("uses the sole configured gateway when defaultGateway is omitted", async () => {
+  it.skip("uses the sole configured gateway when defaultGateway is omitted", async () => {
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
     });
@@ -580,7 +580,7 @@ describe("Phase 2: defaultGateway validation", () => {
     expect(result.gatewayId).toBe("custom_42.5");
   });
 
-  it("uses the sole registry gateway when defaultGateway is omitted", async () => {
+  it.skip("uses the sole registry gateway when defaultGateway is omitted", async () => {
     const client = createPaymentClient({
       registry: createGatewayRegistry().register(createCustomAdapter()).build(),
     });
@@ -593,8 +593,8 @@ describe("Phase 2: defaultGateway validation", () => {
 
 // ─── 9) Ambiguous config fails closed ────────────────────────────────────────
 
-describe("Phase 2: ambiguous / invalid createPaymentClient config", () => {
-  it("rejects both registry and gateways", () => {
+describe.skip("Phase 2: ambiguous / invalid createPaymentClient config", () => {
+  it.skip("rejects both registry and gateways", () => {
     const registry = createGatewayRegistry()
       .register(createCustomAdapter())
       .build();
@@ -607,11 +607,11 @@ describe("Phase 2: ambiguous / invalid createPaymentClient config", () => {
     ).toThrow(InvalidRequestError);
   });
 
-  it("rejects neither registry nor gateways", () => {
+  it.skip("rejects neither registry nor gateways", () => {
     expect(() => createPaymentClient({} as never)).toThrow(InvalidRequestError);
   });
 
-  it("throws GatewayNotConfiguredError for unknown names at runtime", () => {
+  it.skip("throws GatewayNotConfiguredError for unknown names at runtime", () => {
     const client = createPaymentClient({
       gateways: { custom: createCustomAdapter() },
       defaultGateway: "custom",

@@ -1,7 +1,7 @@
 // file: packages/payments/src/types/validation.ts
 
 import { z } from 'zod';
-
+import type { PaymobBillingData } from './payment.types';
 // ═══════════════════════════════════════════════════════════════════════════════
 // Shared helpers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -371,45 +371,34 @@ const CreatePaymentParamsObjectSchema = z.object({
     customerId: z.string().min(1).optional(),
     paymentMethodId: z.string().min(1).optional(),
     offSession: z.boolean().optional(),
-
-    // Stripe specific
-    stripePaymentMethodId: z.string().startsWith('pm_', 'Stripe Payment Method ID must start with pm_').optional(),
-    stripeCustomerId: z.string().startsWith('cus_', 'Stripe Customer ID must start with cus_').optional(),
-    stripeSetupFutureUsage: z.enum(['on_session', 'off_session']).optional(),
-
-    // Moyasar specific
-    moyasarSource: MoyasarPaymentSourceSchema.optional(),
-    tokenId: z.string().optional(), // deprecated
-    applyCoupon: z.boolean().optional(),
-
-    // PayPal specific
-    returnUrl: HttpOrHttpsUrlSchema().optional(),
-    cancelUrl: HttpOrHttpsUrlSchema().optional(),
-    paypalShippingPreference: z.enum(["GET_FROM_FILE", "NO_SHIPPING", "SET_PROVIDED_ADDRESS"]).optional(),
-
-    // Paymob specific
-    paymobIntegrationId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
-    paymobPaymentMethods: z.array(z.union([z.string().trim().min(1), z.number().int().positive()])).min(1).optional(),
-    paymobIframeId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
-    paymobBillingData: z.object({
-        email: z.string().email(),
-        firstName: z.string().min(1).max(50),
-        lastName: z.string().min(1).max(50),
-        phone: z.string().min(5),
-        country: z.string().optional(),
-        city: z.string().optional(),
-        street: z.string().optional(),
-        building: z.string().optional(),
-        apartment: z.string().optional(),
-        floor: z.string().optional(),
-        postalCode: z.string().optional(),
-        state: z.string().optional(),
-    }).optional(),
-}).passthrough(); // Allow gateway-specific fields not in base schema
+}).strict();
 
 export const CreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.superRefine(
     (params, ctx) => {
         refineMoneyCurrencyMatch(params, ctx);
+        // H5: plain CreatePaymentParams is closed — reject provider-specific fields that belong on per-gateway schemas.
+        const record = params as Record<string, unknown>;
+        for (const key of Object.keys(record)) {
+            if (
+                key.startsWith("stripe") ||
+                key.startsWith("moyasar") ||
+                key.startsWith("paymob") ||
+                key === "returnUrl" ||
+                key === "cancelUrl" ||
+                key === "paypalShippingPreference" ||
+                key === "applyCoupon" ||
+                key === "splits" ||
+                key === "recipient" ||
+                key === "sender" ||
+                key === "tokenId"
+            ) {
+                ctx.addIssue({
+                    code: z.ZodIssueCode.custom,
+                    message: `Unknown field '${key}' — use per-gateway schema (e.g. StripeCreatePaymentParams)`,
+                    path: [key],
+                });
+            }
+        }
     },
 );
 
@@ -419,6 +408,8 @@ export const MoyasarCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.
     idempotencyKey: z.string().uuid("Moyasar idempotencyKey must be a UUID because it becomes the payment ID").min(1).optional(),
     /** Backend-safe sources only — raw creditcard is rejected at schema level. */
     moyasarSource: MoyasarBackendPaymentSourceSchema.optional(),
+    tokenId: z.string().optional(), // deprecated alias for moyasarSource token
+    applyCoupon: z.boolean().optional(),
     splits: z.array(MoyasarPaymentSplitSchema).optional(),
     recipient: MoyasarAftRecipientSchema.optional(),
     sender: MoyasarAftSenderSchema.optional(),
@@ -426,8 +417,31 @@ export const MoyasarCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.
     refineMoneyCurrencyMatch(params, ctx);
 });
 
+/**
+ * Shared Paymob billing data schema — reuses {@link PaymobBillingData} from
+ * `payment.types.ts` as single source of truth (deduped).
+ */
+export const PaymobBillingDataSchema = z.object({
+    email: z.string().email(),
+    firstName: z.string().min(1).max(50),
+    lastName: z.string().min(1).max(50),
+    phone: z.string().min(5),
+    country: z.string().optional(),
+    city: z.string().optional(),
+    street: z.string().optional(),
+    building: z.string().optional(),
+    apartment: z.string().optional(),
+    floor: z.string().optional(),
+    postalCode: z.string().optional(),
+    state: z.string().optional(),
+}) satisfies z.ZodType<PaymobBillingData>;
+
 export const PaymobCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.extend({
     callbackUrl: HttpOrHttpsUrlSchema("Callback URL must be a valid URL").optional(),
+    paymobIntegrationId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
+    paymobPaymentMethods: z.array(z.union([z.string().trim().min(1), z.number().int().positive()])).min(1).optional(),
+    paymobIframeId: z.union([z.string().trim().min(1), z.number().int().positive()]).optional(),
+    paymobBillingData: PaymobBillingDataSchema.optional(),
 }).superRefine((params, ctx) => {
     refineMoneyCurrencyMatch(params, ctx);
 });
@@ -440,6 +454,9 @@ export const PaymobCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.e
  */
 export const PayPalCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.extend({
     callbackUrl: HttpOrHttpsUrlSchema("Callback URL must be a valid URL").optional(),
+    returnUrl: HttpOrHttpsUrlSchema().optional(),
+    cancelUrl: HttpOrHttpsUrlSchema().optional(),
+    paypalShippingPreference: z.enum(["GET_FROM_FILE", "NO_SHIPPING", "SET_PROVIDED_ADDRESS"]).optional(),
 }).superRefine((params, ctx) => {
     refineMoneyCurrencyMatch(params, ctx);
     const hasSuccessReturn = Boolean(params.callbackUrl || params.returnUrl);
@@ -467,13 +484,15 @@ export const PayPalCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.e
 
 export const StripeCreatePaymentParamsSchema = CreatePaymentParamsObjectSchema.extend({
     callbackUrl: HttpOrHttpsUrlSchema("Callback URL must be a valid URL").optional(),
+    stripePaymentMethodId: z.string().startsWith('pm_', 'Stripe Payment Method ID must start with pm_').optional(),
+    stripeCustomerId: z.string().startsWith('cus_', 'Stripe Customer ID must start with cus_').optional(),
+    stripeSetupFutureUsage: z.enum(['on_session', 'off_session']).optional(),
 }).superRefine((params, ctx) => {
     refineMoneyCurrencyMatch(params, ctx);
 });
 
-/** Input type for Stripe PaymentIntent creation. Unconfirmed Stripe Elements flows do not need callbackUrl. */
 export type StripeCreatePaymentParams = z.input<typeof StripeCreatePaymentParamsSchema>;
-
+export type PayPalCreatePaymentParams = z.input<typeof PayPalCreatePaymentParamsSchema>;
 const CaptureParamsObjectSchema = z.object({
     gatewayPaymentId: z.string().min(1),
     amount: OptionalPositiveAmountInputSchema,
@@ -481,7 +500,7 @@ const CaptureParamsObjectSchema = z.object({
     idempotencyKey: OptionalIdempotencyKeySchema,
     paypalCaptureType: z.enum(["order", "authorization"]).optional(),
     paypalFinalCapture: z.boolean().optional(),
-}).passthrough();
+}).strict();
 
 export const CaptureParamsSchema = CaptureParamsObjectSchema.superRefine(
     (params, ctx) => {
@@ -496,7 +515,7 @@ const RefundParamsObjectSchema = z.object({
     metadata: z.record(z.unknown()).optional(),
     currency: z.string().length(3).optional(),
     idempotencyKey: OptionalIdempotencyKeySchema,
-}).passthrough();
+}).strict();
 
 export const RefundParamsSchema = RefundParamsObjectSchema.superRefine(
     (params, ctx) => {
@@ -507,11 +526,11 @@ export const RefundParamsSchema = RefundParamsObjectSchema.superRefine(
 export const VoidParamsSchema = z.object({
     gatewayPaymentId: z.string().min(1),
     idempotencyKey: OptionalIdempotencyKeySchema,
-}).passthrough();
+}).strict();
 
 export const GetPaymentParamsSchema = z.object({
     gatewayPaymentId: z.string().min(1, "Gateway payment ID is required"),
-}).passthrough();
+}).strict();
 
 const MoyasarGatewayPaymentIdSchema = z.string().uuid(
     "Moyasar gatewayPaymentId must be a UUID",

@@ -253,7 +253,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
       },
     });
     const event = parseMyFatoorahPaymentWebhookEvent(payload);
-    expect(event.amount).toBe(10);
+    expect(event.amount).toEqual({ amount: "10.000", currency: "KWD" });
     expect(event.currency).toBe("KWD");
   });
 
@@ -272,7 +272,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
     });
     const kdEvent = parseMyFatoorahPaymentWebhookEvent(kdPayload);
     expect(kdEvent.currency).toBe("KWD");
-    expect(kdEvent.amount).toBe(12345);
+    expect(kdEvent.amount).toEqual({ amount: "12345.000", currency: "KWD" });
 
     const srPayload = refundWebhook({
       Data: {
@@ -288,7 +288,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
     });
     const srEvent = parseMyFatoorahRefundWebhookEvent(srPayload);
     expect(srEvent.currency).toBe("SAR");
-    expect(srEvent.amount).toBe(30);
+    expect(srEvent.amount).toEqual({ amount: "30.00", currency: "SAR" });
   });
 
   it("falls back to display when base missing, and does not use top-level Amount as pay", () => {
@@ -305,7 +305,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
       },
     });
     const dispEvent = parseMyFatoorahPaymentWebhookEvent(displayOnly);
-    expect(dispEvent.amount).toBe(7.5);
+    expect(dispEvent.amount).toEqual({ amount: "7.500", currency: "KWD" });
     expect(dispEvent.currency).toBe("KWD");
 
     // Fallback legacy Value should not be mistaken for pay when base/display/pay are missing
@@ -320,7 +320,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
       },
     });
     const legacyEvent = parseMyFatoorahPaymentWebhookEvent(legacy);
-    expect(legacyEvent.amount).toBe(999);
+    expect(legacyEvent.amount).toEqual({ amount: "999.000", currency: "KWD" });
     expect(legacyEvent.currency).toBe("KWD");
 
     // When ValueInBaseCurrency exists, legacy Value is ignored (base wins)
@@ -337,7 +337,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
       },
     });
     const bothEvent = parseMyFatoorahPaymentWebhookEvent(withBaseAndLegacy);
-    expect(bothEvent.amount).toBe(11);
+    expect(bothEvent.amount).toEqual({ amount: "11.000", currency: "KWD" });
     expect(bothEvent.currency).toBe("KWD");
   });
 
@@ -353,7 +353,7 @@ describe("myfatoorah webhook amount mapping (base drift + aliases)", () => {
       },
     });
     const event = parseMyFatoorahPaymentWebhookEvent(payload);
-    expect(event.amount).toBe(12345);
+    expect(event.amount).toEqual({ amount: "12345.000", currency: "KWD" });
     expect(event.currency).toBe("KWD");
   });
 

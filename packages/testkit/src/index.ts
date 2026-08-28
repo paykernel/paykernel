@@ -20,7 +20,6 @@ export type {
   ScriptedOutcomeName,
   ScriptedPaymentOutcome,
   ScriptedRefundOutcome,
-  ScriptedStep,
   ScriptedThrowStep,
   ScriptedWebhookEvent,
   ScriptedOutcomeBase,

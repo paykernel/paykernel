@@ -2,6 +2,7 @@ import {
   attachPaymentEvent,
   hashWebhookPayload,
   InvalidRequestError,
+  type Money,
   type PaymentStatus,
   type WebhookEvent,
 } from "@paykernel/core";
@@ -139,18 +140,18 @@ export function withRelatedIdsOnPaymentEvent(
  */
 function webhookMoneyFromAmountRecord(
   amount: unknown,
-): { amount: number; currency: string } | undefined {
+): { amount: Money; currency: string } | undefined {
   const rec = asRecord(amount);
   const tryParse = (
     value: unknown,
     currency: unknown,
-  ): { amount: number; currency: string } | undefined => {
+  ): { amount: Money; currency: string } | undefined => {
     const normalized = normalizeMyFatoorahCurrency(currency);
     if (normalized === undefined) return undefined;
     if (value === undefined || value === null) return undefined;
     try {
       const money = parseMyFatoorahAmount(value, normalized);
-      return { amount: myFatoorahMajorNumber(money, normalized), currency: normalized };
+      return { amount: money, currency: normalized };
     } catch {
       return undefined;
     }
@@ -274,7 +275,15 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
   if (refundId === undefined) {
     throw new InvalidRequestError("MyFatoorah webhook missing Refund.Id");
   }
-  const status = mapMyFatoorahRefundPaymentStatus(refund.Status);
+  const gatewayStatus = mapMyFatoorahRefundPaymentStatus(refund.Status);
+  const statusForWebhook: import("@paykernel/core").WebhookEnvelopeStatus =
+    gatewayStatus === "refund_pending"
+      ? "pending"
+      : gatewayStatus === "refund_failed"
+        ? "failed"
+        : (gatewayStatus as unknown as import("@paykernel/core").WebhookEnvelopeStatus);
+  const status = gatewayStatus;
+  const statusForLegacy = statusForWebhook;
   const nativeType = `refund.${typeof refund.Status === "string" ? refund.Status : "UNKNOWN"}`;
   const stable = inferMyFatoorahStableType("refund", status);
   const timestamp = myFatoorahWebhookTimestamp(normalized);
@@ -296,7 +305,7 @@ export function parseMyFatoorahRefundWebhookEvent(payload: unknown): WebhookEven
     paymentId: referencedExternalId,
     gatewayPaymentId: invoiceId,
     gatewayObjectId: refundId,
-    status,
+    status: statusForLegacy,
     timestamp,
     rawPayload: normalized,
     ...(refundMoney !== undefined

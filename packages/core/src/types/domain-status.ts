@@ -68,6 +68,28 @@ export type SetupTokenStatus =
     | "cancelled";
 
 /**
+ * Webhook envelope status (payment or refund or setup token).
+ * Used for {@link import('./webhook.types').WebhookEvent.status}.
+ */
+export type WebhookEnvelopeStatus = PaymentDomainStatus | RefundDomainStatus | SetupTokenStatus;
+
+/**
+ * Gateway payment status — payment, refund, or setup token.
+ * Used for {@link import('./payment.types').GatewayPaymentResult.status} so gateway
+ * internal mapping can represent refund/setup outcomes (e.g. `setup_completed`,
+ * `refund_pending`) without `as any` casts. Prefer {@link WebhookEnvelopeStatus}
+ * as an alias; this type exists to make gateway mapping intent explicit.
+ * Legacy aliases (`refund_completed` etc.) are retained for gateway internal
+ * mapping until all callers migrate to domain statuses.
+ */
+export type GatewayPaymentStatus =
+    | WebhookEnvelopeStatus
+    | "refund_pending"
+    | "refund_completed"
+    | "refund_failed"
+    | "setup_completed";
+
+/**
  * Dispute / chargeback lifecycle (normalized).
  *
  * Includes Stripe early-fraud-warning (`warning_*`) arms. Native provider

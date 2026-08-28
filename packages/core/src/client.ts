@@ -16,8 +16,8 @@ import type {
   MoyasarCreatePaymentParams,
   PaymobCreatePaymentParams,
   PayPalCreatePaymentParams,
-  PaymentStatus,
 } from "./types/payment.types";
+import type { GatewayPaymentStatus } from "./types/domain-status";
 import type {
   AttachPaymentMethodParams,
   CreateCustomerParams,
@@ -56,7 +56,6 @@ import {
 } from "./types/payment-event";
 import type {
   CreatePaymentClientOptions,
-  PaymentClientConfig,
 } from "./types/config.types";
 import type {
   CreateCheckoutSessionParams,
@@ -64,11 +63,11 @@ import type {
 } from "./types/validation";
 import type { PaymentHooks } from "./hooks/hooks.types";
 import { HooksManager } from "./hooks/hooks.manager";
-import { MoyasarGateway } from "./gateways/moyasar/moyasar.gateway";
-import { PayPalGateway } from "./gateways/paypal/paypal.gateway";
-import { PaymobGateway } from "./gateways/paymob/paymob.gateway";
+import type { MoyasarGateway } from "./gateways/moyasar/moyasar.gateway";
+import type { PayPalGateway } from "./gateways/paypal/paypal.gateway";
+import type { PaymobGateway } from "./gateways/paymob/paymob.gateway";
+import type { StripeGateway } from "./gateways/stripe/stripe.gateway";
 import {
-  StripeGateway,
   demoteIncompleteRefundWebhookDualWrite,
   demoteIncompleteSettledWebhookDualWrite,
 } from "./gateways/stripe/stripe.gateway";
@@ -389,20 +388,28 @@ function nonEmptyString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-/** Stored method id for off-session create — common field or Stripe convenience field. */
+/** Stored method id for off-session create — common field plus Stripe convenience fields (singleton stripe map or TDefault stripe). */
 function storedPaymentMethodRef(params: CreatePaymentParams): string | undefined {
-  return (
-    nonEmptyString(params.paymentMethodId) ??
-    nonEmptyString(params.stripePaymentMethodId)
-  );
+  const base = nonEmptyString(params.paymentMethodId);
+  if (base !== undefined) return base;
+  // Stripe convenience: read via cast union when TDefault is stripe or singleton stripe map.
+  // Base type doesn't carry stripePaymentMethodId, so we duck-read it without widening the public type.
+  const record = params as unknown as Record<string, unknown>;
+  const stripe = record["stripePaymentMethodId"];
+  const stripeStr = nonEmptyString(stripe);
+  if (stripeStr !== undefined) return stripeStr;
+  return undefined;
 }
 
-/** Customer id for off-session create — common field or Stripe convenience field. */
+/** Customer id for off-session create — common field plus Stripe convenience. */
 function storedCustomerRef(params: CreatePaymentParams): string | undefined {
-  return (
-    nonEmptyString(params.customerId) ??
-    nonEmptyString(params.stripeCustomerId)
-  );
+  const base = nonEmptyString(params.customerId);
+  if (base !== undefined) return base;
+  const record = params as unknown as Record<string, unknown>;
+  const stripe = record["stripeCustomerId"];
+  const stripeStr = nonEmptyString(stripe);
+  if (stripeStr !== undefined) return stripeStr;
+  return undefined;
 }
 
 /**
@@ -436,26 +443,16 @@ function isPluginInitBag(config: unknown): config is PluginInitBag {
 /**
  * Main payment client that orchestrates gateway operations with lifecycle hooks.
  *
- * Prefer {@link createPaymentClient} with a registry or adapters map for new
- * code (typed custom gateways). The constructor accepts the legacy
- * provider-key config and remains supported through 0.x.
+ * Constructed via {@link createPaymentClient} only.
  *
  * @typeParam TGateways - Map of registered gateway name → instance type
  *
- * @example Preferred (plugin / registry)
+ * @example
  * ```typescript
  * const client = createPaymentClient({
  *   gateways: {
  *     moyasar: moyasarGateway({ secretKey: 'sk_...' }),
  *   },
- *   defaultGateway: 'moyasar',
- * });
- * ```
- *
- * @example Legacy (deprecated)
- * ```typescript
- * const client = new PaymentClient({
- *   moyasar: { secretKey: 'sk_...' },
  *   defaultGateway: 'moyasar',
  * });
  * ```
@@ -531,106 +528,23 @@ export class PaymentClient<
    * });
    * ```
    */
-  constructor(config: PaymentClientConfig) {
-    // Internal plugin path (createPaymentClient) — brand-tagged bag
-    if (isPluginInitBag(config)) {
-      const options = config.options as CreatePaymentClientOptions<TGateways>;
-      this.defaultGateway = options.defaultGateway as
-        | (keyof TGateways & string)
-        | undefined;
-      this.logger = options.logger
-        ? createRedactingLogger(options.logger)
-        : noopLogger;
-      this.hooksManager = new HooksManager(options.hooks, this.logger);
-      this.installPartialMoneyCapabilityGuards();
-      this.initFromPlugin(options);
-      return;
+  private constructor(config: PluginInitBag) {
+    if (!isPluginInitBag(config)) {
+      throw new InvalidRequestError("PaymentClient is constructed via createPaymentClient only");
     }
-
-    this.defaultGateway = config.defaultGateway as
+    const options = config.options as CreatePaymentClientOptions<TGateways>;
+    this.defaultGateway = options.defaultGateway as
       | (keyof TGateways & string)
       | undefined;
-    this.logger = config.logger
-      ? createRedactingLogger(config.logger)
+    this.logger = options.logger
+      ? createRedactingLogger(options.logger)
       : noopLogger;
-    // Pass redacting logger so after-hook isolation (proceed:false / throws) is observable
-    this.hooksManager = new HooksManager(config.hooks, this.logger);
+    this.hooksManager = new HooksManager(options.hooks, this.logger);
     this.installPartialMoneyCapabilityGuards();
-
-    PaymentClient.assertGatewayCredentials(config);
-
-    const logger = config.logger;
-    // Phase 8: optional runtime bag for legacy constructor (exactOptionalPropertyTypes-safe).
-    const runtime = config.runtime;
-
-    if (config.moyasar) {
-      this.gateways.set(
-        "moyasar",
-        new MoyasarGateway(
-          config.moyasar,
-          this.hooksManager,
-          logger,
-          runtime,
-        ),
-      );
-    }
-
-    if (config.paypal) {
-      this.gateways.set(
-        "paypal",
-        new PayPalGateway(
-          config.paypal,
-          this.hooksManager,
-          logger,
-          runtime,
-        ),
-      );
-    }
-
-    if (config.paymob) {
-      this.gateways.set(
-        "paymob",
-        new PaymobGateway(
-          config.paymob,
-          this.hooksManager,
-          logger,
-          runtime,
-        ),
-      );
-    }
-
-    if (config.stripe) {
-      this.gateways.set(
-        "stripe",
-        new StripeGateway(
-          config.stripe,
-          this.hooksManager,
-          logger,
-          runtime,
-        ),
-      );
-    }
-
-    if (
-      this.defaultGateway !== undefined &&
-      !this.gateways.has(this.defaultGateway)
-    ) {
-      throw new InvalidRequestError(
-        `defaultGateway '${this.defaultGateway}' is not configured`,
-      );
-    }
+    this.initFromPlugin(options);
   }
 
-  /**
-   * Internal factory used by {@link createPaymentClient}. Not for direct
-   * public use — call `createPaymentClient` instead.
-   *
-   * Uses a brand-tagged config so the real constructor runs (class fields /
-   * `new.target` behave correctly) without exposing a second public ctor shape.
-   *
-   * @internal
-   */
-  static createFromPlugin<
+    static createFromPlugin<
     TMap extends GatewayMap,
     TDefault extends (keyof TMap & string) | undefined = undefined,
   >(
@@ -640,9 +554,7 @@ export class PaymentClient<
       [PLUGIN_INIT]: true,
       options: options as CreatePaymentClientOptions,
     };
-    return new PaymentClient(
-      bag as unknown as PaymentClientConfig,
-    ) as unknown as PaymentClient<TMap, TDefault>;
+    return new PaymentClient(bag as PluginInitBag) as unknown as PaymentClient<TMap, TDefault>;
   }
 
   /**
@@ -730,50 +642,6 @@ export class PaymentClient<
    * Webhook secrets are optional and not checked here.
    * Adapter factories validate their own config on the plugin path.
    */
-  private static assertGatewayCredentials(config: PaymentClientConfig): void {
-    const nonEmpty = (value: unknown): value is string =>
-      typeof value === "string" && value.trim().length > 0;
-
-    if (config.moyasar !== undefined) {
-      if (!nonEmpty(config.moyasar.secretKey)) {
-        throw new InvalidRequestError(
-          "moyasar.secretKey must be a non-empty string",
-        );
-      }
-    }
-
-    if (config.stripe !== undefined) {
-      if (!nonEmpty(config.stripe.secretKey)) {
-        throw new InvalidRequestError(
-          "stripe.secretKey must be a non-empty string",
-        );
-      }
-    }
-
-    if (config.paypal !== undefined) {
-      if (!nonEmpty(config.paypal.clientId)) {
-        throw new InvalidRequestError(
-          "paypal.clientId must be a non-empty string",
-        );
-      }
-      if (!nonEmpty(config.paypal.clientSecret)) {
-        throw new InvalidRequestError(
-          "paypal.clientSecret must be a non-empty string",
-        );
-      }
-    }
-
-    if (config.paymob !== undefined) {
-      const hasSecretKey = nonEmpty(config.paymob.secretKey);
-      const hasApiKey = nonEmpty(config.paymob.apiKey);
-      if (!hasSecretKey && !hasApiKey) {
-        throw new InvalidRequestError(
-          "paymob requires secretKey or apiKey as a non-empty string",
-        );
-      }
-    }
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // Gateway Access
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1002,7 +870,7 @@ export class PaymentClient<
   async getPaymentStatus(
     gatewayId: string,
     gateway?: keyof TGateways & string,
-  ): Promise<PaymentStatus> {
+  ): Promise<GatewayPaymentStatus> {
     const gw = this.resolveGateway(gateway);
     if (typeof gw.getPaymentStatus !== "function") {
       throw new OperationNotSupportedError(gw.name, "getPaymentStatus");

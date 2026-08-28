@@ -1,6 +1,5 @@
 // file: packages/payments/src/types/config.types.ts
 
-import type { GatewayName } from './payment.types';
 import type { PaymentHooks } from '../hooks/hooks.types';
 import type { IdempotencyStore } from '../utils/idempotency';
 import type { Logger } from '../utils/logger';
@@ -20,12 +19,6 @@ export interface MoyasarConfig {
      * Not used by this SDK backend.
      */
     publishableKey?: string;
-    /**
-     * @deprecated Ignored. Moyasar test vs live is determined solely by the
-     * secret key prefix (`sk_test_…` vs `sk_live_…`), not a sandbox flag.
-     * Kept only for config-shape compatibility with other gateways.
-     */
-    sandbox?: boolean;
     /** Webhook secret for verification */
     webhookSecret?: string;
     /** Request timeout in milliseconds. Default: 30000 */
@@ -78,12 +71,12 @@ export interface PaymobIdempotencyRecord {
 
 export interface PaymobIdempotencyStore {
     /**
-     * Optional atomic reservation. Implement with Redis SET NX, a database unique
+     * Atomic reservation. Implement with Redis SET NX, a database unique
      * constraint, or equivalent to prevent duplicate cross-worker API calls.
      * Return an existing record when the key is already reserved, otherwise store
      * the supplied in-progress record and return undefined.
      */
-    reserve?(key: string, record: PaymobIdempotencyRecord): MaybePromise<PaymobIdempotencyRecord | undefined>;
+    reserve(key: string, record: PaymobIdempotencyRecord): MaybePromise<PaymobIdempotencyRecord | undefined>;
     get(key: string): MaybePromise<PaymobIdempotencyRecord | undefined>;
     set(key: string, record: PaymobIdempotencyRecord): MaybePromise<void>;
     delete(key: string): MaybePromise<void>;
@@ -193,45 +186,6 @@ export interface StripeConfig {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type GatewayConfig = Record<string, any>;
 
-/**
- * Legacy `new PaymentClient({ moyasar, stripe, ... })` configuration.
- *
- * @deprecated Prefer {@link CreatePaymentClientOptions} with
- * `createPaymentClient({ gateways | registry })` and first-party adapters
- * (`stripeGateway`, `moyasarGateway`, …). This shape remains supported
- * through 0.x for migration.
- */
-export interface PaymentClientConfig {
-    /** Moyasar gateway configuration */
-    moyasar?: MoyasarConfig;
-    /** PayPal gateway configuration */
-    paypal?: PayPalConfig;
-    /** Paymob gateway configuration */
-    paymob?: PaymobConfig;
-    /** Stripe gateway configuration */
-    stripe?: StripeConfig;
-
-    /** Global lifecycle hooks */
-    hooks?: PaymentHooks;
-
-    /** Default gateway to use when not specified */
-    defaultGateway?: GatewayName;
-
-    /**
-     * Optional logger. All gateway logging is routed through this and secrets/PII
-     * are redacted before being passed to it. Defaults to a no-op (the SDK is
-     * silent unless a logger is provided).
-     */
-    logger?: Logger;
-
-    /**
-     * Optional portable runtime overrides (fetch / crypto / clock / randomUUID).
-     * Forwarded to each built-in gateway constructor (Phase 8). Prefer
-     * `createPaymentClient({ runtime })` for the plugin path.
-     * Omit keys (exactOptionalPropertyTypes) rather than assigning `undefined`.
-     */
-    runtime?: Partial<PaymentRuntime>;
-}
 
 /**
  * Map of gateway name → adapter. Keys must equal each adapter's `name`.

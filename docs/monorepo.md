@@ -43,6 +43,12 @@ paykernel/                         # private workspace root (not published)
 │   │   ├── docs/                     # overview, routing-inputs, selection, safe-fallback, telemetry
 │   │   ├── package.json              # paymentsSdk.portable: true; depends on core only
 │   │   └── README.md
+│   ├── gateway-myfatoorah/           # @paykernel/gateway-myfatoorah (Phase 23; portable MyFatoorah adapter; not a built-in)
+│   │   ├── src/                      # gateway, types, money, idempotency, docs
+│   │   ├── dist/
+│   │   ├── docs/                     # overview, charges, refunds, webhooks, ...
+│   │   ├── package.json              # paymentsSdk.portable: true; depends on core only
+│   │   └── README.md
 │   ├── store-contracts/              # @paykernel/store-contracts (portable; publishable)
 │   │   ├── src/                      # lease-aware contracts + StoreError + manifests
 │   │   ├── dist/
@@ -99,15 +105,10 @@ paykernel/                         # private workspace root (not published)
 │       ├── examples/                 # wrangler.toml (new_sqlite_classes)
 │       ├── package.json              # paymentsSdk.runtime: cloudflare-only
 │       └── README.md
-├── internal/
-│   └── sql-store/                    # @paykernel/internal-sql-store (private thin re-export of sql-foundation)
-│       ├── src/                      # re-export barrel only
-│       ├── dist/
-│       ├── package.json              # private: true — never publish
-│       └── README.md
 ├── examples/                         # private consumer apps (not published)
 │   ├── checkout-kernel/              # @paykernel/example-checkout-kernel (shared composition)
 │   ├── bun-hono-sqlite/              # thin Hono fetch host (via integration-hono)
+│   ├── bun-hono-postgres/            # RC Postgres host (store-postgres/pg, describe.skipIf)
 │   ├── bun-elysia-sqlite/            # thin Elysia fetch host (via integration-elysia)
 │   ├── express-sqlite/               # thin Express host (via integration-express, ephemeral loopback listen(0) — no fixed port)
 │   └── cloudflare-workers-fetch/     # thin Workers fetch host (via integration-cloudflare-workers, production D1/DO via createCheckoutKernel({ stores | storeFactory | executor }))
@@ -190,8 +191,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 
 | Command                            | Purpose                                                                                      |
 | ---------------------------------- | -------------------------------------------------------------------------------------------- |
-| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → integration-http → integration-hono/elysia/express/cloudflare-workers → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
-| `bun run build:types`              | Emit declaration files (same order, including reconciliation, observability, routing, and adapters) |
+| `bun run build`                    | Build core → webhooks → reconciliation → observability → routing → gateway-tap → gateway-myfatoorah → integration-http → integration-hono/elysia/express/cloudflare-workers → store-contracts → testkit → sql-foundation → internal-sql-store → store-postgres → store-redis → store-sqlite → store-turso → store-d1 → store-durable-objects |
 | `bun test`                         | Run core + store-contracts + testkit + webhooks + reconciliation + observability + routing + sql-foundation + internal-sql-store + store-* adapters + `examples` |
 | `bun run test:examples`            | Example apps only (`bun test examples`)                                                      |
 | `bun run test:coverage`            | Core tests with coverage thresholds (`bunfig.toml`; core-focused)                            |
@@ -218,7 +218,7 @@ Root scripts forward into workspace packages so Phase 0 command names stay stabl
 | `bun run baseline`                 | Regenerate Phase 0 API + package baselines                                                   |
 | `bun run changeset`                | Record a Changeset for the next release                                                      |
 
-**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only), then `integration-http` (core + webhooks), then `integration-hono`/`integration-elysia`/`integration-express`/`integration-cloudflare-workers` (each depends on integration-http only), then `store-contracts` (zero workspace deps), then `testkit` (core + webhooks + reconciliation + store-contracts; re-exports contracts for BC), then `sql-foundation` (publishable relational foundation), then `internal/sql-store` (private thin re-export), then `store-postgres` / `store-sqlite` / `store-turso` / `store-d1` / `store-durable-objects` (runtime: store-contracts + sql-foundation; testkit dev-only), then `store-redis` (runtime: store-contracts only; **not** sql-foundation).
+**Build order:** `core` first (no internal workspace deps), then `webhooks` (depends on core), then `reconciliation` (depends on core only), then `observability` (depends on core only; optional peer `@opentelemetry/api`), then `routing` (depends on core only), then `gateway-tap` / `gateway-myfatoorah` (each depends on core only), then `integration-http` (core + webhooks), then `integration-hono`/`integration-elysia`/`integration-express`/`integration-cloudflare-workers` (each depends on integration-http only), then `store-contracts` (zero workspace deps), then `testkit` (core + webhooks + reconciliation + store-contracts; re-exports contracts for BC), then `sql-foundation` (publishable relational foundation), then `internal/sql-store` (private thin re-export), then `store-postgres` / `store-sqlite` / `store-turso` / `store-d1` …
 
 Package-local work:
 

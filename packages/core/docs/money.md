@@ -43,7 +43,7 @@ formatMoney(amount); // "10.50 SAR"
 | `DecimalString` | Clean decimal text (`"10.50"`, `"100"`, `"-1.250"`) |
 | `Money` | `{ readonly amount: DecimalString; readonly currency: string; readonly exponent?: number }` |
 | `MinorAmount` | `bigint` integer minor units (internal / provider integer APIs) |
-| `AmountInput` | `number \| Money` — create/capture/refund/checkout input union in 0.x |
+| `AmountInput` | `Money` — create/capture/refund/checkout input union in 1.0 (use `money()` to build) |
 | `MoneyRoundingMode` | `'reject' \| 'half_up' \| 'half_even' \| 'floor' \| 'ceil' \| 'trunc'` |
 | `CurrencyExponentOverrides` | `Readonly<Record<string, number>>` merchant/provider maps |
 
@@ -167,27 +167,19 @@ Zod create/capture/refund amount schemas keep optional `Money.exponent` so a
 gateway parse cannot strip a merchant scale (e.g. `money("20.12", "OMR",
 { exponentOverrides: { OMR: 2 } })` stays 2012 minors, not ISO 20120).
 
-## 0.x migration from `number`
+## 1.0 migration from `number`
 
 ### Inputs (`CreatePaymentParams` / capture / refund / splits / checkout)
 
-Dual-accept (`number | Money`) applies to:
+In **1.0**, payment APIs accept `Money` only (`AmountInput = Money`):
 
 - **Create / capture / refund** amount fields
 - **Marketplace splits** (Moyasar split `amount`; may be negative where reverse splits apply)
 - **Stripe Checkout** simple-session `CreateCheckoutSessionParams.amount` and
   line-item `priceData.amount` (major units; `priceData.amount` also allows **zero**
-  for free trials — still dual-accept)
+  for free trials — Money only)
 
 ```ts
-// Deprecated but still accepted
-await client.createPayment({
-  amount: 10.5,
-  currency: "SAR",
-  callbackUrl: "https://example.com/cb",
-});
-
-// Preferred
 import { money } from "@paykernel/core";
 
 await client.createPayment({
@@ -204,7 +196,7 @@ await stripe.createCheckoutSession({
 });
 ```
 
-`AmountInput = number | Money`. Gateway code should normalize at the boundary:
+`AmountInput = Money`. Gateway code should normalize at the boundary:
 
 ```ts
 import { normalizeAmountInput, toMinorUnits, minorAmountToNumber } from "@paykernel/core";
@@ -215,34 +207,35 @@ const minor = toMinorUnits(m); // bigint
 const stripeCents = minorAmountToNumber(minor);
 ```
 
+> **Note:** `money(number)` still constructs `Money` (e.g. `money(10.5, "SAR")` → `money("10.50","SAR")`) but **payment APIs reject `number`** — pass `Money` only. See [Migrating to 1.0](../../../docs/migrations/1.0.md#2-numeric-amounts--money). `moneyToMajorNumber` is display-only (float risk — do not use for ledgering).
+
 ### Results (`GatewayPaymentResult.amount`, etc.)
 
-In **0.x**, result money fields remain major-unit **`number`** for shape
-stability. They are derived via shared `fromMinorUnits` + safe conversion.
+In **1.0**, result money fields are `Money | undefined` (canonical decimal strings). They are derived via shared `fromMinorUnits`.
 Do not treat them as exact decimal storage; prefer webhooks / minor units for
-ledgering. A future 1.0 may switch result amounts to `Money`.
+ledgering. `moneyToMajorNumber` remains exported for **display only** (float risk).
 
-### Deprecated number rules
+### Number handling in 1.0
 
-- Prefer **string** majors always.
-- Clean decimals like `10.5` / `99.99` still work.
+- Payment APIs accept **only** `Money` — `number` inputs throw `MoneyAmountError` / `InvalidRequestError`.
+- `money(number, currency)` still constructs `Money` for ergonomic use (e.g. tests), but do not pass `number` directly to `createPayment` / `capture` / `refund` / checkout.
 - Float noise (`0.1 + 0.2`) fails default `reject` precision checks — intentional.
 - Values outside `Number.MAX_SAFE_INTEGER` must use decimal strings / bigint minors.
-- `moneyToMajorNumber` exists only for legacy interop; document float risk.
+- `moneyToMajorNumber(m)` is display-only; document float risk.
 
 ## Helper reference
 
 | Function | Purpose |
 | --- | --- |
-| `money(amount, currency, options?)` | Build canonical `Money` |
+| `money(amount, currency, options?)` | Build canonical `Money` (accepts `string` or `number` for construction; payment APIs require `Money`) |
 | `isMoney(value)` | Type guard (present `exponent` must be integer 0–18) |
 | `toMinorUnits(...)` | Major → `bigint` minor |
 | `fromMinorUnits(minor, currency, options?)` | Minor → `Money` |
-| `normalizeAmountInput(input, currency, options?)` | `number \| Money` → `Money` (currency match required) |
+| `normalizeAmountInput(input, currency, options?)` | `Money` → `Money` (currency match required; `number` throws in 1.0) |
 | `validateMoney(value, options?)` | Re-parse unknown → canonical `Money` |
 | `formatMoney(m)` | `"10.50 SAR"` |
 | `minorAmountToNumber(minor)` | Safe bigint → number (throws if unsafe) |
-| `moneyToMajorNumber(m)` | Legacy major `number` (float risk) |
+| `moneyToMajorNumber(m)` | Display-only major `number` (float risk — not for ledgering) |
 | `MoneyAmountError` | Structured amount failure (`kind` for remapping) |
 | `getCurrencyExponent(code, overrides?)` | ISO (+ overrides) exponent (override > 18 throws) |
 | `isKnownCurrencyCode(code)` | True when the code is in the SDK ISO tables |
@@ -256,6 +249,6 @@ stable `kind` (`excess_precision`, `zero`, `negative`, `unsafe_range`,
 ## What this does *not* do
 
 - Does not collapse Stripe / PayPal / Paymob special currency tables into ISO-only lookup.
-- Does not put `bigint` on public payment results in 0.x.
-- Does not change webhook payloads or start Phase 6 outcome unions.
-- Does not remove `number` amount acceptance in 0.x (deprecated path only).
+- Does not put `bigint` on public payment results (results are `Money` with decimal strings, minors stay internal).
+- Does not change webhook payloads beyond Money-typed amounts (`WebhookEvent.amount` is `Money | undefined` in 1.0).
+- Does not accept `number` amount inputs on payment APIs in 1.0.

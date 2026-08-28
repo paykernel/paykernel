@@ -5,19 +5,21 @@ The Stripe gateway supports PaymentIntents, hosted Checkout Sessions, customers 
 ## Configuration
 
 ```typescript
-import { PaymentClient } from '@paykernel/core';
+import { createPaymentClient, stripeGateway } from '@paykernel/core';
 
-const client = new PaymentClient({
-    stripe: {
-        secretKey: process.env.STRIPE_SECRET_KEY!,
-        publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
-        webhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
-        // Optional. Defaults to the SDK's pinned Stripe API version.
-        apiVersion: '2026-02-25.clover',
-        // Optional. Defaults to 30000.
-        timeoutMs: 30000,
-    },
-    defaultGateway: 'stripe',
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: process.env.STRIPE_SECRET_KEY!,
+      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY,
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
+      // Optional. Defaults to the SDK's pinned Stripe API version.
+      apiVersion: '2026-02-25.clover',
+      // Optional. Defaults to 30000.
+      timeoutMs: 30000,
+    }),
+  },
+  defaultGateway: 'stripe',
 });
 ```
 
@@ -28,10 +30,12 @@ Missing `webhookSecret` throws `InvalidRequestError` (operator configuration) ra
 Use PaymentIntents when you have a custom Stripe Elements flow. The SDK returns `clientSecret` so the frontend can complete confirmation or required customer actions.
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const stripe = client.gateway('stripe');
 
 const result = await stripe.createPayment({
-    amount: 50,
+    amount: money("50", "USD"),
     currency: 'USD',
     callbackUrl: 'https://example.com/stripe/return',
     description: 'Order #1234',
@@ -45,8 +49,7 @@ const result = await stripe.createPayment({
 console.log(result.gatewayId, result.status, result.clientSecret);
 ```
 
-Amounts are passed to SDK methods in base currency units. The Stripe gateway converts them to Stripe minor units using Stripe currency rules, including zero-decimal currencies such as JPY, special whole-unit currencies such as ISK and UGX, and three-decimal currencies such as BHD, JOD, KWD, OMR, and TND.
-For three-decimal currencies Stripe requires the minor-unit amount to be divisible by 10 (0-padding on the last digit). The gateway rejects amounts that violate this rule instead of rounding them (for example `1.234 KWD` is rejected; `1.230 KWD` becomes `1230`).
+Amounts are `Money` only (e.g. `money("50","USD")`). The Stripe gateway converts them to Stripe minor units using Stripe currency rules, including zero-decimal currencies such as JPY, special whole-unit currencies such as ISK and UGX, and three-decimal currencies such as BHD, JOD, KWD, OMR, and TND.
 For charge creation, the gateway validates currency precision and Stripe's published maximum amount limits before sending the request. The default non-card cap is **8 digits** (`99_999_999` minor units); per-currency overrides never exceed the **12-digit card max** (`999_999_999_999`), including JPY and HUF. Minimum charge amounts can depend on settlement currency and conversion context, so Stripe remains the source of truth for minimum enforcement at request time.
 
 For unconfirmed Stripe Elements flows, `callbackUrl` can be omitted. When `stripePaymentMethodId` is provided, the SDK confirms the PaymentIntent immediately and sends `callbackUrl` as Stripe's `return_url` when present.
@@ -59,6 +62,8 @@ Stripe metadata values must be scalar strings, numbers, or booleans. Nested meta
 ### One-Time Payment
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const stripe = client.gateway('stripe');
 
 const result = await stripe.createCheckoutSession({
@@ -76,7 +81,7 @@ const result = await stripe.createCheckoutSession({
                     description: 'Lifetime access',
                     images: ['https://example.com/img.png'],
                 },
-                amount: 100,
+                amount: money("100", "USD"),
             },
             quantity: 1,
         },
@@ -96,8 +101,7 @@ if (result.outcome === 'succeeded') {
 ```
 
 For a simple one-item payment, you can provide `amount` and `currency` instead of `lineItems`.
-Both simple-session `amount` and line-item major-unit `priceData.amount` accept
-`AmountInput` (`number | Money`); prefer `money("100.00", "USD")`.
+Both simple-session `amount` and line-item `priceData.amount` are `Money` only; prefer `money("100.00", "USD")`.
 
 ```typescript
 const result = await stripe.createCheckoutSession({
@@ -138,8 +142,9 @@ if (result.outcome === 'succeeded') {
 ```
 
 Inline `priceData` in subscription mode must include Stripe recurring price settings.
-
 ```typescript
+import { money } from '@paykernel/core';
+
 const result = await stripe.createCheckoutSession({
     mode: 'subscription',
     successUrl: 'https://example.com/success',
@@ -150,7 +155,7 @@ const result = await stripe.createCheckoutSession({
             priceData: {
                 currency: 'USD',
                 productData: { name: 'Pro Plan' },
-                amount: 20,
+                amount: money("20", "USD"),
                 recurring: { interval: 'month' },
             },
             quantity: 1,
@@ -202,8 +207,10 @@ Stripe claims `disputes` (get/list/evidence) and `paymentLinks`. List disputes r
 ## Manual Capture
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const auth = await stripe.createPayment({
-    amount: 100,
+    amount: money("100", "USD"),
     currency: 'USD',
     callbackUrl: 'https://example.com/stripe/return',
     stripePaymentMethodId: 'pm_card_visa',
@@ -213,7 +220,7 @@ const auth = await stripe.createPayment({
 
 const capture = await stripe.capturePayment({
     gatewayPaymentId: auth.gatewayId,
-    amount: 100,
+    amount: money("100", "USD"),
     currency: 'USD',
     idempotencyKey: crypto.randomUUID(),
 });
@@ -225,9 +232,11 @@ After a successful capture, settled amount is `amount_received` → `latest_char
 ## Refunds
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const refund = await stripe.refundPayment({
     gatewayPaymentId: 'pi_1234567890', // must be pi_... — not cs_... or sub_...
-    amount: 50,
+    amount: money("50", "USD"),
     currency: 'USD',
     reason: 'requested_by_customer',
     metadata: { paymentId: 'order_1234' },

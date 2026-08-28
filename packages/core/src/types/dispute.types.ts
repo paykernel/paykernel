@@ -6,6 +6,7 @@
  * is a small common set plus a Stripe-only bag — not a fake 50-field form.
  */
 
+import type { Money } from "../utils/money";
 import type { DisputeStatus } from "./domain-status";
 import type { PaymentErrorLike } from "./operation-result";
 import type { OperationRequestOptions } from "./payment.types";
@@ -20,8 +21,8 @@ import { buildProviderReferences } from "./provider-refs";
 export type Dispute = {
   status: DisputeStatus | string;
   references: ProviderReferences;
-  amount?: number;
-  currency?: string;
+  amount?: Money | number | undefined;
+  currency?: string | undefined;
   reason?: string;
   /** ISO-8601 evidence deadline when the provider exposes one. */
   evidenceDueBy?: string;

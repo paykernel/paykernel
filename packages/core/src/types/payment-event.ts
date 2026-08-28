@@ -16,6 +16,8 @@
  */
 
 import { InvalidRequestError } from "../errors";
+import type { Money } from "../utils/money";
+import { isMoney } from "../utils/money";
 import { sha256Hex } from "../runtime/crypto-portable";
 import { unixSecondsToIso } from "../runtime/clock";
 import type {
@@ -90,8 +92,8 @@ export type PaymentFailure = PaymentDecline;
  */
 export type Refund = {
   status: RefundDomainStatus | string;
-  amount?: number;
-  currency?: string;
+  amount?: Money | undefined;
+  currency?: string | undefined;
   references: ProviderReferences;
   /** Request-local only — stripped from {@link PersistedPaymentEventEnvelope}. */
   rawResponse?: unknown;
@@ -102,8 +104,8 @@ export type Refund = {
  */
 export type Capture = {
   status: CaptureStatus | string;
-  amount?: number;
-  currency?: string;
+  amount?: Money | undefined;
+  currency?: string | undefined;
   references: ProviderReferences;
 };
 
@@ -858,18 +860,19 @@ function referencesFromWebhookEvent(
  * omitted rather than dual-written incomplete.
  */
 function moneyFieldsFromWebhook(event: WebhookEvent): {
-  amount?: number;
-  currency?: string;
+  amount?: Money | undefined;
+  currency?: string | undefined;
 } {
-  const out: { amount?: number; currency?: string } = {};
+  const out: { amount?: Money | undefined; currency?: string | undefined } = {};
   const currency =
     typeof event.currency === "string" && event.currency.trim().length > 0
       ? event.currency.trim().toUpperCase()
       : undefined;
   if (currency !== undefined) {
     out.currency = currency;
-    if (typeof event.amount === "number" && Number.isFinite(event.amount)) {
-      out.amount = event.amount;
+    const amt = event.amount as unknown;
+    if (isMoney(amt)) {
+      out.amount = amt;
     }
   }
   return out;

@@ -976,7 +976,7 @@ export class MyFatoorahGateway extends BaseGateway {
   private createResultAmount(
     transactionDetails: Record<string, unknown>,
     currency: string,
-  ): number | undefined {
+  ): import("@paykernel/core").Money | undefined {
     const amount = asRecord(transactionDetails.Amount);
     const requested = normalizeMyFatoorahCurrency(currency) ?? currency.trim().toUpperCase();
     const payCurrency =
@@ -1068,7 +1068,7 @@ export class MyFatoorahGateway extends BaseGateway {
     // Amount: MF-GETPAYMENT-BASE-MIX — never pair InvoiceValue (base) with transaction pay Currency.
     // Prefer PaidCurrency/PaidCurrencyValue, else TransationValue/Currency (transaction Currency), else InvoiceValue with base Currency field.
     let currency: string | undefined;
-    let amount: number | undefined;
+    let amount: import("@paykernel/core").Money | undefined;
     if (successTransaction !== undefined) {
       const paidCurrency = normalizeMyFatoorahCurrency(successTransaction.PaidCurrency);
       const paidValue = successTransaction.PaidCurrencyValue;
@@ -1164,13 +1164,13 @@ export class MyFatoorahGateway extends BaseGateway {
     return data.InvoiceValue;
   }
 
-  private parseMajor(value: unknown, currency: string): number | undefined {
+  private parseMajor(value: unknown, currency: string): import("@paykernel/core").Money | undefined {
     try {
       if (
         (typeof value === "number" && Number.isFinite(value)) ||
         (typeof value === "string" && value.trim().length > 0)
       ) {
-        return myFatoorahMajorNumber(parseMyFatoorahAmount(value, currency), currency);
+        return parseMyFatoorahAmount(value, currency);
       }
     } catch {
       // Unparseable invoice value: omit amount rather than guess.
@@ -1348,7 +1348,7 @@ export class MyFatoorahGateway extends BaseGateway {
   // ─── Shared validation helpers ──────────────────────────────────────────
 
   private myfatoorahOutboundMajor(
-    amount: Parameters<typeof myFatoorahMajorNumber>[0],
+    amount: import("@paykernel/core").Money,
     currency: string,
   ): number {
     const major = myFatoorahMajorNumber(amount, currency);

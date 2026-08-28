@@ -10,8 +10,11 @@
  */
 
 import type { PaymentError } from "../errors";
+import type { Money } from "../utils/money";
+import { isMoney } from "../utils/money";
 import {
     isPaidLikePaymentStatus,
+    type GatewayPaymentStatus,
     type PaymentDomainStatus,
 } from "./domain-status";
 import type {
@@ -73,27 +76,23 @@ export type PaymentErrorLike = {
 /**
  * Normalized payment snapshot embedded in operation outcomes.
  *
- * Amount fields remain major-unit `number` in 0.x (Phase 5 money model for inputs).
- *
- * **Money completeness:** major-unit amount fields without {@link currency} are
- * incomplete. {@link paymentFromGatewayResult} omits amount-like fields when
- * `currency` is missing (fail-closed) so callers never see a naked major-unit
- * number that cannot be re-scaled safely.
+ * Amount fields are {@link Money} (major units + currency). When `amount` / `fee` / `capturedAmount` / `refundedAmount` is set, `currency` must also be set for a complete snapshot.
+ * {@link paymentFromGatewayResult} omits amount-like fields when `currency` is missing (fail-closed).
  */
 export type Payment = {
     /** Normalized payment lifecycle status (domain status preferred). */
-    status: PaymentDomainStatus | PaymentStatus;
-    /** Major currency units (0.x); may become Money at 1.0 */
-    amount?: number;
+    status: GatewayPaymentStatus;
+    /** Amount as {@link Money} (major units + currency). */
+    amount?: Money | undefined;
     /** ISO 4217 code; required for a complete money snapshot when amount-like fields are set */
-    currency?: string;
+    currency?: string | undefined;
     references: ProviderReferences;
     redirectUrl?: string;
     clientSecret?: string;
     nextAction?: PaymentNextAction;
-    fee?: number;
-    capturedAmount?: number;
-    refundedAmount?: number;
+    fee?: Money | undefined;
+    capturedAmount?: Money | undefined;
+    refundedAmount?: Money | undefined;
     rawResponse?: unknown;
 };
 
@@ -157,21 +156,17 @@ function publishableCurrency(value: unknown): string | undefined {
     return trimmed.length > 0 ? trimmed.toUpperCase() : undefined;
 }
 
-function isFiniteAmount(value: unknown): value is number {
-    return typeof value === "number" && Number.isFinite(value);
-}
-
 type AmountLikeSource = {
-    amount?: number | undefined;
+    amount?: Money | undefined;
     currency?: string | undefined;
-    fee?: number | undefined;
-    capturedAmount?: number | undefined;
-    refundedAmount?: number | undefined;
+    fee?: Money | undefined;
+    capturedAmount?: Money | undefined;
+    refundedAmount?: Money | undefined;
 };
 
 /**
- * Copy currency + finite major-unit amounts together (NEW-MONEY-1).
- * Omits incomplete money (no currency, or non-finite amounts). Currency-only
+ * Copy currency + Money amounts together (1.0).
+ * Omits incomplete money (no currency or invalid Money). Currency-only
  * snapshots are still published.
  */
 function assignPublishableMoneyFields(
@@ -183,16 +178,16 @@ function assignPublishableMoneyFields(
         return;
     }
     target.currency = currency;
-    if (isFiniteAmount(source.amount)) {
+    if (isMoney(source.amount)) {
         target.amount = source.amount;
     }
-    if (isFiniteAmount(source.fee)) {
+    if (isMoney(source.fee)) {
         target.fee = source.fee;
     }
-    if (isFiniteAmount(source.capturedAmount)) {
+    if (isMoney(source.capturedAmount)) {
         target.capturedAmount = source.capturedAmount;
     }
-    if (isFiniteAmount(source.refundedAmount)) {
+    if (isMoney(source.refundedAmount)) {
         target.refundedAmount = source.refundedAmount;
     }
 }
@@ -352,9 +347,11 @@ export function inferOperationOutcome(
         return "declined";
     }
 
-    // CORE-4: paid-like / settled statuses win over residual nextAction so a
-    // leftover action blob cannot under-fulfill a already-paid snapshot.
-    if (result.success && isSettledSuccessStatus(result.status)) {
+    // Honest fallback without `success` flag: bare status drives outcome.
+    // Treat `status:paid` (and other settled statuses) as `succeeded` even
+    // without an explicit outcome — callers must not require `success` to
+    // recognize settled money. This makes the API-ok path honest per H3.
+    if (isSettledSuccessStatus(result.status)) {
         return "succeeded";
     }
 
@@ -364,45 +361,8 @@ export function inferOperationOutcome(
             result.redirectUrl.length > 0 &&
             (result.status === "pending" || result.status === "processing"));
 
-    if (hasAction && result.success) {
+    if (hasAction) {
         return "requires_action";
-    }
-
-    if (!result.success) {
-        // Cancelled/voided is not a card decline — use failed, not declined.
-        if (result.status === "cancelled") {
-            return "failed";
-        }
-        // S20-FAILED-DECLINED: bare failed (no decline object) is failed.
-        // Decline objects are handled above; do not invent a card decline.
-        if (result.status === "failed") {
-            return outcomeForFailedStatus(result);
-        }
-        // P610-INF-2 / CORE-INF-1: API-not-ok (or omitted success) with a
-        // non-terminal, pre-capture, settled, or refunded snapshot is uncertain
-        // (request may have been accepted). Do not forge a definitive failure
-        // — retry-as-failed can double-charge or double-refund.
-        if (
-            result.status === "pending" ||
-            result.status === "processing" ||
-            result.status === "approved" ||
-            result.status === "paid" ||
-            result.status === "authorized" ||
-            result.status === "partially_captured" ||
-            result.status === "refunded" ||
-            result.status === "partially_refunded" ||
-            result.status === "refund_completed" ||
-            result.status === "refund_pending" ||
-            result.status === "reversed"
-        ) {
-            return "indeterminate";
-        }
-        return "failed";
-    }
-
-    // success: true (API call completed — not necessarily paid)
-    if (isSettledSuccessStatus(result.status)) {
-        return "succeeded";
     }
 
     if (
@@ -410,36 +370,44 @@ export function inferOperationOutcome(
         result.status === "processing" ||
         result.status === "approved" ||
         result.status === "partially_captured" ||
-        result.status === "refund_completed"
+        result.status === "refund_completed" ||
+        result.status === "refund_pending"
     ) {
         // Non-terminal / pre-capture / open partial capture / incomplete refund
-        // snapshot: never succeeded.
-        // Prefer requires_action so fulfillment gates stay closed (clientSecret,
-        // bare pending intention, PayPal buyer APPROVED, leftover auth, etc.).
+        // snapshot: never succeeded. Require action so fulfillment gates stay closed.
         return "requires_action";
     }
 
-    if (result.status === "failed") {
+    if (result.status === "failed" || result.status === "refund_failed") {
         return outcomeForFailedStatus(result);
     }
 
-    // cancelled / unknown — not a successful payment capture
+    if (result.status === "cancelled") {
+        return "failed";
+    }
+
+    if (result.status === "reversed") {
+        return "failed";
+    }
+
+    // Unknown / cancelled-like — not a successful payment capture
     return "failed";
 }
 
 /**
- * Statuses where API success implies operation outcome `succeeded`.
+ * Statuses where outcome `succeeded` is implied for a settled operation.
  * Outcome-only: `isPaidOutcome` remains `paid` exclusively.
- * `setup_completed` is a successful vault/setup op — not paid-like.
+ * `setup_completed` / `succeeded` (setup token) is a successful vault/setup op — not paid-like.
  * `partially_captured` is open money — not settled-success.
  */
-function isSettledSuccessStatus(status: GatewayPaymentResult["status"]): boolean {
+function isSettledSuccessStatus(status: GatewayPaymentStatus): boolean {
     return (
         status === "paid" ||
         status === "authorized" ||
         status === "refunded" ||
         status === "partially_refunded" ||
-        status === "setup_completed"
+        status === "setup_completed" ||
+        status === "succeeded"
     );
 }
 
@@ -477,11 +445,10 @@ function coercePaymentOutcomeToGatewayStatus(
         return "indeterminate";
     }
     if (outcome === "succeeded") {
-        if (result.decline !== undefined || result.status === "failed") {
+        if (result.decline !== undefined || result.status === "failed" || result.status === "refund_failed") {
             return outcomeForFailedStatus(result);
         }
         // CORE-2: successful void is outcome succeeded + status cancelled.
-        // Bare cancelled (no explicit outcome) still fails closed via infer.
         if (result.status === "cancelled") {
             return "succeeded";
         }
@@ -490,7 +457,8 @@ function coercePaymentOutcomeToGatewayStatus(
             result.status === "processing" ||
             result.status === "approved" ||
             result.status === "partially_captured" ||
-            result.status === "refund_completed"
+            result.status === "refund_completed" ||
+            result.status === "refund_pending"
         ) {
             return "requires_action";
         }
@@ -499,22 +467,22 @@ function coercePaymentOutcomeToGatewayStatus(
     }
     if (outcome === "requires_action") {
         // NEW-CORE-10: a failed snapshot is not customer action.
-        // `successFromOutcome(requires_action)` is true — do not persist that.
-        if (result.status === "failed") {
+        if (result.status === "failed" || result.status === "refund_failed") {
             return outcomeForFailedStatus(result);
         }
         // CORE-1: partial capture is open money — Paymob/Stripe demote to
         // requires_action; do not upgrade via settled-status coerce.
         if (
             result.status === "partially_captured" ||
-            result.status === "refund_completed"
+            result.status === "refund_completed" ||
+            result.status === "refund_pending"
         ) {
             return "requires_action";
         }
         // Explicit requires_action must not under-fulfill fully settled money
-        // or completed setup (paid / authorized / refunded / partially_refunded /
-        // setup_completed).
-        if (result.success && isSettledSuccessStatus(result.status)) {
+        // or completed setup, but requires_action with paid-like status stays requires_action
+        // (isPaidOutcome will be false for requires_action).
+        if (isSettledSuccessStatus(result.status) && result.status !== "paid") {
             return "succeeded";
         }
         return outcome;
@@ -610,7 +578,7 @@ export function mapGatewayResultToOperationResult(
  */
 export type ApplyOutcomeGatewayBase = {
     gatewayId: string;
-    status: PaymentStatus;
+    status: GatewayPaymentStatus;
     rawResponse: unknown;
     // `| undefined` required under exactOptionalPropertyTypes so callers may pass
     // `value | undefined` from optional gateway fields without conditional spreads.
@@ -619,12 +587,12 @@ export type ApplyOutcomeGatewayBase = {
     captureId?: string | undefined;
     authorizationId?: string | undefined;
     redirectUrl?: string | undefined;
-    amount?: number | undefined;
+    amount?: Money | undefined;
     /** ISO 4217 code for major-unit money fields; prefer always set when amount is set. */
     currency?: string | undefined;
-    fee?: number | undefined;
-    capturedAmount?: number | undefined;
-    refundedAmount?: number | undefined;
+    fee?: Money | undefined;
+    capturedAmount?: Money | undefined;
+    refundedAmount?: Money | undefined;
     clientSecret?: string | undefined;
     nextAction?: PaymentNextAction | undefined;
     references?: ProviderReferences | undefined;
@@ -643,40 +611,22 @@ export type ApplyOutcomeGatewayBase = {
 };
 
 /**
- * Dual-write `outcome` (+ related fields) onto a {@link GatewayPaymentResult},
- * setting deprecated `success` from outcome mapping.
- *
- * ## `success` semantics (0.x compatibility)
- *
- * Historically gateways set `success: true` when the **API call completed**
- * without transport failure — **not** “customer was charged / fulfill order”.
- * That mapping is preserved:
- *
- * | outcome            | success | notes |
- * | ------------------ | ------- | ----- |
- * | `succeeded`        | `true`  | Paid-like or successful auth op |
- * | `requires_action`  | `true`  | API ok; customer action needed |
- * | `declined`         | `false` | Definitive decline |
- * | `failed`           | `false` | Definitive failure |
- * | `indeterminate`    | `false` | **Not** a decline — always set `reconciliationRequired: true` |
+ * Apply `outcome` onto a {@link GatewayPaymentResult}.
  *
  * `reconciliationRequired` is attached **only** for `outcome: 'indeterminate'`.
- * After apply, stored `outcome` matches {@link inferOperationOutcome} (do not
- * attach recon on a non-indeterminate write — that would flip infer).
+ * After apply, stored `outcome` matches {@link inferOperationOutcome}.
  *
- * **Do not fulfill on `success` alone.** Use {@link isPaidOutcome} or
+ * **Do not fulfill on `success` alone (removed in 1.0).** Use {@link isPaidOutcome} or
  * `outcome === 'succeeded'` with a paid-like {@link PaymentStatus}.
  *
- * **CORE-5:** stored `outcome` / `success` are coerced against `base.status`
- * (same family as {@link inferOperationOutcome}). `outcome: 'succeeded'` with
- * `status: 'failed'` / `'pending'` is never persisted as `success: true` +
- * `outcome: 'succeeded'`.
+ * **CORE-5:** stored `outcome` is coerced against `base.status`
+ * (same family as {@link inferOperationOutcome}).
  *
  * **NEW-CORE-6:** `declined` / `failed` with paid-like `status` is stored as
  * `succeeded` (status wins) so `isPaidOutcome` stays honest.
  *
- * **NEW-MONEY-1:** amount-like major-unit fields are copied only with a
- * non-empty `currency` and a finite number. Currency is always published
+ * **NEW-MONEY-1:** amount-like Money fields are copied only with a
+ * non-empty `currency`. Currency is always published
  * together with those amounts (currency-only snapshots are still allowed).
  */
 export function applyOutcomeToGatewayResult(
@@ -696,14 +646,12 @@ export function applyOutcomeToGatewayResult(
 ): GatewayPaymentResult {
     const decline = extras?.decline ?? base.decline;
     const storedOutcome = coercePaymentOutcomeToGatewayStatus(outcome, {
-        success: successFromOutcome(outcome),
         gatewayId: base.gatewayId,
         status: base.status,
         redirectUrl: base.redirectUrl,
         rawResponse: base.rawResponse,
         ...(decline !== undefined ? { decline } : {}),
-    });
-    const success = successFromOutcome(storedOutcome);
+    } as unknown as GatewayPaymentResult);
 
     const references =
         base.references ??
@@ -737,7 +685,6 @@ export function applyOutcomeToGatewayResult(
         });
 
     const result: GatewayPaymentResult = {
-        success,
         outcome: storedOutcome,
         gatewayId: base.gatewayId,
         status: base.status,
@@ -781,12 +728,6 @@ export function applyOutcomeToGatewayResult(
     return result;
 }
 
-/**
- * Derive deprecated `success` boolean from outcome (see {@link applyOutcomeToGatewayResult}).
- */
-export function successFromOutcome(outcome: PaymentOperationOutcome): boolean {
-    return outcome === "succeeded" || outcome === "requires_action";
-}
 
 /**
  * True only when the result means money settled for fulfillment:
@@ -843,9 +784,9 @@ export function isIndeterminateOutcome(
 }
 
 /**
- * GatewayPaymentResult always has `success` + `gatewayId` + `status`.
+ * GatewayPaymentResult has `outcome` + `gatewayId` + `status`.
  * PaymentOperationResult arms have `outcome` without that trio.
- * When both exist (gateway result with dual-written `outcome`), treat as gateway result.
+ * `rawResponse` is NOT required — fixes drift for routing/testkit.
  */
 export function isGatewayPaymentResult(
     result: GatewayPaymentResult | PaymentOperationResult,
@@ -853,7 +794,7 @@ export function isGatewayPaymentResult(
     return (
         typeof result === "object" &&
         result !== null &&
-        "success" in result &&
+        "outcome" in result &&
         "gatewayId" in result &&
         "status" in result
     );
@@ -891,13 +832,13 @@ export type RefundOperationResult =
           outcome: "succeeded";
           refundId: string;
           status: "completed";
-          totalRefunded?: number;
+          totalRefunded?: Money | undefined;
       }
     | {
           outcome: "pending";
           refundId: string;
           status: "pending";
-          totalRefunded?: number;
+          totalRefunded?: Money | undefined;
       }
     | {
           outcome: "failed";
@@ -914,16 +855,6 @@ export type RefundOperationResult =
       };
 
 /**
- * Derive deprecated refund `success` boolean from outcome.
- * `succeeded` | `pending` → true; `failed` | `indeterminate` → false.
- */
-export function successFromRefundOutcome(
-    outcome: RefundOperationOutcome,
-): boolean {
-    return outcome === "succeeded" || outcome === "pending";
-}
-
-/**
  * Base fields for {@link applyOutcomeToGatewayRefundResult} before outcome dual-write.
  */
 export type ApplyOutcomeGatewayRefundBase = {
@@ -932,30 +863,13 @@ export type ApplyOutcomeGatewayRefundBase = {
     rawResponse: unknown;
     // `| undefined` required under exactOptionalPropertyTypes so callers may pass
     // `value | undefined` from optional gateway fields without conditional spreads.
-    totalRefunded?: number | undefined;
+    totalRefunded?: Money | undefined;
     refundedAt?: Date | undefined;
     providerRequestId?: string | undefined;
 };
 
 /**
- * Dual-write `outcome` (+ related fields) onto a {@link GatewayRefundResult},
- * setting deprecated `success` from {@link successFromRefundOutcome}.
- *
- * ## `success` semantics (0.x compatibility)
- *
- * | outcome         | success | notes |
- * | --------------- | ------- | ----- |
- * | `succeeded`     | `true`  | Refund settled / completed |
- * | `pending`       | `true`  | API accepted; not yet terminal |
- * | `failed`        | `false` | Definitive refund failure |
- * | `indeterminate` | `false` | **Not** a failure to mark settled/failed — always set `reconciliationRequired: true` |
- *
- * **NEW-CORE-5:** stored `outcome` / `success` are coerced against `base.status`
- * (same family as {@link inferRefundOperationOutcome} /
- * {@link applyOutcomeToGatewayResult}). `outcome: 'succeeded'` with
- * `status: 'pending'` / `'failed'` is never persisted as a settled success.
- * Prefer building base fields from the provider response, then:
- * `applyOutcomeToGatewayRefundResult(base, outcome)`.
+ * Apply `outcome` onto a {@link GatewayRefundResult}.
  */
 export function applyOutcomeToGatewayRefundResult(
     base: ApplyOutcomeGatewayRefundBase,
@@ -972,10 +886,8 @@ export function applyOutcomeToGatewayRefundResult(
         outcome,
         base.status,
     );
-    const success = successFromRefundOutcome(storedOutcome);
 
     const result: GatewayRefundResult = {
-        success,
         outcome: storedOutcome,
         gatewayRefundId: base.gatewayRefundId,
         status: base.status,
@@ -1076,27 +988,16 @@ export function inferRefundOperationOutcome(
         // coerce as mapGatewayRefundToOperationResult (payment path parity).
         return coerceRefundOutcomeToGatewayStatus(result.outcome, result.status);
     }
-    if (result.status === "completed" && result.success) {
+    // Honest fallback without `success` flag: bare status drives outcome.
+    // `completed` → `succeeded`, `pending` → `pending`, `failed` → `failed`.
+    // Indeterminate only when reconciliationRequired is set (handled above).
+    if (result.status === "completed") {
         return "succeeded";
     }
-    if (result.status === "pending" && result.success) {
+    if (result.status === "pending") {
         return "pending";
     }
-    // P610-INF-2 / CORE-INF-2: success:false (or omitted success) +
-    // pending/processing/approved/completed is uncertain — the refund request
-    // may have been accepted (`completed` + success already returned succeeded
-    // above). Do not forge a definitive `failed` (retry can double-refund).
-    const status = result.status as string;
-    if (
-        !result.success &&
-        (status === "pending" ||
-            status === "processing" ||
-            status === "approved" ||
-            status === "completed")
-    ) {
-        return "indeterminate";
-    }
-    if (result.status === "failed" || result.success === false) {
+    if (result.status === "failed") {
         return "failed";
     }
     return "pending";

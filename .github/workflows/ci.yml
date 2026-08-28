@@ -1,10 +1,13 @@
 name: CI
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: ["**"]
   pull_request:
-
 jobs:
   build:
     name: Typecheck, Test & Package
@@ -46,6 +49,9 @@ jobs:
 
       - name: Verify dist output
         run: test -f packages/core/dist/index.js && test -f packages/core/dist/index.d.ts
+
+      - name: Check API and schema compatibility
+        run: bun run check:compat
 
       - name: Runtime portability (src + dist node: scan)
         run: bun run check:runtime-portability

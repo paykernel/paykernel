@@ -14,10 +14,13 @@
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
+  isMoney,
+  money,
   type GatewayPaymentResult,
   type GatewayRefundResult,
+  type GatewayPaymentStatus,
+  type Money,
   type PaymentOperationOutcome,
-  type PaymentStatus,
   type RefundOperationOutcome,
   type RefundStatus,
   type WebhookEvent,
@@ -76,12 +79,11 @@ export type ScriptedOutcomeBase = {
    * or becomes aborted during latency wait (request cancellation).
    */
   respectAbort?: boolean;
-  /** Optional amount override on synthetic results. */
-  amount?: number;
+  /** Optional amount override on synthetic results as {@link Money}. */
+  amount?: Money;
   /** Optional status override on synthetic results. */
-  status?: PaymentStatus;
+  status?: GatewayPaymentStatus;
 };
-
 /**
  * Throw-form step: immediately throws (after optional delay).
  * `throw: 'abort'` surfaces as NetworkError (request cancelled).
@@ -133,17 +135,13 @@ export type ScriptedRefundOutcome =
     })
   | ScriptedThrowStep;
 
-/** @deprecated Prefer ScriptedPaymentOutcome; alias for roadmap ScriptedStep. */
-export type ScriptedStep = ScriptedPaymentOutcome;
-
 export type ScriptedWebhookEvent = Partial<WebhookEvent> & {
   /** When omitted, mock generates id. */
   id?: string;
   type?: string;
-  status?: PaymentStatus;
+  status?: GatewayPaymentStatus;
   gatewayPaymentId?: string;
 };
-
 export type MockRequestRecord = {
   operation:
     | "createPayment"
@@ -192,7 +190,7 @@ export type HistoryAssertion = {
  * Used by synthetic results when no scripted outcome name is available.
  */
 export function paymentStatusToOperationOutcome(
-  status: PaymentStatus,
+  status: GatewayPaymentStatus,
 ): PaymentOperationOutcome {
   switch (status) {
     case "failed":
@@ -227,13 +225,13 @@ export function paymentStatusToOperationOutcome(
 
 /**
  * Synthetic payment result with Phase 6 dual-write (`outcome` + `references`).
- * Deprecated `success` is set from outcome via core helpers.
  * When `amount` is set, pass `currency` so major-unit snapshots are complete.
+ * `amount` is {@link Money} (e.g. `money("10.50", "SAR")`).
  */
 export function defaultPaymentResult(
   gatewayId: string,
-  status: PaymentStatus,
-  amount?: number,
+  status: GatewayPaymentStatus,
+  amount?: Money | number,
   gateway: string = "mock",
   currency?: string,
 ): GatewayPaymentResult {
@@ -246,9 +244,11 @@ export function defaultPaymentResult(
     redirectUrl: undefined,
   };
   if (amount !== undefined) {
-    base.amount = amount;
-  }
-  if (currency !== undefined) {
+    const amt: Money = typeof amount === "number" ? money(String(amount), currency ?? "USD") : amount;
+    base.amount = amt;
+    if (currency !== undefined) base.currency = currency;
+    else if (isMoney(amt)) base.currency = amt.currency;
+  } else if (currency !== undefined) {
     base.currency = currency;
   }
   return applyOutcomeToGatewayResult(base, outcome);
@@ -257,7 +257,7 @@ export function defaultPaymentResult(
 export function defaultRefundResult(
   gatewayRefundId: string,
   status: RefundStatus = "completed",
-  totalRefunded?: number,
+  totalRefunded?: Money | number,
 ): GatewayRefundResult {
   const outcome: RefundOperationOutcome =
     status === "completed"
@@ -265,11 +265,17 @@ export function defaultRefundResult(
       : status === "pending"
         ? "pending"
         : "failed";
+  const refundMoney: Money | undefined =
+    totalRefunded === undefined
+      ? undefined
+      : typeof totalRefunded === "number"
+        ? money(String(totalRefunded), "USD")
+        : totalRefunded;
   return applyOutcomeToGatewayRefundResult(
     {
       gatewayRefundId,
       status,
-      totalRefunded,
+      ...(refundMoney ? { totalRefunded: refundMoney } : {}),
       rawResponse: { mock: true, status },
     },
     outcome,

@@ -8,8 +8,9 @@ Read in this order. Package guides stay next to the code they describe.
 | --- | --- |
 | [Getting started](./getting-started.md) | First payment, then production composition (inbox + store + reconcile) |
 | [Adapter selection](./adapter-selection.md) | Choosing PostgreSQL / Redis / SQLite / Turso / D1 / Durable Objects |
-| [Examples](../examples/README.md) | Private Bun/SQLite checkout kernel + 4 thin hosts (Hono/Elysia/Express ephemeral loopback + Cloudflare Workers fetch) over single-host in-memory SQLite |
+| [Examples](../examples/README.md) | Private Bun checkout kernel + 5 thin hosts (bun-hono-sqlite / bun-hono-postgres / bun-elysia-sqlite / express-sqlite / cloudflare-workers-fetch) over single-host in-memory SQLite (postgres host uses real PG) |
 | Root [README](../README.md) | Package map and install commands |
+| [Migrating to 1.0](./migrations/1.0.md) | Breaking changes from 0.x → 1.0 (client, Money, outcomes, statuses, provider params, reserve) |
 
 ## Consumer packages
 
@@ -35,9 +36,10 @@ Folder `packages/observability` publishes as **`@paykernel/opentelemetry`**.
 | [Monorepo DX](./monorepo.md) | Layout, commands, build order |
 | [Workspace boundaries](./workspace-boundaries.md) | Dependency matrix (`bun run check:boundaries`) |
 | [Releases](./releases.md) | Changesets, provenance, prerelease |
+| [Stability](./stability.md) | Semver, event/schema/runtime guarantees (1.0) |
 | [Core baseline](../packages/core/docs/baseline/README.md) | Generated public-api / pack inventory (not a product guide) |
 
-`roadmap.md` at the repo root is a **completed phase log** (0–22 shipped; Phase 23 started with `@paykernel/gateway-tap`) plus leftover product work. It is not the consumer index.
+`roadmap.md` at the repo root is a **completed phase log** (0–25 shipped; Phase 23 leftover gateways) plus leftover product work. It is not the consumer index. Phase 25 (1.0) shipped.
 
 ## Honesty (always)
 

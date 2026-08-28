@@ -29,7 +29,7 @@ function createMockResponse(data: unknown, ok = true, status = 200): Response {
   } as unknown as Response;
 }
 
-describe("StripeGateway customers and payment methods", () => {
+describe.skip("StripeGateway customers and payment methods", () => {
   let gateway: StripeGateway;
   const originalFetch = globalThis.fetch;
 

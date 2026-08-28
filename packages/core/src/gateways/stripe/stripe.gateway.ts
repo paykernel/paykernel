@@ -9,10 +9,10 @@ import type {
   GatewayPaymentResult,
   GatewayRefundResult,
   PaymentNextAction,
-  PaymentStatus,
   RefundParams,
   VoidParams,
 } from "../../types/payment.types";
+import type { GatewayPaymentStatus } from "../../types/domain-status";
 import type {
   AttachPaymentMethodParams,
   CreateCustomerParams,
@@ -47,8 +47,7 @@ import type {
   PaymentLink,
   PaymentLinkOperationResult,
 } from "../../types/payment-link.types";
-import { mapNativeDisputeStatus } from "../../types/domain-status";
-import { buildProviderReferences } from "../../types/provider-refs";
+import { mapNativeDisputeStatus, type PaymentDomainStatus } from "../../types/domain-status";
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
@@ -113,14 +112,16 @@ import {
   fromMinorUnits as sharedFromMinorUnits,
   MoneyAmountError,
   minorAmountToNumber,
-  moneyToMajorNumber,
+  money,
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
+  type Money,
 } from "../../utils/money";
 import {
   getCurrencyExponent,
   isKnownCurrencyCode,
 } from "../../utils/currency";
+import { buildProviderReferences } from "../../types/provider-refs";
 
 /**
  * Stripe maps transient failures to NetworkError (timeouts, connection errors,
@@ -382,10 +383,15 @@ function assertStripeMinorUnitAmount(
 function asAmountInput(
   amount:
     | AmountInput
+    | number
     | { amount: string; currency: string; exponent?: number | undefined },
 ): AmountInput {
+  // Legacy number compat for testkit: coerce via Money before normalization.
+  // Production params are Money only (Zod enforces).
   if (typeof amount === "number") {
-    return amount;
+    // Number branch coerced via money(); caller currency passed separately to toStripeAmount.
+    // Use a placeholder currency here; toStripeAmount will re-normalize with correct currency.
+    return money(String(amount), "USD") as unknown as AmountInput;
   }
   if (amount.exponent === undefined) {
     return { amount: amount.amount, currency: amount.currency };
@@ -400,10 +406,13 @@ function asAmountInput(
 function toStripeAmount(
   amount:
     | AmountInput
+    | number
     | { amount: string; currency: string; exponent?: number | undefined },
   currency: string,
   options?: { enforceChargeLimits?: boolean; allowZero?: boolean },
 ): number {
+  // Normalize AmountInput via Money; number passthrough already coerced in asAmountInput
+  // but handle direct Money string coercion for legacy number callers without AmountInput shape
   const amountInput = asAmountInput(amount);
   const normalized = currency.toLowerCase();
   const allowZero = options?.allowZero === true;
@@ -419,8 +428,12 @@ function toStripeAmount(
 
   let minor: bigint;
   try {
-    const money = normalizeAmountInput(amountInput, currency, parseOpts);
-    minor = sharedToMinorUnits(money, parseOpts);
+    // If asAmountInput produced a USD placeholder for number input, re-create with correct currency
+    const effectiveInput: AmountInput = typeof amount === "number"
+      ? (money(String(amount), currency, parseOpts) as unknown as AmountInput)
+      : amountInput;
+    const moneyVal = normalizeAmountInput(effectiveInput, currency, parseOpts);
+    minor = sharedToMinorUnits(moneyVal, parseOpts);
   } catch (error) {
     if (error instanceof MoneyAmountError) {
       if (error.kind === "excess_precision") {
@@ -465,26 +478,21 @@ function toStripeAmount(
   return assertStripeMinorUnitAmount(stripeAmount, normalized, options);
 }
 
-function fromStripeAmount(amount: number, currency: string): number;
+function fromStripeAmount(amount: number, currency: string): Money;
 function fromStripeAmount(
   amount: number | undefined | null,
   currency: string,
-): number | undefined;
+): Money | undefined;
 function fromStripeAmount(
   amount: number | undefined | null,
   currency: string,
-): number | undefined {
+): Money | undefined {
   // NEW-STRIPE-0: missing Stripe minors are unknown — never invent major 0.
   if (amount === undefined || amount === null) {
     return undefined;
   }
   const exponent = stripeCurrencyExponent(currency);
-  const money = sharedFromMinorUnits(amount, currency, {
-    exponent,
-    allowZero: true,
-    allowNegative: true,
-  });
-  return moneyToMajorNumber(money, {
+  return sharedFromMinorUnits(amount, currency, {
     exponent,
     allowZero: true,
     allowNegative: true,
@@ -497,13 +505,13 @@ function finiteStripeMinor(value: unknown): number | undefined {
 }
 
 /**
- * Cumulative major-unit refunds from expanded `charge.amount_refunded`.
+ * Cumulative refunds from expanded `charge.amount_refunded` as Money.
  * Only a finite amount **greater than 0** is proven (NEW-STRIPE-REFUND-0).
  */
 function provenTotalRefundedFromCharge(
   charge: StripeRefund["charge"],
   fallbackCurrency: string,
-): number | undefined {
+): Money | undefined {
   if (typeof charge !== "object" || charge === null) {
     return undefined;
   }
@@ -562,7 +570,7 @@ function expandableId(
   return value?.id;
 }
 
-function stripeSubscriptionStatus(status: string): PaymentStatus {
+function stripeSubscriptionStatus(status: string): GatewayPaymentStatus {
   switch (status) {
     case "active":
       // STRIPE-1: subscription lifecycle `active` is not a settled charge.
@@ -609,7 +617,7 @@ function stripeInvoiceHasCreditNoteRemainder(
 function stripeInvoiceStatus(
   eventType: string,
   invoice: StripeInvoiceSnapshot,
-): PaymentStatus {
+): GatewayPaymentStatus {
   const status = typeof invoice.status === "string" ? invoice.status : "";
   // Object terminal state wins over event type (invoice.paid + void ≠ paid).
   if (status === "void") {
@@ -933,7 +941,7 @@ function mapStripeRefundStatus(
 function mapStripeRefundWebhookStatus(
   status: string,
   object: StripeWebhookPayload["data"]["object"],
-): PaymentStatus {
+): GatewayPaymentStatus {
   if (status === "succeeded") {
     const charge = (object as any).charge;
     if (typeof charge === "object" && charge !== null) {
@@ -1175,7 +1183,7 @@ function stripeChargeSnapshotForRefundStatus(
  */
 function stripeSucceededIntentRefundStatus(
   pi: StripeIntentRefundSource,
-): PaymentStatus | undefined {
+): GatewayPaymentStatus | undefined {
   const charge = stripeChargeSnapshotForRefundStatus(pi);
   if (charge === undefined) {
     return undefined;
@@ -1283,7 +1291,7 @@ function stripeCheckoutPaidSessionStatus(session: {
   amount?: unknown;
   amount_total?: unknown;
   amount_received?: unknown;
-}): PaymentStatus {
+}): GatewayPaymentStatus {
   const hydrated = stripeCheckoutHydratedRefundSource(session);
   if (hydrated === undefined) {
     // S19-CKO-UNEXPANDED: payment_status stays paid after refunds. A string
@@ -1371,10 +1379,10 @@ function isStripePaymentLinkEventType(type: string): boolean {
  */
 function stripeDisputeEnvelopeStatus(
   object: StripeWebhookPayload["data"]["object"],
-): PaymentStatus {
+): GatewayPaymentStatus {
   const native = (object as { status?: unknown }).status;
   if (typeof native === "string" && native.trim().length > 0) {
-    return native as PaymentStatus;
+    return native as GatewayPaymentStatus;
   }
   // Missing native dispute status is still not a payment pending last-write.
   return "processing";
@@ -1590,7 +1598,7 @@ function resolveStripeCustomerRef(params: {
 }): string | undefined {
   return pickExclusiveStripeId(
     params.customerId,
-    params.stripeCustomerId,
+    (params as unknown as StripeCreatePaymentParams).stripeCustomerId,
     "customerId",
     "stripeCustomerId",
   );
@@ -1602,7 +1610,7 @@ function resolveStripePaymentMethodRef(params: {
 }): string | undefined {
   return pickExclusiveStripeId(
     params.paymentMethodId,
-    params.stripePaymentMethodId,
+    (params as unknown as StripeCreatePaymentParams).stripePaymentMethodId,
     "paymentMethodId",
     "stripePaymentMethodId",
   );
@@ -1835,7 +1843,7 @@ function stripePaymentLinkLineItemRows(
  */
 function stripePaymentLinkPublishedMoney(
   object: StripePaymentLinkObject,
-): { amount: number; currency: string } | undefined {
+): { amount: Money; currency: string } | undefined {
   const items = stripePaymentLinkLineItemRows(object);
   if (items === undefined || items.length !== 1) {
     return undefined;
@@ -2478,8 +2486,8 @@ export class StripeGateway extends BaseGateway {
           body.automatic_payment_methods.allow_redirects = "never";
         }
 
-        if (p.stripeSetupFutureUsage) {
-          body.setup_future_usage = p.stripeSetupFutureUsage;
+        if ((p as unknown as StripeCreatePaymentParams).stripeSetupFutureUsage) {
+          body.setup_future_usage = (p as unknown as StripeCreatePaymentParams).stripeSetupFutureUsage;
         }
 
         const response = await this.stripeRequest<StripePaymentIntent>(
@@ -2702,7 +2710,7 @@ export class StripeGateway extends BaseGateway {
             ? response.charge.currency
             : undefined,
         );
-        let totalRefunded: number | undefined;
+        let totalRefunded: Money | undefined;
         if (refundCurrency !== undefined) {
           try {
             totalRefunded = await this.getTotalRefundedForPaymentIntent(
@@ -2715,7 +2723,7 @@ export class StripeGateway extends BaseGateway {
           }
           // NEW-STRIPE-REFUND-0: empty / pending-only list is unproven (not 0).
           // Same charge.amount_refunded recovery as a thrown list — only > 0.
-          if (totalRefunded === undefined || totalRefunded <= 0) {
+          if (totalRefunded === undefined || Number(totalRefunded.amount) <= 0) {
             totalRefunded = provenTotalRefundedFromCharge(
               response.charge,
               refundCurrency,
@@ -3091,7 +3099,7 @@ export class StripeGateway extends BaseGateway {
   /**
    * Get payment status
    */
-  async getPaymentStatus(gatewayId: string): Promise<PaymentStatus> {
+  async getPaymentStatus(gatewayId: string): Promise<GatewayPaymentStatus> {
     const result = await this.getPayment({ gatewayPaymentId: gatewayId });
     return result.status;
   }
@@ -3900,10 +3908,9 @@ export class StripeGateway extends BaseGateway {
         : undefined;
 
     // Determine status/type
-    let status: PaymentStatus = "pending";
+    let status: GatewayPaymentStatus = "pending";
     // Only set amount from real money fields — do not default to 0.
-    let amount: number | undefined;
-    // STRIPE-2: do not default missing currency to "usd" for conversion or
+    let amount: Money | undefined;
     // the normalized event. Without currency, omit amount (wrong scale risk
     // for zero-decimal / three-decimal codes, esp. invoice/checkout).
     const currency = stripeCurrencyCode(
@@ -3911,7 +3918,7 @@ export class StripeGateway extends BaseGateway {
     );
     const convertMinor = (
       minor: number | undefined | null,
-    ): number | undefined => {
+    ): Money | undefined => {
       if (currency === undefined || minor === undefined || minor === null) {
         return undefined;
       }
@@ -4282,7 +4289,7 @@ export class StripeGateway extends BaseGateway {
     paymentIntentId: string,
     fallbackCurrency: string,
     signal?: AbortSignal,
-  ): Promise<number | undefined> {
+  ): Promise<Money | undefined> {
     let totalMinorAmount = 0;
     let currency = fallbackCurrency;
     let startingAfter: string | undefined;
@@ -4475,11 +4482,11 @@ export class StripeGateway extends BaseGateway {
   private mapPaymentIntentResult(
     intent: StripePaymentIntent,
     options: {
-      status?: PaymentStatus | undefined;
-      amount?: number | undefined;
+      status?: GatewayPaymentStatus | undefined;
+      amount?: Money | undefined;
       /** ISO currency for major-unit money fields; required whenever amount/refundedAmount set (STRIPE-1). */
       currency?: string | undefined;
-      refundedAmount?: number | undefined;
+      refundedAmount?: Money | undefined;
       chargeId?: string | undefined;
       omitRedirectUrl?: boolean | undefined;
       forceOutcome?: PaymentOperationOutcome | undefined;
@@ -4553,7 +4560,7 @@ export class StripeGateway extends BaseGateway {
    */
   private mapStripeOutcome(
     nativeStatus: string,
-    mappedStatus: PaymentStatus,
+    mappedStatus: GatewayPaymentStatus,
     nextAction: PaymentNextAction | undefined,
   ): PaymentOperationOutcome {
     if (
@@ -4592,8 +4599,8 @@ export class StripeGateway extends BaseGateway {
    * Unmapped statuses fail closed as `failed` (with a warning) so callers do
    * not treat unknown states as pending fulfillment.
    */
-  private mapStatus(stripeStatus: string): PaymentStatus {
-    const map: Record<string, PaymentStatus> = {
+  private mapStatus(stripeStatus: string): GatewayPaymentStatus {
+    const map: Record<string, GatewayPaymentStatus> = {
       requires_payment_method: "pending",
       requires_confirmation: "pending",
       requires_action: "pending",
@@ -4628,7 +4635,7 @@ export class StripeGateway extends BaseGateway {
    */
   private succeededPaymentIntentWebhookStatus(
     object: StripeWebhookPayload["data"]["object"],
-  ): PaymentStatus {
+  ): GatewayPaymentStatus {
     const pi = object as any;
     const refundStatus = stripeSucceededIntentRefundStatus(pi);
     if (refundStatus !== undefined) {

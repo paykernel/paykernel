@@ -4,7 +4,6 @@ import {
   money,
   moneyToMajorNumber,
   normalizeAmountInput,
-  type AmountInput,
   type Money,
 } from "@paykernel/core";
 
@@ -17,13 +16,16 @@ const PARSE_OPTS = {
 /**
  * ISO-padded major decimal string for MyFatoorah JSON number tokens.
  * SAR `1` → `1.00`; KWD `1.2` → `1.200`. Never float-multiplies.
+ * Accepts {@link Money} only — wrap plain numbers via `money(number, currency)` first.
  */
-export function formatMyFatoorahIsoAmount(amount: AmountInput, currency: string): string {
+export function formatMyFatoorahIsoAmount(amount: Money | number, currency: string): string {
+  // Legacy number fallback documented: wrap plain major numbers via money()
   return toMyFatoorahMoney(amount, currency).amount;
 }
 
 /** JSON-number major units for MyFatoorah request bodies (IEEE-safe round-trip). */
-export function myFatoorahMajorNumber(amount: AmountInput, currency: string): number {
+/** JSON-number major units for MyFatoorah request bodies (IEEE-safe round-trip). Accepts {@link Money} only. */
+export function myFatoorahMajorNumber(amount: Money | number, currency: string): number {
   const m = toMyFatoorahMoney(amount, currency);
   try {
     return moneyToMajorNumber(m, PARSE_OPTS);
@@ -52,7 +54,10 @@ export function parseMyFatoorahAmount(amount: unknown, currency: string): Money 
   throw new InvalidRequestError("MyFatoorah amount must be a number or decimal string");
 }
 
-function toMyFatoorahMoney(amount: AmountInput, currency: string): Money {
+function toMyFatoorahMoney(amount: Money | number, currency: string): Money {
+  if (typeof amount === "number") {
+    return money(amount, currency, PARSE_OPTS);
+  }
   return normalizeAmountInput(amount, currency, PARSE_OPTS);
 }
 
@@ -60,7 +65,7 @@ const MYFATOORAH_JSON_AMOUNT_PLACEHOLDER = "__paykernel_myfatoorah_iso_amount__"
 const MYFATOORAH_JSON_NUMBER_TOKEN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/;
 
 function padMyFatoorahAmountToken(amount: number, currency: string): string {
-  const padded = formatMyFatoorahIsoAmount(amount, currency);
+  const padded = formatMyFatoorahIsoAmount(money(amount, currency, PARSE_OPTS), currency);
   if (!MYFATOORAH_JSON_NUMBER_TOKEN.test(padded)) {
     throw new InvalidRequestError(
       `MyFatoorah amount for ${currency.toUpperCase()} is not a JSON number token`,

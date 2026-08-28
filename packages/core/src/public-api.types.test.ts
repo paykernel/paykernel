@@ -30,7 +30,6 @@ import type {
   HookContext,
   BeforeHookResult,
   AfterHookResult,
-  PaymentClientConfig,
   CreatePaymentClientOptions,
   MoyasarConfig,
   PayPalConfig,
@@ -66,6 +65,7 @@ import type {
   CommonPaymentInput,
   PaymentMetadata,
   PaymentDomainStatus,
+  WebhookEnvelopeStatus,
   PaymentOperationResult,
   PaymentOperationOutcome,
   Payment,
@@ -150,7 +150,6 @@ import {
   isIndeterminateOutcome,
   buildProviderReferences,
   isPaymentDomainStatus,
-  successFromRefundOutcome,
   inferRefundOperationOutcome,
   STABLE_PAYMENT_EVENT_TYPES,
   PAYMENT_EVENT_SCHEMA_VERSION,
@@ -201,10 +200,13 @@ const _emptyAsId: GatewayId = "";
 type BuiltInMapKeys = keyof BuiltInGatewayMap;
 expectTypesEqual<BuiltInMapKeys, BuiltInGatewayName>(true);
 
+// @ts-expect-error — PaymentClient is private, must use createPaymentClient
+type _LegacyClientCheck = ConstructorParameters<typeof PaymentClient>[0] extends { moyasar: { secretKey: string } } ? true : false;
+
 // ─── CreatePaymentParams & related param shapes ──────────────────────────────
 
-const createParams: CreatePaymentParams = {
-  amount: 10.5,
+const createParams: StripeCreatePaymentParams = {
+  amount: money("10.50", "SAR"),
   currency: "SAR",
   callbackUrl: "https://example.com/callback",
   description: "type-test payment",
@@ -216,7 +218,7 @@ expectType<CreatePaymentParams>(createParams);
 
 // Phase 8 Stream C — optional AbortSignal on operation params
 const createParamsWithSignal: CreatePaymentParams = {
-  amount: 10.5,
+  amount: money("10.50", "SAR"),
   currency: "SAR",
   callbackUrl: "https://example.com/callback",
   signal: new AbortController().signal,
@@ -235,11 +237,12 @@ const getWithSignal: GetPaymentParams = {
 };
 expectType<GetPaymentParams>(getWithSignal);
 
-// Phase 5: AmountInput accepts deprecated number and Money
+// Phase 5: AmountInput is Money only (1.0)
 const moneyAmount: Money = money("10.50", "SAR");
-const amountAsNumber: AmountInput = 10.5;
+// @ts-expect-error — AmountInput is Money only in 1.0
+const _bad: AmountInput = 10.5;
+void _bad;
 const amountAsMoney: AmountInput = moneyAmount;
-expectType<AmountInput>(amountAsNumber);
 expectType<AmountInput>(amountAsMoney);
 
 const createParamsMoney: CreatePaymentParams = {
@@ -251,7 +254,7 @@ expectType<CreatePaymentParams>(createParamsMoney);
 
 const captureParams: CaptureParams = {
   gatewayPaymentId: "pay_xxx",
-  amount: 5,
+  amount: money("5.00", "SAR"),
   currency: "SAR",
 };
 expectType<CaptureParams>(captureParams);
@@ -265,7 +268,7 @@ expectType<CaptureParams>(captureParamsMoney);
 
 const refundParams: RefundParams = {
   gatewayPaymentId: "pay_xxx",
-  amount: 1,
+  amount: money("1.00", "SAR"),
   reason: "customer request",
 };
 expectType<RefundParams>(refundParams);
@@ -319,7 +322,7 @@ expectType<Money>(fromMinorUnits(1050n, "SAR"));
 expectType<number>(getCurrencyExponent("JPY"));
 expectType<string>(normalizeCurrencyCode("sar"));
 expectType<boolean>(isKnownCurrencyCode("SAR"));
-expectType<Money>(normalizeAmountInput(10.5, "SAR"));
+expectType<Money>(normalizeAmountInput(money("10.50", "SAR"), "SAR"));
 expectType<Money>(normalizeAmountInput(moneyAmount, "SAR"));
 
 const voidParams: VoidParams = {
@@ -340,14 +343,14 @@ const _missingAmount: CreatePaymentParams = {
 
 // @ts-expect-error — callbackUrl is required on base CreatePaymentParams
 const _missingCallback: CreatePaymentParams = {
-  amount: 1,
+  amount: money("1.00", "SAR"),
   currency: "USD",
 };
 
 // ─── GatewayPaymentResult required fields ────────────────────────────────────
 
 const paymentResult: GatewayPaymentResult = {
-  success: true,
+  outcome: "succeeded" as const,
   gatewayId: "pay_abc",
   status: "paid",
   redirectUrl: undefined,
@@ -357,8 +360,7 @@ expectType<GatewayPaymentResult>(paymentResult);
 
 // Phase 6 dual-write fields optional on GatewayPaymentResult
 const paymentResultWithOutcome: GatewayPaymentResult = {
-  success: true,
-  outcome: "succeeded",
+  outcome: "succeeded" as const,
   gatewayId: "pay_abc",
   status: "paid",
   redirectUrl: undefined,
@@ -373,7 +375,6 @@ expectType<GatewayPaymentResult>(paymentResultWithOutcome);
 
 // Identity fields used across gateways must remain present
 type PaymentResultKeys = keyof GatewayPaymentResult;
-expectType<PaymentResultKeys>("success");
 expectType<PaymentResultKeys>("outcome");
 expectType<PaymentResultKeys>("gatewayId");
 expectType<PaymentResultKeys>("status");
@@ -393,24 +394,26 @@ expectType<PaymentResultKeys>("decline");
 expectType<PaymentResultKeys>("reconciliationRequired");
 expectType<PaymentResultKeys>("providerRequestId");
 
-// @ts-expect-error — success is required (0.x dual-write)
-const _missingSuccess: GatewayPaymentResult = {
+// @ts-expect-error — outcome is required
+const _missingOutcome: GatewayPaymentResult = {
   gatewayId: "x",
   status: "paid",
   redirectUrl: undefined,
   rawResponse: null,
 };
+void _missingOutcome;
 
 // @ts-expect-error — gatewayId is required (not optional)
 const _missingGatewayId: GatewayPaymentResult = {
-  success: true,
+  outcome: "succeeded" as const,
   status: "paid",
   redirectUrl: undefined,
   rawResponse: null,
 };
+void _missingGatewayId;
 
 const _badStatus: GatewayPaymentResult = {
-  success: true,
+  outcome: "succeeded" as const,
   gatewayId: "x",
   // @ts-expect-error — unknown status string is not PaymentStatus
   status: "totally_invalid_status",
@@ -419,7 +422,7 @@ const _badStatus: GatewayPaymentResult = {
 };
 
 const refundResult: GatewayRefundResult = {
-  success: true,
+  outcome: "succeeded" as const,
   gatewayRefundId: "ref_1",
   status: "completed",
   rawResponse: {},
@@ -759,20 +762,33 @@ const statuses: PaymentStatus[] = [
   "reversed",
   "refunded",
   "partially_refunded",
-  "refund_completed",
-  "refund_pending",
-  "refund_failed",
-  "setup_completed",
 ];
 expectType<PaymentStatus[]>(statuses);
 
+const webhookStatuses: WebhookEnvelopeStatus[] = [
+  "pending",
+  "processing",
+  "authorized",
+  "approved",
+  "paid",
+  "partially_captured",
+  "failed",
+  "cancelled",
+  "reversed",
+  "refunded",
+  "partially_refunded",
+  "completed",
+  "requires_action",
+  "succeeded",
+];
+expectType<WebhookEnvelopeStatus[]>(webhookStatuses);
+
 // @ts-expect-error — not a PaymentStatus
 const _badPaymentStatus: PaymentStatus = "succeeded";
-
 // ─── Phase 6 CommonPaymentInput / outcomes / domain statuses ──────────────────
 
 const commonInput: CommonPaymentInput = {
-  amount: 1,
+  amount: money("1.00", "SAR"),
   orderId: "o1",
   description: "d",
   metadata: { k: "v" } satisfies PaymentMetadata,
@@ -788,21 +804,21 @@ expectTypesEqual<
 
 // AC3: assigning provider-specific fields to CommonPaymentInput is a type error
 const _commonWithStripe: CommonPaymentInput = {
-  amount: 1,
+  amount: money("1.00", "SAR"),
   // @ts-expect-error — stripePaymentMethodId is not on CommonPaymentInput
   stripePaymentMethodId: "pm_x",
 };
 void _commonWithStripe;
 
 const _commonWithMoyasar: CommonPaymentInput = {
-  amount: 1,
+  amount: money("1.00", "SAR"),
   // @ts-expect-error — moyasarSource is not on CommonPaymentInput
   moyasarSource: { type: "token", token: "tok_x" },
 };
 void _commonWithMoyasar;
 
 const _commonWithCurrency: CommonPaymentInput = {
-  amount: 1,
+  amount: money("1.00", "SAR"),
   // @ts-expect-error — currency is on CreatePaymentParams, not CommonPaymentInput
   currency: "SAR",
 };
@@ -984,7 +1000,6 @@ void _refundIndFalse;
 expectType<RefundOperationResult>(
   mapGatewayRefundToOperationResult(refundResult),
 );
-expectType<boolean>(successFromRefundOutcome("succeeded"));
 expectType<RefundOperationOutcome>(
   inferRefundOperationOutcome(refundResult),
 );
@@ -999,9 +1014,8 @@ expectType<GatewayRefundResult>(
   ),
 );
 
-// GatewayRefundResult optional outcome dual-write field
+// GatewayRefundResult fields
 type RefundResultKeys = keyof GatewayRefundResult;
-expectType<RefundResultKeys>("success");
 expectType<RefundResultKeys>("outcome");
 expectType<RefundResultKeys>("gatewayRefundId");
 expectType<RefundResultKeys>("status");
@@ -1301,7 +1315,7 @@ expectType<RefundOperationResult>(
 );
 // GatewayRefundResult.outcome is optional dual-write field when present
 const refundWithOutcome: GatewayRefundResult = {
-  success: true,
+  outcome: "succeeded" as const,
   gatewayRefundId: "re_1",
   status: "completed",
   rawResponse: {},
@@ -1394,12 +1408,12 @@ expectType<MoyasarGateway>(typedPluginClient.gateway("moyasar"));
 
 function _defaultClientOneArgCreatePayment(legacy: PaymentClient): void {
   void legacy.createPayment({
-    amount: 10,
+    amount: money("10.00", "SAR"),
     currency: "USD",
     callbackUrl: "https://merchant.example/callback",
   });
   void legacy.createPayment({
-    amount: 10,
+    amount: money("10.00", "SAR"),
     currency: "USD",
     callbackUrl: "https://merchant.example/callback",
     // @ts-expect-error extra-package keys are not on core CreatePaymentParams
@@ -1413,14 +1427,14 @@ function _namedGatewayCreatePaymentDoesNotUseDefaultParams(
 ): void {
   void client.createPayment(
     {
-      amount: 10,
+      amount: money("10.00", "SAR"),
       currency: "USD",
       callbackUrl: "https://merchant.example/callback",
     },
     "stripe",
   );
   void client.createPayment({
-    amount: 10,
+    amount: money("10.00", "SAR"),
     currency: "USD",
     callbackUrl: "https://merchant.example/callback",
   });
@@ -1592,7 +1606,7 @@ expectType<ListPaymentMethodsResult>({
 });
 
 const offSessionCreate: CreatePaymentParams = {
-  amount: 10,
+  amount: money("10.00", "SAR"),
   currency: "SAR",
   callbackUrl: "https://example.com/callback",
   customerId: "cus_1",
@@ -1701,13 +1715,13 @@ function _phase22HigherLevelClientSurface(client: PaymentClient): void {
     client.getDispute({ disputeId: "dp_1" }),
   );
   expectType<Promise<unknown>>(
-    client.createPaymentLink({ amount: 10, currency: "USD" }),
+    client.createPaymentLink({ amount: money("10.00", "SAR"), currency: "USD" }),
   );
 }
 void _phase22HigherLevelClientSurface;
 
 const _marketplaceSplit: MarketplaceSplit = {
-  amount: 10,
+  amount: money("10.00", "SAR"),
   destination: "acc_1",
 };
 expectType<MarketplaceSplit>(_marketplaceSplit);
@@ -1716,7 +1730,7 @@ expectType<CommonCheckoutSessionInput>({
 });
 expectType<GetCheckoutSessionParams>({ sessionId: "cs_1" });
 expectType<GetDisputeParams>({ disputeId: "dp_1" });
-expectType<CreatePaymentLinkParams>({ amount: 10, currency: "USD" });
+expectType<CreatePaymentLinkParams>({ amount: money("10.00", "SAR"), currency: "USD" });
 
 function noopLikeLogger(): Logger {
   return {
@@ -1736,12 +1750,12 @@ describe("public API type-level suite (runtime smoke)", () => {
     // `bun test` loads this file and flags accidental fixture drift.
     expect(validGateways).toEqual(["moyasar", "paypal", "paymob", "stripe"]);
     expect(createParams).toMatchObject({
-      amount: 10.5,
+      amount: money("10.50", "SAR"),
       currency: "SAR",
       callbackUrl: "https://example.com/callback",
     });
     expect(paymentResult).toMatchObject({
-      success: true,
+      outcome: "succeeded" as const,
       gatewayId: "pay_abc",
       status: "paid",
     });

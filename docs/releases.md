@@ -128,6 +128,10 @@ Then add a normal changeset, version, and publish for the stable bump (e.g. `0.9
 
 Only one pre tag is active at a time; exit before switching or cutting stable.
 
+## Stability (1.0)
+
+Versioning, event/schema/runtime, and provider/driver guarantees are documented in [Stability](./stability.md) (canonical decisions in [ADR 0025](./adr/0025-1-0-stability.md)).
+
 ## Local publish (escape hatch only)
 
 ```bash

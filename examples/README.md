@@ -11,6 +11,7 @@ Kernel lives in [`checkout-kernel`](./checkout-kernel) (`@paykernel/example-chec
 | [`bun-elysia-sqlite`](./bun-elysia-sqlite) | `@paykernel/example-bun-elysia-sqlite` | Thin Elysia `fetch` adapter (via `@paykernel/integration-elysia`) |
 | [`express-sqlite`](./express-sqlite) | `@paykernel/example-express-sqlite` | Thin Express adapter (via `@paykernel/integration-express`, `expressAppToFetch` via ephemeral loopback port per request `listen(0)` — no fixed port) |
 | [`cloudflare-workers-fetch`](./cloudflare-workers-fetch) | `@paykernel/example-cloudflare-workers-fetch` | Thin Workers `fetch` adapter (via `@paykernel/integration-cloudflare-workers`, `handleCloudflareWebhook`; production injects D1/DO via `createCheckoutKernel({ stores | storeFactory | executor })`) |
+| [`bun-hono-postgres`](./bun-hono-postgres) | `@paykernel/example-bun-hono-postgres` | Thin Hono `fetch` adapter over Postgres (`@paykernel/store-postgres/pg`, `createPgPostgresExecutor` + `migratePostgresAdapter` in `storeFactory`, `PAYMENTS_SDK_PG_URL` required, `describe.skipIf` honest) |
 
 ## Honesty
 

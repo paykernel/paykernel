@@ -1,11 +1,9 @@
-// file: packages/payments/src/types/payment.types.ts
-
 import type {
     CreditCardSource,
     MoyasarPaymentSource,
 } from "./moyasar-source.types";
 import type { Money } from "../utils/money";
-import type { PaymentDomainStatus } from "./domain-status";
+import type { GatewayPaymentStatus, PaymentDomainStatus } from "./domain-status";
 import type { ProviderReferences } from "./provider-refs";
 import type {
     PaymentDecline,
@@ -14,15 +12,13 @@ import type {
 } from "./operation-result";
 
 /**
- * Amount input accepted during 0.x.
+ * Amount input for create/capture/refund — Money only (1.0).
  *
- * Prefer {@link Money} / `money("10.50", "SAR")` (decimal string + currency).
- * Plain `number` major units remain accepted for backward compatibility but are
- * **deprecated** — JS floats cannot represent all decimals exactly. Convert
- * with shared money helpers (`normalizeAmountInput` / `toMinorUnits`); never
- * use `amount * 100` float math at call sites.
+ * Pass {@link Money} via `money("10.50", "SAR")` (decimal string + currency).
+ * Plain `number` major units are no longer accepted on payment APIs; use Money.
+ * The `money()` factory may still accept a clean number to construct Money.
  */
-export type AmountInput = number | Money;
+export type AmountInput = Money;
 
 /**
  * Built-in first-party gateway names shipped with this package.
@@ -47,22 +43,10 @@ export type GatewayId = string;
 export type GatewayName = BuiltInGatewayName;
 
 /**
- * @deprecated Prefer domain-specific unions:
- * {@link PaymentDomainStatus}, {@link import('./domain-status').RefundDomainStatus},
- * {@link import('./domain-status').SetupTokenStatus}, etc.
- *
- * Legacy mega-union kept for 0.x: payment lifecycle **plus** refund-entity and
- * setup statuses historically mixed into a single field.
- *
- * Equivalent to:
- * `PaymentDomainStatus | 'refund_pending' | 'refund_completed' | 'refund_failed' | 'setup_completed'`.
+ * Payment charge/intent lifecycle only (1.0).
+ * Alias kept for fewer import churn sites.
  */
-export type PaymentStatus =
-    | PaymentDomainStatus
-    | "refund_completed"
-    | "refund_pending"
-    | "refund_failed"
-    | "setup_completed";
+export type PaymentStatus = PaymentDomainStatus;
 
 /**
  * Refund processing status (entity-level).
@@ -128,30 +112,9 @@ export type CommonPaymentInput = {
  * Common fields come from {@link CommonPaymentInput} plus `currency`,
  * `callbackUrl`, optional `capture` / `idempotencyKey`.
  *
- * Provider-specific fields (`stripe*`, `moyasar*`, `paypal*`, `paymob*`, etc.)
- * remain optional on this 0.x mega-interface for convenience. Prefer typed
- * extensions ({@link MoyasarCreatePaymentParams}, Stripe/PayPal/Paymob create
- * params) or extend {@link CommonPaymentInput} in custom adapters so common
- * contracts stay free of provider pollution.
+ * Provider fields are not on `CreatePaymentParams`; use per-gateway `*CreatePaymentParams` (1.0).
  */
 export interface CreatePaymentParams extends CommonPaymentInput, OperationRequestOptions {
-    /**
-     * Amount in major currency units (e.g., SAR, not halalas).
-     *
-     * **Preferred (0.x+):** pass {@link Money} from `money("10.50", "SAR")`
-     * (decimal string + ISO currency). Internals convert via bigint minor units.
-     *
-     * **Deprecated:** plain JS `number` major units (e.g. `10.5`, `99.99`) for
-     * backward compatibility. Pass clean decimals only — not the result of float
-     * arithmetic like `0.1 + 0.2`. Float artifacts can fail strict precision
-     * checks (`rounding: 'reject'`, the default). Prefer string-based Money.
-     *
-     * Response fields on {@link GatewayPaymentResult} still use `number` major
-     * units in 0.x for shape stability (may switch to Money at 1.0).
-     *
-     * @see docs/money.md
-     */
-    amount: AmountInput;
     /** ISO 4217 currency code */
     currency: string;
     /** URL to redirect after payment completion */
@@ -189,78 +152,6 @@ export interface CreatePaymentParams extends CommonPaymentInput, OperationReques
      * `paymentMethods`.
      */
     offSession?: boolean;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Stripe-specific fields (0.x convenience — prefer StripeCreatePaymentParams)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /** Stripe: Payment Method ID (from Stripe.js) */
-    stripePaymentMethodId?: string;
-    /** Stripe: Customer ID for saved payment methods */
-    stripeCustomerId?: string;
-    /** Stripe: Setup for future usage */
-    stripeSetupFutureUsage?: 'on_session' | 'off_session';
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Moyasar-specific fields (0.x convenience — prefer MoyasarCreatePaymentParams)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /**
-     * Moyasar payment source.
-     * Backend create accepts: token, applepay, samsungpay, stcpay.
-     * Raw `creditcard` (PAN/CVC) is a Moyasar.js / PCI type only — this adapter
-     * rejects it with InvalidRequestError before any HTTP request. Use a
-     * Moyasar.js `token` source instead.
-     * Takes precedence over `tokenId` if both are provided.
-     */
-    moyasarSource?: MoyasarPaymentSource;
-
-    /**
-     * @deprecated Use `moyasarSource` with type 'token' instead.
-     * Kept for backwards compatibility.
-     * Moyasar: Card token from Moyasar.js
-     */
-    tokenId?: string;
-
-    /** Moyasar: Whether to apply merchant coupon */
-    applyCoupon?: boolean;
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // PayPal-specific fields (0.x convenience — prefer PayPalCreatePaymentParams)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /** PayPal: Return URL after approval */
-    returnUrl?: string;
-    /** PayPal: Cancel URL if customer cancels */
-    cancelUrl?: string;
-    /** PayPal: Shipping collection behavior for the approval flow */
-    paypalShippingPreference?: "GET_FROM_FILE" | "NO_SHIPPING" | "SET_PROVIDED_ADDRESS";
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Paymob-specific fields (0.x convenience — prefer PaymobCreatePaymentParams)
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    /** Paymob: Override configured Integration ID/payment method alias for this payment */
-    paymobIntegrationId?: string | number;
-    /** Paymob: Explicit payment methods array for Intention API */
-    paymobPaymentMethods?: Array<string | number>;
-    /** Paymob: Legacy iframe ID override */
-    paymobIframeId?: string | number;
-    /** Paymob: Billing data sent to the Intention/payment key APIs */
-    paymobBillingData?: {
-        email: string;
-        firstName: string;
-        lastName: string;
-        phone: string;
-        country?: string;
-        city?: string;
-        street?: string;
-        building?: string;
-        apartment?: string;
-        floor?: string;
-        postalCode?: string;
-        state?: string;
-    };
 }
 
 /**
@@ -355,9 +246,11 @@ export interface MoyasarAftSender {
  * token flows; STC Pay, Apple Pay, and Samsung Pay can omit it.
  */
 export interface MoyasarCreatePaymentParams
-    extends Omit<CreatePaymentParams, "callbackUrl" | "moyasarSource"> {
+    extends Omit<CreatePaymentParams, "callbackUrl"> {
     callbackUrl?: string;
     moyasarSource?: MoyasarBackendPaymentSource;
+    /** Moyasar: Whether to apply merchant coupon */
+    applyCoupon?: boolean;
     /** Moyasar marketplace/platform split instructions. */
     splits?: MoyasarPaymentSplit[];
     /** Moyasar AFT recipient information. */
@@ -368,12 +261,33 @@ export interface MoyasarCreatePaymentParams
 
 /**
  * Paymob-specific create params. Paymob Intention API treats callback and
- * redirection URLs as optional per-payment overrides; dashboard callbacks can
- * be used instead, especially for non-card payment methods.
+/**
+ * Paymob billing data for customer identification.
+ * Shared type used by both {@link PaymobCreatePaymentParams} and Zod validation
+ * in `types/validation.ts` (deduped — single source of truth).
  */
+export type PaymobBillingData = {
+    email: string;
+    firstName: string;
+    lastName: string;
+    phone: string;
+    country?: string | undefined;
+    city?: string | undefined;
+    street?: string | undefined;
+    building?: string | undefined;
+    apartment?: string | undefined;
+    floor?: string | undefined;
+    postalCode?: string | undefined;
+    state?: string | undefined;
+};
+
 export interface PaymobCreatePaymentParams
     extends Omit<CreatePaymentParams, "callbackUrl"> {
     callbackUrl?: string;
+    paymobIntegrationId?: string | number;
+    paymobPaymentMethods?: Array<string | number>;
+    paymobIframeId?: string | number;
+    paymobBillingData?: PaymobBillingData;
 }
 
 /**
@@ -385,6 +299,9 @@ export interface PaymobCreatePaymentParams
 export interface PayPalCreatePaymentParams
     extends Omit<CreatePaymentParams, "callbackUrl"> {
     callbackUrl?: string;
+    returnUrl?: string;
+    cancelUrl?: string;
+    paypalShippingPreference?: "GET_FROM_FILE" | "NO_SHIPPING" | "SET_PROVIDED_ADDRESS";
 }
 
 /**
@@ -509,8 +426,6 @@ export type PaymentNextAction =
     | RedirectPaymentNextAction
     | { type?: string; [key: string]: unknown };
 
-/** @deprecated Prefer {@link PaymentNextAction}; alias kept for Moyasar-focused call sites. */
-export type MoyasarNextAction = MoyasarStcPayOtpNextAction | { type: "redirect"; url: string };
 
 /**
  * Result from gateway payment operations.
@@ -546,16 +461,9 @@ export type MoyasarNextAction = MoyasarStcPayOtpNextAction | { type: "redirect";
  */
 export interface GatewayPaymentResult {
     /**
-     * @deprecated Prefer `outcome`. Kept for 0.x.
-     * Means API/call completed without transport failure when true — **not** "paid".
-     * Dual-written from outcome mapping when gateways use Phase 6 helpers.
+     * Payment outcome discriminant. Switch on this (or use `isPaidOutcome` / `mapGatewayResultToOperationResult`).
      */
-    success: boolean;
-    /**
-     * Preferred Phase 6 outcome discriminant. When present, clients should switch
-     * on this (or use `isPaidOutcome` / `mapGatewayResultToOperationResult`).
-     */
-    outcome?: PaymentOperationOutcome | undefined;
+    outcome: PaymentOperationOutcome;
     /** Gateway's primary payment object ID for this operation */
     gatewayId: string;
     /** Gateway object ID when it is useful to expose separately from the primary ID */
@@ -566,35 +474,27 @@ export interface GatewayPaymentResult {
     captureId?: string | undefined;
     /** PayPal authorization ID, required for PayPal authorization captures and voids */
     authorizationId?: string | undefined;
-    /** Normalized payment status */
-    status: PaymentStatus;
+    /** Normalized payment status — gateway internal mapping (payment/refund/setup) */
+    status: GatewayPaymentStatus;
     /** Redirect URL for 3DS/PayPal approval (if applicable) - may be undefined */
     redirectUrl: string | undefined;
     /**
-     * Amount in major currency units (e.g., SAR).
-     * Still a JS `number` in 0.x for response-shape stability; derived via
-     * shared fromMinorUnits + safe conversion. Prefer treating as display/legacy;
-     * do not re-input float-derived values without re-validation. May become
-     * {@link Money} at 1.0.
-     *
-     * When `amount` / `fee` / `capturedAmount` / `refundedAmount` is set,
-     * prefer also setting {@link currency} so Phase-6 snapshots are complete.
-     * {@link import("./operation-result").paymentFromGatewayResult} fail-closes
-     * incomplete money (amount-like fields without currency are omitted).
+     * Amount as {@link Money} (major units + currency). Omitted when provider did not return money.
+     * When `amount` / `fee` / `capturedAmount` / `refundedAmount` is set, prefer also setting {@link currency} so Phase-6 snapshots are complete.
+     * {@link import("./operation-result").paymentFromGatewayResult} fail-closes incomplete money (Money without currency on sibling field is omitted).
      */
-    amount?: number | undefined;
+    amount?: Money | undefined;
     /**
      * ISO 4217 currency code for major-unit money fields on this result.
      * Required for a complete money snapshot when any amount-like field is set.
      */
     currency?: string | undefined;
-    /** Fee charged by gateway in major currency units (0.x number; see amount) */
-    fee?: number | undefined;
-    /** Amount captured so far (partial captures) in major units (0.x number) */
-    capturedAmount?: number | undefined;
-    /** Amount refunded so far (partial refunds) in major units (0.x number) */
-    refundedAmount?: number | undefined;
-    /** Client secret for frontend confirmation flows (Stripe PaymentIntents) */
+    /** Fee as {@link Money} (major units). */
+    fee?: Money | undefined;
+    /** Amount captured so far (partial captures) as {@link Money}. */
+    capturedAmount?: Money | undefined;
+    /** Amount refunded so far (partial refunds) as {@link Money}. */
+    refundedAmount?: Money | undefined;
     clientSecret?: string | undefined;
     /** Gateway-specific next action payload for customer authentication or redirects */
     nextAction?: PaymentNextAction | undefined;
@@ -628,13 +528,10 @@ export interface GatewayPaymentResult {
  * API-call flag; pending refunds may still set `success: true`.
  */
 export interface GatewayRefundResult {
-    /** Whether the API call succeeded (not “refund settled”) */
-    success: boolean;
     /**
-     * Preferred Phase 6 refund outcome. When present, switch on this rather than
-     * `success` alone. See {@link import('./operation-result').RefundOperationResult}.
+     * Refund outcome discriminant.
      */
-    outcome?: RefundOperationOutcome | undefined;
+    outcome: RefundOperationOutcome;
     /**
      * Gateway's refund identifier.
      * For Moyasar: This is the payment ID (refunds are tracked on payment).
@@ -643,8 +540,8 @@ export interface GatewayRefundResult {
     gatewayRefundId: string;
     /** Refund processing status */
     status: RefundStatus;
-    /** Total amount refunded on this payment (in base currency units) */
-    totalRefunded?: number | undefined;
+    /** Total amount refunded on this payment as {@link Money}. */
+    totalRefunded?: Money | undefined;
     /** Timestamp when refund was processed */
     refundedAt?: Date | undefined;
     /**

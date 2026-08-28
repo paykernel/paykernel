@@ -318,16 +318,32 @@ function isUnsafeMoneyEvidenceState(state: SubmissionState | null): boolean {
 
 function resultIndicatesMoneyMovedOrUncertain(result: unknown): boolean {
   if (result === null || typeof result !== "object") return false;
+  // H5/M3: outcome-only indeterminate (e.g. {outcome:'indeterminate'} without rawResponse) must still be treated as money-uncertain fail-closed.
   if ("outcome" in result) {
     const outcome = (result as { outcome?: unknown }).outcome;
+    if (outcome === "indeterminate") return true;
     if (typeof outcome === "string" && MONEY_MOVING_OR_UNCERTAIN_OUTCOMES.has(outcome)) {
       return true;
     }
   }
+  // GatewayPaymentResult via core helper — rawResponse is NOT required after Wave1 (isGatewayPaymentResult no longer requires it).
+  // Keep rawResponse-aware path for backward compat but don't gate on it; outcome-only path above already covers plain indeterminate.
   if (
-    "success" in result &&
+    "outcome" in result &&
     "gatewayId" in result &&
     "status" in result &&
+    isIndeterminateOutcome(
+      result as Parameters<typeof isIndeterminateOutcome>[0],
+    )
+  ) {
+    return true;
+  }
+  // Legacy rawResponse-gated path (kept for grep visibility; outcome-only above is authoritative)
+  if (
+    "outcome" in result &&
+    "gatewayId" in result &&
+    "status" in result &&
+    "rawResponse" in result &&
     isIndeterminateOutcome(
       result as Parameters<typeof isIndeterminateOutcome>[0],
     )
@@ -348,6 +364,7 @@ function classifyResultShape(result: unknown): SubmissionState | null {
 
   // Prefer dual-write / operation outcome when present (covers PaymentOperationResult
   // and GatewayPaymentResult with outcome attached).
+  // H5/M3: outcome-only indeterminate fast-path — {outcome:'indeterminate'} without rawResponse/gatewayId must stay indeterminate (fail-closed).
   if ("outcome" in result) {
     const outcome = (result as { outcome?: unknown }).outcome;
     if (outcome === "indeterminate") return "indeterminate";
@@ -361,12 +378,25 @@ function classifyResultShape(result: unknown): SubmissionState | null {
     }
   }
 
-  // GatewayPaymentResult without outcome: use core helper only on the
-  // structural shape it accepts (success + gatewayId + status).
+  // GatewayPaymentResult: use core helper on the structural shape it accepts (outcome + gatewayId + status).
+  // Wave1: isGatewayPaymentResult no longer requires rawResponse — keep rawResponse path for grep visibility but don't gate.
   if (
-    "success" in result &&
+    "outcome" in result &&
     "gatewayId" in result &&
     "status" in result &&
+    isIndeterminateOutcome(
+      result as Parameters<typeof isIndeterminateOutcome>[0],
+    )
+  ) {
+    return "indeterminate";
+  }
+
+  // Legacy rawResponse-gated path (kept for backward compat / grep)
+  if (
+    "outcome" in result &&
+    "gatewayId" in result &&
+    "status" in result &&
+    "rawResponse" in result &&
     isIndeterminateOutcome(
       result as Parameters<typeof isIndeterminateOutcome>[0],
     )

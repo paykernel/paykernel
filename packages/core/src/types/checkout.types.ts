@@ -8,6 +8,7 @@
  */
 
 import type { PaymentErrorLike } from "./operation-result";
+import type { Money } from "../utils/money";
 import type {
   AmountInput,
   OperationRequestOptions,
@@ -53,9 +54,9 @@ export type CheckoutSession = {
   references: ProviderReferences;
   url?: string;
   paymentStatus?: string;
-  amount?: number;
+  amount?: Money | undefined;
   currency?: string;
-  refundedAmount?: number;
+  refundedAmount?: Money | undefined;
   rawResponse?: unknown;
 };
 

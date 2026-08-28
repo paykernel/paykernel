@@ -255,7 +255,11 @@ function moneyFromMajorUnits(
   }
 }
 
-/** Provider recon snapshot from `getPayment` money only. Incomplete money fails closed. */
+function isMoneyValue(value: unknown): value is Money {
+  return typeof value === "object" && value !== null && "amount" in value && "currency" in value;
+}
+
+/** Provider recon snapshot from `getPayment` Money only. Incomplete money fails closed. */
 function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
   if (!got.gatewayId) return undefined;
   const currency = publishableCurrency(got.currency);
@@ -264,7 +268,9 @@ function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
     got.capturedAmount !== undefined ||
     got.refundedAmount !== undefined;
   if (hasAmountLike && currency === undefined) return undefined;
-  const amount = moneyFromMajorUnits(got.amount, currency);
+  const amount = isMoneyValue(got.amount)
+    ? (got.amount as Money)
+    : moneyFromMajorUnits(got.amount as unknown as number | undefined, currency);
   if (amount === undefined) return undefined;
   const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
     gatewayPaymentId: got.gatewayId,
@@ -273,12 +279,16 @@ function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
     providerStatus: got.status,
   };
   if (got.capturedAmount !== undefined) {
-    const captured = moneyFromMajorUnits(got.capturedAmount, currency);
+    const captured = isMoneyValue(got.capturedAmount)
+      ? (got.capturedAmount as Money)
+      : moneyFromMajorUnits(got.capturedAmount as unknown as number | undefined, currency);
     if (captured === undefined) return undefined;
     input.capturedAmount = captured;
   }
   if (got.refundedAmount !== undefined) {
-    const refunded = moneyFromMajorUnits(got.refundedAmount, currency);
+    const refunded = isMoneyValue(got.refundedAmount)
+      ? (got.refundedAmount as Money)
+      : moneyFromMajorUnits(got.refundedAmount as unknown as number | undefined, currency);
     if (refunded === undefined) return undefined;
     input.refundedAmount = refunded;
   }
@@ -433,7 +443,7 @@ Silent ACK of failed work is forbidden. Full matrix: [webhook-inbox.md](../packa
 ## Next
 
 - [docs home](./README.md)
-- [Runnable examples](../examples/README.md) — checkout kernel + Bun Hono/Elysia + Express (`express-sqlite`, ephemeral loopback) + Cloudflare Workers fetch (`cloudflare-workers-fetch`) over single-host in-memory SQLite (4 examples)
+- [Runnable examples](../examples/README.md) — checkout kernel + Bun Hono/Elysia + Express (`express-sqlite`, ephemeral loopback) + Cloudflare Workers fetch (`cloudflare-workers-fetch`) + Postgres (`bun-hono-postgres`) over single-host in-memory SQLite (postgres host uses real PG; 5 hosts)
 - [Adapter selection](./adapter-selection.md)
 - [Store contracts](../packages/store-contracts/docs/contracts.md)
 - Gateway notes: [Moyasar](../packages/core/docs/moyasar.md) · [PayPal](../packages/core/docs/paypal.md) · [Paymob](../packages/core/docs/paymob.md) · [Stripe](../packages/core/docs/stripe.md)

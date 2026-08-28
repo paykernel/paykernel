@@ -1,10 +1,9 @@
 import {
   InvalidRequestError,
   MoneyAmountError,
+  money,
   moneyToMajorNumber,
   normalizeAmountInput,
-  money,
-  type AmountInput,
   type Money,
 } from "@paykernel/core";
 
@@ -17,16 +16,20 @@ const PARSE_OPTS = {
 /**
  * ISO-padded major decimal string for Tap hashstring and JSON number tokens.
  * SAR `1` → `1.00`; KWD `1.2` → `1.200`. Never float-multiplies.
+ * Accepts {@link Money} only — if you have a plain major `number`, wrap it first
+ * via `money(number, currency)` (which validates and canonicalizes).
  */
-export function formatTapIsoAmount(
-  amount: AmountInput,
-  currency: string,
-): string {
+export function formatTapIsoAmount(amount: Money | number, currency: string): string {
+  // Legacy number fallback documented: wrap plain major numbers via money()
+  // so normalizeAmountInput stays Money-only and precise.
   return toTapMoney(amount, currency).amount;
 }
 
-/** JSON-number major units for Tap request bodies (IEEE-safe round-trip). */
-export function tapMajorNumber(amount: AmountInput, currency: string): number {
+/**
+ * JSON-number major units for Tap request bodies (IEEE-safe round-trip).
+ * Accepts {@link Money} only — wrap plain numbers via `money(number, currency)` first.
+ */
+export function tapMajorNumber(amount: Money | number, currency: string): number {
   const m = toTapMoney(amount, currency);
   try {
     return moneyToMajorNumber(m, PARSE_OPTS);
@@ -47,7 +50,10 @@ export function parseTapAmount(amount: unknown, currency: string): Money {
   throw new InvalidRequestError("Tap amount must be a number or decimal string");
 }
 
-function toTapMoney(amount: AmountInput, currency: string): Money {
+function toTapMoney(amount: Money | number, currency: string): Money {
+  if (typeof amount === "number") {
+    return money(amount, currency, PARSE_OPTS);
+  }
   return normalizeAmountInput(amount, currency, PARSE_OPTS);
 }
 
@@ -66,7 +72,7 @@ export function stringifyTapJsonBody(body: Record<string, unknown>): string {
   if (typeof amount !== "number" || typeof currency !== "string") {
     return JSON.stringify(body);
   }
-  const padded = formatTapIsoAmount(amount, currency);
+  const padded = formatTapIsoAmount(money(amount, currency, PARSE_OPTS), currency);
   if (!TAP_JSON_NUMBER_TOKEN.test(padded)) {
     throw new InvalidRequestError(
       `Tap amount for ${currency.toUpperCase()} is not a JSON number token`,

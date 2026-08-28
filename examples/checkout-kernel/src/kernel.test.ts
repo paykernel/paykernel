@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NetworkError } from "@paykernel/core";
+import { money } from "@paykernel/core";
 import { createCheckoutKernel } from "./kernel";
 
 function bodyOf(result: { body: unknown }): Record<string, unknown> {
@@ -108,11 +109,10 @@ describe("checkout kernel provider snapshot money", () => {
         {
           outcome: "custom",
           result: {
-            success: true,
             outcome: "succeeded",
             gatewayId: "pay_mock_1",
             status: "paid",
-            amount: 99,
+            amount: money("99", "USD"),
             currency: "USD",
             redirectUrl: undefined,
             rawResponse: {},
@@ -144,11 +144,10 @@ describe("checkout kernel provider snapshot money", () => {
         {
           outcome: "custom",
           result: {
-            success: true,
             outcome: "succeeded",
             gatewayId: "pay_mock_1",
             status: "paid",
-            amount: 10,
+            amount: money("10", "USD"),
             redirectUrl: undefined,
             rawResponse: {},
           },

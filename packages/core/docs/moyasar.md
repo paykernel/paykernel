@@ -5,24 +5,26 @@ Moyasar is a Saudi payment gateway supporting credit cards, Apple Pay, Samsung P
 ## Configuration
 
 ```typescript
-import { PaymentClient } from '@paykernel/core';
+import { createPaymentClient, moyasarGateway } from '@paykernel/core';
 
-const client = new PaymentClient({
-  moyasar: {
-    // Required: API secret key (sk_test_… for test, sk_live_… for live)
-    secretKey: process.env.MOYASAR_SECRET_KEY!,
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({
+      // Required: API secret key (sk_test_… for test, sk_live_… for live)
+      secretKey: process.env.MOYASAR_SECRET_KEY!,
 
-    // Optional: Webhook verification
-    webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
+      // Optional: Webhook verification
+      webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
 
-    // Optional: API timeout in milliseconds (default: 30000)
-    timeoutMs: 30000,
+      // Optional: API timeout in milliseconds (default: 30000)
+      timeoutMs: 30000,
 
-    // Required at runtime for capture/refund/void/confirmStcPayOtp (throws if omitted)
-    // Prefer a shared store with atomic reserve() in production.
-    // idempotencyStore: sharedStoreWithAtomicReserve,
+      // Required at runtime for capture/refund/void/confirmStcPayOtp (throws if omitted)
+      // Prefer a shared store with atomic reserve() in production.
+      // idempotencyStore: sharedStoreWithAtomicReserve,
 
-    // sandbox is ignored — Moyasar test/live is determined by the key prefix only
+      // sandbox is ignored — Moyasar test/live is determined by the key prefix only
+    }),
   },
   defaultGateway: 'moyasar',
 });
@@ -55,9 +57,10 @@ Backend-safe `moyasarSource` types (raw `creditcard` PAN/CVC is **not** accepted
 
 ```typescript
 import type { CardTokenSource } from '@paykernel/core';
+import { isPaidOutcome, money } from '@paykernel/core';
 
 const result = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   orderId: 'order_123',
   callbackUrl: 'https://example.com/callback', // Required for token sources
@@ -68,18 +71,17 @@ const result = await client.createPayment({
   metadata: { customerId: 'customer_456' },
 });
 
-// success:true includes initiated/pending payments — always check status.
-if (result.status === 'failed') {
-  // Do not mark the order paid (success is also false for failed/abandoned).
+if (isPaidOutcome(result)) {
+  // Safe to fulfill only after you also verify amount/currency against the order.
 } else if (result.redirectUrl) {
   // 3DS required — do not fulfill yet; see Callback / 3DS return below.
   redirect(result.redirectUrl);
-} else if (result.status === 'paid') {
-  // Safe to fulfill only after you also verify amount/currency against the order.
 } else if (result.status === 'authorized') {
   // Auth-only hold — capture later; do not ship as paid unless that is intentional.
-} else {
+} else if (result.outcome === 'requires_action' || result.status === 'pending') {
   // pending (initiated) or other non-terminal — wait for 3DS/OTP/webhook.
+} else {
+  // failed / declined — do not mark the order paid
 }
 ```
 
@@ -91,11 +93,12 @@ STC Pay uses a mobile OTP verification flow. Manual / authorize-only capture is
 
 ```typescript
 import type { StcPaySource } from '@paykernel/core';
+import { money } from '@paykernel/core';
 
 // Pass 'moyasar' (or use client.gateway('moyasar')) so optional callbackUrl
 // and Moyasar-only fields type-check against MoyasarCreatePaymentParams.
 const result = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   // callbackUrl optional for STC Pay
   moyasarSource: {
@@ -145,10 +148,11 @@ if (confirmed.status === 'paid') {
 
 ```typescript
 import type { ApplePaySource, SamsungPaySource } from '@paykernel/core';
+import { money } from '@paykernel/core';
 
 // Apple Pay (encrypted token — supports manualCapture / capture: false)
 const appleResult = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   callbackUrl: 'https://example.com/callback',
   moyasarSource: {
@@ -160,7 +164,7 @@ const appleResult = await client.createPayment({
 
 // Samsung Pay
 const samsungResult = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   callbackUrl: 'https://example.com/callback',
   moyasarSource: {
@@ -175,19 +179,9 @@ const samsungResult = await client.createPayment({
 > This SDK **rejects** `capture: false` for DPAN sources with
 > `InvalidRequestError`. Use an encrypted Apple Pay `token` source for
 > authorize-only payments.
+### Token lifecycle
 
-### Legacy Token Compatibility
-
-The `tokenId` field is still supported for backwards compatibility:
-
-```typescript
-// Legacy approach (still works)
-const result = await client.createPayment({
-  amount: 100,
-  currency: 'SAR',
-  callbackUrl: 'https://example.com/callback',
-  tokenId: 'token_abc123xyz', // Converted to moyasarSource internally
-});
+`tokenId` is deleted in types in 1.0; the runtime fallback for `tokenId` has been removed — use `moyasarGateway` per-gateway params with `moyasarSource: { type: "token", token }`. See [Migrating to 1.0](../../../docs/migrations/1.0.md#6-provider-fields-off-common-params).
 ```
 
 ## Important Notes
@@ -197,18 +191,18 @@ const result = await client.createPayment({
 | **3DS Flow** | Card payments may return `redirectUrl` for 3DS verification. Moyasar `3ds_auth_error` maps to `CardDeclinedError` (not `AuthenticationError`) |
 | **STC Pay OTP** | STC Pay returns `nextAction.type === 'stcpay_otp'` with the OTP confirmation URL |
 | **Token Format** | Tokens must start with `token_` |
-| **Amount** | Provide amount in major currency units (e.g. `100` for 100.00 SAR); the SDK converts to the currency's smallest unit |
-| **Splits** | `splits[].amount` is also in major units (same as top-level `amount`); the SDK converts each split to minor units for the API. Pass gateway `'moyasar'` on `createPayment` when using `splits` |
+| **Amount** | `Money` only — e.g. `money("100","SAR")` → 10000 halalas; use `money()` for all amounts |
+| **Splits** | `splits[].amount` is `Money` (same currency as top-level `amount`); the SDK converts each split to minor units. Pass gateway `'moyasar'` on `createPayment` when using `splits` |
 | **Metadata** | Moyasar metadata supports up to 30 string key/value pairs; keys are limited to 40 characters and values to 500 characters |
 | **Order Correlation** | `orderId` is copied into `metadata.orderId` and `metadata.paymentId` unless you set those metadata keys yourself |
 | **Idempotency (create)** | Use `idempotencyKey` as a UUID; Moyasar uses it as the created payment ID (`given_id`) |
 | **Idempotency (mutations)** | Capture/refund/void/`confirmStcPayOtp` have **no** native Moyasar idempotency and are **not** auto-retried by the SDK (`withRetry`). Configure `idempotencyStore` (shared across workers) and pass `idempotencyKey` so **your** retries are safe — required for multi-worker refund / OTP safety |
 | **Payment IDs** | Moyasar payment operation IDs are UUIDs; `getPayment`, `capturePayment`, `refundPayment`, and `voidPayment` reject non-UUID IDs before calling Moyasar |
-| **Failed Attempts** | Moyasar can return HTTP 201 with `status: 'failed'` (or `abandoned`); this SDK returns `success: false` and `status: 'failed'` for those payment objects |
+| **Failed Attempts** | Moyasar can return HTTP 201 with `status: 'failed'` (or `abandoned`); this SDK returns `outcome: 'failed'` (or `declined`) and `status: 'failed'` for those payment objects |
 | **Create 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** declined/`failed`. Create is unfenced — the SDK returns `outcome: 'indeterminate'` + `reconciliationRequired` so callers reconcile via `given_id` / `getPayment` instead of minting a new idempotency key |
 | **Refund 2xx without id** | HTTP 200 `{}` / missing `payment.id` is **not** a completed refund. `refundPayment` requires an observed id before mapping; missing id is `outcome: 'indeterminate'` and the mutation fence stays `unknown` (never `completed` with `gatewayRefundId: undefined`). Resolve via `getPayment` before retrying — a new key can double-refund |
 | **Mutation 2xx invalid JSON** | HTTP 200 with an unreadable body after create/capture/refund/void/OTP is **not** a clean `GatewayApiError`. The SDK returns `outcome: 'indeterminate'` and keeps the mutation fence `unknown` (same key will not POST again). GET / non-mutating 2xx invalid JSON stays `GatewayApiError`. Reconcile via `getPayment` |
-| **`success` vs status** | `success: true` only means the payment did not map to `failed` (provider `failed`/`abandoned`, or an **unmapped** status). An `initiated` payment returns `success: true` with `status: 'pending'`. **Fulfill only when `status` is `paid`** (or `authorized` for intentional auth-only holds). Complete 3DS/OTP first when required |
+| **`outcome` vs status** | `outcome: 'succeeded'` alone is not fulfillment. `isPaidOutcome(result)` requires `outcome === 'succeeded'` **and** `status === 'paid'` (`initiated` → `pending` is `requires_action`, not paid). **Fulfill only when `isPaidOutcome` / `status === 'paid'`** (or `authorized` for intentional auth-only holds). Complete 3DS/OTP first when required |
 | **AFT (account funding)** | Optional `recipient` and `sender` on create are Moyasar Account Funding Transaction (AFT) fields. They require AFT-enabled account capability from Moyasar; omit them for ordinary payments |
 | **Callback / 3DS return** | After the customer returns to `callback_url`, **never trust query-string status alone**. Always `getPayment` (or a verified webhook), then verify `amount` and `currency` against your order. Prefer webhooks as the source of truth |
 | **Manual Capture** | Set `capture: false` or `manualCapture: true` for auth-only (capture later). Not supported for decrypted Apple Pay (DPAN) or STC Pay sources |
@@ -225,12 +219,14 @@ const result = await client.createPayment({
 
 ## Marketplace Splits
 
-When creating a payment with splits, pass each split `amount` in **major** currency units (same as the top-level payment amount). The SDK converts them to Moyasar minor units.
+When creating a payment with splits, pass each split `amount` as `Money` (same currency as top-level `amount`). The SDK converts them to Moyasar minor units.
 
 ```typescript
+import { money } from "@paykernel/core";
+
 // splits is Moyasar-only — pass gateway: 'moyasar' (or gateway('moyasar')).
 const result = await client.createPayment({
-  amount: 100, // 100.00 SAR major units
+  amount: money("100", "SAR"), // 100.00 SAR
   currency: 'SAR',
   moyasarSource: {
     type: 'applepay',
@@ -238,13 +234,13 @@ const result = await client.createPayment({
   },
   splits: [
     {
-      amount: 50, // major units → sent as 5000 halalas
+      amount: money("50", "SAR"), // → sent as 5000 halalas
       recipient_id: '3fa85f64-5717-4562-b3fc-2c963f66afa6',
       reference: 'seller_a',
       fee_source: true,
     },
     {
-      amount: 50,
+      amount: money("50", "SAR"),
       recipient_id: '4fa85f64-5717-4562-b3fc-2c963f66afa6',
       reference: 'seller_b',
     },
@@ -265,8 +261,10 @@ AFT is **account-gated**: your Moyasar merchant account must have AFT enabled
 unless that capability is active and you are intentionally creating an AFT.
 
 ```typescript
+import { money } from "@paykernel/core";
+
 const result = await client.createPayment({
-  amount: 100,
+  amount: money("100", "SAR"),
   currency: 'SAR',
   moyasarSource: {
     type: 'applepay',
@@ -308,9 +306,9 @@ const result = await client.createPayment({
 | `voided` | `cancelled` |
 | *(unmapped string)* | `failed` (logged warning; fail-closed for fulfillment) |
 
-> **Do not fulfill on `success` alone.** HTTP-successful creates with
-> Moyasar `status: 'initiated'` map to `success: true` and SDK
-> `status: 'pending'` until 3DS/OTP completes. **Fulfill only when status is
+> **Do not fulfill on `outcome` alone.** HTTP-successful creates with
+> Moyasar `status: 'initiated'` map to `outcome: 'requires_action'` and SDK
+> `status: 'pending'` until 3DS/OTP completes. **Fulfill only when `isPaidOutcome(result)` / `status is
 > `paid`** (or `authorized` if you intentionally hold auth-only funds). Prefer
 > verified webhooks; after a `callback_url` / 3DS return, re-fetch with
 > `getPayment` and verify amount/currency — never trust the redirect query
@@ -374,9 +372,11 @@ Moyasar payments are typically auto-captured by default. Set `capture: false` on
 > double-apply. See [Idempotency for refunds, captures, and voids](#idempotency-for-refunds-captures-and-voids).
 
 ```typescript
+import { money } from "@paykernel/core";
+
 const result = await client.capturePayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
-  amount: 100, // Optional: Capture partial amount if supported
+  amount: money("100", "SAR"), // Optional: Capture partial amount if supported
   currency: 'SAR', // Required whenever amount is provided; must match payment currency
   idempotencyKey: 'capture-order-123',
 }, 'moyasar');
@@ -415,9 +415,11 @@ Partial amounts convert with the **payment** currency from a preflight GET
 > required on every refund (no native Moyasar refund idempotency).
 
 ```typescript
+import { money } from "@paykernel/core";
+
 const result = await client.refundPayment({
   gatewayPaymentId: '760878ec-d1d3-5f72-9056-191683f55872',
-  amount: 50, // Optional: Partial refund (major units)
+  amount: money("50", "SAR"), // Optional: Partial refund
   currency: 'SAR', // Required whenever amount is provided; must match payment
   idempotencyKey: 'refund-order-123',
 }, 'moyasar');

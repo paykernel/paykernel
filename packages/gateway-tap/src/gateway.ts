@@ -12,7 +12,7 @@ import {
   NetworkError,
   toMinorUnits,
   withRetry,
-  type AmountInput,
+  type Money,
   type GatewayPaymentResult,
   type GatewayRefundResult,
   type GatewayRuntimeDeps,
@@ -413,19 +413,31 @@ export class TapGateway extends BaseGateway {
     const currency =
       typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
     const tapStatus = typeof obj.status === "string" ? obj.status : "";
-    const status =
+    const gatewayStatus =
       kind === "refund"
         ? mapTapRefundPaymentStatus(tapStatus)
         : mapTapChargeStatus(tapStatus);
+    // WebhookEvent.status is WebhookEnvelopeStatus — map Gateway refund_pending/failed to domain pending/failed
+    const statusForWebhook: import("@paykernel/core").WebhookEnvelopeStatus =
+      kind === "refund"
+        ? gatewayStatus === "refund_pending"
+          ? "pending"
+          : gatewayStatus === "refund_failed"
+            ? "failed"
+            : gatewayStatus === "refunded"
+              ? "refunded"
+              : (gatewayStatus as unknown as import("@paykernel/core").WebhookEnvelopeStatus)
+        : (gatewayStatus as unknown as import("@paykernel/core").WebhookEnvelopeStatus);
+    const status = gatewayStatus;
     const authorizeChargeId =
       kind === "authorize" ? chargeIdFromAuthorize(obj) : undefined;
     const chargeId =
       kind === "refund" && typeof obj.charge_id === "string"
         ? obj.charge_id
         : (authorizeChargeId ?? id);
-    let amount: number | undefined;
+    let amount: Money | undefined;
     if (obj.amount !== undefined && currency !== undefined) {
-      amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
+      amount = parseTapAmount(obj.amount, currency);
     }
     const liveMode = typeof obj.live_mode === "boolean" ? obj.live_mode : undefined;
     const apiVersion =
@@ -445,13 +457,17 @@ export class TapGateway extends BaseGateway {
       gateway: "tap",
       paymentId,
       gatewayPaymentId: chargeId,
-      status,
+      status: statusForWebhook,
       timestamp: created,
       rawPayload: normalized,
     };
     if (kind === "refund") legacy.gatewayObjectId = id;
-    if (amount !== undefined) legacy.amount = amount;
-    if (currency !== undefined) legacy.currency = currency;
+    if (amount !== undefined) {
+      legacy.amount = amount;
+      legacy.currency = amount.currency;
+    } else if (currency !== undefined) {
+      legacy.currency = currency;
+    }
     if (liveMode !== undefined) legacy.livemode = liveMode;
     if (apiVersion !== undefined) legacy.apiVersion = apiVersion;
 
@@ -604,13 +620,13 @@ export class TapGateway extends BaseGateway {
         : mapTapChargeOutcome(tapStatus, status, code);
     const omitCapturedHoldAmount =
       kind === "authorize" && tapStatusNormalized === "CAPTURED";
-    let amount: number | undefined;
+    let amount: Money | undefined;
     if (
       obj.amount !== undefined &&
       currency !== undefined &&
       !omitCapturedHoldAmount
     ) {
-      amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
+      amount = parseTapAmount(obj.amount, currency);
     }
     const declineMessage =
       typeof (obj.response as { message?: unknown } | undefined)?.message ===
@@ -651,8 +667,7 @@ export class TapGateway extends BaseGateway {
         redirectUrl: outcome === "requires_action" ? redirectUrl : undefined,
         rawResponse: raw,
         references,
-        ...(amount !== undefined ? { amount } : {}),
-        ...(currency !== undefined ? { currency } : {}),
+        ...(amount !== undefined ? { amount, currency: amount.currency } : currency !== undefined ? { currency } : {}),
         ...(authId !== undefined ? { authorizationId: authId } : {}),
         providerNativeStatus: tapStatus,
       },
@@ -932,10 +947,7 @@ export class TapGateway extends BaseGateway {
     return Object.keys(out).length > 0 ? out : undefined;
   }
 
-  private tapOutboundMajor(
-    amount: Parameters<typeof tapMajorNumber>[0],
-    currency: string,
-  ): number {
+  private tapOutboundMajor(amount: Money, currency: string): number {
     const major = tapMajorNumber(amount, currency);
     if (major === 0) {
       throw new InvalidRequestError("Tap amount must be greater than 0");
@@ -944,15 +956,12 @@ export class TapGateway extends BaseGateway {
   }
 
   private assertCaptureAmount(
-    requested: AmountInput | undefined,
+    requested: Money | undefined,
     authorizeAmount: unknown,
     currency: string,
   ): boolean {
     if (requested === undefined) return false;
-    const requestedMinor =
-      typeof requested === "number"
-        ? toMinorUnits(requested, currency)
-        : toMinorUnits(requested);
+    const requestedMinor = toMinorUnits(requested);
     const authorizedMinor = toMinorUnits(parseTapAmount(authorizeAmount, currency));
     if (requestedMinor > authorizedMinor) {
       throw new InvalidRequestError(

@@ -1,0 +1,99 @@
+{
+  "schemaFamily": "payments-storage",
+  "currentVersion": 2,
+  "migrations": [
+    {
+      "version": 1,
+      "checksum": "v1_foundation"
+    },
+    {
+      "version": 2,
+      "checksum": "v2_list_indexes"
+    }
+  ],
+  "logicalTables": [
+    "payment_idempotency",
+    "payment_reconciliation_jobs",
+    "payment_storage_migrations",
+    "payment_webhook_inbox"
+  ],
+  "idempotencyColumns": [
+    "attempts",
+    "completed_at",
+    "created_at",
+    "error_sanitized",
+    "fingerprint",
+    "generation",
+    "indeterminate_at",
+    "key",
+    "lease_expires_at",
+    "lease_owner",
+    "lease_token",
+    "result_json",
+    "status",
+    "tenant_id",
+    "updated_at"
+  ],
+  "webhookInboxColumns": [
+    "attempts",
+    "available_at",
+    "completed_at",
+    "created_at",
+    "first_received_at",
+    "gateway",
+    "generation",
+    "key",
+    "last_error_sanitized",
+    "last_received_at",
+    "lease_expires_at",
+    "lease_owner",
+    "lease_token",
+    "payload_hash",
+    "payload_ref",
+    "provider_event_id",
+    "status",
+    "tenant_id",
+    "updated_at"
+  ],
+  "reconciliationColumns": [
+    "attempts",
+    "completed_at",
+    "created_at",
+    "due_at",
+    "generation",
+    "key",
+    "last_error_sanitized",
+    "lease_expires_at",
+    "lease_owner",
+    "lease_token",
+    "reason",
+    "status",
+    "subject_id",
+    "tenant_id",
+    "updated_at"
+  ],
+  "idempotencyStatuses": [
+    "completed",
+    "expired",
+    "indeterminate",
+    "reserved"
+  ],
+  "webhookInboxStatuses": [
+    "claimed",
+    "completed",
+    "dead_letter",
+    "failed",
+    "pending"
+  ],
+  "reconciliationStatuses": [
+    "claimed",
+    "completed",
+    "failed",
+    "manual_review",
+    "scheduled"
+  ],
+  "FOUNDATION_SQL_POSTGRES": "CREATE TABLE IF NOT EXISTS \"payment_idempotency\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  fingerprint TEXT NOT NULL,\n  result_json TEXT,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  tenant_id TEXT,\n  completed_at TEXT,\n  indeterminate_at TEXT,\n  error_sanitized TEXT,\n  CHECK (status IN ('reserved', 'completed', 'indeterminate', 'expired')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_lease_expires ON \"payment_idempotency\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_status ON \"payment_idempotency\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_tenant ON \"payment_idempotency\" (tenant_id);\nCREATE TABLE IF NOT EXISTS \"payment_webhook_inbox\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  payload_hash TEXT NOT NULL,\n  gateway TEXT,\n  provider_event_id TEXT,\n  payload_ref TEXT,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  available_at TEXT,\n  first_received_at TEXT,\n  last_received_at TEXT,\n  completed_at TEXT,\n  last_error_sanitized TEXT,\n  tenant_id TEXT,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  CHECK (status IN ('pending', 'claimed', 'completed', 'failed', 'dead_letter')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_lease_expires ON \"payment_webhook_inbox\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_available ON \"payment_webhook_inbox\" (available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_status ON \"payment_webhook_inbox\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_tenant ON \"payment_webhook_inbox\" (tenant_id);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_payload_hash ON \"payment_webhook_inbox\" (payload_hash);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail ON \"payment_webhook_inbox\" (status, available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_lexp ON \"payment_webhook_inbox\" (status, lease_expires_at);\nCREATE TABLE IF NOT EXISTS \"payment_reconciliation_jobs\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  subject_id TEXT,\n  reason TEXT,\n  due_at TEXT NOT NULL,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  last_error_sanitized TEXT,\n  tenant_id TEXT,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  completed_at TEXT,\n  CHECK (status IN ('scheduled', 'claimed', 'completed', 'failed', 'manual_review')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_lease_expires ON \"payment_reconciliation_jobs\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_due ON \"payment_reconciliation_jobs\" (due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_status ON \"payment_reconciliation_jobs\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_tenant ON \"payment_reconciliation_jobs\" (tenant_id);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due ON \"payment_reconciliation_jobs\" (status, due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_lexp ON \"payment_reconciliation_jobs\" (status, lease_expires_at);\nCREATE TABLE IF NOT EXISTS \"payment_storage_migrations\" (\n  version INTEGER PRIMARY KEY NOT NULL,\n  name TEXT NOT NULL,\n  applied_at TEXT NOT NULL,\n  checksum TEXT\n);\n-- payments-storage v1 postgres: TEXT timestamps (TIMESTAMPTZ optional at adapter layer);",
+  "FOUNDATION_SQL_SQLITE": "CREATE TABLE IF NOT EXISTS \"payment_idempotency\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  fingerprint TEXT NOT NULL,\n  result_json TEXT,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  tenant_id TEXT,\n  completed_at TEXT,\n  indeterminate_at TEXT,\n  error_sanitized TEXT,\n  CHECK (status IN ('reserved', 'completed', 'indeterminate', 'expired')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_lease_expires ON \"payment_idempotency\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_status ON \"payment_idempotency\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_idempotency_tenant ON \"payment_idempotency\" (tenant_id);\nCREATE TABLE IF NOT EXISTS \"payment_webhook_inbox\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  payload_hash TEXT NOT NULL,\n  gateway TEXT,\n  provider_event_id TEXT,\n  payload_ref TEXT,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  available_at TEXT,\n  first_received_at TEXT,\n  last_received_at TEXT,\n  completed_at TEXT,\n  last_error_sanitized TEXT,\n  tenant_id TEXT,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  CHECK (status IN ('pending', 'claimed', 'completed', 'failed', 'dead_letter')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_lease_expires ON \"payment_webhook_inbox\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_available ON \"payment_webhook_inbox\" (available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_status ON \"payment_webhook_inbox\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_tenant ON \"payment_webhook_inbox\" (tenant_id);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_payload_hash ON \"payment_webhook_inbox\" (payload_hash);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail ON \"payment_webhook_inbox\" (status, available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_lexp ON \"payment_webhook_inbox\" (status, lease_expires_at);\nCREATE TABLE IF NOT EXISTS \"payment_reconciliation_jobs\" (\n  key TEXT PRIMARY KEY NOT NULL,\n  status TEXT NOT NULL,\n  subject_id TEXT,\n  reason TEXT,\n  due_at TEXT NOT NULL,\n  lease_owner TEXT,\n  lease_token TEXT,\n  lease_expires_at TEXT,\n  attempts INTEGER NOT NULL DEFAULT 0,\n  generation INTEGER NOT NULL DEFAULT 0,\n  last_error_sanitized TEXT,\n  tenant_id TEXT,\n  created_at TEXT NOT NULL,\n  updated_at TEXT NOT NULL,\n  completed_at TEXT,\n  CHECK (status IN ('scheduled', 'claimed', 'completed', 'failed', 'manual_review')),\n  CHECK (attempts >= 0),\n  CHECK (generation >= 0)\n);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_lease_expires ON \"payment_reconciliation_jobs\" (lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_due ON \"payment_reconciliation_jobs\" (due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_status ON \"payment_reconciliation_jobs\" (status);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_tenant ON \"payment_reconciliation_jobs\" (tenant_id);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due ON \"payment_reconciliation_jobs\" (status, due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_lexp ON \"payment_reconciliation_jobs\" (status, lease_expires_at);\nCREATE TABLE IF NOT EXISTS \"payment_storage_migrations\" (\n  version INTEGER PRIMARY KEY NOT NULL,\n  name TEXT NOT NULL,\n  applied_at TEXT NOT NULL,\n  checksum TEXT\n);\n-- payments-storage v1 sqlite: TEXT timestamps + CHECK;",
+  "LIST_INDEX_SQL_POSTGRES": "CREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail ON \"payment_webhook_inbox\" (status, available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_lexp ON \"payment_webhook_inbox\" (status, lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due ON \"payment_reconciliation_jobs\" (status, due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_lexp ON \"payment_reconciliation_jobs\" (status, lease_expires_at);",
+  "LIST_INDEX_SQL_SQLITE": "CREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_avail ON \"payment_webhook_inbox\" (status, available_at);\nCREATE INDEX IF NOT EXISTS idx_payment_webhook_inbox_st_lexp ON \"payment_webhook_inbox\" (status, lease_expires_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_due ON \"payment_reconciliation_jobs\" (status, due_at);\nCREATE INDEX IF NOT EXISTS idx_payment_reconciliation_jobs_st_lexp ON \"payment_reconciliation_jobs\" (status, lease_expires_at);"
+}

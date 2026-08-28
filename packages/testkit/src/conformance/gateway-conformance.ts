@@ -23,20 +23,24 @@ import {
   GATEWAY_CAPABILITY_KEYS,
   GatewayApiError,
   InsufficientFundsError,
+  isIndeterminateOutcome,
   isMoney,
+  isPaidLikePaymentStatus,
+  isPaidOutcome,
   money,
   moneyToMajorNumber,
+  MoneyAmountError,
   NetworkError,
   OperationNotSupportedError,
   PaymentAbortedError,
   type AmountInput,
   type GatewayCapabilities,
   type GatewayCapabilityKey,
+  type GatewayPaymentStatus,
   type Logger,
+  type Money,
   type PaymentGateway,
-  type PaymentStatus,
 } from "@paykernel/core";
-import { majorToMinor } from "../mock/mock-gateway";
 import type {
   GatewayConformanceCaseResult,
   GatewayConformanceFixtures,
@@ -45,20 +49,23 @@ import type {
   GatewayConformanceReport,
 } from "./types";
 
-/** Resolve expected major-unit number from AmountInput for assertions. */
+/** Resolve expected major-unit Money from AmountInput for assertions. */
+function amountInputToExpectedMoney(
+  amount: AmountInput,
+  _currency: string,
+): Money {
+  if (isMoney(amount)) return amount;
+  // Defensive — AmountInput is Money in 1.0; legacy number still handled for compat
+  return money(String(amount), _currency);
+}
+
+/** Legacy helper kept for number comparison via moneyToMajorNumber. */
 function amountInputToExpectedMajor(
   amount: AmountInput,
   currency: string,
 ): number {
-  if (typeof amount === "number") return amount;
-  if (isMoney(amount)) {
-    return moneyToMajorNumber(amount, { allowZero: true, allowNegative: true });
-  }
-  // Defensive — AmountInput is number | Money
-  return moneyToMajorNumber(money(String(amount), currency), {
-    allowZero: true,
-    allowNegative: true,
-  });
+  const m = amountInputToExpectedMoney(amount, currency);
+  return moneyToMajorNumber(m, { allowZero: true, allowNegative: true });
 }
 
 /** Canonical case ids for include/exclude and report entries. */
@@ -86,12 +93,7 @@ export const GATEWAY_CONFORMANCE_CASES = [
 export type GatewayConformanceCaseName =
   (typeof GATEWAY_CONFORMANCE_CASES)[number];
 
-const STRUCTURAL_CASES: ReadonlySet<string> = new Set([
-  "capabilities_parity",
-  "claim_method_presence",
-]);
-
-const ALLOWED_PAYMENT_STATUSES: ReadonlySet<PaymentStatus> = new Set([
+const ALLOWED_PAYMENT_STATUSES: ReadonlySet<GatewayPaymentStatus> = new Set([
   "pending",
   "processing",
   "authorized",
@@ -108,7 +110,10 @@ const ALLOWED_PAYMENT_STATUSES: ReadonlySet<PaymentStatus> = new Set([
   "refund_failed",
   "setup_completed",
 ]);
-
+const STRUCTURAL_CASES: ReadonlySet<string> = new Set([
+  "capabilities_parity",
+  "claim_method_presence",
+]);
 type Mockish = PaymentGateway & {
   enqueue?: (
     op: string,
@@ -116,13 +121,13 @@ type Mockish = PaymentGateway & {
   ) => void;
   history?: ReadonlyArray<{ operation: string; params: unknown }>;
   buildWebhook?: (overrides?: Record<string, unknown>) => unknown;
-  getLastProviderSideSuccess?: () => { success?: boolean } | undefined;
+  getLastProviderSideSuccess?: () => { outcome?: string; status?: string } | undefined;
   getPaymentState?: (id: string) =>
     | {
-        amount: number;
-        capturedAmount: number;
-        refundedAmount?: number;
-        status?: PaymentStatus | string;
+        amount: Money | number;
+        capturedAmount: Money | number;
+        refundedAmount?: Money | number;
+        status?: GatewayPaymentStatus | string;
       }
     | undefined;
   /** Optional testkit logger injection surface */
@@ -144,7 +149,7 @@ function defaultCreatePayment(caps: GatewayCapabilities) {
   const authHold =
     caps.authorization === true && caps.immediateCapture === false;
   return {
-    amount: 10.5,
+    amount: money("10.50", "SAR"),
     currency: "SAR",
     callbackUrl: "https://merchant.example/callback",
     capture: !authHold,
@@ -189,10 +194,11 @@ function isAbortLike(err: unknown): boolean {
 }
 
 function isPaidSuccess(result: {
-  success?: boolean;
+  outcome?: string;
   status?: string;
+  amount?: unknown;
 }): boolean {
-  return result.success === true && result.status === "paid";
+  return result.outcome === "succeeded" && isPaidLikePaymentStatus(result.status ?? "");
 }
 
 function buildReport(
@@ -341,14 +347,23 @@ export async function runGatewayConformanceSuite(
           fixtures.amountCases ??
           (isScriptableMock(g)
             ? [
-                { amount: 10.5, currency: "USD", expectedMinor: 1050 },
-                { amount: 100, currency: "JPY", expectedMinor: 100 },
-                { amount: 1.234, currency: "KWD", expectedMinor: 1234 },
-                // Money decimal-string path (Phase 5 shared conversion)
+                // Provider-profile cases: KWD padded 3-decimal, JPY zero-decimal, SAR two-decimal
+                {
+                  amount: money("1.200", "KWD"),
+                  currency: "KWD",
+                  expectedMajor: money("1.200", "KWD"),
+                  expectedMinor: 1200,
+                },
+                {
+                  amount: money("100", "JPY"),
+                  currency: "JPY",
+                  expectedMajor: money("100", "JPY"),
+                  expectedMinor: 100,
+                },
                 {
                   amount: money("10.50", "SAR"),
                   currency: "SAR",
-                  expectedMajor: 10.5,
+                  expectedMajor: money("10.50", "SAR"),
                   expectedMinor: 1050,
                 },
               ]
@@ -369,23 +384,32 @@ export async function runGatewayConformanceSuite(
             createParams.capture = fixtures.createPayment.capture;
           }
           const result = await g.createPayment(createParams);
-          const expectedMajor =
-            ac.expectedMajor ??
-            amountInputToExpectedMajor(ac.amount, ac.currency);
+          const expectedMoney =
+            ac.expectedMajor ?? amountInputToExpectedMoney(ac.amount, ac.currency);
           assert(
-            result.amount === expectedMajor,
-            `amount major units: expected ${expectedMajor}, got ${String(result.amount)} (${ac.currency})`,
+            isMoney(result.amount),
+            `result.amount must be Money, got ${String(result.amount)} (${ac.currency})`,
           );
-          const expectedMinor =
-            ac.expectedMinor ??
-            fixtures.expectedAmountMinor ??
-            majorToMinor(ac.amount, ac.currency);
-          const raw = result.rawResponse as { amountMinor?: number } | null;
-          if (raw && typeof raw === "object" && typeof raw.amountMinor === "number") {
-            assert(
-              raw.amountMinor === expectedMinor,
-              `amountMinor ${raw.amountMinor} !== ${expectedMinor} (${ac.currency})`,
-            );
+          assert(
+            isMoney(expectedMoney),
+            `expectedMajor must be Money`,
+          );
+          assert(
+            moneyToMajorNumber(result.amount) === moneyToMajorNumber(expectedMoney),
+            `amount major units: expected ${moneyToMajorNumber(expectedMoney)}, got ${moneyToMajorNumber(result.amount as Money)} (${ac.currency})`,
+          );
+          assert(
+            result.currency === ac.currency.toUpperCase(),
+            `currency mismatch: expected ${ac.currency.toUpperCase()}, got ${result.currency}`,
+          );
+          if (ac.expectedMinor !== undefined) {
+            const raw = result.rawResponse as { amountMinor?: number } | null;
+            if (raw && typeof raw === "object" && typeof raw.amountMinor === "number") {
+              assert(
+                raw.amountMinor === ac.expectedMinor,
+                `amountMinor ${raw.amountMinor} !== ${ac.expectedMinor} (${ac.currency})`,
+              );
+            }
           }
           assert(
             typeof result.gatewayId === "string" && result.gatewayId.length > 0,
@@ -394,11 +418,34 @@ export async function runGatewayConformanceSuite(
           // Never claim paid with wrong major→minor silent scale (e.g. 10.5 → 10)
           if (isPaidSuccess(result)) {
             assert(
-              result.amount === expectedMajor,
+              moneyToMajorNumber(result.amount as Money) === moneyToMajorNumber(expectedMoney),
               "paid result amount must match major units",
             );
           }
         }
+        // BHD excess precision must be rejected (exponent 3, 4 decimals)
+        let bhdRejected = false;
+        try {
+          const bad = money("1.2345", "BHD");
+          await g.createPayment({
+            amount: bad,
+            currency: "BHD",
+            callbackUrl: fixtures.createPayment.callbackUrl,
+          });
+        } catch (e) {
+          if (e instanceof MoneyAmountError || e instanceof Error) {
+            bhdRejected = true;
+          }
+        }
+        // If Money factory itself rejects, that's also valid; otherwise gateway must reject
+        if (!bhdRejected) {
+          try {
+            money("1.2345", "BHD");
+          } catch {
+            bhdRejected = true;
+          }
+        }
+        assert(bhdRejected, "BHD 1.2345 excess precision must be rejected via MoneyAmountError");
       },
     },
 
@@ -416,8 +463,8 @@ export async function runGatewayConformanceSuite(
 
         const mockish = g as Mockish;
         if (typeof mockish.enqueue === "function") {
-          // Script known statuses and assert SDK PaymentStatus union
-          const scripts: Array<{ outcome: string; expect: PaymentStatus }> = [
+          // Script known statuses and assert SDK GatewayPaymentStatus union
+          const scripts: Array<{ outcome: string; expect: GatewayPaymentStatus }> = [
             { outcome: "succeeded", expect: "paid" },
             { outcome: "pending", expect: "pending" },
             { outcome: "processing", expect: "processing" },
@@ -433,7 +480,7 @@ export async function runGatewayConformanceSuite(
           for (const s of scripts) {
             mockish.enqueue!("createPayment", { outcome: s.outcome });
             const result = await g.createPayment({
-              amount: 1,
+              amount: money("1.00", "USD"),
               currency: "USD",
               callbackUrl: fixtures.createPayment.callbackUrl,
               capture: s.outcome === "authorized" ? false : true,
@@ -451,7 +498,7 @@ export async function runGatewayConformanceSuite(
             for (const [, mapped] of Object.entries(fixtures.statusMap)) {
               assert(
                 ALLOWED_PAYMENT_STATUSES.has(mapped),
-                `statusMap value ${mapped} not in PaymentStatus union`,
+                `statusMap value ${mapped} not in GatewayPaymentStatus union`,
               );
             }
           }
@@ -493,17 +540,21 @@ export async function runGatewayConformanceSuite(
         let declinedOk = false;
         try {
           const result = await g.createPayment({
-            amount: 1,
+            amount: money("1.00", "USD"),
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
-          // Some designs return success:false instead of throwing
+          // Design may return outcome declined instead of throwing
           declinedOk =
-            result.success === false &&
+            (result.outcome === "declined" || result.outcome === "failed") &&
             (result.status === "failed" || result.status === "cancelled");
           assert(
             !isPaidSuccess(result),
             "decline must not surface as paid success",
+          );
+          assert(
+            !isPaidOutcome(result),
+            "decline must not be paid outcome",
           );
         } catch (e) {
           // Documented design: CardDeclinedError throw is acceptable
@@ -513,7 +564,7 @@ export async function runGatewayConformanceSuite(
         }
         assert(
           declinedOk,
-          "decline must yield success:false or CardDeclinedError (gateway design may throw)",
+          "decline must yield outcome declined/failed or CardDeclinedError (gateway design may throw)",
         );
       },
     },
@@ -539,13 +590,14 @@ export async function runGatewayConformanceSuite(
         let mapped = false;
         try {
           const result = await g.createPayment({
-            amount: 1,
+            amount: money("1.00", "USD"),
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
           mapped =
-            result.success === false &&
-            !isPaidSuccess(result);
+            (result.outcome === "failed" || result.outcome === "declined") &&
+            !isPaidSuccess(result) &&
+            !isPaidOutcome(result);
         } catch (e) {
           mapped = e instanceof GatewayApiError;
         }
@@ -555,7 +607,6 @@ export async function runGatewayConformanceSuite(
         );
       },
     },
-
     // ── 5 network_failure ──────────────────────────────────────────────────
     {
       name: "network_failure",
@@ -573,28 +624,32 @@ export async function runGatewayConformanceSuite(
         }
         mockish.enqueue("createPayment", { outcome: "network_error" });
         let err: unknown;
-        let resultSuccess: boolean | undefined;
+        let outcomeFailed = false;
         try {
           const result = await g.createPayment({
-            amount: 1,
+            amount: money("1.00", "USD"),
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
-          resultSuccess = result.success === true;
+          outcomeFailed = result.outcome === "failed" || result.outcome === "declined";
           assert(
-            result.success !== true,
-            "network_failure must not accept success:true",
+            result.outcome !== "succeeded",
+            "network_failure must not accept outcome succeeded",
+          );
+          assert(
+            !isPaidOutcome(result),
+            "network_failure must not be paid outcome",
           );
         } catch (e) {
           err = e;
         }
         assert(
-          resultSuccess !== true,
-          "network_failure must not accept success:true",
+          outcomeFailed || err instanceof NetworkError,
+          "network_error should surface NetworkError (or failed outcome)",
         );
         assert(
-          err instanceof NetworkError || resultSuccess === false,
-          "network_error should surface NetworkError (or success:false result)",
+          err instanceof NetworkError || outcomeFailed,
+          "network_error should surface NetworkError (or failed outcome)",
         );
       },
     },
@@ -619,11 +674,11 @@ export async function runGatewayConformanceSuite(
         let paid = false;
         try {
           const result = await g.createPayment({
-            amount: 1,
+            amount: money("1.00", "USD"),
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
-          paid = isPaidSuccess(result);
+          paid = isPaidSuccess(result) || isPaidOutcome(result);
         } catch (e) {
           err = e;
         }
@@ -707,13 +762,13 @@ export async function runGatewayConformanceSuite(
 
         const key = "conformance-idem-key-002";
         const r1 = await g.createPayment({
-          amount: 25,
+          amount: money("25.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
           idempotencyKey: key,
         });
         const r2 = await g.createPayment({
-          amount: 25,
+          amount: money("25.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
           idempotencyKey: key,
@@ -938,38 +993,49 @@ export async function runGatewayConformanceSuite(
         if (netSkip) throw new SkipSignal(netSkip);
 
         const created = await g.createPayment({
-          amount: 100,
+          amount: money("100.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
           capture: false,
         });
         const cap = await g.capturePayment({
           gatewayPaymentId: created.gatewayId,
-          amount: 40,
+          amount: money("40.00", "USD"),
           currency: "USD",
         });
         // TESTKIT-1: partial money must be proven. Full capture / paid status /
         // omitted capturedAmount must not green-pass (fail-closed incomplete snapshot).
         // Exact partially_captured + capturedAmount=40 implies not full paid/100.
-        assert(cap.success === true, "partial capture must report success");
+        assert(cap.outcome === "succeeded", "partial capture must report outcome succeeded");
+        assert(isPaidOutcome(cap) === false, "partial capture must not be paid outcome");
         assert(
           cap.status === "partially_captured",
           `partial capture must report partially_captured, got ${cap.status}`,
         );
         assert(
-          cap.capturedAmount === 40,
+          isMoney(cap.capturedAmount),
+          `partial capture must report capturedAmount Money, got ${String(cap.capturedAmount)}`,
+        );
+        assert(
+          moneyToMajorNumber(cap.capturedAmount) === 40,
           `partial capture must report capturedAmount=40, got ${String(cap.capturedAmount)}`,
         );
         const mockish = g as Mockish;
         if (typeof mockish.getPaymentState === "function") {
           const state = mockish.getPaymentState(created.gatewayId);
           if (state) {
+            const stateCaptured = isMoney(state.capturedAmount)
+              ? moneyToMajorNumber(state.capturedAmount as Money)
+              : (state.capturedAmount as unknown as number);
+            const stateAmount = isMoney(state.amount)
+              ? moneyToMajorNumber(state.amount as Money)
+              : (state.amount as unknown as number);
             assert(
-              state.capturedAmount === 40,
+              stateCaptured === 40,
               `mock ledger capturedAmount must be 40, got ${state.capturedAmount}`,
             );
             assert(
-              state.capturedAmount < state.amount,
+              stateCaptured < stateAmount,
               "mock ledger must leave remaining capturable amount",
             );
             assert(
@@ -995,21 +1061,21 @@ export async function runGatewayConformanceSuite(
         if (netSkip) throw new SkipSignal(netSkip);
 
         const created = await g.createPayment({
-          amount: 100,
+          amount: money("100.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
           capture: true,
         });
         const refund = await g.refundPayment({
           gatewayPaymentId: created.gatewayId,
-          amount: 25,
+          amount: money("25.00", "USD"),
           currency: "USD",
         });
         // TESTKIT-1: partial refund money + partial status. Full refund / omitted
         // amount must not green-pass.
         assert(
-          refund.success === true,
-          "partial refund must report success",
+          refund.outcome === "succeeded",
+          "partial refund must report outcome succeeded",
         );
         assert(
           refund.status === "completed" || refund.status === "pending",
@@ -1018,7 +1084,11 @@ export async function runGatewayConformanceSuite(
         // Fail-closed: totalRefunded required and must equal requested partial amount
         // (exact 25 implies not full capture amount 100).
         assert(
-          refund.totalRefunded === 25,
+          isMoney(refund.totalRefunded),
+          `partial refund must report totalRefunded Money, got ${String(refund.totalRefunded)}`,
+        );
+        assert(
+          moneyToMajorNumber(refund.totalRefunded) === 25,
           `partial refund must report totalRefunded=25, got ${String(refund.totalRefunded)}`,
         );
 
@@ -1034,18 +1104,21 @@ export async function runGatewayConformanceSuite(
         const partialPaymentStatus =
           after.status === "partially_refunded" ||
           after.status === "refund_pending";
+        const refundedMajor = isMoney(after.refundedAmount)
+          ? moneyToMajorNumber(after.refundedAmount as Money)
+          : (after.refundedAmount as unknown as number | undefined);
         const partialRefundedAmount =
-          after.refundedAmount === 25 ||
-          (after.refundedAmount !== undefined &&
-            after.refundedAmount < 100 &&
-            after.refundedAmount > 0);
+          refundedMajor === 25 ||
+          (refundedMajor !== undefined &&
+            refundedMajor < 100 &&
+            refundedMajor > 0);
         assert(
           partialPaymentStatus || partialRefundedAmount,
           `partial refund must leave payment partially_refunded (or refundedAmount=25); got status=${after.status} refundedAmount=${String(after.refundedAmount)}`,
         );
         assert(
           after.status !== "refunded" ||
-            (after.refundedAmount !== undefined && after.refundedAmount < 100),
+            (refundedMajor !== undefined && refundedMajor < 100),
           "partial refund must not fully refund the payment",
         );
 
@@ -1053,8 +1126,11 @@ export async function runGatewayConformanceSuite(
         if (typeof mockish.getPaymentState === "function") {
           const state = mockish.getPaymentState(created.gatewayId);
           if (state) {
+            const stateRefunded = isMoney(state.refundedAmount)
+              ? moneyToMajorNumber(state.refundedAmount as Money)
+              : (state.refundedAmount as unknown as number);
             assert(
-              state.refundedAmount === 25,
+              stateRefunded === 25,
               `mock ledger refundedAmount must be 25, got ${state.refundedAmount}`,
             );
             assert(
@@ -1137,7 +1213,7 @@ export async function runGatewayConformanceSuite(
           const sinkBefore = captured.length;
           await g
             .createPayment({
-              amount: 1,
+              amount: money("1.00", "USD"),
               currency: "USD",
               callbackUrl: fixtures.createPayment.callbackUrl,
               metadata: {
@@ -1211,7 +1287,7 @@ export async function runGatewayConformanceSuite(
         });
         const controller = new AbortController();
         const p = g.createPayment({
-          amount: 1,
+          amount: money("1.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
           ...({ signal: controller.signal } as object),
@@ -1221,7 +1297,7 @@ export async function runGatewayConformanceSuite(
         let paid = false;
         try {
           const result = await p;
-          paid = isPaidSuccess(result);
+          paid = isPaidSuccess(result) || isPaidOutcome(result);
         } catch (e) {
           aborted = isAbortLike(e);
         }
@@ -1260,15 +1336,15 @@ export async function runGatewayConformanceSuite(
         let paid = false;
         try {
           const result = await g.createPayment({
-            amount: 5,
+            amount: money("5.00", "USD"),
             currency: "USD",
             callbackUrl: fixtures.createPayment.callbackUrl,
           });
-          paid = isPaidSuccess(result);
+          paid = isPaidSuccess(result) || isPaidOutcome(result);
         } catch (e) {
           err = e;
         }
-        assert(!paid, "indeterminate must never surface success:true paid");
+        assert(!paid, "indeterminate must never surface outcome succeeded paid");
         assert(
           err instanceof NetworkError,
           "provider_ok_client_timeout must be NetworkError for reconciliation",
@@ -1276,21 +1352,21 @@ export async function runGatewayConformanceSuite(
         if (typeof mockish.getLastProviderSideSuccess === "function") {
           const side = mockish.getLastProviderSideSuccess();
           assert(
-            side?.success === true,
+            side?.outcome === "succeeded",
             "provider-side success retained for reconcile",
           );
         }
 
         const ind = await g.createPayment({
-          amount: 5,
+          amount: money("5.00", "USD"),
           currency: "USD",
           callbackUrl: fixtures.createPayment.callbackUrl,
         });
         assert(
-          ind.success !== true,
-          "indeterminate must not surface success:true",
+          (ind as { outcome?: string }).outcome !== "succeeded",
+          "indeterminate must not surface outcome succeeded",
         );
-        assert(!isPaidSuccess(ind), "indeterminate must never surface paid");
+        assert(!isPaidSuccess(ind) && !isPaidOutcome(ind), "indeterminate must never surface paid");
         assert(
           (ind as { outcome?: string }).outcome === "indeterminate",
           "indeterminate script must surface outcome indeterminate",
@@ -1300,12 +1376,15 @@ export async function runGatewayConformanceSuite(
             true,
           "indeterminate must set reconciliationRequired",
         );
+        assert(
+          isIndeterminateOutcome(ind as unknown as never),
+          "indeterminate must be indeterminate outcome",
+        );
       },
     },
   ];
 
   const results: GatewayConformanceCaseResult[] = [];
-
   for (const def of cases) {
     if (include && !include.has(def.name)) continue;
     if (exclude && exclude.has(def.name)) {

@@ -2,9 +2,10 @@ import {
   attachPaymentEvent,
   hashWebhookPayload,
   InvalidRequestError,
+  type Money,
   type WebhookEvent,
 } from "@paykernel/core";
-import { parseTapAmount, tapMajorNumber } from "./money";
+import { parseTapAmount } from "./money";
 import type { TapApiObject } from "./types";
 import { tapCreatedRaw } from "./webhooks";
 
@@ -85,6 +86,12 @@ export function tapWebhookTimestamp(createdRaw: string): Date {
   return new Date(ms);
 }
 
+/**
+ * Parse a Tap invoice webhook object into a normalized {@link WebhookEvent}.
+ * Invoice `amount` is a major-unit {@link Money} value when present (e.g. `money("1.00", "SAR")`);
+ * webhook verification (`verifyTapHashstring`) and parsing are independent — either order is safe
+ * because `payloadHash` is derived from the raw payload via `hashWebhookPayload`, not from verification state.
+ */
 export function parseTapInvoiceWebhookEvent(obj: TapApiObject): WebhookEvent {
   if (typeof obj.id !== "string" || obj.id.length === 0) {
     throw new InvalidRequestError("Tap invoice webhook missing id");
@@ -98,9 +105,9 @@ export function parseTapInvoiceWebhookEvent(obj: TapApiObject): WebhookEvent {
   const created = tapWebhookTimestamp(createdRaw);
   const currency =
     typeof obj.currency === "string" ? obj.currency.toUpperCase() : undefined;
-  let amount: number | undefined;
+  let amount: Money | undefined;
   if (obj.amount !== undefined && currency !== undefined) {
-    amount = tapMajorNumber(parseTapAmount(obj.amount, currency), currency);
+    amount = parseTapAmount(obj.amount, currency);
   }
   const nativeType = `invoice.${tapStatus}`;
   const legacy: WebhookEvent = {
@@ -113,8 +120,12 @@ export function parseTapInvoiceWebhookEvent(obj: TapApiObject): WebhookEvent {
     timestamp: created,
     rawPayload: obj,
   };
-  if (amount !== undefined) legacy.amount = amount;
-  if (currency !== undefined) legacy.currency = currency;
+  if (amount !== undefined) {
+    legacy.amount = amount;
+    legacy.currency = amount.currency;
+  } else if (currency !== undefined) {
+    legacy.currency = currency;
+  }
   const attached = attachPaymentEvent(legacy);
   const provider = attached.provider
     ? { ...attached.provider, eventType: nativeType }

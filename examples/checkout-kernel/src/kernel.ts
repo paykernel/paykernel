@@ -1,5 +1,6 @@
 import {
   createPaymentClient,
+  isMoney,
   NetworkError,
   money,
   stripeGateway,
@@ -8,6 +9,7 @@ import {
   type GatewayAdapter,
   type GatewayPaymentResult,
   type Money,
+  type PaymentStatus,
   type PaymentGateway,
 } from "@paykernel/core";
 import {
@@ -82,7 +84,9 @@ function providerSnapshotFromGetPayment(
   got: GatewayPaymentResult,
 ): ProviderPaymentSnapshot | undefined {
   if (!got.gatewayId) return undefined;
-  const currency = publishableCurrency(got.currency);
+  const currency = publishableCurrency(
+    got.currency ?? (isMoney(got.amount) ? (got.amount as Money).currency : undefined),
+  );
   const hasAmountLike =
     got.amount !== undefined ||
     got.capturedAmount !== undefined ||
@@ -90,23 +94,29 @@ function providerSnapshotFromGetPayment(
   if (hasAmountLike && currency === undefined) {
     return undefined;
   }
-  const amount = moneyFromMajorUnits(got.amount, currency);
+  const amount = isMoney(got.amount)
+    ? (got.amount as Money)
+    : moneyFromMajorUnits(got.amount as unknown as number | undefined, currency);
   if (amount === undefined) {
     return undefined;
   }
   const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
     gatewayPaymentId: got.gatewayId,
-    status: got.status,
+    status: got.status as unknown as PaymentStatus,
     amount,
     providerStatus: got.status,
   };
   if (got.capturedAmount !== undefined) {
-    const captured = moneyFromMajorUnits(got.capturedAmount, currency);
+    const captured = isMoney(got.capturedAmount)
+      ? (got.capturedAmount as Money)
+      : moneyFromMajorUnits(got.capturedAmount as unknown as number | undefined, currency);
     if (captured === undefined) return undefined;
     input.capturedAmount = captured;
   }
   if (got.refundedAmount !== undefined) {
-    const refunded = moneyFromMajorUnits(got.refundedAmount, currency);
+    const refunded = isMoney(got.refundedAmount)
+      ? (got.refundedAmount as Money)
+      : moneyFromMajorUnits(got.refundedAmount as unknown as number | undefined, currency);
     if (refunded === undefined) return undefined;
     input.refundedAmount = refunded;
   }

@@ -98,26 +98,13 @@ const client = createPaymentClient({
 });
 ```
 
-Legacy constructor (still supported in 0.x; prefer `createPaymentClient`):
+> **Migrating from 0.x:** see [Migrating to 1.0](../../docs/migrations/1.0.md) — `new PaymentClient({ moyasar, ... })` is removed, use `createPaymentClient({ gateways: { moyasar: moyasarGateway(...) } })`; numeric `amount: 10.5` → `money("10.50", "SAR")`; `success` → `outcome`, and other 1.0 cuts.
+
+## Creating a payment
 
 ```typescript
-import { PaymentClient } from "@paykernel/core";
+import { money, isPaidOutcome } from "@paykernel/core";
 
-const client = new PaymentClient({
-  moyasar: {
-    secretKey: process.env.MOYASAR_SECRET_KEY!,
-    webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
-  },
-  defaultGateway: "moyasar",
-});
-```
-
-Using either client:
-
-```typescript
-import { money } from "@paykernel/core";
-
-// Create a payment (prefer money() decimal strings; plain number still works in 0.x)
 const result = await client.createPayment({
   amount: money("100.00", "SAR"),
   currency: "SAR",
@@ -129,65 +116,77 @@ const result = await client.createPayment({
   },
 });
 
-if (result.status === "failed") {
-  // Do not mark the order paid.
+if (isPaidOutcome(result)) {
+  // Paid-like settlement only (outcome === "succeeded" && status === "paid").
 } else if (result.redirectUrl) {
-  // Redirect customer for 3DS verification
+  // Redirect customer for 3DS verification — do not fulfill yet
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Charge may already exist — reconcile via getPayment, do not retry create
 }
 ```
 
 ## Multi-Gateway Usage
 
 ```typescript
-const client = new PaymentClient({
-  moyasar: { secretKey: '...' },
-  paypal: { clientId: '...', clientSecret: '...' },
-  paymob: {
-    secretKey: '...',
-    publicKey: '...',
-    hmacSecret: '...',
-    integrationId: 123456,
-    authIntegrationId: 456789, // for capture: false auth/capture flows
-    region: 'ksa',
-    timeoutMs: 30000,
+import {
+  createPaymentClient,
+  moyasarGateway,
+  paymobGateway,
+  paypalGateway,
+  stripeGateway,
+} from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({ secretKey: "..." }),
+    paypal: paypalGateway({ clientId: "...", clientSecret: "..." }),
+    paymob: paymobGateway({
+      secretKey: "...",
+      publicKey: "...",
+      hmacSecret: "...",
+      integrationId: 123456,
+      authIntegrationId: 456789, // for capture: false auth/capture flows
+      region: "ksa",
+      timeoutMs: 30000,
+    }),
+    stripe: stripeGateway({
+      secretKey: "sk_...", // required — this package is server-side only
+      publishableKey: "pk_...", // optional here; browser Stripe.js / Elements only
+      webhookSecret: "whsec_...",
+    }),
   },
-  stripe: {
-    secretKey: 'sk_...',           // required — this package is server-side only
-    publishableKey: 'pk_...',      // optional here; browser Stripe.js / Elements only
-    webhookSecret: 'whsec_...',
-  },
-  defaultGateway: 'moyasar',
+  defaultGateway: "moyasar",
 });
 
 // Use default gateway
-await client.createPayment({ ... });
+await client.createPayment({ amount: money("10.00", "SAR"), currency: "SAR", callbackUrl: "https://example.com/callback", moyasarSource: { type: "token", token: "token_xxx" } });
 
 // Specify gateway explicitly
-await client.createPayment({ ... }, 'paypal');
+await client.createPayment({ amount: money("10.00", "USD"), currency: "USD", returnUrl: "https://example.com/return", cancelUrl: "https://example.com/cancel" }, "paypal");
 
 // Stripe Checkout Example — Phase 6 outcome union (see hosted-checkout.md).
 // Create success is not paid settlement. Caller idempotencyKey is required.
-const stripe = client.gateway('stripe');
+const stripe = client.gateway("stripe");
 const result = await stripe.createCheckoutSession({
-  successUrl: 'https://example.com/success',
-  cancelUrl: 'https://example.com/cancel',
-  mode: 'payment',
-  metadata: { paymentId: 'order_123' },
+  successUrl: "https://example.com/success",
+  cancelUrl: "https://example.com/cancel",
+  mode: "payment",
+  metadata: { paymentId: "order_123" },
   idempotencyKey: crypto.randomUUID(),
   lineItems: [
     {
       priceData: {
-        currency: 'USD',
+        currency: "USD",
         productData: {
-          name: 'T-Shirt',
+          name: "T-Shirt",
         },
-        amount: 20,
+        amount: money("20.00", "USD"),
       },
       quantity: 10,
-    }
-  ]
+    },
+  ],
 });
-if (result.outcome === 'succeeded') {
+if (result.outcome === "succeeded") {
   if (result.session.url) {
     redirect(result.session.url);
   }
@@ -206,14 +205,10 @@ The unified API hides provider differences, but **IDs and auth flows are not int
 
 Always use the gateway that created the payment for follow-up calls (`refundPayment(..., 'paypal')`, etc.). See each gateway doc for edge cases (partial refunds, currency, idempotency).
 
-### Integrator caveats
-
 - **After-hooks cannot undo money.** Hooks that run after a successful create/capture/refund/void (`onAfter`, `afterCapture`, …) may throw or return `{ proceed: false }`, but the provider side effect already happened — the SDK **logs and still returns success** (no `PaymentAbortedError`, no reverse of the charge). Use before-hooks to abort, and reconcile in your app if an after-hook fails. Details: [hooks](./docs/hooks.md#after-hooks-cannot-abort-money-operations).
 - **Never fulfill in `onWebhookVerified`.** Claim via [`@paykernel/webhooks`](../webhooks/README.md) first. Fulfill only on rematched `payment.succeeded` | `capture.completed` **and** `payment.status === "paid"`, binding `gatewayPaymentId`. Homemade `alreadyProcessed(event.id)` in the verify hook is not a lease. Details: [webhooks](./docs/webhooks.md), [getting-started](../../docs/getting-started.md).
-- **Prefer Phase 7 `PaymentEvent` for new fulfillment.** `WebhookEvent.type` stays provider-native for 0.x; use `attachPaymentEvent` / `event.event` and switch on stable names (`payment.succeeded`, …) **plus** nested `payment.status === "paid"`. Persist via `toPersistedPaymentEventEnvelope` (never store `rawPayload` by default). Details: [webhook-events](./docs/webhook-events.md).
-- **Prefer `money("10.50", "SAR")` over float `number` amounts.** Shared helpers convert decimal strings to **bigint** minor units (never `amount * 100` float math). Plain `number` major units remain accepted in 0.x but are **deprecated** — pass clean decimals only (`10.5`, `99.99`), never `0.1 + 0.2`. See [Safe Money Model](./docs/money.md).
-
-## Production checklist
+- **Prefer Phase 7 `PaymentEvent` for new fulfillment.** `WebhookEvent.type` stays provider-native; use `attachPaymentEvent` / `event.event` and switch on stable names (`payment.succeeded`, …) **plus** nested `payment.status === "paid"`. Persist via `toPersistedPaymentEventEnvelope` (never store `rawPayload` by default). Details: [webhook-events](./docs/webhook-events.md).
+- **Use `money("10.50", "SAR")` — `AmountInput = Money` only.** Shared helpers convert decimal strings to **bigint** minor units (never `amount * 100` float math). `money(number)` still constructs `Money` (e.g. `money(10.5, "SAR")`) but **payment APIs reject `number`** — pass `Money` only (see [Migrating to 1.0](../../docs/migrations/1.0.md#2-numeric-amounts--money)). `moneyToMajorNumber` is display-only (float risk). See [Safe Money Model](./docs/money.md).
 
 Use this before going live. Gateway-specific details live under [docs/](./docs/).
 
@@ -223,7 +218,7 @@ Use this before going live. Gateway-specific details live under [docs/](./docs/)
 | **Moyasar / Paymob `idempotencyStore` (multi-worker)** | In-memory store is per process only. Multi-worker, serverless, or restart-safe capture/refund/void needs a shared store (Redis/DB) with atomic `reserve` where available. Configure `moyasar.idempotencyStore` / `paymob.idempotencyStore` and pass `idempotencyKey` on mutations. |
 | **Raw body for webhooks**                              | Stripe and PayPal verification need the **unparsed** request body (string/Buffer). Do not `JSON.parse` first; prefer `client.handleWebhook(gateway, rawBody, signatureOrHeaders)`.                                                                                                 |
 | **Fulfill on paid outcome / `status`, not `success`**  | `success: true` means API call OK (can be pending / 3DS / approved). Prefer Phase 6 **`isPaidOutcome(result)`** or `outcome === 'succeeded'` with **`status === 'paid'`** only (`approved` / `authorized` are not paid-like). Never treat `indeterminate` as paid or as a definitive decline — reconcile. See [operation-results.md](./docs/operation-results.md). |
-| **Amounts / money model**                              | Prefer `money("10.50", "SAR")` (`AmountInput = number \| Money`). Conversion uses bigint minor units + ISO exponents (provider overrides stay explicit). Deprecated `number` inputs must be clean decimals — see [money.md](./docs/money.md).                                      |
+| **Amounts / money model**                              | `AmountInput = Money` only — pass `money("10.50", "SAR")`. `money(number)` still constructs `Money` but payment APIs reject `number` (see [1.0 migration](../../docs/migrations/1.0.md#2-numeric-amounts--money)). `moneyToMajorNumber` is display-only. Conversion uses bigint minor units + ISO exponents. See [money.md](./docs/money.md). |
 | **Inbox claim, then rematch + bind**                   | `handleWebhook` verifies only. Claim via `@paykernel/webhooks`, then fulfill only on rematched `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`, binding `gatewayPaymentId`. Never fulfill in `onWebhookVerified`. See [getting-started](../../docs/getting-started.md). |
 | **Secret keys server-side only**                       | Never put `secretKey` / `clientSecret` / `whsec_…` / HMAC secrets in browser code.                                                                                                                                                                                                 |
 

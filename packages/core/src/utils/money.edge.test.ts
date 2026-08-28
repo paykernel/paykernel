@@ -217,7 +217,7 @@ describe("5.4 exponent overrides", () => {
 // ---------------------------------------------------------------------------
 describe("5.4 negative amounts (marketplace / allowNegative)", () => {
   it("toMinorUnits(-5, 'SAR', { allowNegative: true }) → -500n", () => {
-    expect(toMinorUnits(-5, "SAR", { allowNegative: true })).toBe(-500n);
+    expect(toMinorUnits("-5", "SAR", { allowNegative: true })).toBe(-500n);
     expect(toMinorUnits("-5", "SAR", { allowNegative: true })).toBe(-500n);
     expect(toMinorUnits("-5.00", "SAR", { allowNegative: true })).toBe(-500n);
     expect(
@@ -226,7 +226,7 @@ describe("5.4 negative amounts (marketplace / allowNegative)", () => {
   });
 
   it("throws without allowNegative", () => {
-    expect(() => toMinorUnits(-5, "SAR")).toThrow(InvalidRequestError);
+    expect(() => toMinorUnits("-5", "SAR")).toThrow(InvalidRequestError);
     expect(() => toMinorUnits("-5.00", "SAR")).toThrow(InvalidRequestError);
     expect(() => money("-1.00", "USD")).toThrow(InvalidRequestError);
   });
@@ -456,7 +456,7 @@ describe("5.4 no-float finance invariant", () => {
       () => toMinorUnits("100", "JPY"),
       () => toMinorUnits("1.234", "KWD"),
       () => toMinorUnits(money("99.99", "EUR")),
-      () => toMinorUnits(-5, "SAR", { allowNegative: true }),
+      () => toMinorUnits("-5", "SAR", { allowNegative: true }),
     ];
     for (const fn of samples) {
       const v = fn();

@@ -12,22 +12,23 @@ import {
   attachPaymentEvent,
   hmacSha256Hex,
   isPaidLikePaymentStatus,
+  money,
   MOYASAR_EVENT_TYPE_MAP,
   type AttachPaymentEventOptions,
+  type GatewayPaymentStatus,
+  type Money,
   type PaymentEvent,
-  type PaymentStatus,
   type WebhookEvent,
 } from "@paykernel/core";
-
 export const DEFAULT_MOCK_WEBHOOK_SECRET = "testkit_mock_secret";
 
 export type MockWebhookPayload = {
   id: string;
   type: string;
   gatewayPaymentId: string;
-  status: PaymentStatus;
+  status: GatewayPaymentStatus;
   paymentId?: string | undefined;
-  amount?: number | undefined;
+  amount?: number | Money | undefined;
   currency?: string | undefined;
   /** Mock HMAC signature field. */
   signature?: string | undefined;
@@ -53,8 +54,8 @@ export type GenerateWebhookEventOptions = {
   type?: string;
   paymentId?: string;
   gatewayPaymentId?: string;
-  status?: PaymentStatus;
-  amount?: number;
+  status?: GatewayPaymentStatus;
+  amount?: number | Money;
   currency?: string;
   sequence?: number;
   id?: string;
@@ -124,7 +125,7 @@ export function signMockWebhook(
  * Default domain status from a mock/provider-native event type (NEW-TESTKIT-8).
  * `payment_failed` / `failed` must not inherit the paid default.
  */
-function defaultWebhookStatusFromType(type: string): PaymentStatus {
+function defaultWebhookStatusFromType(type: string): GatewayPaymentStatus {
   const t = type.trim().toLowerCase();
   if (
     t === "failed" ||
@@ -319,7 +320,8 @@ export function mockPayloadToWebhookEvent(
     timestamp: payload.createdAt ? new Date(payload.createdAt) : new Date(),
     rawPayload: payload,
   };
-  if (payload.amount !== undefined) base.amount = payload.amount;
+  if (payload.amount !== undefined)
+    base.amount = typeof payload.amount === "number" ? money(String(payload.amount), payload.currency ?? "USD") : (payload.amount as Money);
   if (payload.currency !== undefined) base.currency = payload.currency;
 
   return dualWriteMockWebhookEvent(base, attachOpts);

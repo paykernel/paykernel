@@ -5,22 +5,24 @@ PayPal uses OAuth 2.0 authentication and the Orders API v2 for processing paymen
 ## Configuration
 
 ```typescript
-import { PaymentClient } from '@paykernel/core';
+import { createPaymentClient, paypalGateway } from '@paykernel/core';
 
-const client = new PaymentClient({
-  paypal: {
-    // Required: API credentials
-    clientId: process.env.PAYPAL_CLIENT_ID!,
-    clientSecret: process.env.PAYPAL_CLIENT_SECRET!,
+const client = createPaymentClient({
+  gateways: {
+    paypal: paypalGateway({
+      // Required: API credentials
+      clientId: process.env.PAYPAL_CLIENT_ID!,
+      clientSecret: process.env.PAYPAL_CLIENT_SECRET!,
 
-    // Optional: Webhook verification (required for production)
-    webhookId: process.env.PAYPAL_WEBHOOK_ID,
+      // Optional: Webhook verification (required for production)
+      webhookId: process.env.PAYPAL_WEBHOOK_ID,
 
-    // Optional: Environment (default: false = production). Prefer an explicit flag.
-    sandbox: process.env.PAYPAL_SANDBOX === 'true',
+      // Optional: Environment (default: false = production). Prefer an explicit flag.
+      sandbox: process.env.PAYPAL_SANDBOX === 'true',
 
-    // Optional: Request timeout in milliseconds (default: 30000)
-    timeoutMs: 30000,
+      // Optional: Request timeout in milliseconds (default: 30000)
+      timeoutMs: 30000,
+    }),
   },
   defaultGateway: 'paypal',
 });
@@ -28,11 +30,11 @@ const client = new PaymentClient({
 
 ## Create Payment
 
-> **Order validity**: Uncaptured PayPal checkout orders typically expire after about **3 hours**. Capture (or authorize) promptly after the buyer returns from approval, and do not assume a stale order token remains valid.
-
 ```typescript
+import { money } from '@paykernel/core';
+
 const result = await client.createPayment({
-  amount: 99.99,
+  amount: money("99.99", "USD"),
   currency: 'USD',
   // Optional when returnUrl is set. Used as fallback for return_url and/or cancel_url.
   callbackUrl: 'https://example.com/callback',
@@ -120,8 +122,10 @@ await db.payment.update({
 Set `capture: false` to create an `AUTHORIZE` intent order. After the customer approves the order, authorize it to place the hold, then capture or void the authorization later.
 
 ```typescript
+import { money } from '@paykernel/core';
+
 const order = await client.createPayment({
-  amount: 99.99,
+  amount: money("99.99", "USD"),
   currency: 'USD',
   callbackUrl: 'https://example.com/callback',
   capture: false,
@@ -150,7 +154,7 @@ if (!authorizationId) throw new Error('PayPal authorization ID missing');
 // this partial amount should close the authorization.
 const captureResult = await client.gateway('paypal').capturePayment({
   gatewayPaymentId: authorizationId,
-  amount: 25.00,
+  amount: money("25.00", "USD"),
   currency: 'USD',
   paypalCaptureType: 'authorization',
   // paypalFinalCapture omitted → false when amount is set
@@ -168,7 +172,7 @@ if (!firstCaptureId) throw new Error('PayPal capture ID missing');
 // Final capture from the same authorization (amount set + explicit final)
 const finalCapture = await client.gateway('paypal').capturePayment({
   gatewayPaymentId: authorizationId,
-  amount: 74.99,
+  amount: money("74.99", "USD"),
   currency: 'USD',
   paypalCaptureType: 'authorization',
   paypalFinalCapture: true,
@@ -203,7 +207,7 @@ if (!refundResult.success || refundResult.status === 'failed') {
 // Partial refund (currency required)
 await client.refundPayment({
   gatewayPaymentId: captureId,
-  amount: 25.00,
+  amount: money("25.00", "USD"),
   currency: 'USD', // Required for partial refunds
   reason: 'Customer request',
   idempotencyKey: crypto.randomUUID(),

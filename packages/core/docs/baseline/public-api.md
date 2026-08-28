@@ -5,12 +5,11 @@
 
 ## Generation metadata
 
-- **Generated at (UTC)**: 2026-08-21T05:11:23.338Z
 - **Command**: `bun run scripts/generate-api-baseline.ts`
 - **Source of truth (exports)**: `src/index.ts`
 - **Runtime module inspected**: `dist/index.js`
 - **Declarations inspected**: `dist/**/*.d.ts`
-- **Bundle**: `dist/index.js` — 505923 bytes, sha256 `10d31afcc5f2ef84bb51a5309987ff9530c74eb598f3ddb41cf44df63cc5d448`
+- **Bundle**: `dist/index.js` — 506774 bytes, sha256 `f15504dd9cb0d6e5bb6692ac56ae3b92f9e0b1c058abe3c34625a71a9e8ab069`
 
 ## Package
 
@@ -38,6 +37,51 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 
 | Name | Kind |
 | --- | --- |
+| `AuthenticationError` | class |
+| `BUILTIN_ADAPTER_VERSION` | const |
+| `BUILTIN_GATEWAY_CAPABILITIES` | const |
+| `BUILTIN_GATEWAY_MANIFESTS` | const |
+| `BaseGateway` | class |
+| `CAPABILITY_DOCS_BANNER` | const |
+| `CAPABILITY_OPERATION_MAP` | const |
+| `CardDeclinedError` | class |
+| `DEFAULT_GATEWAY_CAPABILITIES` | const |
+| `DEFAULT_RETRY_CONFIG` | const |
+| `DISPUTE_STATUSES` | const |
+| `GATEWAY_CAPABILITY_KEYS` | const |
+| `GatewayApiError` | class |
+| `GatewayNotConfiguredError` | class |
+| `HooksManager` | class |
+| `InMemoryIdempotencyStore` | class |
+| `InsufficientFundsError` | class |
+| `InvalidRequestError` | class |
+| `InvalidWebhookError` | class |
+| `MOYASAR_CAPABILITIES` | const |
+| `MOYASAR_EVENT_TYPE_MAP` | const |
+| `MoneyAmountError` | class |
+| `MoyasarGateway` | class |
+| `NetworkError` | class |
+| `OperationNotSupportedError` | class |
+| `PAID_LIKE_PAYMENT_STATUSES` | const |
+| `PAYMENT_DOMAIN_STATUSES` | const |
+| `PAYMENT_EVENT_SCHEMA_VERSION` | const |
+| `PAYMOB_CAPABILITIES` | const |
+| `PAYMOB_TOKEN_EVENT_TYPES` | const |
+| `PAYPAL_CAPABILITIES` | const |
+| `PAYPAL_EVENT_TYPE_MAP` | const |
+| `PayPalGateway` | class |
+| `PaymentAbortedError` | class |
+| `PaymentClient` | class |
+| `PaymentError` | class |
+| `PaymobGateway` | class |
+| `RateLimitError` | class |
+| `ResourceNotFoundError` | class |
+| `STABLE_PAYMENT_EVENT_TYPES` | const |
+| `STRIPE_CAPABILITIES` | const |
+| `STRIPE_EVENT_TYPE_MAP` | const |
+| `STRIPE_UNMAPPED_EVENT_TYPES` | const |
+| `StripeGateway` | class |
+| `WEBHOOK_PAYLOAD_SECRET_KEYS` | const |
 | `applyIndeterminateCheckoutSessionOutcome` | function |
 | `applyIndeterminateCustomerOutcome` | function |
 | `applyIndeterminateDisputeOutcome` | function |
@@ -49,19 +93,11 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `applyOutcomeToGatewayResult` | function |
 | `assertNoSecretsInEnvelope` | function |
 | `attachPaymentEvent` | function |
-| `AuthenticationError` | class |
 | `base64ToBytes` | function |
-| `BaseGateway` | class |
 | `buildProviderEventMetadata` | function |
 | `buildProviderReferences` | function |
-| `BUILTIN_ADAPTER_VERSION` | const |
-| `BUILTIN_GATEWAY_CAPABILITIES` | const |
-| `BUILTIN_GATEWAY_MANIFESTS` | const |
 | `bytesToBase64` | function |
 | `bytesToHex` | function |
-| `CAPABILITY_DOCS_BANNER` | const |
-| `CAPABILITY_OPERATION_MAP` | const |
-| `CardDeclinedError` | class |
 | `combineAbortSignals` | function |
 | `concatBytes` | function |
 | `createDefaultGatewayContext` | function |
@@ -73,10 +109,7 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `createRedactingLogger` | function |
 | `createRedactingTelemetrySink` | function |
 | `createTimeoutSignal` | function |
-| `DEFAULT_GATEWAY_CAPABILITIES` | const |
-| `DEFAULT_RETRY_CONFIG` | const |
 | `defineGatewayCapabilities` | function |
-| `DISPUTE_STATUSES` | const |
 | `encryptRawWebhookPayload` | function |
 | `extractAbortSignal` | function |
 | `finalizeOperationContext` | function |
@@ -84,9 +117,6 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `formatMoney` | function |
 | `freezeCapabilities` | function |
 | `fromMinorUnits` | function |
-| `GATEWAY_CAPABILITY_KEYS` | const |
-| `GatewayApiError` | class |
-| `GatewayNotConfiguredError` | class |
 | `generateGatewayCapabilitiesMarkdown` | function |
 | `getCurrencyExponent` | function |
 | `hashWebhookPayload` | function |
@@ -95,13 +125,8 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `hmacSha256Hex` | function |
 | `hmacSha512` | function |
 | `hmacSha512Hex` | function |
-| `HooksManager` | class |
 | `inferOperationOutcome` | function |
 | `inferRefundOperationOutcome` | function |
-| `InMemoryIdempotencyStore` | class |
-| `InsufficientFundsError` | class |
-| `InvalidRequestError` | class |
-| `InvalidWebhookError` | class |
 | `isAbortError` | function |
 | `isApplePaySource` | function |
 | `isCardTokenSource` | function |
@@ -133,57 +158,30 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `mergePaymentRuntime` | function |
 | `minorAmountToNumber` | function |
 | `money` | function |
-| `MoneyAmountError` | class |
 | `moneyToMajorNumber` | function |
-| `MOYASAR_CAPABILITIES` | const |
-| `MOYASAR_EVENT_TYPE_MAP` | const |
 | `moyasarGateway` | function |
-| `MoyasarGateway` | class |
-| `NetworkError` | class |
 | `noopLogger` | const |
 | `normalizeAmountInput` | function |
 | `normalizeCurrencyCode` | function |
 | `operationContextToTelemetryData` | function |
-| `OperationNotSupportedError` | class |
-| `PAID_LIKE_PAYMENT_STATUSES` | const |
 | `parseRetryAfterSeconds` | function |
-| `PAYMENT_DOMAIN_STATUSES` | const |
-| `PAYMENT_EVENT_SCHEMA_VERSION` | const |
-| `PaymentAbortedError` | class |
-| `PaymentClient` | class |
-| `PaymentError` | class |
 | `paymentFromGatewayResult` | function |
 | `paymentFromWebhookEvent` | function |
 | `paymentNextActionToAction` | function |
 | `paymentRuntimeFromContext` | function |
-| `PAYMOB_CAPABILITIES` | const |
-| `PAYMOB_TOKEN_EVENT_TYPES` | const |
 | `paymobGateway` | function |
-| `PaymobGateway` | class |
-| `PAYPAL_CAPABILITIES` | const |
-| `PAYPAL_EVENT_TYPE_MAP` | const |
 | `paypalGateway` | function |
-| `PayPalGateway` | class |
-| `RateLimitError` | class |
 | `redact` | function |
 | `redactWebhookPayloadSecrets` | function |
 | `resolveDefaultCrypto` | function |
-| `ResourceNotFoundError` | class |
 | `sha256` | function |
 | `sha256Hex` | function |
 | `sha512` | function |
 | `sha512Hex` | function |
-| `STABLE_PAYMENT_EVENT_TYPES` | const |
 | `stableStringifyForHash` | function |
 | `stripAbortSignal` | function |
-| `STRIPE_CAPABILITIES` | const |
-| `STRIPE_EVENT_TYPE_MAP` | const |
-| `STRIPE_UNMAPPED_EVENT_TYPES` | const |
-| `stripeGateway` | function |
-| `StripeGateway` | class |
 | `stripRawFromPaymentEvent` | function |
-| `successFromOutcome` | function |
-| `successFromRefundOutcome` | function |
+| `stripeGateway` | function |
 | `systemClock` | const |
 | `timingSafeEqualBytes` | function |
 | `timingSafeEqualHex` | function |
@@ -194,12 +192,11 @@ Value exports from `src/index.ts`, classified by inspecting the built ESM module
 | `utf8ToBase64` | function |
 | `uuidV4FromGetRandomValues` | function |
 | `validateMoney` | function |
-| `WEBHOOK_PAYLOAD_SECRET_KEYS` | const |
 | `webhookEventToPaymentEvent` | function |
 | `withAbortSignal` | function |
 | `withRetry` | function |
 
-**Count**: 160
+**Count**: 158
 
 ## Type-only exports
 
@@ -222,9 +219,9 @@ These exist only in the TypeScript declaration surface.
 | `BeforeHookResult` |
 | `BuildProviderEventMetadataOptions` |
 | `BuildProviderReferencesInput` |
-| `BuiltinGatewayCapabilityName` |
 | `BuiltInGatewayMap` |
 | `BuiltInGatewayName` |
+| `BuiltinGatewayCapabilityName` |
 | `Capture` |
 | `CaptureParams` |
 | `CaptureStatus` |
@@ -275,6 +272,7 @@ These exist only in the TypeScript declaration surface.
 | `GatewayMap` |
 | `GatewayName` |
 | `GatewayPaymentResult` |
+| `GatewayPaymentStatus` |
 | `GatewayRefundResult` |
 | `GatewayRegistryBuilder` |
 | `GatewayRuntimeDeps` |
@@ -294,8 +292,8 @@ These exist only in the TypeScript declaration surface.
 | `ListDisputesResult` |
 | `ListPaymentMethodsParams` |
 | `ListPaymentMethodsResult` |
-| `Logger` |
 | `LogLevel` |
+| `Logger` |
 | `MappedStableEventType` |
 | `MarketplaceSplit` |
 | `MinorAmount` |
@@ -309,7 +307,6 @@ These exist only in the TypeScript declaration surface.
 | `MoyasarConfig` |
 | `MoyasarConfirmStcPayOtpParams` |
 | `MoyasarCreatePaymentParams` |
-| `MoyasarNextAction` |
 | `MoyasarPaymentSource` |
 | `MoyasarPaymentSplit` |
 | `MoyasarStcPayOtpNextAction` |
@@ -318,9 +315,11 @@ These exist only in the TypeScript declaration surface.
 | `OperationNotSupportedErrorOptions` |
 | `OperationRequestOptions` |
 | `OperationType` |
+| `PayPalConfig` |
+| `PayPalCreatePaymentParams` |
+| `PayPalWebhookPayload` |
 | `Payment` |
 | `PaymentAction` |
-| `PaymentClientConfig` |
 | `PaymentDecline` |
 | `PaymentDomainStatus` |
 | `PaymentErrorLike` |
@@ -351,9 +350,6 @@ These exist only in the TypeScript declaration surface.
 | `PaymobWebhookPayload` |
 | `Payout` |
 | `PayoutStatus` |
-| `PayPalConfig` |
-| `PayPalCreatePaymentParams` |
-| `PayPalWebhookPayload` |
 | `PersistedPaymentEventEnvelope` |
 | `ProviderEventMapContext` |
 | `ProviderEventMetadata` |
@@ -385,6 +381,7 @@ These exist only in the TypeScript declaration surface.
 | `TransferStatus` |
 | `UnmappedPaymentEventType` |
 | `VoidParams` |
+| `WebhookEnvelopeStatus` |
 | `WebhookEvent` |
 | `WebhookEventToPaymentEventOptions` |
 | `WebhookFailedHook` |
@@ -399,7 +396,7 @@ These exist only in the TypeScript declaration surface.
 - Parsed value exports present on runtime module: **yes**
 - Runtime keys not listed in `src/index.ts` value exports: _none_
 - Type-only names that also exist as runtime values: _none_
-- Total distinct public names (runtime + type-only): **343**
+- Total distinct public names (runtime + type-only): **341**
 
 ## Declaration output tree (`dist/**/*.d.ts`)
 

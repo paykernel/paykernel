@@ -31,6 +31,7 @@ import {
   isMoney,
   isPaidLikePaymentStatus,
   minorAmountToNumber,
+  money,
   moneyToMajorNumber,
   NetworkError,
   noopLogger,
@@ -70,7 +71,7 @@ import {
   type PaymentLinkOperationResult,
   type PaymentMethodOperationResult,
   type PaymentOperationOutcome,
-  type PaymentStatus,
+  type GatewayPaymentStatus,
   type RefundParams,
   type SubmitDisputeEvidenceParams,
   type VoidParams,
@@ -124,9 +125,9 @@ const CONVERSION_OPTS = {
  * rejected (same default as `@paykernel/core` money model).
  */
 export function majorToMinor(amount: number | Money, currency: string): number {
-  const code = isMoney(amount) ? amount.currency : currency;
-  const m = normalizeAmountInput(amount, code, CONVERSION_OPTS);
-  return minorAmountToNumber(toMinorUnits(m, CONVERSION_OPTS));
+  const m = isMoney(amount) ? amount : money(String(amount), currency);
+  const normalized = normalizeAmountInput(m, m.currency, CONVERSION_OPTS);
+  return minorAmountToNumber(toMinorUnits(normalized, CONVERSION_OPTS));
 }
 
 /**
@@ -161,7 +162,7 @@ function resolveChargeAmount(
  * (NEW-TESTKIT-2: refunding captured funds must not freeze remaining hold).
  * Remaining-amount checks still reject fully captured ledgers.
  */
-function isCapturableMockStatus(status: PaymentStatus): boolean {
+function isCapturableMockStatus(status: GatewayPaymentStatus): boolean {
   return (
     status === "authorized" || status === "partially_captured" || status === "partially_refunded"
   );
@@ -183,34 +184,35 @@ function createPaymentIdentityFields(params: CreatePaymentParams): Record<string
     identity.paymentMethodId = params.paymentMethodId;
   }
   if (params.offSession !== undefined) identity.offSession = params.offSession;
-  if (params.stripePaymentMethodId !== undefined) {
-    identity.stripePaymentMethodId = params.stripePaymentMethodId;
+  const bag = params as unknown as Record<string, unknown>;
+  if (bag.stripePaymentMethodId !== undefined) {
+    identity.stripePaymentMethodId = bag.stripePaymentMethodId;
   }
-  if (params.stripeCustomerId !== undefined) {
-    identity.stripeCustomerId = params.stripeCustomerId;
+  if (bag.stripeCustomerId !== undefined) {
+    identity.stripeCustomerId = bag.stripeCustomerId;
   }
-  if (params.stripeSetupFutureUsage !== undefined) {
-    identity.stripeSetupFutureUsage = params.stripeSetupFutureUsage;
+  if (bag.stripeSetupFutureUsage !== undefined) {
+    identity.stripeSetupFutureUsage = bag.stripeSetupFutureUsage;
   }
-  if (params.tokenId !== undefined) identity.tokenId = params.tokenId;
-  if (params.paymobIntegrationId !== undefined) {
-    identity.paymobIntegrationId = params.paymobIntegrationId;
+  if (bag.tokenId !== undefined) identity.tokenId = bag.tokenId;
+  if (bag.paymobIntegrationId !== undefined) {
+    identity.paymobIntegrationId = bag.paymobIntegrationId;
   }
-  if (params.paymobPaymentMethods !== undefined) {
-    identity.paymobPaymentMethods = params.paymobPaymentMethods;
+  if (bag.paymobPaymentMethods !== undefined) {
+    identity.paymobPaymentMethods = bag.paymobPaymentMethods;
   }
-  if (params.paymobIframeId !== undefined) {
-    identity.paymobIframeId = params.paymobIframeId;
+  if (bag.paymobIframeId !== undefined) {
+    identity.paymobIframeId = bag.paymobIframeId;
   }
-  if (params.moyasarSource !== undefined) {
-    const source = params.moyasarSource;
+  if (bag.moyasarSource !== undefined) {
+    const source = bag.moyasarSource;
     if (typeof source === "object" && source !== null) {
-      const bag = source as unknown as Record<string, unknown>;
+      const srcBag = source as unknown as Record<string, unknown>;
       const src: Record<string, unknown> = {};
-      if (bag.type !== undefined) src.type = bag.type;
-      if (typeof bag.token === "string") src.token = bag.token;
-      if (typeof bag.tokenId === "string") src.tokenId = bag.tokenId;
-      if (typeof bag.mobile === "string") src.mobile = bag.mobile;
+      if (srcBag.type !== undefined) src.type = srcBag.type;
+      if (typeof srcBag.token === "string") src.token = srcBag.token;
+      if (typeof srcBag.tokenId === "string") src.tokenId = srcBag.tokenId;
+      if (typeof srcBag.mobile === "string") src.mobile = srcBag.mobile;
       identity.moyasarSource = src;
     } else {
       identity.moyasarSource = source;
@@ -305,7 +307,7 @@ export type MockGatewayOptions = {
 type PaymentStateInternal = {
   amountMinor: number;
   currency: string;
-  status: PaymentStatus;
+  status: GatewayPaymentStatus;
   capturedAmountMinor: number;
   refundedAmountMinor: number;
   authorized: boolean;
@@ -315,7 +317,7 @@ type PaymentStateInternal = {
 export type PaymentState = {
   amount: number;
   currency: string;
-  status: PaymentStatus;
+  status: GatewayPaymentStatus;
   capturedAmount: number;
   refundedAmount: number;
   authorized: boolean;
@@ -1138,7 +1140,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         // Auth-only creates (fallback status authorized) stay authorized —
         // do not force a full paid capture (TESTKIT-2).
         const fb = fallback();
-        const providerStatus: PaymentStatus = fb.status === "authorized" ? "authorized" : "paid";
+        const providerStatus: GatewayPaymentStatus = fb.status === "authorized" ? "authorized" : "paid";
         const providerBase = { ...fb, status: providerStatus };
         const providerResult = applyResultOverrides(
           withPhase6Outcome(providerBase, "succeeded"),
@@ -1188,9 +1190,10 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
         const fb = fallback();
         const succeeded: GatewayPaymentResult = { ...fb };
         if (succeeded.status === "authorized" && succeeded.capturedAmount === undefined) {
-          succeeded.capturedAmount = 0;
-          if (succeeded.currency === undefined && fb.currency !== undefined) {
-            succeeded.currency = fb.currency;
+          const cur = (succeeded.amount as Money | undefined)?.currency ?? (fb.amount as Money | undefined)?.currency ?? "USD";
+          succeeded.capturedAmount = money("0", cur);
+          if ((succeeded as unknown as Record<string, unknown>).currency === undefined && (fb as unknown as Record<string, unknown>).currency !== undefined) {
+            (succeeded as unknown as Record<string, unknown>).currency = (fb as unknown as Record<string, unknown>).currency;
           }
         }
         return applyResultOverrides(withPhase6Outcome(succeeded, "succeeded"), outcome);
@@ -1482,12 +1485,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
             const result = await resolvePaymentOutcome(
               outcome,
               () => {
-                const status: PaymentStatus =
+                const status: GatewayPaymentStatus =
                   !capture && capabilities.authorization ? "authorized" : "paid";
                 const base = defaultPaymentResult(id, status, major, name, currencyCode);
                 return {
                   ...base,
-                  ...(status === "authorized" ? { capturedAmount: 0, currency: currencyCode } : {}),
+                  ...(status === "authorized" ? { capturedAmount: money("0", currencyCode) } : {}),
                   rawResponse: {
                     mock: true,
                     amountMinor: minor,
@@ -1556,14 +1559,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               finalResult.capturedAmount === undefined
                 ? {
                     ...finalResult,
-                    capturedAmount: 0,
-                    currency: finalResult.currency ?? currencyCode,
+                    capturedAmount: money("0", (finalResult.amount as Money | undefined)?.currency ?? currencyCode),
+                    ...(finalResult.currency === undefined ? { currency: currencyCode } : {}),
                   }
                 : finalResult;
 
-            if (settledResult.success || settledResult.status === "processing") {
-              ensurePaymentLedger(id, params, settledResult, { major, minor });
-            } else {
+            if (settledResult.outcome === "succeeded" || settledResult.status === "processing") {
               // Non-success terminal (e.g. failed): honest ledger — never leave paid hanging
               const key = finalResult.gatewayId || id;
               payments.set(key, {
@@ -1677,15 +1678,15 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               // Refunded captured funds do not close remaining hold
               // (NEW-TESTKIT-2). Full capture with prior refund stays
               // partially_refunded — not a silent paid rewrite.
-              const nextStatus: PaymentStatus = fullyCaptured
+              const nextStatus: GatewayPaymentStatus = fullyCaptured
                 ? state.refundedAmountMinor > 0
                   ? "partially_refunded"
                   : "paid"
                 : state.refundedAmountMinor > 0
                   ? "partially_refunded"
                   : "partially_captured";
-              const amountMajor = minorToMajor(state.amountMinor, state.currency);
-              const capturedMajor = minorToMajor(finalCapturedMinor, state.currency);
+              const amountMoney = fromMinorUnits(state.amountMinor, state.currency);
+              const capturedMoney = fromMinorUnits(finalCapturedMinor, state.currency);
               applyLedger = () => {
                 state.capturedAmountMinor = finalCapturedMinor;
                 state.authorized = false;
@@ -1695,12 +1696,12 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                 ...defaultPaymentResult(
                   params.gatewayPaymentId,
                   nextStatus,
-                  amountMajor,
+                  amountMoney,
                   name,
                   state.currency,
                 ),
-                capturedAmount: capturedMajor,
-                amount: amountMajor,
+                capturedAmount: capturedMoney,
+                amount: amountMoney,
                 currency: state.currency,
               };
             },
@@ -1721,10 +1722,10 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               {
                 ...result,
                 status: publicState.status,
-                amount: publicState.amount,
+                amount: money(String(publicState.amount), publicState.currency),
                 currency: publicState.currency,
-                capturedAmount: publicState.capturedAmount,
-                refundedAmount: publicState.refundedAmount,
+                capturedAmount: money(String(publicState.capturedAmount), publicState.currency),
+                refundedAmount: money(String(publicState.refundedAmount), publicState.currency),
               },
               paymentStatusToOperationOutcome(publicState.status),
               result.reconciliationRequired === true ? { reconciliationRequired: true } : undefined,
@@ -1853,7 +1854,6 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
                   // Re-assert ledger-derived money identity after spread
                   status: base.status,
                   totalRefunded: base.totalRefunded,
-                  success: base.success,
                   outcome: base.outcome,
                   gatewayRefundId:
                     ((outcome.result ?? {}) as Partial<GatewayRefundResult>).gatewayRefundId ??
@@ -1961,8 +1961,8 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
               publicState.currency,
             ),
             currency: publicState.currency,
-            capturedAmount: publicState.capturedAmount,
-            refundedAmount: publicState.refundedAmount,
+            capturedAmount: money(String(publicState.capturedAmount), publicState.currency),
+            refundedAmount: money(String(publicState.refundedAmount), publicState.currency),
           };
         };
 
@@ -1989,7 +1989,7 @@ export function mockGateway(options: MockGatewayOptions = {}): MockGateway {
       });
     },
 
-    async getPaymentStatus(gatewayId: string): Promise<PaymentStatus> {
+    async getPaymentStatus(gatewayId: string): Promise<GatewayPaymentStatus> {
       return track("getPaymentStatus", { gatewayId }, async () => {
         const state = payments.get(gatewayId);
         if (!state) {

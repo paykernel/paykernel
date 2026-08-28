@@ -28,6 +28,7 @@ const DIST_INDEX_JS = join(CORE, "dist", "index.js");
 const DIST_INDEX_DTS = join(CORE, "dist", "index.d.ts");
 const PACKAGE_JSON = join(CORE, "package.json");
 const OUT_FILE = join(CORE, "docs", "baseline", "public-api.md");
+const OUT_JSON = join(CORE, "docs", "baseline", "public-api.inventory.json");
 const COMMAND = "bun run scripts/generate-api-baseline.ts";
 
 type ParsedExports = {
@@ -61,6 +62,22 @@ function parseIndexExports(source: string): ParsedExports {
   const stripped = source
     .replace(/\/\*[\s\S]*?\*\//g, "")
     .replace(/^\s*\/\/.*$/gm, "");
+
+  // H9 — Export * blind spot: forbid star re-exports in root barrel.
+  // `export * from "..."` and `export * as ns from "..."` silently widen the API
+  // and evade name-based diffing. Detect and fail closed.
+  const starExportRe = /export\s*\*\s*(?:as\s+[A-Za-z_$][\w$]*\s*)?from\s*["'][^"']+["']/g;
+  const starHit = starExportRe.exec(stripped);
+  if (starHit) {
+    throw new Error(
+      `Forbidden star export in src/index.ts: "${starHit[0]}" — expand to named exports (export { A, B } from "...")`,
+    );
+  }
+  if (/export\s*\*/.test(stripped)) {
+    throw new Error(
+      "Forbidden star export in src/index.ts — export * is not allowed in the root barrel. Use named re-exports.",
+    );
+  }
 
   // export type { A, B as C } from "..."
   // export type { A, B }
@@ -110,8 +127,8 @@ function parseIndexExports(source: string): ParsedExports {
   }
 
   return {
-    typeOnly: [...typeOnly].sort((a, b) => a.localeCompare(b)),
-    valueExports: [...valueExports].sort((a, b) => a.localeCompare(b)),
+    typeOnly: [...typeOnly].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    valueExports: [...valueExports].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
   };
 }
 
@@ -142,7 +159,7 @@ function walkDtsFiles(dir: string, base: string = dir): string[] {
       out.push(relative(base, full).split("\\").join("/"));
     }
   }
-  return out.sort((a, b) => a.localeCompare(b));
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 function classifyRuntimeExport(
@@ -205,7 +222,7 @@ async function main(): Promise<void> {
     string,
     unknown
   >;
-  const runtimeKeys = Object.keys(mod).sort((a, b) => a.localeCompare(b));
+  const runtimeKeys = Object.keys(mod).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
   // Cross-check: every parsed value export must exist on the runtime module
   const missingAtRuntime = parsed.valueExports.filter((n) => !(n in mod));
@@ -228,10 +245,10 @@ async function main(): Promise<void> {
     return { name: exportName, kind };
   });
 
-  // Sort already sorted by parse, but re-sort for safety
-  runtimeRows.sort((a, b) => a.name.localeCompare(b.name));
+  // Sort already sorted by parse, but re-sort for safety (deterministic, no locale)
+  runtimeRows.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   const typeOnlySorted = [...parsed.typeOnly].sort((a, b) =>
-    a.localeCompare(b),
+    a < b ? -1 : a > b ? 1 : 0,
   );
 
   const dtsFiles = walkDtsFiles(join(CORE, "dist"));
@@ -239,8 +256,6 @@ async function main(): Promise<void> {
   const bundleSha = createHash("sha256")
     .update(readFileSync(DIST_INDEX_JS))
     .digest("hex");
-
-  const generatedAt = new Date().toISOString();
 
   const lines: string[] = [];
   lines.push("# Public API Baseline");
@@ -254,7 +269,6 @@ async function main(): Promise<void> {
   lines.push("");
   lines.push("## Generation metadata");
   lines.push("");
-  lines.push(`- **Generated at (UTC)**: ${generatedAt}`);
   lines.push(`- **Command**: \`${COMMAND}\``);
   lines.push(`- **Source of truth (exports)**: \`src/index.ts\``);
   lines.push(`- **Runtime module inspected**: \`dist/index.js\``);
@@ -359,6 +373,60 @@ async function main(): Promise<void> {
   console.log(
     `[generate-api-baseline] runtime=${runtimeRows.length} type-only=${typeOnlySorted.length} d.ts=${dtsFiles.length}`,
   );
+
+  // ── Public API inventory JSON (machine-checkable, no timestamps) ──────
+  const runtimeNames = runtimeRows.map((r) => r.name).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const typeOnlyNames = [...typeOnlySorted].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const paymentEventSchemaVersion = String(
+    (mod as Record<string, unknown>)["PAYMENT_EVENT_SCHEMA_VERSION"] ?? "1",
+  );
+  const stablePaymentEventTypesRaw = (mod as Record<string, unknown>)["STABLE_PAYMENT_EVENT_TYPES"];
+  const stablePaymentEventTypes = Array.isArray(stablePaymentEventTypesRaw)
+    ? [...(stablePaymentEventTypesRaw as string[])].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+    : [];
+  if (!Array.isArray(stablePaymentEventTypesRaw) || stablePaymentEventTypesRaw.length === 0) {
+    console.warn(
+      "[generate-api-baseline] warning: STABLE_PAYMENT_EVENT_TYPES missing or empty in dist runtime; writing empty array",
+    );
+  }
+  // H9 — type-shape gap: hash of d.ts declarations + normalized exports map.
+  // dtsHash = sha256(sorted d.ts files' contents with path separators for determinism)
+  // exportsHash = sha256(JSON of { exports, main, types, type })
+  const dtsHash = (() => {
+    const h = createHash("sha256");
+    for (const rel of dtsFiles) {
+      h.update(rel);
+      h.update("\0");
+      try {
+        h.update(readFileSync(join(CORE, "dist", rel)));
+      } catch {
+        // missing file after walk — fail closed via empty hash chunk
+        h.update("__MISSING__");
+      }
+      h.update("\0");
+    }
+    return h.digest("hex");
+  })();
+  const exportsHash = (() => {
+    const normalized = {
+      exports: (pkg as Record<string, unknown>).exports ?? null,
+      main: (pkg as Record<string, unknown>).main ?? null,
+      type: (pkg as Record<string, unknown>).type ?? null,
+      types: (pkg as Record<string, unknown>).types ?? null,
+    };
+    // Deterministic: keys already in sorted order (exports, main, type, types)
+    return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
+  })();
+  const inventory = {
+    runtime: runtimeNames,
+    typeOnly: typeOnlyNames,
+    paymentEventSchemaVersion,
+    stablePaymentEventTypes,
+    dtsHash,
+    exportsHash,
+  };
+  writeFileSync(OUT_JSON, JSON.stringify(inventory, null, 2) + "\n", "utf8");
+  console.log(`[generate-api-baseline] Wrote ${relative(ROOT, OUT_JSON)}`);
 }
 
 main().catch((err) => {

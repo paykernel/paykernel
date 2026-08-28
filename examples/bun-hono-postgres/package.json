@@ -1,0 +1,31 @@
+{
+  "name": "@paykernel/example-bun-hono-postgres",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Thin Bun + Hono checkout example over @paykernel/example-checkout-kernel (Postgres).",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=18",
+    "bun": ">=1.0.0"
+  },
+  "dependencies": {
+    "@paykernel/example-checkout-kernel": "workspace:*",
+    "@paykernel/integration-hono": "workspace:*",
+    "@paykernel/store-postgres": "workspace:*",
+    "hono": "^4.13.3",
+    "pg": "^8.13.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.3"
+  }
+}

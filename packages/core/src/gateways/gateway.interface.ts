@@ -1,5 +1,6 @@
 // file: packages/payments/src/gateways/gateway.interface.ts
 
+import type { GatewayPaymentStatus } from '../types/domain-status';
 import type {
     PaymentStatus,
     CreatePaymentParams,
@@ -149,7 +150,7 @@ export interface PaymentGateway<TName extends string = string> {
     /**
      * Get current status of a payment
      */
-    getPaymentStatus?(gatewayId: string): Promise<PaymentStatus>;
+    getPaymentStatus?(gatewayId: string): Promise<GatewayPaymentStatus>;
 
     /**
      * Create a hosted checkout session (capability `hostedCheckout`).

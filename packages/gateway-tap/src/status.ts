@@ -1,4 +1,5 @@
 import type {
+  GatewayPaymentStatus,
   PaymentOperationOutcome,
   PaymentStatus,
   RefundStatus,
@@ -52,8 +53,13 @@ export function mapTapRefundEntityStatus(status: unknown): RefundStatus {
   return REFUND_STATUS[key] ?? "failed";
 }
 
-/** Payment-domain status when the object is a Tap refund. */
-export function mapTapRefundPaymentStatus(status: unknown): PaymentStatus {
+/**
+ * Payment-domain status when the object is a Tap refund.
+ * Returns a {@link GatewayPaymentStatus} — `refunded` terminal, `refund_pending`/`refund_failed`
+ * are webhook-only refund states. Webhook refund `amount` (when present) is a major-unit
+ * {@link Money} value (e.g. `money("10.50", "SAR")`), never minor units.
+ */
+export function mapTapRefundPaymentStatus(status: unknown): GatewayPaymentStatus {
   const entity = mapTapRefundEntityStatus(status);
   if (entity === "completed") return "refunded";
   if (entity === "pending") return "refund_pending";
@@ -105,7 +111,7 @@ export function isTapDeclineStatus(
 /** Stable Phase 7 names so attachPaymentEvent can map a custom gateway. */
 export function inferTapStableType(
   kind: "charge" | "authorize" | "refund",
-  status: PaymentStatus,
+  status: GatewayPaymentStatus,
 ): StablePaymentEventType | undefined {
   if (kind === "refund") {
     if (status === "refunded") return "refund.completed";

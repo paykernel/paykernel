@@ -1,6 +1,6 @@
-// file: packages/payments/src/types/webhook.types.ts
-
-import type { GatewayId, PaymentStatus } from './payment.types';
+import type { GatewayId } from './payment.types';
+import type { Money } from '../utils/money';
+import type { GatewayPaymentStatus } from './domain-status';
 import type {
     PaymentEvent,
     PaymentEventSchemaVersion,
@@ -53,14 +53,14 @@ export interface WebhookEvent {
     gatewaySubscriptionId?: string | undefined;
     /** Gateway token emitted by setup/tokenization events, when applicable */
     gatewayToken?: string | undefined;
-    /** Normalized payment status */
-    status: PaymentStatus;
+    /** Normalized status — payment, refund, or setup token */
+    status: GatewayPaymentStatus;
     /** Whether the gateway event came from live mode when the gateway exposes that flag. */
     livemode?: boolean | undefined;
     /** Gateway API version that shaped the webhook payload, when exposed. */
     apiVersion?: string | undefined;
-    /** Amount in base currency units, when the gateway event includes money details */
-    amount?: number | undefined;
+    /** Amount as {@link Money} (major units + currency), when the gateway event includes money details */
+    amount?: Money | undefined;
     /**
      * Currency code, when the gateway event includes money details.
      * Normalized to uppercase ISO 4217 across all gateways for consistency.

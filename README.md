@@ -167,7 +167,7 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 | Stores | [postgres](./packages/store-postgres/README.md) · [redis](./packages/store-redis/README.md) · [sqlite](./packages/store-sqlite/README.md) · [turso](./packages/store-turso/README.md) · [d1](./packages/store-d1/README.md) · [durable objects](./packages/store-durable-objects/README.md) |
 | Contributors | [`docs/monorepo.md`](./docs/monorepo.md) · [`docs/workspace-boundaries.md`](./docs/workspace-boundaries.md) · [`docs/releases.md`](./docs/releases.md) |
 
-`roadmap.md` is a completed phase log (0–22 shipped, Phase 23 started with `@paykernel/gateway-tap` and `@paykernel/gateway-myfatoorah`) plus leftover product work. It is not the consumer index.
+`roadmap.md` is a completed phase log (0–25 shipped, Phase 23 leftover gateways) plus leftover product work. It is not the consumer index. Phase 25 (1.0): 1.0 contract cut, compat CI, `bun-hono-postgres` RC.
 
 ## License
 

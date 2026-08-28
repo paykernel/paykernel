@@ -3336,21 +3336,19 @@ describe("MoyasarGateway", () => {
       ).toBe(true);
     });
 
-    it("warns when the idempotency store lacks atomic reserve()", () => {
-      const { warnings, logger } = captureWarnings();
+    it("throws when the idempotency store lacks atomic reserve() (fail-fast)", () => {
       const storeWithoutReserve = {
         get: async () => undefined,
         set: async () => {},
         delete: async () => {},
       };
-
-      new MoyasarGateway(
-        { ...CONFIG, idempotencyStore: storeWithoutReserve },
-        new HooksManager(),
-        logger,
-      );
-
-      expect(warnings.some((w) => w.includes("atomic reserve"))).toBe(true);
+      expect(
+        () =>
+          new MoyasarGateway(
+            { ...CONFIG, idempotencyStore: storeWithoutReserve },
+            new HooksManager(),
+          ),
+      ).toThrow(/idempotencyStore\.reserve required/);
     });
 
     it("does not warn when the store implements reserve()", () => {
@@ -3410,25 +3408,19 @@ describe("MoyasarGateway", () => {
       expect(fetchCalls).toHaveLength(0);
     });
 
-    it("fails closed when store lacks atomic reserve (MOYASAR-1)", async () => {
+    it("fails closed when store lacks atomic reserve (MOYASAR-1) — fail-fast at construction", () => {
       const storeWithoutReserve = {
         get: async () => undefined,
         set: async () => {},
         delete: async () => {},
       };
-      const gateway = new MoyasarGateway(
-        { ...CONFIG, idempotencyStore: storeWithoutReserve },
-        new HooksManager(),
-      );
-      mockFetchJson(paymentResponse({ status: "refunded", refunded: 10000 }));
-
-      await expect(
-        gateway.refundPayment({
-          gatewayPaymentId: PAYMENT_ID,
-          idempotencyKey: DEFAULT_MUTATION_IDEMPOTENCY_KEY,
-        }),
-      ).rejects.toThrow(/requires idempotencyStore\.reserve/);
-      expect(fetchCalls).toHaveLength(0);
+      expect(
+        () =>
+          new MoyasarGateway(
+            { ...CONFIG, idempotencyStore: storeWithoutReserve },
+            new HooksManager(),
+          ),
+      ).toThrow(/idempotencyStore\.reserve required/);
     });
 
     it("fails closed when store is present but idempotencyKey is omitted (MOYASAR-2)", async () => {

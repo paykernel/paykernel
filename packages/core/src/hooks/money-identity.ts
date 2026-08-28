@@ -17,7 +17,6 @@
  * cannot poison the freeze snapshot.
  */
 const MONEY_IDENTITY_KEYS = [
-    'success',
     'outcome',
     'status',
     'amount',

@@ -6,6 +6,7 @@
  */
 
 import type { PaymentErrorLike } from "./operation-result";
+import type { Money } from "../utils/money";
 import type {
   AmountInput,
   OperationRequestOptions,
@@ -40,7 +41,7 @@ export type PaymentLink = {
   /** Hosted URL. Omitted on post-submit indeterminate snapshots (never invent ""). */
   url?: string;
   references: ProviderReferences;
-  amount?: number;
+  amount?: Money | undefined;
   currency?: string;
   rawResponse?: unknown;
 };

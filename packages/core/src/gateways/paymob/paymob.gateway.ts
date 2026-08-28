@@ -14,15 +14,15 @@ import {
 } from "../../runtime/crypto-portable";
 import type {
   AmountInput,
-  PaymentStatus,
-  PaymobCreatePaymentParams,
   CaptureParams,
-  RefundParams,
-  VoidParams,
   GetPaymentParams,
   GatewayPaymentResult,
   GatewayRefundResult,
+  PaymobCreatePaymentParams,
+  RefundParams,
+  VoidParams,
 } from "../../types/payment.types";
+import type { GatewayPaymentStatus } from "../../types/domain-status";
 import {
   applyOutcomeToGatewayResult,
   applyOutcomeToGatewayRefundResult,
@@ -72,9 +72,10 @@ import {
   fromMinorUnits as sharedFromMinorUnits,
   MoneyAmountError,
   minorAmountToNumber,
-  moneyToMajorNumber,
+  money,
   normalizeAmountInput,
   toMinorUnits as sharedToMinorUnits,
+  type Money,
 } from "../../utils/money";
 import { PAYMOB_CAPABILITIES } from "../builtin-capabilities";
 
@@ -403,8 +404,19 @@ export class PaymobGateway extends BaseGateway {
     super(config, hooks, logger, PAYMOB_CAPABILITIES, runtime);
     this.paymobConfig = config;
     this.baseUrl = this.resolveBaseUrl(config);
+    this.assertIdempotencyStoreValid();
     this.warnIfIdempotencyStoreUnsafe();
     this.warnIfHmacSecretMissing();
+  }
+
+  private assertIdempotencyStoreValid(): void {
+    const store = this.paymobConfig.idempotencyStore as unknown as { reserve?: unknown } | undefined;
+    if (store !== undefined && typeof store.reserve !== "function") {
+      throw new InvalidRequestError(
+        "idempotencyStore.reserve required; use InMemoryIdempotencyStore or a store with atomic reserve() (e.g. Redis SET NX or SQL unique constraint)",
+        [{ path: ["idempotencyStore"] }],
+      );
+    }
   }
 
   /**
@@ -451,13 +463,7 @@ export class PaymobGateway extends BaseGateway {
       return;
     }
 
-    if (!store.reserve) {
-      this.logger.warn(
-        "[Paymob] idempotencyStore does not implement atomic reserve(). " +
-          "Capture, refund, and void will throw until a store with atomic reserve() " +
-          "is provided (e.g. Redis SET NX or a SQL unique constraint).",
-      );
-    }
+    // Reserve shape validated fail-fast in assertIdempotencyStoreValid(); no second warn.
   }
 
   private isLikelyServerlessEnvironment(): boolean {
@@ -543,7 +549,7 @@ export class PaymobGateway extends BaseGateway {
       special_reference: this.resolveSpecialReference(params),
       notification_url: params.callbackUrl,
       // Normalize redirect URL to prevent Paymob adding trailing slash before query params
-      redirection_url: this.normalizeRedirectUrl(params.returnUrl),
+      redirection_url: this.normalizeRedirectUrl(params.callbackUrl),
       // Include paymentId and tenantId in extras - these appear in payment_key_claims.extra
       extras: {
         ...params.metadata,
@@ -651,7 +657,7 @@ export class PaymobGateway extends BaseGateway {
     // Match Intention resolvePaymentMethods: auth requires authIntegrationId
     // (or per-request method override). Never fall back to sale integrationId
     // for capture:false — that can settle as a sale integration.
-    let integrationId = params.paymobIntegrationId;
+    let integrationId = (params as unknown as PaymobCreatePaymentParams).paymobIntegrationId;
     if (integrationId === undefined || integrationId === null) {
       if (params.capture === false) {
         if (this.paymobConfig.authIntegrationId !== undefined && this.paymobConfig.authIntegrationId !== null) {
@@ -661,7 +667,7 @@ export class PaymobGateway extends BaseGateway {
         integrationId = this.paymobConfig.integrationId;
       }
     }
-    const iframeId = params.paymobIframeId ?? this.paymobConfig.iframeId;
+    const iframeId = (params as unknown as PaymobCreatePaymentParams).paymobIframeId ?? this.paymobConfig.iframeId;
 
     if (integrationId === undefined || integrationId === null) {
       if (params.capture === false) {
@@ -931,7 +937,7 @@ export class PaymobGateway extends BaseGateway {
                   currency,
                 }
               : publishCaptured && cumulativeCapturedAmountCents === 0
-                ? { capturedAmount: 0, currency }
+                ? { capturedAmount: this.fromMinorUnits(0, currency), currency }
                 : {}),
             providerNativeStatus: success ? "success" : "failed",
             gateway: "paymob",
@@ -1005,7 +1011,7 @@ export class PaymobGateway extends BaseGateway {
         );
         // NEW-PAYMOB-VOID-P: honor pending like capture/refund — not cancelled.
         const pending = this.parseBoolean(data.pending) === true;
-        const status: PaymentStatus = pending
+        const status: GatewayPaymentStatus = pending
           ? "pending"
           : success
             ? "cancelled"
@@ -1396,10 +1402,8 @@ export class PaymobGateway extends BaseGateway {
       gateway: "paymob",
       paymentId: undefined,
       gatewayPaymentId,
-      gatewayObjectId: String(payload.obj.id),
-      gatewayToken: payload.obj.token,
       status: "setup_completed",
-      timestamp: this.parseTimestamp(payload.obj.created_at),
+      timestamp: new Date(),
       rawPayload: payload,
     };
     return attachPaymentEvent(legacy, { computePayloadHash: true });
@@ -1525,13 +1529,15 @@ export class PaymobGateway extends BaseGateway {
    * symmetric with incomplete refunds. Callers inquire for cumulative captured.
    */
   private resolveWebhookEventAmount(
-    status: PaymentStatus,
-    amountCents: number,
+    status: GatewayPaymentStatus,
+    amountCents: number | undefined,
     currency: string,
     refundedAmountCents?: number,
-  ): number | undefined {
+  ): Money | undefined {
+    if (amountCents === undefined) {
+      return undefined;
+    }
     const isRefundDomain =
-      status === "refunded" ||
       status === "partially_refunded" ||
       status === "refund_completed" ||
       status === "refund_pending" ||
@@ -1853,7 +1859,7 @@ export class PaymobGateway extends BaseGateway {
     }, GetPaymentParamsSchema);
   }
 
-  async getPaymentStatus(gatewayId: string): Promise<PaymentStatus> {
+  async getPaymentStatus(gatewayId: string): Promise<GatewayPaymentStatus> {
     const payment = await this.getPayment({ gatewayPaymentId: gatewayId });
     return payment.status;
   }
@@ -2137,8 +2143,7 @@ export class PaymobGateway extends BaseGateway {
     is_auth?: boolean;
     is_capture?: boolean;
     is_captured?: boolean;
-  }): PaymentStatus {
-    if (data.pending) return "pending";
+  }): GatewayPaymentStatus {
     // Webhook sanitize already dropped unsigned is_refund / is_void when
     // current-state is present (I1). Remaining action flags are HMAC aliases
     // or trusted inquiry/API fields. Child refunds/voids on the webhook path
@@ -2235,10 +2240,7 @@ export class PaymobGateway extends BaseGateway {
       transactionAmountCents: number;
       cumulativeCapturedAmountCents?: number | undefined;
     },
-  ): PaymentStatus {
-    if (!success) return "failed";
-
-    // PAYMOB-1: never map capture success to paid / isPaidOutcome without a
+  ): GatewayPaymentStatus {
     // positive captured total. Sparse bodies and captured_amount:0 fall through
     // mapTransactionStatus to paid when is_capture blocks the auth branch.
     const cumulative = resolved?.cumulativeCapturedAmountCents ?? data.captured_amount;
@@ -2273,7 +2275,7 @@ export class PaymobGateway extends BaseGateway {
    * `outcome === "succeeded"` / `success: true`.
    */
   private mapPaymobOutcome(
-    status: PaymentStatus,
+    status: GatewayPaymentStatus,
     success: boolean,
     options: { pending?: boolean } = {},
   ): PaymentOperationOutcome {
@@ -2298,7 +2300,6 @@ export class PaymobGateway extends BaseGateway {
     if (status === "refund_completed") {
       return "requires_action";
     }
-    // Refunds may still be operation-succeeded without success flag; never isPaidOutcome.
     if (status === "refunded" || status === "partially_refunded") {
       return "succeeded";
     }
@@ -2517,13 +2518,13 @@ export class PaymobGateway extends BaseGateway {
   // ═══════════════════════════════════════════════════════════════════════════
 
   private resolvePaymentMethods(params: PaymobCreatePaymentParams): PaymobPaymentMethod[] {
-    if (params.paymobPaymentMethods?.length) {
-      return params.paymobPaymentMethods.map((method) => this.normalizePaymentMethod(method));
+    if ((params as unknown as PaymobCreatePaymentParams).paymobPaymentMethods?.length) {
+      return (params as unknown as PaymobCreatePaymentParams).paymobPaymentMethods!.map((method) => this.normalizePaymentMethod(method!));
     }
 
     // Per-request override always wins.
-    if (params.paymobIntegrationId !== undefined && params.paymobIntegrationId !== null) {
-      return [this.normalizePaymentMethod(params.paymobIntegrationId)];
+    if ((params as unknown as PaymobCreatePaymentParams).paymobIntegrationId !== undefined && (params as unknown as PaymobCreatePaymentParams).paymobIntegrationId !== null) {
+      return [this.normalizePaymentMethod((params as unknown as PaymobCreatePaymentParams).paymobIntegrationId as PaymobPaymentMethod)];
     }
 
     if (params.capture === false) {
@@ -2575,7 +2576,7 @@ export class PaymobGateway extends BaseGateway {
     params: PaymobCreatePaymentParams,
     paymentMethods: PaymobPaymentMethod[],
   ): void {
-    const hasPerPaymentCallback = Boolean(params.callbackUrl || params.returnUrl);
+    const hasPerPaymentCallback = Boolean(params.callbackUrl);
     if (!hasPerPaymentCallback || paymentMethods.length === 0) {
       return;
     }
@@ -2608,7 +2609,7 @@ export class PaymobGateway extends BaseGateway {
     params: PaymobCreatePaymentParams,
     options: { includeShippingMethod?: boolean } = {},
   ): PaymobBillingData {
-    const source = params.paymobBillingData;
+    const source = (params as unknown as PaymobCreatePaymentParams).paymobBillingData;
     const metadata = params.metadata ?? {};
 
     const email = source?.email ?? this.stringOrUndefined(metadata.email);
@@ -2769,14 +2770,9 @@ export class PaymobGateway extends BaseGateway {
     }
   }
 
-  private fromMinorUnits(amount: number, currency: string): number {
+  private fromMinorUnits(amount: number, currency: string): Money {
     const fractionDigits = this.currencyFractionDigits(currency);
-    const money = sharedFromMinorUnits(amount, currency, {
-      exponent: fractionDigits,
-      allowZero: true,
-      allowNegative: true,
-    });
-    return moneyToMajorNumber(money, {
+    return sharedFromMinorUnits(amount, currency, {
       exponent: fractionDigits,
       allowZero: true,
       allowNegative: true,
@@ -3114,14 +3110,7 @@ export class PaymobGateway extends BaseGateway {
         [{ path: ["idempotencyKey"] }],
       );
     }
-    if (!store.reserve) {
-      throw new InvalidRequestError(
-        `Paymob ${operation} requires idempotencyStore.reserve() for atomic ` +
-          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
-          "get-then-set stores can double-apply refund/capture/void under concurrency.",
-        [{ path: ["idempotencyStore"] }],
-      );
-    }
+    // reserve validated fail-fast at construction (assertIdempotencyStoreValid); dead TOCTOU check removed.
 
     return this.executeIdempotent(operation, idempotencyKey, params, executor);
   }
@@ -3291,17 +3280,7 @@ export class PaymobGateway extends BaseGateway {
       return undefined;
     }
 
-    // PAYMOB-TOCTOU: never fall through to get-then-set. Concurrent workers
-    // can both observe a free key and double-apply (Moyasar parity).
-    if (!store.reserve) {
-      throw new InvalidRequestError(
-        `Paymob ${operation} requires idempotencyStore.reserve() for atomic ` +
-          "reservation (e.g. Redis SET NX or SQL unique constraint). Non-atomic " +
-          "get-then-set stores can double-apply refund/capture/void under concurrency.",
-        [{ path: ["idempotencyStore"] }],
-      );
-    }
-
+    // Reserve validated fail-fast at construction; no TOCTOU dead check.
     const existing = await store.reserve(key, record);
     if (!existing) {
       return undefined;
@@ -3311,7 +3290,6 @@ export class PaymobGateway extends BaseGateway {
     // Do not delete+re-reserve — Paymob has no native idempotency.
     return this.retainStoredIdempotencyFence(existing);
   }
-
   /**
    * Expired in_progress is an unknown mutation outcome (worker may have died
    * after POST). Refuse retry; do not treat the key as free.
@@ -3531,7 +3509,7 @@ export class PaymobGateway extends BaseGateway {
    * domain statuses must not appear on the envelope (S19-PAYMOB-REDIR-STATUS,
    * S20-PAYMOB-REDIR-TERM). In-flight `pending` / `processing` stay as mapped.
    */
-  private redirectEnvelopeStatus(mapped: PaymentStatus): PaymentStatus {
+  private redirectEnvelopeStatus(mapped: GatewayPaymentStatus): GatewayPaymentStatus {
     if (mapped === "pending" || mapped === "processing") {
       return mapped;
     }

@@ -35,12 +35,12 @@ export interface IdempotencyStore {
   set(key: string, record: IdempotencyRecord): MaybePromise<void>;
   delete(key: string): MaybePromise<void>;
   /**
-   * Optional atomic reservation. Implement with Redis `SET NX`, a database
+   * Atomic reservation. Implement with Redis `SET NX`, a database
    * unique constraint, or equivalent to prevent duplicate cross-worker calls.
    * Store the supplied in-progress record and return undefined when the key is
    * free; return the existing record when it is already reserved.
    */
-  reserve?(
+  reserve(
     key: string,
     record: IdempotencyRecord,
   ): MaybePromise<IdempotencyRecord | undefined>;
