@@ -63,30 +63,17 @@ function publishableCurrency(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function moneyFromMajorUnits(
-  amount: number | undefined,
-  currency: string | undefined,
-): Money | undefined {
-  if (amount === undefined || !Number.isFinite(amount)) return undefined;
-  if (currency === undefined) return undefined;
-  try {
-    return money(amount, currency);
-  } catch {
-    return undefined;
-  }
-}
-
 /**
- * Provider recon snapshot from `getPayment` money only.
- * Incomplete major-unit fields (amount without currency) fail closed.
+ * Provider recon snapshot from `getPayment` Money only (1.0 fail-closed).
+ * Incomplete money (Money without currency) fails closed; legacy number
+ * major units are not accepted — return undefined so caller schedules reconcile
+ * instead of forging a snapshot.
  */
 function providerSnapshotFromGetPayment(
   got: GatewayPaymentResult,
 ): ProviderPaymentSnapshot | undefined {
   if (!got.gatewayId) return undefined;
-  const currency = publishableCurrency(
-    got.currency ?? (isMoney(got.amount) ? (got.amount as Money).currency : undefined),
-  );
+  const currency = publishableCurrency(got.currency);
   const hasAmountLike =
     got.amount !== undefined ||
     got.capturedAmount !== undefined ||
@@ -94,12 +81,8 @@ function providerSnapshotFromGetPayment(
   if (hasAmountLike && currency === undefined) {
     return undefined;
   }
-  const amount = isMoney(got.amount)
-    ? (got.amount as Money)
-    : moneyFromMajorUnits(got.amount as unknown as number | undefined, currency);
-  if (amount === undefined) {
-    return undefined;
-  }
+  if (!isMoney(got.amount)) return undefined;
+  const amount = got.amount as Money;
   const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
     gatewayPaymentId: got.gatewayId,
     status: got.status as unknown as PaymentStatus,
@@ -107,21 +90,16 @@ function providerSnapshotFromGetPayment(
     providerStatus: got.status,
   };
   if (got.capturedAmount !== undefined) {
-    const captured = isMoney(got.capturedAmount)
-      ? (got.capturedAmount as Money)
-      : moneyFromMajorUnits(got.capturedAmount as unknown as number | undefined, currency);
-    if (captured === undefined) return undefined;
-    input.capturedAmount = captured;
+    if (!isMoney(got.capturedAmount)) return undefined;
+    input.capturedAmount = got.capturedAmount as Money;
   }
   if (got.refundedAmount !== undefined) {
-    const refunded = isMoney(got.refundedAmount)
-      ? (got.refundedAmount as Money)
-      : moneyFromMajorUnits(got.refundedAmount as unknown as number | undefined, currency);
-    if (refunded === undefined) return undefined;
-    input.refundedAmount = refunded;
+    if (!isMoney(got.refundedAmount)) return undefined;
+    input.refundedAmount = got.refundedAmount as Money;
   }
   return buildProviderPaymentSnapshot(input);
 }
+
 
 /** Bundle shape injected into the checkout kernel (SqliteStoresBundle + optional close). */
 export type CheckoutStoresBundle = SqliteStoresBundle & {

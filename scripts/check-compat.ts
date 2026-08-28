@@ -265,7 +265,20 @@ export function generateSchemaInventory(): SchemaInventory {
 }
 
 export function deepEqual(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return deterministicStringify(a) === deterministicStringify(b);
+}
+
+function deterministicStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (val !== null && typeof val === "object" && !Array.isArray(val)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(val as Record<string, unknown>).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0))) {
+        sorted[k] = (val as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    return val as unknown;
+  });
 }
 
 export function diffStringArrays(label: string, committed: string[], current: string[]): string[] {

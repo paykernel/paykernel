@@ -1396,14 +1396,26 @@ export class PaymobGateway extends BaseGateway {
         ? String(payload.obj.order_id).trim()
         : undefined;
     const gatewayPaymentId = signedOrderId ?? String(payload.obj.id);
+    let timestamp: Date;
+    try {
+      timestamp = this.parseTimestamp(payload.obj.created_at);
+    } catch (error) {
+      if (error instanceof InvalidWebhookError) {
+        timestamp = new Date();
+      } else {
+        throw error;
+      }
+    }
     const legacy: WebhookEvent = {
       id: String(payload.obj.id),
       type: payload.type,
       gateway: "paymob",
       paymentId: undefined,
       gatewayPaymentId,
+      gatewayObjectId: String(payload.obj.id),
+      gatewayToken: String(payload.obj.token),
       status: "setup_completed",
-      timestamp: new Date(),
+      timestamp,
       rawPayload: payload,
     };
     return attachPaymentEvent(legacy, { computePayloadHash: true });
@@ -2465,11 +2477,6 @@ export class PaymobGateway extends BaseGateway {
     return this.legacyAuthToken;
   }
 
-  /**
-   * Determine when to refresh the cached auth token. Prefer the actual expiry
-   * encoded in the JWT (`exp`), refreshing 5 minutes early; fall back to 50
-   * minutes when the expiry can't be read.
-   */
   private resolveAuthTokenExpiry(token: string): number {
     const FALLBACK_MS = 50 * 60 * 1000;
     const fallback = this.clock.nowMs() + FALLBACK_MS;
@@ -2481,8 +2488,8 @@ export class PaymobGateway extends BaseGateway {
 
     const refreshSkewMs = 5 * 60 * 1000;
     const withSkew = expiryMs - refreshSkewMs;
-    // JWT `exp` is wall-clock epoch seconds, not a cache TTL.
-    return withSkew > Date.now() ? withSkew : fallback;
+    // JWT `exp` is wall-clock epoch seconds — compare via injectable clock, not Date.now().
+    return withSkew > this.clock.nowMs() ? withSkew : fallback;
   }
 
   /**

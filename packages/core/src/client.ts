@@ -508,25 +508,11 @@ export class PaymentClient<
   private readonly logger: Logger;
 
   /**
-   * Legacy constructor: configure built-in gateways via provider config keys.
+   * Private in 1.0 — construct via {@link createPaymentClient}.
    *
-   * @deprecated Prefer {@link createPaymentClient} with
-   * `gateways: { stripe: stripeGateway(...), ... }` or a built
-   * `createGatewayRegistry()` registry. This constructor remains supported
-   * through 0.x for migration.
-   *
-   * @example
-   * ```typescript
-   * const client = new PaymentClient({
-   *   moyasar: { secretKey: 'sk_...' },
-   *   defaultGateway: 'moyasar',
-   *   hooks: {
-   *     beforeCreatePayment: async (ctx) => {
-   *       return { proceed: true };
-   *     },
-   *   },
-   * });
-   * ```
+   * Legacy `new PaymentClient({ moyasar, stripe, ... })` was removed at 1.0.0.
+   * Use `createPaymentClient({ gateways: { stripe: stripeGateway(...), moyasar: moyasarGateway(...) }, defaultGateway })`
+   * or a `createGatewayRegistry()` registry.
    */
   private constructor(config: PluginInitBag) {
     if (!isPluginInitBag(config)) {

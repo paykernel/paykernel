@@ -14,7 +14,7 @@ if (import.meta.main) {
     const executor = createPgPostgresExecutor(pool);
     // Ops/CI only — migrate explicitly before kernel, never on import/request (see docs/getting-started.md:140-142)
     await migratePostgresAdapter(executor);
-    const stores = createPostgresStoresFromPg({ executor });
+    const stores = createPostgresStoresFromPg({ client: pool });
     kernel = await createCheckoutKernel({
       storeFactory: async () => ({
         ...stores,

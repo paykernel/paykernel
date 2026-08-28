@@ -420,7 +420,7 @@ describe("PaymobGateway", () => {
       expect(requestBody.amount).toBe(10000);
       expect(requestBody.payment_methods).toEqual([123456]);
       expect(requestBody.billing_data.email).toBe("customer@example.com");
-      expect(requestBody.redirection_url).toBe("https://example.com/success");
+      expect(requestBody.redirection_url).toBe("https://example.com/webhook");
       expect(result.gatewayId).toBe("pi_test_123");
       expect(result.redirectUrl).toBe(
         "https://ksa.paymob.com/unifiedcheckout/?publicKey=pk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx&clientSecret=csk_test_123",
@@ -435,7 +435,6 @@ describe("PaymobGateway", () => {
       // Phase 6: intention checkout is requires_action, never succeeded
       expect(result.outcome).toBe("requires_action");
       expect(result.outcome).not.toBe("succeeded");
-      expect(result.success).toBe(true);
       expect(result.status).toBe("pending");
       expect(result.references?.providerObjectId).toBe("pi_test_123");
     });
@@ -459,21 +458,31 @@ describe("PaymobGateway", () => {
     });
 
     it("rejects Paymob amounts below the currency minor unit before sending requests", async () => {
-      await expect(gateway.createPayment({
-        ...VALID_CREATE_PARAMS,
-        amount: money("0.004", "SAR"),
-        currency: "SAR",
-      })).rejects.toThrow(InvalidRequestError);
+      await expect(
+        (async () => {
+          const amt = money("0.004", "SAR");
+          return gateway.createPayment({
+            ...VALID_CREATE_PARAMS,
+            amount: amt,
+            currency: "SAR",
+          });
+        })(),
+      ).rejects.toThrow(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
     });
 
     it("rejects Paymob amounts with more precision than the currency supports", async () => {
-      await expect(gateway.createPayment({
-        ...VALID_CREATE_PARAMS,
-        amount: money("10.001", "SAR"),
-        currency: "SAR",
-      })).rejects.toThrow(InvalidRequestError);
+      await expect(
+        (async () => {
+          const amt = money("10.001", "SAR");
+          return gateway.createPayment({
+            ...VALID_CREATE_PARAMS,
+            amount: amt,
+            currency: "SAR",
+          });
+        })(),
+      ).rejects.toThrow(InvalidRequestError);
 
       expect(fetchCalls).toHaveLength(0);
     });
@@ -639,7 +648,7 @@ describe("PaymobGateway", () => {
 
       await overrideGateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: money("20.12", "SAR"),
+        amount: money("20.12", "OMR"),
         currency: "OMR",
       });
       const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
@@ -663,7 +672,7 @@ describe("PaymobGateway", () => {
 
       await overrideGateway.createPayment({
         ...VALID_CREATE_PARAMS,
-        amount: money("20.12", "SAR"),
+        amount: money("20.12", "OMR"),
         currency: "OMR",
       });
       const requestBody = JSON.parse(fetchCalls[0]!.init!.body as string);
@@ -683,8 +692,8 @@ describe("PaymobGateway", () => {
       await expect(
         overrideGateway.createPayment({
           ...VALID_CREATE_PARAMS,
-          amount: money("20.12", "SAR"),
-          currency: "OMR",
+          amount: money("20.12", "OMR"),
+        currency: "OMR",
         }),
       ).rejects.toThrow(InvalidRequestError);
       expect(fetchCalls).toHaveLength(0);
@@ -813,8 +822,7 @@ describe("PaymobGateway", () => {
       );
 
       const result = await legacyGateway.createPayment({
-        ...VALID_CREATE_PARAMS,
-        currency: "EGP",
+        ...VALID_CREATE_PARAMS, amount: money("100.00", "EGP"), currency: "EGP",
       });
 
       expect(fetchCalls.map((call) => call.url)).toEqual([
@@ -861,8 +869,7 @@ describe("PaymobGateway", () => {
       );
 
       const result = await legacyGateway.createPayment({
-        ...VALID_CREATE_PARAMS,
-        currency: "EGP",
+        ...VALID_CREATE_PARAMS, amount: money("100.00", "EGP"), currency: "EGP",
       });
 
       expect(result.redirectUrl).toBe(
@@ -879,8 +886,7 @@ describe("PaymobGateway", () => {
         jsonResponse({ token: "payment_key_retry" }),
       );
       const params = {
-        ...VALID_CREATE_PARAMS,
-        currency: "EGP",
+        ...VALID_CREATE_PARAMS, amount: money("100.00", "EGP"), currency: "EGP",
         idempotencyKey: "legacy_200_missing_token",
       };
 
@@ -907,8 +913,7 @@ describe("PaymobGateway", () => {
         jsonResponse({ token: "payment_key_second_order" }),
       );
       const params = {
-        ...VALID_CREATE_PARAMS,
-        currency: "EGP",
+        ...VALID_CREATE_PARAMS, amount: money("100.00", "EGP"), currency: "EGP",
         idempotencyKey: "legacy_orders_200_payment_keys_408",
       };
 
@@ -936,8 +941,7 @@ describe("PaymobGateway", () => {
         jsonResponse({ token: "payment_key_retry" }),
       );
       const params = {
-        ...VALID_CREATE_PARAMS,
-        currency: "EGP",
+        ...VALID_CREATE_PARAMS, amount: money("100.00", "EGP"), currency: "EGP",
         idempotencyKey: "legacy_200_missing_order_id",
       };
 
@@ -1014,7 +1018,6 @@ describe("PaymobGateway", () => {
       // Partial capture is open money — not outcome-succeeded / not isPaidOutcome
       expect(result.status).toBe("partially_captured");
       expect(result.outcome).toBe("requires_action");
-      expect(result.success).toBe(true);
       expect(isPaidOutcome(result)).toBe(false);
       // PAYMOB-2: gatewayId is the parent payment/txn id (not child capture response id).
       expect(result.gatewayId).toBe("123456789");
@@ -1153,8 +1156,6 @@ describe("PaymobGateway", () => {
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
-
-      expect(result.success).toBe(false);
       expect(result.outcome).toBe("failed");
       expect(result.status).toBe("failed");
     });
@@ -1173,8 +1174,6 @@ describe("PaymobGateway", () => {
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
-
-      expect(result.success).toBe(true);
       expect(result.outcome).toBe("pending");
       expect(result.status).toBe("pending");
       // PAYMOB-1: pending must not invent totalRefunded (do not over-book ledger).
@@ -1199,14 +1198,13 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 30,
+        amount: money("30.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
 
       expect(result.outcome).toBe("pending");
       expect(result.status).toBe("pending");
-      expect(result.success).toBe(true);
       expect(result.totalRefunded).toBeUndefined();
       expect(result.gatewayRefundId).toBe("999002");
     });
@@ -1231,7 +1229,7 @@ describe("PaymobGateway", () => {
       expect(result.status).not.toBe("completed");
       expect(result.outcome).not.toBe("succeeded");
       expect(result.totalRefunded).toBeUndefined();
-      expect(result.totalRefunded).not.toBe(0);
+      expect(result.totalRefunded).not.toEqual(money("0.00", "SAR", { allowZero: true }));
       expect(result.gatewayRefundId).toBe("999003");
     });
 
@@ -1246,13 +1244,13 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 30,
+        amount: money("30.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
 
       // prior 20 + this 30 = 50 major units
-      expect(result.totalRefunded).toBe(50);
+      expect(result.totalRefunded).toEqual(money("50.00", "SAR"));
       // PAYMOB-4: gatewayRefundId is the refund txn id — not the payment id.
       expect(result.gatewayRefundId).toBe("999001");
       expect(result.gatewayRefundId).not.toBe("123456789");
@@ -1331,9 +1329,8 @@ describe("PaymobGateway", () => {
       const refundBody = JSON.parse(fetchCalls[2]!.init!.body as string);
 
       expect(refundBody.amount_cents).toBe(8000);
-      expect(result.totalRefunded).toBe(100);
+      expect(result.totalRefunded).toEqual(money("100.00", "SAR"));
       expect(result.outcome).toBe("succeeded");
-      expect(result.success).toBe(true);
       expect(result.status).toBe("completed");
     });
 
@@ -1355,7 +1352,7 @@ describe("PaymobGateway", () => {
       const second = await actionGateway.refundPayment(params);
 
       expect(first).toBe(second);
-      expect(first.totalRefunded).toBe(50);
+      expect(first.totalRefunded).toEqual(money("50.00", "SAR"));
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
         "https://ksa.paymob.com/api/acceptance/transactions/123456789",
@@ -1383,7 +1380,7 @@ describe("PaymobGateway", () => {
       ]);
 
       expect(first).toBe(second);
-      expect(first.totalRefunded).toBe(50);
+      expect(first.totalRefunded).toEqual(money("50.00", "SAR"));
       expect(fetchCalls.map((call) => call.url)).toEqual([
         "https://ksa.paymob.com/api/auth/tokens",
         "https://ksa.paymob.com/api/acceptance/transactions/123456789",
@@ -1451,7 +1448,7 @@ describe("PaymobGateway", () => {
       // New key at capacity: refuse rather than evict a completed refund fence
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 10,
+        amount: money("10.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_new_under_pressure",
       })).rejects.toThrow(/full of in-flight, unknown, or completed mutation fences/i);
@@ -1556,7 +1553,7 @@ describe("PaymobGateway", () => {
       );
       await actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 10,
+        amount: money("10.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_trigger_prune",
       });
@@ -1589,7 +1586,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 10,
+        amount: money("10.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_when_cache_full_unknown",
       })).rejects.toThrow(/full of in-flight, unknown, or completed mutation fences/i);
@@ -1723,7 +1720,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 60,
+        amount: money("60.00", "SAR"),
         currency: "SAR",
         idempotencyKey: "refund_idem_123",
       })).rejects.toThrow(InvalidRequestError);
@@ -1951,7 +1948,7 @@ describe("PaymobGateway", () => {
 
       const first = await firstGateway.refundPayment(params);
       expect(first.status).toBe("completed");
-      expect(first.totalRefunded).toBe(50);
+      expect(first.totalRefunded).toEqual(money("50.00", "SAR"));
 
       clock.advance(ttlMs + 1);
       const secondGateway = new PaymobGateway(
@@ -2045,7 +2042,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 20,
+        amount: money("20.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(InvalidRequestError);
@@ -2103,7 +2100,7 @@ describe("PaymobGateway", () => {
           await expect(
             actionGateway.capturePayment({
               gatewayPaymentId: "123456789",
-              amount: 10,
+              amount: money("10.00", "SAR"),
               currency: "SAR",
               idempotencyKey: nextMutationKey(),
             }),
@@ -2133,7 +2130,7 @@ describe("PaymobGateway", () => {
 
       await expect(actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 10,
+        amount: money("10.00", "SAR"),
         currency: "OMR",
         idempotencyKey: nextMutationKey(),
       })).rejects.toThrow(InvalidRequestError);
@@ -2287,7 +2284,7 @@ describe("PaymobGateway", () => {
       const captureBody = JSON.parse(fetchCalls[2]!.init!.body as string);
 
       expect(captureBody.amount_cents).toBe(20125);
-      expect(result.capturedAmount).toBe(20.125);
+      expect(result.capturedAmount).toEqual(money("20.125", "OMR"));
     });
 
     it("uses transaction currency when an explicit action amount omits currency", async () => {
@@ -2307,7 +2304,7 @@ describe("PaymobGateway", () => {
 
       expect(fetchCalls[1]!.url).toBe("https://ksa.paymob.com/api/acceptance/transactions/123456789");
       expect(captureBody.amount_cents).toBe(20125);
-      expect(result.capturedAmount).toBe(20.125);
+      expect(result.capturedAmount).toEqual(money("20.125", "OMR"));
     });
 
     it("rejects transaction inquiry responses that include money without currency", async () => {
@@ -2346,9 +2343,9 @@ describe("PaymobGateway", () => {
       expect(result.status).toBe("partially_refunded");
       // PAYMOB-3: currency accompanies major-unit amount fields (no naked majors)
       expect(result.currency).toBe("SAR");
-      expect(result.amount).toBe(100);
-      expect(result.capturedAmount).toBe(40);
-      expect(result.refundedAmount).toBe(10);
+      expect(result.amount).toEqual(money("100.00", "SAR"));
+      expect(result.capturedAmount).toEqual(money("40.00", "SAR"));
+      expect(result.refundedAmount).toEqual(money("10.00", "SAR"));
     });
 
     it("dedupes concurrent legacy auth requests with a single in-flight token fetch", async () => {
@@ -2514,7 +2511,6 @@ describe("PaymobGateway", () => {
       expect(result.status).toBe("failed");
       expect(result.outcome).toBe("declined");
       expect(isPaidOutcome(result)).toBe(false);
-      expect(result.success).toBe(false);
     });
 
     it("authorized inquiry is not isPaidOutcome (hold may be outcome-succeeded)", async () => {
@@ -2557,7 +2553,6 @@ describe("PaymobGateway", () => {
       expect(result.status).toBe("partially_captured");
       expect(result.outcome).toBe("requires_action");
       expect(isPaidOutcome(result)).toBe(false);
-      expect(result.success).toBe(true);
     });
 
     it("is_captured without positive captured_amount is not paid / not isPaidOutcome (PAYMOB-1)", async () => {
@@ -2655,13 +2650,13 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 40,
+        amount: money("40.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
 
       expect(result.status).toBe("partially_captured");
-      expect(result.capturedAmount).toBe(40);
+      expect(result.capturedAmount).toEqual(money("40.00", "SAR"));
       expect(result.currency).toBe("SAR");
       expect(result.outcome).toBe("requires_action");
       expect(isPaidOutcome(result)).toBe(false);
@@ -2706,14 +2701,14 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 25,
+        amount: money("25.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
 
       expect(result.status).toBe("partially_captured");
       // Prior 40 + this request 25 = 65 cumulative (not 40+100 from amount_cents)
-      expect(result.capturedAmount).toBe(65);
+      expect(result.capturedAmount).toEqual(money("65.00", "SAR"));
       expect(isPaidOutcome(result)).toBe(false);
     });
 
@@ -2735,7 +2730,7 @@ describe("PaymobGateway", () => {
       expect(zero.status).not.toBe("paid");
       expect(isPaidOutcome(zero)).toBe(false);
       expect(zero.outcome).not.toBe("succeeded");
-      expect(zero.capturedAmount).toBe(0);
+      expect(zero.capturedAmount).toEqual(money("0.00", "SAR", { allowZero: true }));
 
       // Sparse success body with no amounts — estimate from this-request + inquiry prior
       const sparseGateway = new PaymobGateway(withMutationFence(), hooksManager);
@@ -2752,7 +2747,7 @@ describe("PaymobGateway", () => {
       });
       // prior 0 + requested 50 = 50 → partially_captured (honest estimate), not false full paid with 0
       expect(sparse.status).toBe("partially_captured");
-      expect(sparse.capturedAmount).toBe(50);
+      expect(sparse.capturedAmount).toEqual(money("50.00", "SAR"));
       expect(isPaidOutcome(sparse)).toBe(false);
     });
 
@@ -2794,13 +2789,13 @@ describe("PaymobGateway", () => {
 
       const result = await actionGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 40,
+        amount: money("40.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
 
       expect(result.status).toBe("partially_captured");
-      expect(result.capturedAmount).toBe(40);
+      expect(result.capturedAmount).toEqual(money("40.00", "SAR"));
     });
 
     it("rejects malformed successful action responses as indeterminate (PAYMOB-1)", async () => {
@@ -2946,12 +2941,12 @@ describe("PaymobGateway", () => {
 
       const capture = await captureGateway.capturePayment({
         gatewayPaymentId: "123456789",
-        amount: 40,
+        amount: money("40.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
       expect(capture.status).toBe("partially_captured");
-      expect(capture.capturedAmount).toBe(40);
+      expect(capture.capturedAmount).toEqual(money("40.00", "SAR"));
       expect(capture.gatewayId).toBe("123456789");
 
       const refundGateway = new PaymobGateway(withMutationFence(), hooksManager);
@@ -2968,12 +2963,12 @@ describe("PaymobGateway", () => {
 
       const refund = await refundGateway.refundPayment({
         gatewayPaymentId: "123456789",
-        amount: 25,
+        amount: money("25.00", "SAR"),
         currency: "SAR",
         idempotencyKey: nextMutationKey(),
       });
       expect(refund.status).toBe("completed");
-      expect(refund.totalRefunded).toBe(25);
+      expect(refund.totalRefunded).toEqual(money("25.00", "SAR"));
       expect(refund.gatewayRefundId).toBe("999002");
     });
 

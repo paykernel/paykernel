@@ -592,6 +592,9 @@ export function isMoney(value: unknown): value is Money {
  * True when `value` is a complete, publishable {@link Money} object:
  * valid decimal `amount`, non-empty `currency`, and valid `exponent` when present.
  * Central helper — use instead of local `isMoneyValue` duplicates.
+ * Currently alias of {@link isMoney} because {@link isMoneyShape} already checks
+ * currency non-empty and amount decimal form; kept separate for publishable-intent
+ * call sites (e.g. recon snapshots) and future stricter checks.
  */
 export function isCompleteMoney(value: unknown): value is Money {
   return isMoney(value);
