@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { PaymobGateway } from "./paymob.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
+import { money } from "../../index";
 import {
   AuthenticationError,
   GatewayApiError,
@@ -58,10 +59,9 @@ const PAYMOB_LEGACY_CONFIG: PaymobConfig = {
 };
 
 const VALID_CREATE_PARAMS: CreatePaymentParams = {
-  amount: 100,
+  amount: money("100.00", "SAR"),
   currency: "SAR",
   callbackUrl: "https://example.com/webhook",
-  returnUrl: "https://example.com/success",
   orderId: "order_123",
   metadata: {
     paymentId: "payment_123",
@@ -3401,7 +3401,7 @@ describe("PaymobGateway", () => {
       // PAYMOB-1: merchant_order_id / extras are unsigned — never copy into paymentId.
       expect(event.paymentId).toBeUndefined();
       expect(event.status).toBe("paid");
-      expect(event.amount).toBe(100);
+      expect(event.amount).toEqual(money("100.00", "SAR"));
       expect(event.currency).toBe("SAR");
       expect(event.timestamp.toISOString()).toBe("2024-12-31T12:00:00.000Z");
     });
@@ -3427,7 +3427,7 @@ describe("PaymobGateway", () => {
 
       expect(event.gatewayPaymentId).toBe("123456789");
       expect(event.status).toBe("paid");
-      expect(event.amount).toBe(100);
+      expect(event.amount).toEqual(money("100.00", "SAR"));
     });
 
     it("prioritizes refund and void flags over success", () => {
@@ -4084,7 +4084,7 @@ describe("PaymobGateway", () => {
       expect(event.gatewayPaymentId).toBe("123456789");
       expect(event.status).toBe("processing");
       expect(event.status).not.toBe("paid");
-      expect(event.amount).toBe(100);
+      expect(event.amount).toEqual(money("100.00", "SAR"));
       // Dual-write must not look fulfillment-ready on redirect success alone.
       expect(event.stableType).toBe("payment.processing");
       expect(event.event?.type).toBe("payment.processing");

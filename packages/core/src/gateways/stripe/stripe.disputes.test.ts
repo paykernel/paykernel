@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, mock } from "bun:test";
 import { StripeGateway } from "./stripe.gateway";
 import { HooksManager } from "../../hooks/hooks.manager";
 import type { StripeConfig } from "../../types/config.types";
-import { InvalidRequestError, NetworkError } from "../../index";
+import { InvalidRequestError, money, NetworkError } from "../../index";
 
 const STRIPE_TEST_CONFIG: StripeConfig = {
   secretKey: "sk_test_123",
@@ -59,7 +59,7 @@ describe("StripeGateway disputes", () => {
     }
     expect(result.dispute.status).toBe("needs_response");
     expect(result.dispute.reason).toBe("fraudulent");
-    expect(result.dispute.amount).toBe(10);
+    expect(result.dispute.amount).toEqual(money("10.00", "USD"));
     expect(result.dispute.currency).toBe("USD");
     expect(result.dispute.evidenceDueBy).toBe(
       new Date(1782000000 * 1000).toISOString(),

@@ -73,7 +73,7 @@ describe("StripeGateway payment links", () => {
     expect(result.paymentLink.references.providerNativeStatus).toBe("true");
     expect(result.paymentLink.url).toBe("https://buy.stripe.com/test_123");
     expect(result.paymentLink.references.providerObjectId).toBe("plink_123");
-    expect(result.paymentLink.amount).toBe(10);
+    expect(result.paymentLink.amount).toEqual(money("10.00", "USD"));
     expect(result.paymentLink.currency).toBe("USD");
   });
 
@@ -160,7 +160,7 @@ describe("StripeGateway payment links", () => {
     if (result.outcome !== "succeeded") {
       expect.unreachable("getPaymentLink must succeed");
     }
-    expect(result.paymentLink.amount).toBe(25);
+    expect(result.paymentLink.amount).toEqual(money("25.00", "USD"));
     expect(result.paymentLink.currency).toBe("USD");
     expect(result.paymentLink.references.providerNativeStatus).toBe("true");
   });

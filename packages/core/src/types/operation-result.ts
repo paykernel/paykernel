@@ -338,6 +338,9 @@ export function inferOperationOutcome(
     }
 
     if (result.outcome !== undefined) {
+        if (result.outcome === "failed" && result.decline !== undefined) {
+            return "declined";
+        }
         // Do not trust explicit outcome over gateway status — same
         // fail-closed family as coerceRefundOutcomeToGatewayStatus.
         return coercePaymentOutcomeToGatewayStatus(result.outcome, result);
