@@ -1,7 +1,7 @@
 {
   "name": "@paykernel/core",
-  "version": "0.1.0-next.0",
-  "description": "PayKernel core \u2014 type-safe payment orchestration contracts, client, gateway registry, money types, results, and runtime abstractions for TypeScript.",
+  "version": "1.0.0",
+  "description": "PayKernel core — type-safe payment orchestration contracts, client, gateway registry, money types, results, and runtime abstractions for TypeScript.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

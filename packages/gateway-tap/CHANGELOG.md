@@ -1,5 +1,24 @@
 # @paykernel/gateway-tap
 
+## 1.0.0
+
+### Major Changes
+
+- 6f78c47: 1.0 contract cut (constructor, Money, outcomes, statuses, provider params, reserve required). Removes 0.x shims: `new PaymentClient({ moyasar, ... })` → `createPaymentClient({ gateways: { moyasar: moyasarGateway(...) } })`; `AmountInput = Money` only (`money("10.50", "SAR")`), `GatewayPaymentResult` amount fields `Money | undefined`; `outcome` required, `success` removed; `PaymentStatus` → `PaymentDomainStatus`, `WebhookEvent.status` → `WebhookEnvelopeStatus`; provider fields moved off `CreatePaymentParams` onto per-gateway `*CreatePaymentParams`; `IdempotencyStore.reserve` and `PaymobIdempotencyStore.reserve` required; `expectedAmountMinor` and `ScriptedStep` removed from `@paykernel/testkit`. Compat CI (`check:compat`) + baselines (`public-api.inventory.json`, `schema.inventory.json`) added; `bun-hono-postgres` RC with real Postgres via `store-postgres/pg`.
+
+### Minor Changes
+
+- 94547b7: Phase 23: add portable `@paykernel/gateway-tap` (Tap Payments charges, authorize/capture/void, refunds, hashstring webhooks). Extra gateway package — not a core built-in.
+
+### Patch Changes
+
+- 9de3699: Type `createPayment` / `capturePayment` / `refundPayment` from the client's default gateway (map and registry) without putting extra-package fields on core params. Tap omitted-amount remaining math fail-closes on mixed refund lists; nested refund replay matches `reference.idempotent`.
+- Updated dependencies [df66280]
+- Updated dependencies [94547b7]
+- Updated dependencies [6f78c47]
+- Updated dependencies [9de3699]
+  - @paykernel/core@1.0.0
+
 ## Unreleased
 
 ### Minor
@@ -36,7 +55,7 @@
 - **TAP-ABORT-RETRY:** Caller-abort `NetworkError` after a mutating POST is not retried.
 - **TAP-HTTP-5XX-ORDER:** HTTP 5xx maps to `NetworkError` before Tap JSON `1106` / other 11xx body codes. A 5xx body that includes `1106` is not `InvalidRequestError`.
 - **TAP-WEBHOOK-AUTH-CHARGE:** Authorize webhook objects set `relatedIds.chargeId` when `charge_id` is present. Authorize `CAPTURED` with `charge_id` also sets `gatewayPaymentId` to that `chg_…` (TAP-WEBHOOK-AUTH-ID).
-- **TAP-CHARGE-REFUNDED:** Charge object status `REFUNDED` maps to payment `refunded` (`getPayment` and charge webhooks), not `failed`. Refund *objects* were already `refunded`.
+- **TAP-CHARGE-REFUNDED:** Charge object status `REFUNDED` maps to payment `refunded` (`getPayment` and charge webhooks), not `failed`. Refund _objects_ were already `refunded`.
 - **TAP-MISSING-STATUS:** Mutating HTTP 2xx with an `id` but no object `status` is `indeterminate` (`afterProviderSubmit`). Missing status is not mapped as Tap `UNKNOWN` → `failed`.
 - **TAP-CAPTURE-REPLAY:** `capturePayment` GETs the authorize. `AUTHORIZED` POSTs `/charges`. `CAPTURED` does not POST — keeps `authorizationId` (crash-retry after a completed capture). Without nested `charge_id`, omit `amount`. Replaying POST on an already-captured `auth_…` is Tap `1126`.
 - **TAP-AUTH-CHARGE-ID:** Capture result `authorizationId` is the `auth_…` id; `gatewayId` is the charge `chg_…` id. Capture does not drop the authorize id when mapping the charge.

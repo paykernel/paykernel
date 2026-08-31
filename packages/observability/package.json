@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/opentelemetry",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Portable payment metrics, span instrumentation, and optional OpenTelemetry bridge for @paykernel/core (no hard OTEL dep in core).",
   "type": "module",
   "main": "./dist/index.js",

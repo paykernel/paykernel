@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/reconciliation",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Portable reconciliation primitives for @paykernel/core: safe provider lookup, machine-readable drift, decision-only policy, store-backed scheduling, batch reconcile (no queue required).",
   "type": "module",
   "main": "./dist/index.js",

@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-durable-objects",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Cloudflare SQLite-backed Durable Object stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (per-partition strong coordination).",
   "type": "module",
   "main": "./dist/index.js",

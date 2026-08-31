@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/routing",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Portable safe payment routing policies for @paykernel/core: deterministic select-only gateway choice, money-safe amount ranges, and structurally restricted post-attempt fallback eligibility.",
   "type": "module",
   "main": "./dist/index.js",

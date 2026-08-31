@@ -1,5 +1,11 @@
 # @paykernel/store-postgres
 
+## 0.1.0
+
+### Minor Changes
+
+- df66280: Initial PayKernel package family under the `@paykernel` npm scope.
+
 ## Unreleased
 
 ### Patch
@@ -10,9 +16,7 @@
 
 - Docs honesty: webhook `listRetryable` comments note Redis bulk SCAN soft-release + ZSET re-index list-discovery parity (R8 fixed).
 
-
 ## 0.1.0-next.0
-
 
 ### Patch
 

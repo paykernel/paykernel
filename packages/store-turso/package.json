@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-turso",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Turso serverless and libSQL stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (shared remote SQLite-compatible).",
   "type": "module",
   "main": "./dist/index.js",
