@@ -2,7 +2,7 @@
   "name": "paykernel",
   "version": "0.1.0",
   "private": true,
-  "description": "PayKernel monorepo — a type-safe payment orchestration toolkit for TypeScript, built for MENA payment providers and modern server runtimes.",
+  "description": "PayKernel — type-safe payment orchestration toolkit for TypeScript. MENA gateways (Moyasar, PayPal, Paymob, Stripe, Tap, MyFatoorah), portable webhook inbox, reconciliation & multi-store adapters.",
   "type": "module",
   "workspaces": [
     "packages/*",
@@ -83,5 +83,25 @@
     "type": "git",
     "url": "git+https://github.com/paykernel/paykernel.git"
   },
-  "homepage": "https://github.com/paykernel/paykernel#readme"
+  "homepage": "https://github.com/paykernel/paykernel#readme",
+  "keywords": [
+    "payments",
+    "payment-orchestration",
+    "typescript",
+    "paykernel",
+    "moyasar",
+    "paymob",
+    "stripe",
+    "paypal",
+    "mena",
+    "tap-payments",
+    "myfatoorah",
+    "webhooks",
+    "reconciliation",
+    "postgres",
+    "redis",
+    "sqlite",
+    "turso",
+    "cloudflare-workers"
+  ]
 }

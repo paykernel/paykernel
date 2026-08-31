@@ -43,10 +43,13 @@
     "typescript": "^5.9.3"
   },
   "keywords": [
-    "hono",
+    "payments",
     "webhooks",
+    "hono",
     "integration",
-    "paykernel"
+    "paykernel",
+    "typescript",
+    "http"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

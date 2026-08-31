@@ -47,11 +47,14 @@
     "typescript": "^5.9.3"
   },
   "keywords": [
-    "cloudflare",
-    "workers",
+    "payments",
     "webhooks",
+    "cloudflare-workers",
+    "cloudflare",
     "integration",
-    "paykernel"
+    "paykernel",
+    "typescript",
+    "workers"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

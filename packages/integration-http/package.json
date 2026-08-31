@@ -44,7 +44,9 @@
     "webhooks",
     "http",
     "integration",
-    "paykernel"
+    "paykernel",
+    "typescript",
+    "webhook-verification"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

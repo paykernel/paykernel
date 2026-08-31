@@ -64,10 +64,12 @@
     "payments",
     "sqlite",
     "bun",
+    "better-sqlite3",
     "idempotency",
     "webhooks",
     "reconciliation",
-    "paykernel"
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

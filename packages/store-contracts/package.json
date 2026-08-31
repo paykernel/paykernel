@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-contracts",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Portable lease-aware store contracts, StoreError taxonomy, and storage adapter manifests for PayKernel production adapters and conformance harnesses.",
   "type": "module",
   "main": "./dist/index.js",
@@ -39,7 +39,9 @@
     "idempotency",
     "webhooks",
     "reconciliation",
-    "paykernel"
+    "storage",
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

@@ -40,9 +40,11 @@
   "keywords": [
     "payments",
     "routing",
+    "payment-routing",
     "gateway-selection",
     "fallback",
-    "paykernel"
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

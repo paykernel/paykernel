@@ -80,7 +80,8 @@
     "idempotency",
     "webhooks",
     "reconciliation",
-    "paykernel"
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

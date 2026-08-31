@@ -44,10 +44,14 @@
     "typescript": "^5.9.3"
   },
   "keywords": [
-    "express",
+    "payments",
     "webhooks",
+    "express",
     "integration",
-    "paykernel"
+    "paykernel",
+    "typescript",
+    "http",
+    "nodejs"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

@@ -38,9 +38,12 @@
   "keywords": [
     "payments",
     "webhooks",
-    "inbox",
+    "payment-webhooks",
+    "webhook-inbox",
     "idempotency",
-    "paykernel"
+    "deduplication",
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

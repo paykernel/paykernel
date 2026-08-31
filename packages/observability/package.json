@@ -51,10 +51,12 @@
   "keywords": [
     "payments",
     "observability",
-    "metrics",
-    "telemetry",
     "opentelemetry",
-    "paykernel"
+    "metrics",
+    "tracing",
+    "telemetry",
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

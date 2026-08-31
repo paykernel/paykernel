@@ -51,13 +51,13 @@
   "keywords": [
     "payments",
     "cloudflare",
+    "cloudflare-workers",
     "d1",
-    "workers",
     "sqlite",
+    "workers",
     "idempotency",
-    "webhooks",
-    "reconciliation",
-    "paykernel"
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",

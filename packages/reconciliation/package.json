@@ -38,9 +38,11 @@
   "keywords": [
     "payments",
     "reconciliation",
+    "payment-reconciliation",
     "idempotency",
-    "drift",
-    "paykernel"
+    "drift-detection",
+    "paykernel",
+    "typescript"
   ],
   "author": "Abdelrahman Shaheen",
   "license": "MIT",
