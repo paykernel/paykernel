@@ -1,5 +1,20 @@
 # @paykernel/core
 
+## 1.0.0
+
+### Major Changes
+
+- 6f78c47: 1.0 contract cut (constructor, Money, outcomes, statuses, provider params, reserve required). Removes 0.x shims: `new PaymentClient({ moyasar, ... })` → `createPaymentClient({ gateways: { moyasar: moyasarGateway(...) } })`; `AmountInput = Money` only (`money("10.50", "SAR")`), `GatewayPaymentResult` amount fields `Money | undefined`; `outcome` required, `success` removed; `PaymentStatus` → `PaymentDomainStatus`, `WebhookEvent.status` → `WebhookEnvelopeStatus`; provider fields moved off `CreatePaymentParams` onto per-gateway `*CreatePaymentParams`; `IdempotencyStore.reserve` and `PaymobIdempotencyStore.reserve` required; `expectedAmountMinor` and `ScriptedStep` removed from `@paykernel/testkit`. Compat CI (`check:compat`) + baselines (`public-api.inventory.json`, `schema.inventory.json`) added; `bun-hono-postgres` RC with real Postgres via `store-postgres/pg`.
+
+### Minor Changes
+
+- df66280: Initial PayKernel package family under the `@paykernel` npm scope.
+
+### Patch Changes
+
+- 94547b7: Document `@paykernel/gateway-tap` as a first-party extra adapter on the custom-gateways plugin path.
+- 9de3699: Type `createPayment` / `capturePayment` / `refundPayment` from the client's default gateway (map and registry) without putting extra-package fields on core params. Tap omitted-amount remaining math fail-closes on mixed refund lists; nested refund replay matches `reference.idempotent`.
+
 ## Unreleased
 
 ### Major Changes
@@ -53,7 +68,6 @@
 - **Paymob dual-write (amount-only refunds / auth+capture):** Phase 7 stable-type mapping prefers normalized `WebhookEvent.status` and amount-derived refund/capture signals over bare `success` / sticky `is_auth`. Amount-only `refunded_amount_cents` TRANSACTION webhooks dual-write `refund.completed` (not `payment.succeeded`). `is_auth` + full `captured_amount` dual-writes `payment.succeeded` when status is `paid` (not `payment.authorized`). Failed refund/void action callbacks dual-write `payment.failed` in agreement with status. Optional `ProviderEventMapContext.amounts` minor-unit fields support amount-aware dual-write.
 - **Paymob redirect honesty (N1):** `TRANSACTION_RESPONSE` (browser/redirect) success, paid, or capture signals dual-write **`payment.processing`**, never `payment.succeeded` / `capture.completed`. Processed server `TRANSACTION` webhooks still settle as before. Prefer fulfill on processed TRANSACTION + settlement stable type (or inquiry + `isPaidOutcome`); do not fulfill on redirect-only.
 - **Paymob partial capture dual-write (N2/N7):** `partially_captured` (status or amount-derived partial capture without `is_capture`) dual-writes **`payment.processing`**, not `payment.succeeded`, so type-only fulfillment matches `isPaidOutcome` (partial excluded). Explicit `is_capture` + success still maps to `capture.completed` (amount-aware).
-
 
 ## 0.1.0-next.0
 

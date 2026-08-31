@@ -1,5 +1,11 @@
 # @paykernel/store-redis
 
+## 0.1.0
+
+### Minor Changes
+
+- df66280: Initial PayKernel package family under the `@paykernel` npm scope.
+
 ## Unreleased
 
 ### Patch Changes

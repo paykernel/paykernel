@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-redis",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Redis/Valkey/Upstash stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation coordination.",
   "type": "module",
   "main": "./dist/index.js",
