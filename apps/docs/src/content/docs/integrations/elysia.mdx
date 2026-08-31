@@ -1,0 +1,100 @@
+---
+title: "@paykernel/integration-elysia"
+description: Thin Elysia adapter that registers POST path with parse none and request.text().
+sidebar:
+  order: 4
+  label: Elysia
+---
+
+`elysiaWebhook(path, options)` returns an `Elysia` instance with `POST path` registered as `{ parse: "none" }`, then calls `processWebhookHttp`. No payment logic, no store adapters. Depends only on [`@paykernel/integration-http`](/integrations/http) among workspace packages.
+
+Version `0.1.0-next.0` (workspace). Not a released 1.0. Portable (`paymentsSdk.portable: true`). Peer `elysia >= 1`. Export map: `"."` only.
+
+```bash
+bun add @paykernel/integration-elysia
+# dependency: @paykernel/integration-http
+# peer: elysia >= 1
+```
+
+## Usage
+
+```ts
+import { Elysia } from "elysia";
+import { elysiaWebhook } from "@paykernel/integration-elysia";
+
+const app = new Elysia()
+  .use(
+    elysiaWebhook("/webhooks/stripe", {
+      gateway: "stripe",
+      client, // PaymentClient with no onWebhookVerified fulfillment
+      engine,
+      handler,
+    }),
+  )
+  .listen(3000);
+```
+
+`options` is `Omit<ProcessWebhookHttpInput, "rawBody" | "headers" | "query">`.
+
+What the registered handler does:
+
+1. `rawBody = await request.text()`
+2. `headers = request.headers`
+3. Query from `new URL(request.url).searchParams` (first value per key)
+4. `processWebhookHttp({ ...options, rawBody, headers, query })`
+5. `return webhookHttpResultToResponse(result)`
+
+The route is created with `{ parse: "none" }` so Elysia does **not** JSON-parse the webhook body.
+
+Runnable host: [Bun + Elysia + SQLite](/examples/bun-elysia-sqlite). That example's SQLite is **single-host** (`:memory:` is one process).
+
+:::caution[parse: none]
+Do not add a JSON parser on the webhook route. `elysiaWebhook` already sets `{ parse: "none" }` and reads `request.text()`. Parsing first breaks Stripe / PayPal / MyFatoorah HMAC.
+:::
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill only in `handler` after the inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `handleWebhook` verifies and normalizes; it does not claim, lease, or set HTTP status. See [HTTP mapping](/integrations/http) and [Webhooks](/guides/webhooks).
+:::
+
+## Failure paths
+
+Same table as [`processWebhookHttp`](/integrations/http#failure-paths). Typical Stripe cases:
+
+| Request | Status | Body |
+| --- | --- | --- |
+| Missing `stripe-signature` | 400 | `{ error: "invalid_webhook" }` — client **not** called |
+| Forgery (bad HMAC) | 400 | `{ error: "invalid_webhook" }` |
+| Parse / missing-config `InvalidWebhookError` | 500 | `{ outcome: "handler_failed", retryable: true }` |
+| `already_processing` | 503 | `{ outcome: "already_processing" }`; `Retry-After` when `retryAfterMs` is set |
+| `payload_conflict` | 409 | `{ outcome: "payload_conflict" }` |
+| Handler throws | 500 | `{ outcome: "handler_failed", retryable: true }` |
+
+Default `ackPolicy` is `provider_redelivery` (`scheduled_for_retry` → 503). `{ kind: "durable_worker" }` is valid only with `engine.mode === "durable_retry"` and `workerGuaranteed === true`; otherwise `processWebhookHttp` warns and returns 503.
+
+Status codes come from `mapInboxOutcome` in `@paykernel/integration-http`, **not** from `@paykernel/webhooks`.
+
+Paymob query signatures work because the adapter forwards `URL.searchParams` as `query`.
+
+## Re-exports
+
+```ts
+import {
+  elysiaWebhook,
+  mapInboxOutcome,
+  retryAfterSeconds,
+  processWebhookHttp,
+  webhookHttpResultToResponse,
+  createWebhookOperationContext,
+  getHeader,
+  resolveCorrelationId,
+  requireStringBindings,
+  GATEWAY_WEBHOOK_SIGNATURE,
+  extractWebhookSignature,
+} from "@paykernel/integration-elysia";
+```
+
+Types re-exported: `InboxHttpAckPolicy`, `HeaderBag`, `GatewayWebhookSignatureProfile`, `WebhookClient`, `WebhookHttpResult`, `ProcessWebhookHttpInput`.
+
+`OBJECT_HMAC_GATEWAYS` is **not** re-exported here. Import it from `@paykernel/integration-http`.
+
+Example `POST /internal/*` routes in the Elysia checkout example are unauthenticated test hooks (`enableTestHooks`) and **must not be deployed**.

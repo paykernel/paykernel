@@ -1,0 +1,111 @@
+---
+title: Errors
+description: PaymentError subclasses exported from packages/core/src/errors.ts via @paykernel/core.
+sidebar:
+  order: 4
+---
+
+All classes below are defined in `packages/core/src/errors.ts` and re-exported from `packages/core/src/index.ts` as `@paykernel/core`. Catch `PaymentError` for the family, then branch with `instanceof`.
+
+```ts
+import {
+  PaymentError,
+  InvalidWebhookError,
+  InvalidRequestError,
+  NetworkError,
+  OperationNotSupportedError,
+} from "@paykernel/core";
+```
+
+`PaymentError.statusCode` is metadata on the **error object**. It is **not** the HTTP status your webhook route should return. HTTP mapping lives in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`), not in `@paykernel/webhooks` and not in these class defaults.
+
+Workspace version **`0.1.0-next.0`**. Not a released npm 1.0.
+
+## Classes (`errors.ts` → `index.ts`)
+
+| Class | `code` | Default `statusCode` | When it is thrown |
+| --- | --- | --- | --- |
+| `PaymentError` | caller-supplied | `500` | Base class. `new PaymentError(message, code, statusCode?)` |
+| `PaymentAbortedError` | `PAYMENT_ABORTED` | `400` | Before-hook abort or caller `AbortSignal` on operation params. **Not** a provider timeout (those map to `NetworkError`) |
+| `GatewayNotConfiguredError` | `GATEWAY_NOT_CONFIGURED` | `400` | Named gateway is missing from the client/registry |
+| `OperationNotSupportedError` | `OPERATION_NOT_SUPPORTED` | `400` | Gateway lacks the method or capability (`capability?`, `claimedSupport?` on the options bag) |
+| `InvalidWebhookError` | `INVALID_WEBHOOK` | `403` | Webhook **verification** failed (bad signature, missing secret, provider rejected the transmission) |
+| `GatewayApiError` | `GATEWAY_API_ERROR` | `502` | Provider HTTP/API call failed. `gatewayName`, optional `rawError` |
+| `CardDeclinedError` | `CARD_DECLINED` | `402` | Issuer declined the card. Optional `rawError` |
+| `InsufficientFundsError` | `INSUFFICIENT_FUNDS` | `402` | Insufficient funds. Optional `rawError` |
+| `AuthenticationError` | `AUTHENTICATION_FAILED` | `401` | Auth failed (3DS, wrong CVV/expiry, and similar). Optional `rawError` |
+| `RateLimitError` | `RATE_LIMIT_EXCEEDED` | `429` | Gateway rate limit. Optional `retryAfterSeconds` from `Retry-After` |
+| `ResourceNotFoundError` | `RESOURCE_NOT_FOUND` | `404` | Requested gateway resource does not exist. Optional `rawError` |
+| `InvalidRequestError` | `INVALID_REQUEST` | `400` | Validation failed upstream or at the gateway. Optional `validationErrors` |
+| `NetworkError` | `NETWORK_ERROR` | `503` | Transport failure. See `afterProviderSubmit` below |
+
+Type-only companion (not a class): `OperationNotSupportedErrorOptions` (`capability?`, `claimedSupport?`, `message?`). Two-arg `new OperationNotSupportedError(name, op)` remains valid.
+
+## `NetworkError.afterProviderSubmit`
+
+```ts
+try {
+  await client.createPayment(params);
+} catch (err) {
+  if (err instanceof NetworkError && err.afterProviderSubmit) {
+    // Provider may already have accepted the POST.
+    // Lookup + decideReconciliationPolicy only.
+    // Do NOT createPayment again. Do NOT auto-route a second gateway.
+  }
+  throw err;
+}
+```
+
+`afterProviderSubmit` is `true` when the provider may already have accepted a mutating request (timeout / drop / 5xx **after** POST). Callers must **reconcile**, not retry as a fresh failure. Preflight auth and GET failures stay `false`.
+
+On the happy path of create/capture/refund/void, post-submit timeout / drop / 5xx typically becomes `outcome: "indeterminate"` + `reconciliationRequired: true` rather than a thrown `NetworkError`. That is still **not** a decline. Do not `createPayment` again. See [outcomes](/guides/outcomes).
+
+## Webhook verify vs parse
+
+| Failure | Class | Meaning |
+| --- | --- | --- |
+| Signature / secret / authenticity | `InvalidWebhookError` | Forgery or misconfiguration. Map to a **4xx** in *your* HTTP adapter (`mapInboxOutcome` / `invalid_webhook`) |
+| Authenticated payload, bad shape | `InvalidRequestError` | Parse failed after verify. **Not** a forged webhook. Treat as server/data-shape — typically retryable 5xx via inbox `handler_failed` |
+
+`handleWebhook` does **not** set HTTP status. **Never fulfill in `onWebhookVerified`.** Claim via [`@paykernel/webhooks`](/packages/webhooks), then fulfill only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+
+```ts
+try {
+  const event = await client.handleWebhook("stripe", rawBody, signature);
+  // verify + parse only — do not fulfill here
+} catch (err) {
+  if (err instanceof InvalidWebhookError) {
+    // authenticity failure
+  } else if (err instanceof InvalidRequestError) {
+    // parse / shape failure after verify
+  } else {
+    throw err;
+  }
+}
+```
+
+## Related class (not in `errors.ts`)
+
+`MoneyAmountError` extends `InvalidRequestError`. It is defined in `packages/core/src/utils/money.ts` and **is** a runtime export of `@paykernel/core` (`kind: MoneyFailureKind`). Branch on `kind`, not English messages. See [money](/guides/money).
+
+## Catch pattern
+
+```ts
+import { PaymentError, isPaidOutcome } from "@paykernel/core";
+
+try {
+  const result = await client.createPayment(params);
+  if (isPaidOutcome(result)) {
+    // paid settlement only
+  } else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+    // do not retry createPayment
+  }
+} catch (err) {
+  if (err instanceof PaymentError) {
+    // err.code, err.statusCode (object metadata, not webhook HTTP)
+  }
+  throw err;
+}
+```
+
+Full runtime catalog: [core API](/reference/core-api).

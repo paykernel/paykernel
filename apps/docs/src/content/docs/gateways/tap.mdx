@@ -1,0 +1,275 @@
+---
+title: Tap Payments
+description: Extra package @paykernel/gateway-tap — charges, authorize/capture/void, refunds, and hashstring webhooks for createPaymentClient.
+sidebar:
+  order: 6
+---
+
+`@paykernel/gateway-tap` is a portable extra adapter (`GatewayAdapter<"tap", TapGateway>`) you pass into [`createPaymentClient`](/packages/core). It is **not** a `BuiltInGatewayName` (`"moyasar" | "paypal" | "paymob" | "stripe"`). Core does not import this package. Current version is `0.1.0-next.0` (`TAP_ADAPTER_VERSION`). It is not a released 1.0 on npm.
+
+Runtime dependency is `@paykernel/core` only. Manifest `apiVersion` is `"V2"`. API base is `https://api.tap.company/v2`. Test vs live is the key prefix (`sk_test_` / `sk_live_`), not a sandbox flag. Secrets stay closed over by `tapGateway` — they are never copied onto the gateway context or manifest.
+
+:::caution
+Do not `import { tapGateway } from "@paykernel/core"`. Register the adapter yourself. Two or more gateways still need `defaultGateway` or a named `gateway` argument.
+:::
+
+## Install
+
+Package name `@paykernel/gateway-tap`, export `"."` only (`./dist/index.js`). Version `0.1.0-next.0`. Install from this monorepo workspace until a publish happens.
+
+```bash
+bun add @paykernel/gateway-tap @paykernel/core
+```
+
+## Public exports
+
+From `@paykernel/gateway-tap` (`packages/gateway-tap/src/index.ts`):
+
+| Export | Kind |
+| --- | --- |
+| `tapGateway` | factory → `GatewayAdapter<"tap", TapGateway>` |
+| `TapGateway` | class (`name: "tap"`) |
+| `TAP_ADAPTER_VERSION` | `"0.1.0-next.0"` |
+| `TAP_CAPABILITIES` | frozen capability map |
+| `TapConfig` | config type |
+| `TapCreatePaymentParams` | create payload (`tap*` fields) |
+| `TapCaptureParams` | capture payload |
+| `TapRefundParams` | refund payload |
+| `TapVoidParams` | void payload (alias of core `VoidParams`) |
+| `TapCustomerInput` | `{ id }` or inline name + email |
+| `TapRefundReason` | `"duplicate" \| "fraudulent" \| "requested_by_customer"` |
+| `TapSource` | `{ id }` token / `src_*` |
+
+`TapGateway` methods used at runtime: `createPayment`, `capturePayment`, `voidPayment`, `refundPayment`, `getPayment`, `verifyWebhook`, `parseWebhookEvent`. Prefer `PaymentClient.handleWebhook("tap", …)` over calling verify/parse yourself. See [/guides/webhooks](/guides/webhooks).
+
+## Quickstart
+
+```ts
+import { createPaymentClient, isPaidOutcome, money } from "@paykernel/core";
+import { tapGateway } from "@paykernel/gateway-tap";
+
+const payments = createPaymentClient({
+  gateways: {
+    tap: tapGateway({
+      secretKey: process.env.TAP_SECRET_KEY!,
+      webhookUrl: "https://merchant.example/webhooks/tap",
+      // autoVoidHours: 24, // authorize create; rejected for src_all / src_card; not defaulted
+    }),
+  },
+  defaultGateway: "tap",
+});
+
+const tap = payments.gateway("tap");
+
+const result = await tap.createPayment({
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://merchant.example/return",
+  idempotencyKey: crypto.randomUUID(), // required — adapter does not mint a UUID
+  tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
+  // tapSource omitted → src_all (hosted methods page). Not hostedCheckout.
+  // capture: false omitted tapSource → src_card.
+});
+
+if (result.outcome === "requires_action" && result.redirectUrl) {
+  // transaction.url (3DS / KNET / mada / Fawry) — redirect the customer, do not fulfill
+} else if (isPaidOutcome(result) && result.status === "paid") {
+  // still verify via webhook + inbox claim before fulfillment
+} else if (result.outcome === "declined") {
+  // card/issuer decline (DECLINED, or FAILED + response.code 501–516)
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // provider may already have the charge — lookup + decideReconciliationPolicy
+  // (see /packages/reconciliation). Do NOT createPayment again. Do not switch gateways.
+} else {
+  // failed / cancelled charge VOID — do not mark the order paid
+}
+```
+
+`success: true` is not the fulfillment signal. Use `isPaidOutcome` / `outcome` ([/guides/outcomes](/guides/outcomes)). `authorized` is a hold, not paid. Partial capture is `partially_captured` — `isPaidOutcome` is false.
+
+With `defaultGateway: "tap"`, or a TAP-only `gateways` map without `defaultGateway`, `payments.createPayment({ tapCustomer, … })` is typed as `TapCreatePaymentParams`. Core does **not** add `tap*` to `CreatePaymentParams`. You can also pass a registry:
+
+```ts
+import { createGatewayRegistry, createPaymentClient } from "@paykernel/core";
+import { tapGateway } from "@paykernel/gateway-tap";
+
+const payments = createPaymentClient({
+  registry: createGatewayRegistry()
+    .register(tapGateway({ secretKey: process.env.TAP_SECRET_KEY! }))
+    .build(),
+  defaultGateway: "tap",
+});
+```
+
+## Config (`TapConfig`)
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `secretKey` | yes | `sk_test_…` / `sk_live_…`. Trimmed; whitespace-only throws `InvalidRequestError`. Also the webhook HMAC key. |
+| `merchantId` | no | Sent as `merchant.id` on create (and capture when set). Overridable per request with `tapMerchantId`. |
+| `webhookUrl` | no | Default `post.url`. **HTTPS only** (Tap will not POST IPN to localhost HTTP). |
+| `timeoutMs` | no | Finite `> 0`. Default `30000`. |
+| `autoVoidHours` | no | Finite `1..168` inclusive. Sent on authorize create (`capture: false`) as `auto: { type: "VOID", time }`. Not defaulted. **Throws** for omitted / `src_card` / `src_all`. Allowed for other sources (`tok_…`, `src_kw.knet`, `src_sa.mada`, …). |
+
+Auth header is `Authorization: Bearer <secretKey>`. Create and capture POST send `save_card: false`.
+
+## Capabilities
+
+Claimed: `payments`, `immediateCapture`, `authorization`, `partialCapture`, `refunds`, `partialRefunds`, `voids`.
+
+Unclaimed (fail-closed): `hostedCheckout`, `tokenization`, `customers`, `paymentMethods`, `marketplaceSplits`, `disputes`, `paymentLinks`, `providerRecurring`.
+
+`src_all` is a **redirect source**, not a Checkout Session product. Query with `gateway.supports("authorization")` etc. See [/reference/capabilities](/reference/capabilities).
+
+## Charges
+
+`createPayment` with `capture: true` (default) calls `POST /v2/charges`.
+
+Required: `amount` (`> 0`), `currency`, `callbackUrl`, `idempotencyKey`, and `tapCustomer` **or** `customerId`. Inline `tapCustomer` needs non-empty `firstName`, `lastName`, and `email` (Tap `1130` / `1132` / `1138`). Tap `1106` ("Customer not found") is `InvalidRequestError`, not a missing payment.
+
+Optional: `tapSource` (default `src_all`), `tapPostUrl` (HTTPS override of config `webhookUrl`), `tapThreeDSecure` (default `true`), `tapMerchantId`, `orderId` → `reference.order`. `metadata` values must be scalar strings, numbers, or booleans (objects throw `InvalidRequestError`).
+
+IDs: charges `chg_…`, authorizes `auth_…`, refunds `re_…`.
+
+Raw PAN / `source.card` PCI blobs are rejected before fetch. `createPayment` rejects `auth_…` source ids — use `capturePayment`. Tokens: `tok_…`. Local methods: `src_kw.knet`, `src_sa.mada`, `src_eg.fawry`, ….
+
+`INITIATED` and `IN PROGRESS` / `IN_PROGRESS` (including Fawry) are `status: "pending"` / `outcome: "requires_action"` — not paid. `redirectUrl` / `nextAction` are **`transaction.url` only**, and only when outcome is `requires_action`. Merchant `redirect.url` (`callbackUrl`) is the return URL echo, not a next action. Leftover `transaction.url` on AUTHORIZED or CAPTURED is not `requires_action`. Redirect the payer only when the URL is `transaction.url` / a Tap checkout host (`checkout.payments.tap.company`).
+
+`CAPTURED` is `status: "paid"` / `outcome: "succeeded"`. `FAILED` with charge `response.code` `501`–`516` is `outcome: "declined"`. `DECLINED` is declined. Charge `VOID` is a **failed** payment (not succeeded). Charge `REFUNDED` is `refunded` / succeeded on `getPayment` (not failed).
+
+## Authorize, capture, and void
+
+`createPayment({ capture: false })` calls `POST /v2/authorize`. Success is `AUTHORIZED` → `status: "authorized"`. That is **not** paid settlement. Omitted `tapSource` defaults to `src_card` (not `src_all`). Optional config `autoVoidHours` is sent as `auto: { type: "VOID", time }` on authorize create except when the resolved source is `src_all` or `src_card` (those throw `InvalidRequestError`).
+
+**Capture** (`capturePayment`): `gatewayPaymentId` must be `auth_…`. Requires `idempotencyKey`. The adapter GETs the authorize first.
+
+- `AUTHORIZED`: `POST /v2/charges` with `source.id` = authorize id. Result `authorizationId` is the `auth_…` id; `gatewayId` is the charge `chg_…` id. Store both — refunds need `chg_…`.
+- `CAPTURED`: already captured (crash-retry). **Does not** POST `/charges`. Nested `charge_id` → `gatewayId` is that `chg_…`. Without it, **omit `amount`** (do not invent captured money from the hold) and keep `authorizationId` as `auth_…`.
+- `VOID`: rejected — hold released, not captured.
+- Capture `amount` less than the authorize is `partially_captured`, not `paid` (`isPaidOutcome` is false). Greater than the authorize throws `InvalidRequestError`. Caller `currency` must match the authorize (Tap `1149`).
+- Capture POST sends `threeDSecure: true`, `customer_initiated: true`, `save_card: false`, and `redirect.url` from `tapRedirectUrl` or the authorize object’s `redirect.url` (required; Tap `1110`). `tapThreeDSecure: false` / `tapCustomerInitiated: false` throw. Capture may still be `outcome: "requires_action"` if Tap returns `INITIATED`.
+- Tap `1114` ("Please check the Authorize status") and `1126` ("Source already used") are `InvalidRequestError`.
+
+**Void** (`voidPayment`): GET `/v2/authorize/{id}` first. `gatewayPaymentId` must be `auth_…`. Requires `idempotencyKey`. Already `VOID` returns `outcome: "succeeded"` + `status: "cancelled"` from that GET and does **not** POST. Otherwise `POST /v2/authorize/{id}/void`. Authorize VOID is succeeded + cancelled (not a failed payment) and is not capturable. Tap does **not** natively idempotent-void. The adapter does not retry void after submit — reconcile with `getPayment` instead of a second void POST.
+
+`getPayment` dispatches on prefix: `chg_…` → `GET /charges/{id}`, `auth_…` → `GET /authorize/{id}`.
+
+```ts
+const hold = await tap.createPayment({
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://merchant.example/return",
+  idempotencyKey: crypto.randomUUID(),
+  capture: false,
+  tapCustomer: { firstName: "Ada", lastName: "Lovelace", email: "ada@example.com" },
+  tapSource: { id: "tok_…" },
+});
+
+if (hold.status === "authorized" && hold.gatewayId) {
+  const captured = await tap.capturePayment({
+    gatewayPaymentId: hold.gatewayId, // auth_…
+    idempotencyKey: crypto.randomUUID(),
+    amount: money("10.50", "SAR"),
+    currency: "SAR",
+  });
+  // captured.authorizationId === auth_… ; captured.gatewayId === chg_…
+}
+```
+
+## Refunds
+
+`refundPayment` calls `POST /v2/refunds`. `gatewayPaymentId` must be a **charge** id (`chg_…`). Authorize ids are rejected — store the capture result `gatewayId` separately from `authorizationId`. Requires `idempotencyKey` (`reference.idempotent`).
+
+Tap requires `amount`, `currency`, and `reason`. Omitted `amount` uses remaining refundable when the charge exposes remaining / refunded and remaining is **positive**. Remaining `0` or status `REFUNDED` does **not** re-POST `charge.amount` — the adapter maps the nested refund whose `reference.idempotent` matches this key (or `GET /refunds/{id}`). A nested refund with a **different** key is not this refund. Omitted `currency` is taken from the charge; a mismatch throws (Tap `1149`).
+
+Reason is `tapReason` if set, else caller `reason`, else `requested_by_customer`. Length must be `< 250` (Tap `1157`). Config `webhookUrl` is sent as `post.url` when set. Partial refunds are claimed.
+
+Refund object `ACCEPTED` (Refund Logic v2) → refund `pending` / payment-domain `refund_pending` — in progress, **not** failed and not completed. `REFUNDED` → `completed` / `refunded`. `totalRefunded` is omitted unless a true cumulative figure exists; this adapter never invents `0`.
+
+## Money
+
+Tap JSON `amount` is **major units with ISO decimal places**, not integer minor units. Internals use `@paykernel/core` `Money` / bigint (`rounding: "reject"`). Request JSON `amount` is an ISO-padded **number** token (`10.50` SAR, `1.200` KWD), never a string and never `amount * 100`. Unsafe magnitudes throw. Webhook `hashstring` uses the same padded decimal. See [/guides/money](/guides/money).
+
+## Idempotency and recovery
+
+Tap natively deduplicates `reference.idempotent` for **24 hours** on charges, authorizes, and refunds. **Void is not Tap-idempotent.** Missing / blank `idempotencyKey` on create / capture / refund / void throws `InvalidRequestError` before POST.
+
+:::caution
+Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx. Never mint a new idempotency key for the same attempt.
+:::
+
+| Situation | What to do |
+| --- | --- |
+| Create timeout / HTTP 5xx / Tap `1151` (indeterminate / `afterProviderSubmit`) | **Do not** `createPayment` again — same or new `idempotencyKey`. Schedule lookup + [`decideReconciliationPolicy`](/packages/reconciliation). If you have no `chg_…` / `auth_…` yet, key the job on `idempotencyKey` and wait for a webhook / implement `findByIdempotencyKey`. Never mint a new key. |
+| You already have a `chg_…` or `auth_…` | `getPayment` + `decideReconciliationPolicy`. Do not create a different payment. |
+| Capture timeout | `getPayment(auth_…)`. If CAPTURED, use nested `charge_id` when present; otherwise wait for a charge webhook before refund. |
+| Void timeout | `getPayment(auth_…)`. If cancelled / VOID, do **not** void again. |
+| Refund timeout | `getPayment(chg_…)`. |
+
+Mutating 2xx with an `id` but no object `status` is `indeterminate` (`NetworkError.afterProviderSubmit`) — not Tap `UNKNOWN` / `failed`. HTML/proxy 5xx is the same mutating network error, not a card decline. HTTP 50x is never Tap decline codes `501`–`516` (those are charge `response.code` values). Tap JSON `1151` is `NetworkError`. HTTP 5xx is classified **before** Tap JSON `1106` / other 11xx body codes. Remaining Tap 11xx JSON error codes (other than already-typed auth / not-found / amount) are `InvalidRequestError`, not untyped `GatewayApiError`. Auto-retry (`withRetry`) runs on GET or Tap-keyed mutations; caller-abort after a mutating POST is not retried.
+
+## Webhooks
+
+Tap POSTs the charge / authorize / refund JSON to `post.url` (`webhookUrl` or `tapPostUrl`). Verification is **not** HMAC-of-raw-body. HMAC-SHA256 hex of a canonical string, keyed with the **secret API key**, compared to the `hashstring` header (`timingSafeEqualHex`). `@paykernel/integration-http` profile: header `hashstring` (Tap is an object-HMAC gateway). Official field list: [Tap webhook docs](https://developers.tap.company/docs/webhook). Charge vector: [Create a Charge](https://developers.tap.company/reference/create-a-charge). Unpadded amount `1` does not match Tap’s published `hashstring`.
+
+Charge / authorize / refund:
+
+```text
+x_id{id}x_amount{isoAmount}x_currency{currency}x_gateway_reference{gatewayOrEmpty}x_payment_reference{payment}x_status{status}x_created{created}
+```
+
+Invoice (`x_updated`, not gateway/payment reference):
+
+```text
+x_id{id}x_amount{isoAmount}x_currency{currency}x_updated{updated}x_status{status}x_created{created}
+```
+
+Missing or non-hex `hashstring`, a payload that cannot supply those fields, and a missing `object` or an `object` other than `charge` / `authorize` / `refund` / `invoice`, fail closed (`verifyWebhook` → `false`). `handleWebhook` then throws `InvalidWebhookError`. Invoice objects parse as **non-paid** (`cancelled`) so they are not fulfilled. Missing `id` or `created` is `InvalidRequestError`.
+
+Charge webhooks set `gatewayPaymentId` to the `chg_…` id. Capture settlement is a **charge** object, not the original `auth_…`. An authorize `CAPTURED` webhook with `charge_id` sets `gatewayPaymentId` to that `chg_…`. `paymentId` is `metadata.paymentId`, then `metadata.orderId`, then `reference.order`. **`metadata.udf1` is not a payment id.**
+
+```ts
+const rawBody = await request.text();
+const hashstring = request.headers.get("hashstring") ?? undefined;
+const webhookEvent = await payments.handleWebhook("tap", rawBody, hashstring);
+// handleWebhook verifies and normalizes only. It does not claim, lease, or set HTTP status.
+```
+
+:::caution
+**Never fulfill in `onWebhookVerified`.** Fulfill after an inbox **claim** ([`@paykernel/webhooks`](/packages/webhooks)), and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. Partial capture is not paid. HTTP status codes live in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+:::
+
+## Status mapping
+
+| Tap | PaymentStatus | outcome (typical) |
+| --- | --- | --- |
+| `INITIATED` | `pending` | `requires_action` |
+| `IN PROGRESS` / `IN_PROGRESS` | `pending` | `requires_action` |
+| `AUTHORIZED` | `authorized` | `succeeded` (hold, not paid) |
+| `CAPTURED` | `paid` | `succeeded` |
+| `CAPTURED` (partial capture) | `partially_captured` | not `isPaidOutcome` |
+| `REFUNDED` (charge object) | `refunded` | `succeeded` |
+| `VOID` (charge object) | `cancelled` | `failed` |
+| `VOID` (authorize object) | `cancelled` | `succeeded` (`getPayment` / `voidPayment`); not capturable |
+| `CANCELLED` / `ABANDONED` | `cancelled` | `failed` (`getPayment`) |
+| `DECLINED` | `failed` | `declined` |
+| `FAILED` + `response.code` `501`–`516` | `failed` | `declined` |
+| `FAILED` (other) / `RESTRICTED` / `TIMEDOUT` | `failed` | `failed` |
+| object `status` present but unknown | `failed` | `failed` |
+| mutating HTTP 2xx with `id` but no `status` | — | `indeterminate` |
+
+Refund objects: `REFUNDED` → completed / `refunded`; `PENDING` / `IN PROGRESS` / `IN_PROGRESS` / `ACCEPTED` → pending / `refund_pending`. Provider `TIMEDOUT` is a definite Tap object status; SDK transport timeout after POST is `indeterminate`.
+
+## Runtime
+
+`paymentsSdk.portable: true`. Production sources use injected `fetch` and core portable HMAC (`hmacSha256Hex`). No `node:crypto` / `node:buffer`. Supported: Node ≥ 18, Bun ≥ 1.0, Deno, Cloudflare Workers (Web APIs). Pass `runtime` on `createPaymentClient` to override `fetch` / clock / UUID. See [/guides/runtime](/guides/runtime).
+
+## Production notes
+
+- Verify `hashstring` with the secret key; never skip verification. Config `webhookUrl` / `tapPostUrl` must be public HTTPS.
+- Fulfill after inbox claim and only when `isPaidOutcome` / `status === "paid"` (`CAPTURED`).
+- Store `chg_` vs `auth_` separately; refunds need `chg_…`.
+- Do not capture VOID auths. Charge VOID is a failed payment. Authorize VOID `getPayment` is succeeded + cancelled — do not void again.
+- Refund `ACCEPTED` is `refund_pending` — do not fulfill or treat as failure.
+- Customer is required. No raw cards. Amount must be `> 0`.
+- 3DS / KNET / mada / Fawry require `callbackUrl`. Pending statuses are `requires_action`; redirect only when `transaction.url` is present.

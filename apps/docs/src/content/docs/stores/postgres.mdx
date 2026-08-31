@@ -1,0 +1,178 @@
+---
+title: PostgreSQL
+description: Multi-host PostgreSQL stores for lease-aware idempotency, webhook inbox, and reconciliation.
+sidebar:
+  order: 2
+---
+
+`@paykernel/store-postgres` is the general production default when all workers share one PostgreSQL cluster. Claims use engine-level `INSERT … ON CONFLICT` / `UPDATE … RETURNING` — not application get-then-set.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+Manifest: `POSTGRES_STORAGE_ADAPTER_MANIFEST` — `coordinationScope: "multi-host"`, `durability: "durable"`, `consistency.claims: "strong"`, `readAfterWrite: "strong"`, `staleReadsPossible: false`. Multi-primary without consensus is **out of scope**. No adapter declares `multi-region`.
+
+## Install
+
+```bash
+bun add @paykernel/store-postgres
+# optional drivers (pick one binding):
+bun add pg
+# or
+bun add postgres
+```
+
+Root entry **never** statically imports `pg`, `postgres`, `drizzle-orm`, or `bun:sql`.
+
+## Quick start (root executor)
+
+```ts
+import {
+  createPostgresIdempotencyStore,
+  migratePostgresAdapter,
+  type PostgresExecutor,
+} from "@paykernel/store-postgres";
+
+const executor: PostgresExecutor = /* … */;
+
+// Explicit migrate — NEVER automatic on import or factory construction.
+await migratePostgresAdapter(executor);
+
+const store = createPostgresIdempotencyStore({ executor });
+const r = await store.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+```
+
+`createPostgresStores({ executor })` returns `{ idempotency, webhookInbox, reconciliation, executor, namespace, clock, manifest }` and **does not** migrate.
+
+## Subpaths
+
+| Subpath | Peer / runtime | Binding helpers |
+| --- | --- | --- |
+| `@paykernel/store-postgres` | none | `createPostgres*Store({ executor })`, `migratePostgresAdapter` |
+| `/pg` | `pg` | `createPgPostgresExecutor` / `createExecutorFromPg`, `createPostgresStoresFromPg` |
+| `/postgres-js` | `postgres` | `createPostgresJsPostgresExecutor`, `createPostgresStoresFromPostgresJs` |
+| `/bun-sql` | Bun SQL (`bun:sql`) | `createBunSqlPostgresExecutor`, `createPostgresStoresFromBunSql` |
+| `/drizzle` | `drizzle-orm` **not imported** | Notes + executor pass-through only. Phase 12.3 Drizzle schema exports were **not** shipped |
+
+### `pg`
+
+```ts
+import { Pool } from "pg";
+import {
+  createPostgresStoresFromPg,
+  createPgPostgresExecutor,
+  migratePostgresAdapter,
+} from "@paykernel/store-postgres/pg";
+
+const pool = new Pool({
+  connectionString: process.env.PAYMENTS_SDK_PG_URL ?? process.env.DATABASE_URL,
+});
+const executor = createPgPostgresExecutor(pool);
+await migratePostgresAdapter(executor);
+const stores = createPostgresStoresFromPg({ client: pool });
+```
+
+`createExecutorFromPg` enables `withTransaction` when the client exposes `connect()` (pool). Placeholders are `$1..$n` with **bound** params only.
+
+### postgres.js
+
+```ts
+import postgres from "postgres";
+import {
+  createPostgresJsPostgresExecutor,
+  createPostgresStoresFromPostgresJs,
+  migratePostgresAdapter,
+} from "@paykernel/store-postgres/postgres-js";
+
+const sql = postgres(process.env.PAYMENTS_SDK_PG_URL!);
+const executor = createPostgresJsPostgresExecutor(sql);
+await migratePostgresAdapter(executor);
+const stores = createPostgresStoresFromPostgresJs({ sql });
+```
+
+### Bun SQL
+
+```ts
+import { SQL } from "bun:sql";
+import {
+  createExecutorFromBunSql,
+  createPostgresStoresFromBunSql,
+  migratePostgresAdapter,
+} from "@paykernel/store-postgres/bun-sql";
+
+const sql = new SQL(process.env.DATABASE_URL!);
+const executor = createExecutorFromBunSql(sql);
+await migratePostgresAdapter(executor);
+const stores = createPostgresStoresFromBunSql({ sql });
+```
+
+The client must expose `unsafe(query, params)` for prepared `$n` statements.
+
+### Drizzle (pass-through only)
+
+`/drizzle` does **not** ship `pgTable` mirrors and does **not** run claims through a Drizzle query builder. Build a `PostgresExecutor` from the same `pg` / `postgres` / Bun client, then:
+
+```ts
+import {
+  createPostgresStoresWithDrizzleExecutor,
+  migratePostgresAdapter,
+} from "@paykernel/store-postgres/drizzle";
+import { createExecutorFromPg } from "@paykernel/store-postgres/pg";
+import { Pool } from "pg";
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const executor = createExecutorFromPg(pool);
+await migratePostgresAdapter(executor);
+const stores = createPostgresStoresWithDrizzleExecutor({ executor });
+```
+
+Do **not** replace atomic claim SQL with multi-step Drizzle get-then-set.
+
+## Migrate
+
+```ts
+import {
+  migratePostgresAdapter,
+  verifyPostgresAdapterSchema,
+} from "@paykernel/store-postgres";
+
+await migratePostgresAdapter(executor);
+const check = await verifyPostgresAdapterSchema(executor);
+if (!check.ok) throw new Error(check.errors.join("; "));
+```
+
+- Dialect is **`postgres`** (wraps [`@paykernel/sql-foundation`](/packages/sql-foundation) `migrate` / `verifySchema`).
+- When `sqlSchema` is set, migrate issues `CREATE SCHEMA IF NOT EXISTS`. Operators still need `CREATE` privilege.
+- Construct stores with the **same** namespace used for migrate.
+- Do not run migrate on every request.
+
+`tenantColumn` enables a nullable `tenant_id` column + index **only**. v1 does **not** isolate tenants and does **not** write `tenant_id` from stores. PK remains `key`.
+
+## Failure paths
+
+| Event | What the store holds | What you do |
+| --- | --- | --- |
+| Crash after `reserve`/`claim`, before side effect | Row leased until `lease_expires_at` | Peer reclaims with new `leaseToken` + higher `generation` |
+| Crash after provider work, before `complete` | Still leased; no terminal row | Prefer `markIndeterminate` if the lease is still valid; **never invent terminal failure**. Do **not** `createPayment` again |
+| Stale `complete` after peer reclaim | Zero rows match `lease_token` | `StoreLeaseLostError` — another worker owns the work |
+| Connection drop mid-statement | Commit **or** abort | `StoreUnavailableError` / `StoreTimeoutError`; re-read / re-claim |
+| `withTransaction` missing on executor | — | `StoreUnsupportedFeatureError` (fail closed; no silent no-op) |
+
+Postgres never writes idempotency status `expired` (reclaim uses `lease_expires_at`). Webhook `fail` writes `pending` / `dead_letter`, not `failed`. `listDue` soft-releases expired `claimed` rows then `SELECT`s due `scheduled` work. `FOR UPDATE SKIP LOCKED` is **not** used on the default scan. Advisory locks are never the only durable record of work.
+
+Lease predicates bind injectable `now` (ISO TEXT), not `SQL NOW()`, so FakeClock works. Production hosts must be NTP-synced.
+
+Inbox `claim` is not webhook verify. **Never fulfill in `onWebhookVerified`.** See [Webhooks](/guides/webhooks).
+
+## Redis is optional
+
+PostgreSQL alone satisfies all Phase 9 contracts. Hybrid (Redis claims + Postgres audit) is **app-layer** composition — this package does not depend on `@paykernel/store-redis`. See [Redis](/stores/redis).
+
+## Related
+
+- [Stores overview](/stores) · [Adapter selection](/guides/adapter-selection)
+- [Store contracts](/packages/store-contracts) · [SQL foundation](/packages/sql-foundation)

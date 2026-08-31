@@ -1,0 +1,285 @@
+---
+title: Migrating to 1.0
+description: Breaking changes from 0.x to the 1.0 API — createPaymentClient, Money, outcomes, webhooks, statuses, and reserve.
+sidebar:
+  order: 10
+---
+
+This page maps breaking changes from `0.x` to the **1.0 API** already in source. Published versions today are `0.1.0-next.0` — **not** a released npm 1.0. Each section has a **Before (0.x)** / **After (1.0)** snippet.
+
+Stability policy (contributor docs on GitHub): [Stability](https://github.com/paykernel/paykernel/blob/main/docs/stability.md) and [ADR 0025](https://github.com/paykernel/paykernel/blob/main/docs/adr/0025-1-0-stability.md).
+
+## 1. Client construction
+
+**Before (0.x)** — legacy constructor with provider keys:
+
+```typescript
+import { PaymentClient } from "@paykernel/core";
+
+const client = new PaymentClient({
+  moyasar: { secretKey: process.env.MOYASAR_SECRET_KEY! },
+  stripe: { secretKey: process.env.STRIPE_SECRET_KEY! },
+  defaultGateway: "moyasar",
+});
+```
+
+**After (1.0)** — `createPaymentClient` with gateway factories or a built registry. `PaymentClient`’s constructor is `private`; construct only via `createPaymentClient`.
+
+```typescript
+import { createPaymentClient, createGatewayRegistry, moyasarGateway, stripeGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({ secretKey: process.env.MOYASAR_SECRET_KEY! }),
+    stripe: stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }),
+  },
+  defaultGateway: "moyasar",
+});
+
+const registry = createGatewayRegistry()
+  .register(moyasarGateway({ secretKey: process.env.MOYASAR_SECRET_KEY! }))
+  .register(stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }))
+  .build();
+const client2 = createPaymentClient({ registry, defaultGateway: "moyasar" });
+```
+
+`BuiltInGatewayMap` remains as the default type-param fallback. `MoyasarConfig` has **no** `sandbox` field (removed in 1.0). Provide **exactly one** of `registry` or `gateways`. Mixing both, or omitting both, throws `InvalidRequestError`.
+
+## 2. Numeric amounts → Money
+
+**Before (0.x)** — `number` major units were accepted:
+
+```typescript
+await client.createPayment({
+  amount: 10.5,
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+});
+const result: GatewayPaymentResult = await client.createPayment(params);
+console.log(result.amount); // number | undefined
+```
+
+**After (1.0)** — `amount` / `capturedAmount` / `refundedAmount` / `fee` / `totalRefunded` / `WebhookEvent.amount` are `Money | undefined`. Pass `Money` via `money()`:
+
+```typescript
+import { money } from "@paykernel/core";
+
+await client.createPayment({
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+});
+const result: GatewayPaymentResult = await client.createPayment(params);
+console.log(result.amount); // Money | undefined — { amount: "10.50", currency: "SAR" }
+```
+
+- `AmountInput` is now `type AmountInput = Money` (not `number | Money`).
+- Zod amount schemas accept only the `Money` object arm.
+- `normalizeAmountInput(input: Money, currency)` throws `MoneyAmountError` on `number`. `money()` may still accept a clean `number` to **construct** `Money` (for example `money(10.5, "SAR")`), but payment APIs do not.
+- `currency` on create params is still `string`. If `amount.currency` (normalized) disagrees with `params.currency` (case-insensitive), `InvalidRequestError` is thrown.
+- Gateways convert provider integer minor units via `fromMinorUnits` → `Money`; `moneyToMajorNumber` remains exported for display only.
+
+See [Money](/guides/money).
+
+## 3. `success` → outcomes
+
+**Before (0.x)** — `success` boolean on results:
+
+```typescript
+const result = await client.createPayment({ amount: money("10.50", "SAR"), currency: "SAR", callbackUrl: "..." });
+if (result.success) {
+  // API call ok — not necessarily paid
+}
+```
+
+**After (1.0)** — `success` is removed. `outcome` is **required** (`PaymentOperationOutcome` / `RefundOperationOutcome`). Use `isPaidOutcome`:
+
+```typescript
+import { isPaidOutcome } from "@paykernel/core";
+
+const result = await client.createPayment({ amount: money("10.50", "SAR"), currency: "SAR", callbackUrl: "..." });
+switch (result.outcome) {
+  case "succeeded":
+    if (isPaidOutcome(result)) {
+      // fulfill — paid-like status (`paid` only)
+    }
+    break;
+  case "requires_action":
+    // 3DS / redirect
+    break;
+  case "declined":
+  case "failed":
+  case "indeterminate":
+    // handle — do not createPayment again on indeterminate
+    break;
+}
+
+console.log(isPaidOutcome(result)); // true only for outcome === "succeeded" and paid-like status
+```
+
+- `GatewayPaymentResult.success` and `GatewayRefundResult.success` deleted.
+- `applyOutcomeToGatewayResult` / `applyOutcomeToGatewayRefundResult` no longer write `success`. `successFromOutcome` / `successFromRefundOutcome` are removed.
+- `isGatewayPaymentResult` discriminant is now `"outcome" in result && "gatewayId" in result && "status" in result` (no `rawResponse`).
+- Mock / testkit scripted results set `outcome` required.
+
+See [Outcomes](/guides/outcomes).
+
+## 4. Webhook events
+
+**Before (0.x)** — fulfill on `WebhookEvent.type` (provider-native) and persist `rawPayload`.
+
+**After (1.0)** — fulfill on `event` / `stableType` (`payment.succeeded` + nested `payment.status === "paid"`). Persist via `toPersistedPaymentEventEnvelope`. `rawPayload` stays **required request-local**; do not persist raw.
+
+```typescript
+import { toPersistedPaymentEventEnvelope } from "@paykernel/core";
+
+const event: WebhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+if (event.event && event.event.type === "payment.succeeded" && event.event.payment.status === "paid") {
+  // Still claim the inbox before fulfill — see /guides/webhooks
+}
+if (event.stableType === "payment.succeeded" && event.event?.payment.status === "paid") {
+  // same rematch
+}
+
+const envelope = toPersistedPaymentEventEnvelope(event.event!, {
+  payloadHash: event.payloadHash,
+  rawForHash: event.rawPayload,
+});
+await inbox.persist(envelope); // rawPayload not persisted
+```
+
+:::note
+`docs/migrations/1.0.md` shows `handleWebhook(rawBody, signature, "stripe")`. Implementation is gateway-first: `handleWebhook(gateway, payload, signatureOrHeaders?, headers?)` in `packages/core/src/client.ts`. Use the gateway-first form above.
+:::
+
+:::caution
+Never fulfill in `onWebhookVerified` or from `handleWebhook` alone. Claim via `@paykernel/webhooks`, rematch paid + bind `gatewayPaymentId`. `isPaidOutcome` is not for `WebhookEvent`.
+:::
+
+- `WebhookEvent.type` stays provider-native; do not switch fulfillment on it alone.
+- `toPersistedPaymentEventEnvelope` strips raw and secrets.
+
+See [Webhooks](/guides/webhooks).
+
+## 5. Statuses
+
+**Before (0.x)** — mega-union `PaymentStatus` included refund and setup members (`"refund_completed"`, …).
+
+**After (1.0)** — `PaymentStatus` is an alias for `PaymentDomainStatus` only. Refunds use `RefundDomainStatus`. Envelope status is `WebhookEnvelopeStatus`.
+
+```typescript
+import type { PaymentStatus, RefundDomainStatus, WebhookEnvelopeStatus, PaymentDomainStatus } from "@paykernel/core";
+
+const paymentStatus: PaymentStatus = "paid"; // PaymentDomainStatus
+const refundStatus: RefundDomainStatus = "completed";
+const envelopeStatus: WebhookEnvelopeStatus = "completed"; // PaymentDomainStatus | RefundDomainStatus | SetupTokenStatus
+```
+
+- Delete `"refund_completed" | "refund_pending" | "refund_failed" | "setup_completed"` from `PaymentStatus`.
+- `export type PaymentStatus = PaymentDomainStatus`.
+- `export type WebhookEnvelopeStatus = PaymentDomainStatus | RefundDomainStatus | SetupTokenStatus`.
+- `MoyasarNextAction` alias is removed; use `PaymentNextAction`.
+
+## 6. Provider fields off common params
+
+**Before (0.x)** — `CreatePaymentParams` was a mega-interface with provider keys (`stripePaymentMethodId`, `moyasarSource`, `paymobIntegrationId`, `tokenId`, …).
+
+**After (1.0)** — `CreatePaymentParams` is only `CommonPaymentInput` + `currency` + `callbackUrl` + `capture?` + `idempotencyKey?` + `customerId?` + `paymentMethodId?` + `offSession?` + `OperationRequestOptions`. Provider fields move to per-gateway types:
+
+```typescript
+import type {
+  MoyasarCreatePaymentParams,
+  StripeCreatePaymentParams,
+  PayPalCreatePaymentParams,
+  PaymobCreatePaymentParams,
+} from "@paykernel/core";
+import { money } from "@paykernel/core";
+
+const stripeParams: StripeCreatePaymentParams = {
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+  stripePaymentMethodId: "pm_123",
+  stripeCustomerId: "cus_123",
+  stripeSetupFutureUsage: "on_session",
+};
+
+const moyasarParams: MoyasarCreatePaymentParams = {
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+  moyasarSource: { type: "token", token: "tok_..." },
+  applyCoupon: true,
+};
+
+const paypalParams: PayPalCreatePaymentParams = {
+  amount: money("10.50", "USD"),
+  currency: "USD",
+  callbackUrl: "https://example.com/callback",
+  returnUrl: "https://example.com/return",
+  cancelUrl: "https://example.com/cancel",
+  paypalShippingPreference: "NO_SHIPPING",
+};
+
+const paymobParams: PaymobCreatePaymentParams = {
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://example.com/callback",
+  paymobIntegrationId: "123",
+  paymobPaymentMethods: ["card"],
+  paymobIframeId: "123",
+  paymobBillingData: { email: "a@b.com", firstName: "A", lastName: "B", phone: "+966..." },
+};
+```
+
+- `tokenId` is deleted; use `moyasarSource: { type: "token", token }`.
+
+## 7. Idempotency
+
+Two layers stay distinct (core must not import `@paykernel/store-contracts`):
+
+**Before (0.x)** — `IdempotencyStore.reserve` and `PaymobIdempotencyStore.reserve` were **optional**.
+
+**After (1.0)** — `reserve` is **required**:
+
+```typescript
+import { InMemoryIdempotencyStore, type IdempotencyStore } from "@paykernel/core";
+
+const store: IdempotencyStore = {
+  get: async () => undefined,
+  set: async () => {},
+  delete: async () => {},
+  reserve: async (key, record) => {
+    // atomic reserve via Redis SET NX or DB unique constraint
+    return undefined;
+  },
+};
+
+const mem = new InMemoryIdempotencyStore(); // still implements reserve (single-process only)
+
+import type { PaymobIdempotencyStore } from "@paykernel/core";
+
+const paymobStore: PaymobIdempotencyStore = {
+  get: async () => undefined,
+  set: async () => {},
+  delete: async () => {},
+  reserve: async (key, record) => undefined, // required
+};
+```
+
+- Tests that built a store `{ get, set, delete }` without `reserve` no longer typecheck. Construction throws `InvalidRequestError` if `reserve` is missing.
+- Do **not** replace gateway fencing with `@paykernel/store-contracts` `LeaseAwareIdempotencyStore`. App inbox/recon/durable mutation idempotency: lease-aware stores from `@paykernel/store-*`. Gateway mutation fencing (`MoyasarConfig.idempotencyStore`, `PaymobConfig.idempotencyStore`): core `IdempotencyStore` with required `reserve`.
+- `InMemoryIdempotencyStore` is single-process only — **not** a multi-host production store.
+
+## Checklist
+
+1. Replace `new PaymentClient({ ... })` with `createPaymentClient({ gateways: { ... } })`.
+2. Replace `amount: 10.5` with `money("10.50", "SAR")` and update result handling for `Money`.
+3. Replace `result.success` checks with `result.outcome` / `isPaidOutcome`.
+4. Update webhook handlers to use `event` / `stableType` and `toPersistedPaymentEventEnvelope`. Claim the inbox before fulfill.
+5. Update `PaymentStatus` usages to `PaymentDomainStatus` / `WebhookEnvelopeStatus` as appropriate.
+6. Move provider fields to per-gateway param types and remove `tokenId`.
+7. Ensure `IdempotencyStore` and `PaymobIdempotencyStore` implement `reserve`.
+8. Remove `expectedAmountMinor` / `ScriptedStep` fixtures. Use `@paykernel/testkit` `mockGateway` scripted `{ outcome }` steps and (for conformance) `fixtures.amountCases`. There is **no** `moneyCases` export.
+
+See [Getting started](/guides/getting-started), [Outcomes](/guides/outcomes), and [Money](/guides/money).

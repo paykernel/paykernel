@@ -1,0 +1,340 @@
+---
+title: Runtime
+description: Portable PaymentRuntime for Node, Bun, Deno, and Cloudflare Workers — Web APIs, no secrets on context.
+sidebar:
+  order: 8
+---
+
+`@paykernel/core` is designed to run on **Node ≥ 18**, **Bun ≥ 1**, **Deno**, and **Cloudflare Workers** using Web APIs (`fetch`, `TextEncoder`, `AbortController`, Web Crypto) and pure portable crypto helpers. Production sources and the published `dist/index.js` entry **do not** static-import `node:crypto`, `node:buffer`, or other Node builtins.
+
+Related: [Webhooks](/guides/webhooks), [Composition](/guides/composition), [`@paykernel/core`](/packages/core).
+
+## PaymentRuntime
+
+Injectable, **secret-free** dependency bag for portable HTTP and crypto:
+
+```ts
+import {
+  createPaymentRuntime,
+  createPaymentClient,
+  stripeGateway,
+  type PaymentRuntime,
+} from "@paykernel/core";
+
+declare const customFetch: typeof fetch;
+
+const runtime: PaymentRuntime = createPaymentRuntime({
+  fetch: customFetch,
+  clock: { now: () => new Date(0), nowMs: () => 0 },
+});
+
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }),
+  },
+  runtime: {
+    fetch: customFetch,
+    clock: runtime.clock,
+  },
+});
+```
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `fetch` | Live-delegating `globalThis.fetch` | Gateways use `this.fetch` / context fetch — not bare `fetch(...)` at call sites |
+| `crypto` | Web Crypto (`globalThis.crypto`) | `CryptoProvider`: `randomUUID`, `getRandomValues`, optional `subtle` |
+| `clock` | `Date` / `Date.now` | `Clock`: `now()` / `nowMs()` (Stripe webhook skew uses clock) |
+| `randomUUID` | `crypto.randomUUID` | Falls back to `uuidV4FromGetRandomValues` when `randomUUID` is missing (still requires Web Crypto `getRandomValues`) |
+
+| Export | Role |
+| --- | --- |
+| `createPaymentRuntime(partial?)` | Build full runtime with portable defaults |
+| `mergePaymentRuntime(base, partial?)` | Overlay partial fields |
+| `paymentRuntimeFromContext(ctx)` | Project runtime fields from `GatewayContext` |
+| `systemClock` | Default wall clock |
+| `resolveDefaultCrypto` | Web Crypto provider resolution — throws when missing; inject `crypto` |
+| `uuidV4FromGetRandomValues` | UUID v4 from `getRandomValues` only |
+
+`resolveDefaultCrypto()` prefers `globalThis.crypto`. If `getRandomValues` is missing, it **throws**. It does **not** fall back to `Math.random`. Auto idempotency keys and runtime UUIDs must be cryptographically strong.
+
+On hosts without Web Crypto, inject an explicit `CryptoProvider`:
+
+```ts
+const client = createPaymentClient({
+  gateways: { /* … */ },
+  runtime: {
+    crypto: {
+      randomUUID: () => crypto.randomUUID(),
+      getRandomValues: (a) => crypto.getRandomValues(a),
+    },
+  },
+});
+```
+
+Do not ship a `Math.random` UUID path for lease tokens, idempotency keys, or any security-sensitive randomness.
+
+:::caution
+**Never** put API keys, webhook secrets, DB handles, request objects, or PII on `PaymentRuntime` / `GatewayContext`.
+:::
+
+### `exactOptionalPropertyTypes`
+
+Omit optional keys instead of assigning `undefined`:
+
+```ts
+declare const gateways: Parameters<typeof createPaymentClient>[0]["gateways"];
+declare const mockFetch: typeof fetch;
+
+// Good
+createPaymentClient({ gateways, runtime: { fetch: mockFetch } });
+
+// Avoid
+createPaymentClient({
+  gateways,
+  runtime: { fetch: mockFetch, clock: undefined },
+});
+```
+
+## GatewayContext
+
+`GatewayContext` **extends** `PaymentRuntime` and adds client-owned fields:
+
+| Field | Role |
+| --- | --- |
+| `hooks` | Shared `HooksManager` |
+| `logger` | Prefer redacting logger |
+| `uuid()` | Convenience alias of `randomUUID` |
+| `telemetry?` | Optional sink (no PII/secrets) — prefer `createRedactingTelemetrySink` |
+
+`createDefaultGatewayContext({ runtime?, fetch?, crypto?, clock?, … })` builds defaults via `createPaymentRuntime`. Nested `runtime` is merged under top-level PaymentRuntime fields. Optional `telemetry` is attached only when provided. Built-in factories (`stripeGateway`, …) forward context runtime into gateway constructors so HTTP uses the injected `fetch`.
+
+### Telemetry
+
+`PaymentRuntime` itself is **fetch / crypto / clock / randomUUID only** — it does **not** carry a telemetry bag. Optional diagnostics live on `GatewayContext.telemetry` and on structured `OperationContext` builders.
+
+```ts
+import {
+  createDefaultGatewayContext,
+  createRedactingTelemetrySink,
+  createOperationContext,
+  finalizeOperationContext,
+  operationContextToTelemetryData,
+  systemClock,
+} from "@paykernel/core";
+
+const telemetry = createRedactingTelemetrySink({
+  emit(event, data) {
+    console.info(event, data);
+  },
+});
+
+const ctx = createDefaultGatewayContext({
+  telemetry,
+  clock: systemClock,
+});
+
+const started = createOperationContext({
+  operationId: ctx.randomUUID(),
+  gateway: "stripe",
+  operationType: "payment.create",
+});
+const startMs = ctx.clock.nowMs();
+// … work …
+const finished = finalizeOperationContext(started, {
+  durationMs: Math.max(0, ctx.clock.nowMs() - startMs),
+  normalizedOutcome: "succeeded",
+  providerRequestId: "req_abc",
+});
+ctx.telemetry?.emit?.(
+  "payment.operation",
+  operationContextToTelemetryData(finished),
+);
+```
+
+| Rule | Detail |
+| --- | --- |
+| Optional / additive | `TelemetrySink` stays optional |
+| Redact by default | Prefer `createRedactingTelemetrySink` (same `redact()` as logs) |
+| No secrets on context | Never put API keys, webhook secrets, card data, or raw payloads on runtime/context/telemetry bags |
+| No OTEL in core | Metrics / optional OTEL bridge live in [`@paykernel/opentelemetry`](/packages/opentelemetry) (folder `packages/observability`; subpath `./otel`) |
+| Portable duration | Use injectable `Clock.nowMs()` / `Date.now` — never `node:perf_hooks` |
+
+## Portable crypto (sync webhooks)
+
+Pure implementations (no `node:crypto`, no npm crypto deps) keep `verifyWebhook` **synchronous** on Workers / Deno / Bun / Node:
+
+| Helper | Use |
+| --- | --- |
+| `sha256Hex` / `sha256` | Payload digests (`hashWebhookPayload`) |
+| `sha512Hex` / `sha512` | Digest helpers |
+| `hmacSha256Hex` / `hmacSha256` | Stripe-style webhook signatures |
+| `hmacSha512Hex` / `hmacSha512` | Paymob-style webhook signatures |
+| `timingSafeEqualBytes` / `timingSafeEqualHex` | Signature compare |
+| `utf8Encode`, `bytesToHex`, `hexToBytes` | Encoding |
+| `bytesToBase64`, `base64ToBytes`, `utf8ToBase64` | Basic auth / tokens (no `Buffer`) |
+| `concatBytes` | Portable `Buffer.concat` |
+
+Strategy: pure sync HMAC/SHA for sync `verifyWebhook`. Optional Web Crypto `subtle` remains on `CryptoProvider` for future async paths. `hashWebhookPayload` uses portable `sha256Hex` (redacted canonical JSON).
+
+```ts
+import { createPaymentClient, stripeGateway } from "@paykernel/core";
+
+const secret = process.env.STRIPE_WEBHOOK_SECRET!;
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: process.env.STRIPE_SECRET_KEY!,
+      webhookSecret: secret,
+    }),
+  },
+});
+
+const rawBody = /* exact request body string */;
+const sig = request.headers.get("stripe-signature") ?? undefined;
+const ok = client.gateway("stripe").verifyWebhook(rawBody, sig);
+```
+
+Prefer `handleWebhook` on the client for production verify + parse.
+
+## HTTP timeouts and AbortSignal
+
+Built-in gateways cancel in-flight provider HTTP with a **timeout** signal from `createTimeoutSignal` (always `AbortController` + `setTimeout` so `clear()` cancels; `unref()` when the host timer supports it). `AbortSignal.timeout` is not used — its timer cannot be cancelled.
+
+- Config knobs: per-gateway `timeoutMs` (defaults are provider-specific).
+- Timeouts surface as **`NetworkError`**. For money mutations they are **indeterminate** — do not treat as definite failure. See [Outcomes](/guides/outcomes).
+- Injected `runtime.fetch` must honor `RequestInit.signal` for timeouts to work.
+
+| Export | Role |
+| --- | --- |
+| `combineAbortSignals(...signals)` | Fan-in (`AbortSignal.any` or portable polyfill) |
+| `createTimeoutSignal(timeoutMs)` | Timeout handle + `clear()` |
+| `extractAbortSignal` / `stripAbortSignal` / `withAbortSignal` | Params helpers (`exactOptionalPropertyTypes`-safe) |
+| `isAbortError` / `mapHttpAbortError` | Classify abort vs timeout → `PaymentAbortedError` / `NetworkError` |
+
+Every network operation accepts optional `signal?: AbortSignal` on params (`CreatePaymentParams`, `CaptureParams`, `RefundParams`, `VoidParams`, `GetPaymentParams`, checkout session params, Moyasar STC OTP confirm).
+
+```ts
+import { money } from "@paykernel/core";
+
+const controller = new AbortController();
+const payment = client.createPayment({
+  amount: money("10.00", "USD"),
+  currency: "USD",
+  callbackUrl: "https://example.com/cb",
+  signal: controller.signal,
+});
+controller.abort();
+```
+
+:::note
+`packages/core/docs/runtime.md` shows `amount: 10` (a number). 1.0 payment APIs accept **only** `Money` — `number` throws `MoneyAmountError` / `InvalidRequestError`. Use `money()` as above.
+:::
+
+Gateways merge **caller signal + timeout** on every HTTP call. Caller abort **before** submit → `PaymentAbortedError`. Caller abort **after** a mutating POST maps to `NetworkError` with `afterProviderSubmit: true` (same uncertainty class as a timeout). Timeout → `NetworkError`. Never convert uncertain transport outcomes into definite payment failure.
+
+## Injecting custom fetch / clock / crypto
+
+### Mock fetch in tests
+
+```ts
+import {
+  createPaymentClient,
+  stripeGateway,
+  createDefaultGatewayContext,
+} from "@paykernel/core";
+
+const fetchCalls: string[] = [];
+const mockFetch: typeof fetch = async (input, init) => {
+  fetchCalls.push(String(input));
+  return new Response(JSON.stringify({ id: "pi_test", status: "succeeded" }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+};
+
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({ secretKey: "sk_test_…" }),
+  },
+  runtime: { fetch: mockFetch },
+});
+
+const ctx = createDefaultGatewayContext({ fetch: mockFetch });
+void ctx;
+```
+
+Defaults delegate to **live** `globalThis.fetch` (not a frozen snapshot), so tests that only patch `globalThis.fetch` after construction still work. Prefer explicit `runtime.fetch` for deterministic harnesses.
+
+### Fake clock (webhook skew)
+
+```ts
+const fixedMs = Date.parse("2020-01-01T00:00:00.000Z");
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: "sk_test_…",
+      webhookSecret: "whsec_…",
+    }),
+  },
+  runtime: {
+    clock: {
+      now: () => new Date(fixedMs),
+      nowMs: () => fixedMs,
+    },
+  },
+});
+// Stripe 5-minute signature window uses clock.nowMs()
+```
+
+For richer clocks in app tests, `@paykernel/testkit` exposes `createFakeClock` (testkit-only; core does not depend on testkit).
+
+### Custom crypto / UUID
+
+```ts
+createPaymentRuntime({
+  randomUUID: () => "00000000-0000-4000-8000-000000000001",
+  crypto: {
+    randomUUID: () => "00000000-0000-4000-8000-000000000001",
+    getRandomValues: (arr) => {
+      /* fill arr */ return arr;
+    },
+  },
+});
+```
+
+## Supported runtimes
+
+| Runtime | Engines / notes | Status |
+| --- | --- | --- |
+| **Node** | `>=18` (min); LTS 18 / 20 / 22 recommended | CI: Node 20 typecheck/test/build + consumer smoke |
+| **Bun** | `>=1.0.0` | CI: Bun 1.2.x install/test/build + consumer smoke |
+| **Deno** | Modern Deno with npm/file import of ESM | Optional smoke when `deno` is on PATH; else static `node:` gate |
+| **Cloudflare Workers** | Workerd-compatible Web APIs | Static: published `dist` must have **zero** `node:` imports |
+
+`package.json` `engines`: `"node": ">=18"`, `"bun": ">=1.0.0"`. Single ESM export entry (portable). CommonJS `require()` is not supported.
+
+Portability CI (`bun run check:runtime-portability`) fails if `node:` / `bun:` / `cloudflare:` appear in production sources or `dist/**/*.js` for `PORTABLE_PACKAGE_DIRS`: `packages/core`, `webhooks`, `reconciliation`, `observability`, `routing`, `store-contracts`, `sql-foundation`, `testkit`, `gateway-tap`, `gateway-myfatoorah`, `integration-http`, `integration-hono`, `integration-elysia`, `integration-cloudflare-workers`. (`integration-express` and the store adapters are not in that list.)
+
+## What is not supported
+
+| Not supported | Why |
+| --- | --- |
+| **Browsers with secret keys** | Secret keys, webhook secrets, and money mutations are **server-side only**. Do not ship this package with secrets to client bundles. |
+| CommonJS `require()` | ESM-only package (`exports.import` only). |
+| Node &lt; 18 | Needs global `fetch` / `AbortController` / modern ESM. |
+| Relying on `Buffer` / `node:crypto` in **portable production** code paths | Use pure helpers and `Uint8Array` / `TextEncoder`. Tests may still use `node:crypto` for fixtures. |
+| Framework coupling | No Express/Hono/Elysia types in core. |
+| Secrets on `PaymentRuntime` | Context is secret-free by contract. |
+
+## Design rules
+
+1. No secrets on `PaymentRuntime` / `GatewayContext`.
+2. Prefer Web APIs (`fetch`, `TextEncoder`, `AbortController`, Web Crypto).
+3. Production `packages/core/src` must not static-import `node:` builtins (tests may).
+4. Global `fetch` remains the default — injecting runtime is opt-in.
+5. Gateways use injected `this.fetch` when context/runtime is available.
+6. Never convert uncertain transport outcomes into definite payment failure.
+7. `verifyWebhook` stays synchronous where possible.
+8. `exactOptionalPropertyTypes`: omit optional keys; do not assign `undefined`.
+9. Optional `telemetry` is additive only; prefer redacting sinks.
+10. Core has no `@opentelemetry/*` dependency; observability is optional and external (`@paykernel/opentelemetry`).

@@ -1,0 +1,99 @@
+---
+title: "@paykernel/integration-hono"
+description: Thin Hono adapter that reads c.req.raw.text() and calls processWebhookHttp.
+sidebar:
+  order: 3
+  label: Hono
+---
+
+`honoWebhook` converts a Hono request into `processWebhookHttp` and returns `webhookHttpResultToResponse`. No payment logic, no store adapters. Depends only on [`@paykernel/integration-http`](/integrations/http) among workspace packages.
+
+Version `0.1.0-next.0` (workspace). Not a released 1.0. Portable (`paymentsSdk.portable: true`). Peer `hono >= 4`. Export map: `"."` only.
+
+```bash
+bun add @paykernel/integration-hono
+# dependency: @paykernel/integration-http
+# peer: hono >= 4
+```
+
+## Usage
+
+```ts
+import { Hono } from "hono";
+import { honoWebhook } from "@paykernel/integration-hono";
+
+const app = new Hono();
+app.post(
+  "/webhooks/stripe",
+  honoWebhook({
+    gateway: "stripe",
+    client, // PaymentClient with no onWebhookVerified fulfillment
+    engine,
+    handler,
+  }),
+);
+```
+
+`honoWebhook` accepts `Omit<ProcessWebhookHttpInput, "rawBody" | "headers" | "query">` — you pass `gateway`, `client`, `engine`, `handler`, and optionally `ackPolicy`, `correlationId`, `signatureProfile`.
+
+What it does:
+
+1. `const request = c.req.raw`
+2. `rawBody = await request.text()` — **never** `c.req.json()`
+3. `headers = request.headers`
+4. `query = c.req.query()` (Paymob-style `?hmac=` signatures)
+5. `processWebhookHttp({ ...options, rawBody, headers, query })`
+6. `return webhookHttpResultToResponse(result)`
+
+Runnable host: [Bun + Hono + SQLite](/examples/bun-hono-sqlite) (in-memory SQLite is **single-host** and process-local). Postgres variant: [Bun + Hono + Postgres](/examples/bun-hono-postgres).
+
+:::caution[Raw body]
+Do not put a JSON body parser on `/webhooks/stripe`. Stripe HMAC is byte-exact on the raw string. `honoWebhook` uses `c.req.raw.text()` so the bytes never go through `c.req.json()`.
+:::
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill only in `handler` after the inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `handleWebhook` verifies and normalizes; it does not claim, lease, or set HTTP status. See [HTTP mapping](/integrations/http) and [Webhooks](/guides/webhooks).
+:::
+
+## Failure paths
+
+Same table as [`processWebhookHttp`](/integrations/http#failure-paths). Typical Stripe cases:
+
+| Request | Status | Body |
+| --- | --- | --- |
+| Missing `stripe-signature` | 400 | `{ error: "invalid_webhook" }` — client **not** called |
+| Forgery (bad HMAC) | 400 | `{ error: "invalid_webhook" }` |
+| Parse / missing-config `InvalidWebhookError` | 500 | `{ outcome: "handler_failed", retryable: true }` |
+| `already_processing` | 503 | `{ outcome: "already_processing" }`; `Retry-After` when `retryAfterMs` is set |
+| `payload_conflict` | 409 | `{ outcome: "payload_conflict" }` |
+| Handler throws (no local paid order, store error) | 500 | `{ outcome: "handler_failed", retryable: true }` |
+
+Default `ackPolicy` is `provider_redelivery`: `scheduled_for_retry` is 503. Pass `ackPolicy: { kind: "durable_worker" }` only when `engine.mode === "durable_retry"` and a `processRetryable` worker is guaranteed.
+
+Status codes come from `mapInboxOutcome` in `@paykernel/integration-http`, **not** from `@paykernel/webhooks`.
+
+## Re-exports
+
+Import HTTP helpers from this package if you want a single specifier:
+
+```ts
+import {
+  honoWebhook,
+  mapInboxOutcome,
+  retryAfterSeconds,
+  processWebhookHttp,
+  webhookHttpResultToResponse,
+  createWebhookOperationContext,
+  getHeader,
+  resolveCorrelationId,
+  requireStringBindings,
+  GATEWAY_WEBHOOK_SIGNATURE,
+  extractWebhookSignature,
+} from "@paykernel/integration-hono";
+```
+
+Also re-exported as types: `InboxHttpAckPolicy`, `HeaderBag`, `GatewayWebhookSignatureProfile`, `WebhookClient`, `WebhookHttpResult`, `ProcessWebhookHttpInput`.
+
+`OBJECT_HMAC_GATEWAYS` is **not** re-exported here. Import it from `@paykernel/integration-http`.
+
+Example `POST /internal/*` routes in the Hono checkout example are unauthenticated test hooks (`enableTestHooks`) and **must not be deployed**.

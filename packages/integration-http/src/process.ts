@@ -416,9 +416,8 @@ export async function processWebhookHttp(
     (outcome.reason === "parked" || outcome.reason === "handler_retry") &&
     ackPolicy.kind === "durable_worker"
   ) {
-    const eng = input.engine as unknown as { mode?: unknown; workerGuaranteed?: unknown };
-    const modeOk = eng.mode === "durable_retry";
-    const workerOk = eng.workerGuaranteed === true;
+    const modeOk = input.engine.mode === "durable_retry";
+    const workerOk = input.engine.workerGuaranteed === true;
     if (!modeOk || !workerOk) {
       console.warn(
         '[paykernel] durable_worker policy requires engine.mode="durable_retry" + workerGuaranteed; falling back to 503',

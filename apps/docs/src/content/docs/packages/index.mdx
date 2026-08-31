@@ -1,0 +1,90 @@
+---
+title: Packages
+description: Map of every publishable PayKernel package at version 0.1.0-next.0, with npm names, exports, and what each one is for.
+sidebar:
+  order: 1
+---
+
+PayKernel is a **composition** of packages, not a single SDK. `@paykernel/core` creates payments, maps money, and **verifies** webhooks. Claim, lease, HTTP status, stores, routing, and OpenTelemetry live in other packages you wire at the application layer.
+
+Current version is **`0.1.0-next.0`**. These packages are **not published to the public npm registry yet**. Consume them from this monorepo workspace. The specifiers below are the intended public names once they ship.
+
+:::caution
+The folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Never import or install `@paykernel/observability`.
+:::
+
+## Kernel
+
+| Package | Role | Docs |
+| --- | --- | --- |
+| [`@paykernel/core`](/packages/core) | Client, registry, money, outcomes, built-in gateways (Moyasar, PayPal, Paymob, Stripe), hooks, runtime. Export `.` only. | [core](/packages/core) |
+| [`@paykernel/webhooks`](/packages/webhooks) | Inbox engine: claim, payload-hash conflict, lease-fenced processing. **Does not** set HTTP status codes. | [webhooks](/packages/webhooks) |
+| [`@paykernel/reconciliation`](/packages/reconciliation) | Lookup + `decideReconciliationPolicy` after `outcome === "indeterminate"`. Do not `createPayment` again. | [reconciliation](/packages/reconciliation) |
+| [`@paykernel/routing`](/packages/routing) | Select-only gateway choice **before** `createPayment`. Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx. | [routing](/packages/routing) |
+| [`@paykernel/opentelemetry`](/packages/opentelemetry) | Metrics, spans, optional OTEL bridge. Exports `.` and `./otel`. Core has **no** hard OTEL dependency. | [opentelemetry](/packages/opentelemetry) |
+
+## Extra gateways (not `BuiltInGatewayName`)
+
+Built-ins live **in** `@paykernel/core`: `moyasar`, `paypal`, `paymob`, `stripe`. Tap and MyFatoorah are **first-party extra packages**. They depend only on `@paykernel/core` and are **not** members of `BuiltInGatewayName` (`"moyasar" \| "paypal" \| "paymob" \| "stripe"`).
+
+| Package | Role | Docs |
+| --- | --- | --- |
+| [`@paykernel/gateway-tap`](/gateways/tap) | Tap charges, authorize/capture/void, refunds, hashstring webhooks. | [Tap](/gateways/tap) |
+| [`@paykernel/gateway-myfatoorah`](/gateways/myfatoorah) | MyFatoorah V3 hosted payments, refunds, Webhook V2. | [MyFatoorah](/gateways/myfatoorah) |
+
+There is **no** `@paykernel/gateway-stripe` (or Moyasar/PayPal/Paymob) package. Use `stripeGateway` / `moyasarGateway` / `paypalGateway` / `paymobGateway` from `@paykernel/core`.
+
+## HTTP integrations
+
+Webhook routes must read the **raw body** (`text()` / `express.raw`) **before** verify. Never `json()` first for Stripe or PayPal. HTTP status mapping lives in `@paykernel/integration-http` (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+
+| Package | Role | Docs |
+| --- | --- | --- |
+| [`@paykernel/integration-http`](/integrations/http) | Portable `mapInboxOutcome`, signature helpers, `processWebhookHttp`. No framework imports. | [HTTP](/integrations/http) |
+| [`@paykernel/integration-hono`](/integrations/hono) | Thin Hono adapter over HTTP helpers (raw-body safe). | [Hono](/integrations/hono) |
+| [`@paykernel/integration-elysia`](/integrations/elysia) | Thin Elysia adapter (`parse: none`). | [Elysia](/integrations/elysia) |
+| [`@paykernel/integration-express`](/integrations/express) | Thin Express adapter (raw-body safe). | [Express](/integrations/express) |
+| [`@paykernel/integration-cloudflare-workers`](/integrations/cloudflare-workers) | Thin Workers adapter. | [Workers](/integrations/cloudflare-workers) |
+
+## Store contracts and SQL foundation
+
+| Package | Role | Docs |
+| --- | --- | --- |
+| [`@paykernel/store-contracts`](/packages/store-contracts) | Lease-aware store interfaces, `StoreError` taxonomy, adapter manifests. | [store-contracts](/packages/store-contracts) |
+| [`@paykernel/sql-foundation`](/packages/sql-foundation) | Shared relational schemas, codecs, migrations, claim algorithms. **Not** a general ORM. Importing it does **not** apply DDL — migrate explicitly. | [sql-foundation](/packages/sql-foundation) |
+
+`@paykernel/internal-sql-store` is **private** (`internal/sql-store`). It is a thin BC shim that re-exports `@paykernel/sql-foundation`. **Do not install it.** Prefer `@paykernel/sql-foundation` in new code.
+
+## Durable stores
+
+Core does **not** depend on any store package. Inject stores at the app layer. **Redis is optional.** Local SQLite is **single-host**. `:memory:` is **one process**. Turso is **remote multi-host** and has **no** `/sync` export. D1 ≠ Durable Objects ≠ Turso ≠ local SQLite. Memory stores (testkit) are **NON-PRODUCTION**. No published adapter declares `coordinationScope: "multi-region"`.
+
+| Package | Scope | Documented exports |
+| --- | --- | --- |
+| [`@paykernel/store-postgres`](/stores/postgres) | Multi-host durable (general default when you have Postgres) | `.`, `/bun-sql`, `/postgres-js`, `/pg`, `/drizzle` |
+| [`@paykernel/store-redis`](/stores/redis) | Optional multi-host; durability is configuration-dependent | `.`, `/bun`, `/upstash`, `/ioredis`, `/node-redis` |
+| [`@paykernel/store-sqlite`](/stores/sqlite) | **Single-host** file SQLite | `.`, `/bun`, `/node`, `/better-sqlite3` |
+| [`@paykernel/store-turso`](/stores/turso) | Remote multi-host Turso / libSQL. **No `/sync`.** | `.`, `/serverless`, `/libsql` |
+| [`@paykernel/store-d1`](/stores/d1) | Workers D1 (shared SQLite via D1 binding) | `.` only |
+| [`@paykernel/store-durable-objects`](/stores/durable-objects) | Partitioned SQLite Durable Objects — **never one global DO** | `.` only |
+
+Choosing an adapter: [adapter selection](/guides/adapter-selection). Store overview: [stores](/stores).
+
+## Testing
+
+| Package | Role | Docs |
+| --- | --- | --- |
+| [`@paykernel/testkit`](/packages/testkit) | `mockGateway`, capability-gated conformance, fixture safety, **NON-PRODUCTION** in-memory stores. Core does **not** depend on testkit. | [testkit](/packages/testkit) |
+
+## Composition
+
+| You need | Packages |
+| --- | --- |
+| Create / capture / refund / verify webhooks | `@paykernel/core` |
+| Deduped, leased webhook fulfillment | core + `@paykernel/webhooks` + one `@paykernel/store-*` |
+| Recover after timeout / indeterminate create | add `@paykernel/reconciliation` (same store). Lookup + `decideReconciliationPolicy` only — **do not** `createPayment` again. |
+| Pick a gateway before `createPayment` | optional `@paykernel/routing` (select-only) |
+| Metrics / spans | optional `@paykernel/opentelemetry` |
+| App tests without live PSPs | `@paykernel/testkit` (dev) |
+
+Walkthrough: [getting started](/guides/getting-started), [composition](/guides/composition), [quickstart](/quickstart).

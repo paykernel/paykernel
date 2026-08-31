@@ -1,0 +1,257 @@
+---
+title: "@paykernel/opentelemetry"
+description: Portable payment metrics, span instrumentation, and an optional OpenTelemetry bridge. Folder packages/observability publishes as @paykernel/opentelemetry (subpath ./otel).
+sidebar:
+  order: 6
+---
+
+The monorepo folder is `packages/observability`. The **publish name is `@paykernel/opentelemetry`**. Always install and import that name — never `@paykernel/observability`.
+
+Workspace version is `0.1.0-next.0` — not a released 1.0. `@paykernel/core` has **no** `@opentelemetry/*` dependency. Root `import "@paykernel/opentelemetry"` works **without** `@opentelemetry/api`.
+
+Exports:
+
+| Specifier | Contents |
+| --- | --- |
+| `@paykernel/opentelemetry` | Metrics, spans, instrumentation, redaction, OperationContext, `createOpenTelemetryBridge` |
+| `@paykernel/opentelemetry/otel` | Same `createOpenTelemetryBridge` factory (no static OTEL import) |
+
+Neither entry statically imports `@opentelemetry/api`. Pass a duck-typed API into the factory.
+
+## Install
+
+```bash
+bun add @paykernel/opentelemetry
+# workspace / peer: @paykernel/core
+# optional: bun add @opentelemetry/api   # only if you use the OTEL bridge with a real API
+```
+
+`@opentelemetry/api` is an **optional** peer (`>=1.0.0`). Metrics-only paths do not need it.
+
+Webhooks and reconciliation stay free of a hard observability dependency — inject metrics / tracer / sink at the composition root.
+
+## Metrics (no OTEL required)
+
+```typescript
+import {
+  createInMemoryPaymentMetrics,
+  METRIC_NAMES,
+} from "@paykernel/opentelemetry";
+
+const metrics = createInMemoryPaymentMetrics();
+metrics.operationOutcomes.add(1, {
+  gateway: "stripe",
+  operationType: "payment.create",
+  outcome: "succeeded",
+});
+metrics.providerLatencyMs.record(42, {
+  gateway: "stripe",
+  operationType: "payment.create",
+});
+
+const snap = metrics.snapshot();
+console.log(snap.counters[METRIC_NAMES.operationOutcomes]);
+metrics.reset();
+```
+
+`createInMemoryPaymentMetrics` is a test / local registry — **not** a production time-series backend. `createNoopPaymentMetrics()` is the disabled default.
+
+Never pass secrets, tokens, card data, or PII as metric attribute values. Labels must be non-sensitive primitives (`string | number | boolean`). The in-memory registry auto-redacts labels via `redactAttributeBag`; a custom `PaymentMetrics` may not.
+
+| Property | Kind | `METRIC_NAMES` |
+| --- | --- | --- |
+| `operationOutcomes` | counter | `payments.operation.outcomes` |
+| `providerLatencyMs` | histogram | `payments.provider.latency_ms` |
+| `rateLimits` | counter | `payments.provider.rate_limits` |
+| `retries` | counter | `payments.operation.retries` |
+| `webhookDuplicates` | counter | `payments.webhook.duplicates` |
+| `payloadConflicts` | counter | `payments.webhook.payload_conflicts` |
+| `handlerFailures` | counter | `payments.webhook.handler_failures` |
+| `expiredLeases` | counter | `payments.store.expired_leases` |
+| `reclaimedLeases` | counter | `payments.store.reclaimed_leases` |
+| `reconciliationDrift` | counter | `payments.reconciliation.drift` |
+| `indeterminateOperations` | counter | `payments.operation.indeterminate` |
+| `adapterLatencyMs` | histogram | `payments.adapter.latency_ms` |
+| `adapterErrors` | counter | `payments.adapter.errors` |
+
+`PAYMENT_METRICS_KEYS` is the exhaustiveness list of those property names.
+
+:::note[OBS-3 reconciliationDrift]
+`withPaymentOperation` increments `reconciliationDrift` only when `countReconciliationDrift: true` **and** the op is `payment.reconcile` with `reconciliationRequired: true`. Transport-indeterminate creates that flag recon-needed do **not** auto-count. Default is `false` (opt-in).
+:::
+
+Webhook duplicate / conflict / handler and lease reclaim counters are **app-owned** — increment them when [webhooks](/packages/webhooks) / [reconciliation](/packages/reconciliation) report those outcomes. Those packages do not depend on this one.
+
+Do not collapse `indeterminate` to `failed` for dashboards. Keep the outcome label and use `indeterminateOperations` for alerting.
+
+## Spans
+
+| Constant | Name |
+| --- | --- |
+| `PAYMENT_SPAN_NAMES.create` | `payment.create` |
+| `PAYMENT_SPAN_NAMES.capture` | `payment.capture` |
+| `PAYMENT_SPAN_NAMES.refund` | `payment.refund` |
+| `PAYMENT_SPAN_NAMES.void` | `payment.void` |
+| `PAYMENT_SPAN_NAMES.webhookVerify` | `payment.webhook.verify` |
+| `PAYMENT_SPAN_NAMES.webhookClaim` | `payment.webhook.claim` |
+| `PAYMENT_SPAN_NAMES.webhookProcess` | `payment.webhook.process` |
+| `PAYMENT_SPAN_NAMES.reconcile` | `payment.reconcile` |
+| `PAYMENT_SPAN_NAMES.storeClaim` | `payment.store.claim` |
+
+```typescript
+import {
+  PAYMENT_SPAN_NAMES,
+  spanNameForOperationType,
+  createNoopTracer,
+} from "@paykernel/opentelemetry";
+
+spanNameForOperationType("payment.create"); // "payment.create"
+createNoopTracer();
+PAYMENT_SPAN_NAMES.create; // "payment.create"
+```
+
+Custom operation types pass through unchanged. `recordException` on the OTEL bridge exports **name + optional non-secret code only** — never raw `Error.message` / stack. Secret-shaped codes (`sk_live_…`) are dropped.
+
+Failed / declined / indeterminate **non-throw** outcomes end span `code: "error"` (not OK) so error rates track payment failures. Only explicit `succeeded` / `requires_action` end `code: "ok"`. Missing `normalizedOutcome` ends `error` with message `"unknown"`.
+
+## Optional OpenTelemetry bridge
+
+```typescript
+import { createOpenTelemetryBridge } from "@paykernel/opentelemetry";
+// or: import { createOpenTelemetryBridge } from "@paykernel/opentelemetry/otel";
+
+import { trace, SpanStatusCode } from "@opentelemetry/api"; // app only — optional peer
+
+const tracer = createOpenTelemetryBridge(
+  { trace, SpanStatusCode },
+  { tracerName: "paykernel" }, // default
+);
+```
+
+Duck-typed API: `{ trace: { getTracer(name, version?) }`, optional `SpanStatusCode: { OK, ERROR } }`. If `SpanStatusCode` is omitted, the bridge uses numeric `OK=1`, `ERROR=2`. Default tracer name is `"paykernel"`.
+
+This is **not** a full OTEL SDK, exporter, or collector.
+
+## Instrument one operation
+
+```typescript
+import {
+  createOperationContext,
+  createInMemoryPaymentMetrics,
+  createNoopTracer,
+  withPaymentOperation,
+  createRedactingTelemetrySink,
+} from "@paykernel/opentelemetry";
+
+const metrics = createInMemoryPaymentMetrics();
+const telemetry = createRedactingTelemetrySink({
+  emit(event, data) {
+    console.info(event, data);
+  },
+});
+
+const started = createOperationContext({
+  operationId: crypto.randomUUID(),
+  gateway: "stripe",
+  operationType: "payment.create",
+  internalReference: "ord_123",
+});
+
+const { result, context, durationMs } = await withPaymentOperation(
+  {
+    context: started,
+    metrics,
+    tracer: createNoopTracer(),
+    telemetry,
+  },
+  async () => {
+    return {
+      result: { id: "pi_123" },
+      contextPatch: {
+        normalizedOutcome: "succeeded",
+        providerObjectId: "pi_123",
+        providerRequestId: "req_abc", // allow-listed; visible after redaction
+      },
+    };
+  },
+);
+void result;
+void context;
+void durationMs;
+```
+
+Callback return shapes:
+
+1. Plain value — used as `result`.
+2. Wrapped `{ result, contextPatch? }` — only when object keys are exactly `result` and/or `contextPatch`.
+
+On throw: span ends `error`; exceptions are sanitized; transport-ambiguous throws (`NetworkError`, generic `Error`, …) finalize as **`indeterminate`** (never invent definitive `failed` from a bare network blip). Known core decline errors map to `declined`. The error is **rethrown** after instrumentation.
+
+`recordPaymentOperation(options)` records metrics + telemetry for an already-completed op (no span lifecycle).
+
+`withPaymentOperation` automatically:
+
+1. Records `operationOutcomes` (`unknown` if `normalizedOutcome` is missing).
+2. Records `providerLatencyMs` with measured `durationMs`.
+3. If outcome is `indeterminate` or `indeterminate.*`, also increments `indeterminateOperations`.
+4. If `retry === true`, increments `retries`.
+5. Increments `reconciliationDrift` only on the OBS-3 path above.
+
+## Redaction
+
+```typescript
+import {
+  createRedactingTelemetrySink,
+  redactTelemetryData,
+  redactAttributeBag,
+} from "@paykernel/opentelemetry";
+
+const safe = createRedactingTelemetrySink({
+  emit(event, data) {
+    console.info(event, data);
+  },
+});
+
+safe.emit?.("payment.operation", {
+  providerRequestId: "req_abc", // visible (allow-listed)
+  cardNumber: "4242…", // → [REDACTED]
+  authorization: "Bearer …", // → [REDACTED]
+});
+
+redactTelemetryData({ operationId: "op_1", token: "secret" });
+// { operationId: "op_1", token: "[REDACTED]" }
+```
+
+`createRedactingTelemetrySink` / `redactTelemetryData` / `redactAttributeBag` are **package-owned** on core `redact()` — not pure re-exports. `withPaymentOperation` always re-wraps telemetry through this package’s sink. `providerRequestId` is allow-listed for operational debugging.
+
+Core also exports its own sink wrapper for gateway context. Prefer this package’s wrapper on observability paths.
+
+## OperationContext (core re-exports)
+
+`createOperationContext`, `finalizeOperationContext`, `operationContextToTelemetryData`, `systemClock` are re-exported from `@paykernel/core`. Required fields: `operationId`, `gateway`, `operationType`. Portable clock — no `node:perf_hooks`.
+
+## Failure paths
+
+| Situation | Behavior |
+| --- | --- |
+| Callback throws | Metrics/span/telemetry recorded; error rethrown; ambiguous transport → `indeterminate` |
+| Returned `normalizedOutcome: "indeterminate"` | Outcome label kept; `indeterminateOperations += 1`; span `error` |
+| Returned `failed` / `declined` | Span `error` (not OK) |
+| Missing `normalizedOutcome` | Span `error`, message `"unknown"` |
+| Root import without `@opentelemetry/api` | Works. Bridge needs an injected API object |
+
+## Runtime exports (root)
+
+Metrics: `METRIC_NAMES`, `PAYMENT_METRICS_KEYS`, `createInMemoryPaymentMetrics`, `createNoopPaymentMetrics`.
+
+Spans: `PAYMENT_SPAN_NAMES`, `createNoopTracer`, `spanNameForOperationType`.
+
+Bridge: `createOpenTelemetryBridge` (also `@paykernel/opentelemetry/otel`).
+
+Instrumentation: `withPaymentOperation`, `recordPaymentOperation`, `sanitizeExceptionForSpan`.
+
+Redaction: `createRedactingTelemetrySink`, `redactTelemetryData`, `redactAttributeBag`, `sanitizeExceptionCode`, `sanitizeExceptionIdentity`, `sanitizeSpanStatusMessage`.
+
+Context: `createOperationContext`, `finalizeOperationContext`, `operationContextToTelemetryData`, `systemClock`.
+
+See also: [runtime](/guides/runtime), [outcomes](/guides/outcomes), [core](/packages/core).

@@ -10,7 +10,7 @@
 - **Customer:** required on create (`tapCustomer` or `customerId`). Inline customers need non-empty first name, last name, and email
 - **Redirect:** `callbackUrl` → `redirect.url` (required for 3DS / KNET / mada)
 - **Default source:** charges omit `tapSource` → `src_all` (hosted methods page). Authorize (`capture: false`) omit `tapSource` → `src_card`. Tokens: `tok_…`. Local methods: `src_kw.knet`, `src_sa.mada`, … `createPayment` rejects `auth_…` source ids.
-- **Authorize auto VOID:** optional config `autoVoidHours` on authorize create only; not defaulted. Rejected with omitted / `src_card` source; allowed with `tok_…`
+- **Authorize auto VOID:** optional config `autoVoidHours` on authorize create only; not defaulted. Rejected with omitted / `src_card` / `src_all`; allowed with `tok_…` and other non-`src_all`/`src_card` sources.
 - **Idempotency:** `createPayment` requires a caller `idempotencyKey` (no minted UUID). Capture / refund / void require it too. `voidPayment` GETs first; already VOID does not POST
 - **Partial capture:** capture `amount` less than the authorize is `partially_captured`, not `paid` (`isPaidOutcome` is false). Greater than the authorize throws
 - **VOID:** charge VOID is a failed payment (not succeeded). Authorize VOID is `succeeded` + cancelled

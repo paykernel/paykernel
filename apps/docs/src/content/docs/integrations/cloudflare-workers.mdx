@@ -1,0 +1,149 @@
+---
+title: "@paykernel/integration-cloudflare-workers"
+description: Thin Workers fetch adapter using request.text() and handleCloudflareWebhook. Path guard required.
+sidebar:
+  order: 6
+  label: Cloudflare Workers
+---
+
+`handleCloudflareWebhook` reads `request.text()` and `request.headers`, forwards `URL.searchParams` as query, and returns `webhookHttpResultToResponse`. No payment logic, no store adapters, **no** static `cloudflare:workers` import (structural `Request` / `Response` only).
+
+Version `0.1.0-next.0` (workspace). Not a released 1.0. Portable (`paymentsSdk.portable: true`). Optional peer `@cloudflare/workers-types`. Export map: `"."` only. Depends only on [`@paykernel/integration-http`](/integrations/http) among workspace packages.
+
+```bash
+bun add @paykernel/integration-cloudflare-workers
+# dependency: @paykernel/integration-http
+# optional peer: @cloudflare/workers-types
+```
+
+## Usage
+
+```ts
+import {
+  handleCloudflareWebhook,
+  readWorkerBindings,
+} from "@paykernel/integration-cloudflare-workers";
+
+export default {
+  async fetch(request: Request, env: Record<string, string | undefined>) {
+    const { STRIPE_WEBHOOK_SECRET } = readWorkerBindings(env, ["STRIPE_WEBHOOK_SECRET"]);
+    const url = new URL(request.url);
+    if (url.pathname === "/webhooks/stripe" && request.method === "POST") {
+      return handleCloudflareWebhook(request, {
+        gateway: "stripe",
+        client, // PaymentClient with no onWebhookVerified fulfillment
+        engine,
+        handler,
+      });
+    }
+    return new Response("not_found", { status: 404 });
+  },
+};
+```
+
+`handleCloudflareWebhook(request, options)`:
+
+1. Non-`POST` → `new Response("method not allowed", { status: 405 })` (plain text, not JSON)
+2. `rawBody = await request.text()`
+3. `headers = request.headers`
+4. Query from `URL.searchParams` (first value per key)
+5. `processWebhookHttp({ ...options, rawBody, headers, query })`
+6. `return webhookHttpResultToResponse(result)`
+
+`options` is `Omit<ProcessWebhookHttpInput, "rawBody" | "headers" | "query">`.
+
+Correlation: `resolveCorrelationId` uses `x-request-id` → `x-correlation-id` → `cf-ray` → generated id. When Cloudflare sends `cf-ray` and no `x-request-id`, the response `x-request-id` is that ray id.
+
+Runnable host: [Cloudflare Workers fetch](/examples/cloudflare-workers-fetch). Tests in that example run in Bun with `store-sqlite` (`:memory:` is **one process**, single-host). Do not use that SQLite in a production Worker.
+
+:::caution[Path guard is required]
+`handleCloudflareWebhook` and `createCloudflareWebhookFetchHandler` only guard the **method** (405 on non-POST). They do **not** check `request.url`. Call them only after you match the pathname (for example `POST /webhooks/stripe`). Without a path guard the handler would accept every POST on the Worker.
+:::
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill only in `handler` after the inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `handleWebhook` verifies and normalizes; it does not claim, lease, or set HTTP status. See [HTTP mapping](/integrations/http) and [Webhooks](/guides/webhooks).
+:::
+
+## readWorkerBindings
+
+Alias of `requireStringBindings` from `@paykernel/integration-http`:
+
+```ts
+readWorkerBindings(env, ["STRIPE_WEBHOOK_SECRET"]);
+// throws `missing env: STRIPE_WEBHOOK_SECRET` — keys only, never values
+```
+
+Empty strings count as missing.
+
+## createCloudflareWebhookFetchHandler
+
+```ts
+import { createCloudflareWebhookFetchHandler } from "@paykernel/integration-cloudflare-workers";
+
+const webhookFetch = createCloudflareWebhookFetchHandler({
+  gateway: "stripe",
+  client,
+  engine,
+  handler,
+});
+
+// Still wrap with a pathname check:
+export default {
+  async fetch(request: Request) {
+    const url = new URL(request.url);
+    if (url.pathname === "/webhooks/stripe") {
+      return webhookFetch(request);
+    }
+    return new Response("not_found", { status: 404 });
+  },
+};
+```
+
+The helper returns 405 for non-POST, then delegates to `handleCloudflareWebhook`. It is **not** a complete Worker router.
+
+## Failure paths
+
+| Request | Status | Body |
+| --- | --- | --- |
+| `GET` / non-POST | 405 | `"method not allowed"` (text) |
+| Missing `stripe-signature` | 400 | `{ error: "invalid_webhook" }` — client **not** called |
+| Forgery (bad HMAC) | 400 | `{ error: "invalid_webhook" }` |
+| Parse / missing-config `InvalidWebhookError` | 500 | `{ outcome: "handler_failed", retryable: true }` |
+| `already_processing` | 503 | `{ outcome: "already_processing" }`; `Retry-After` when `retryAfterMs` is set |
+| `payload_conflict` | 409 | `{ outcome: "payload_conflict" }` |
+| Handler throws | 500 | `{ outcome: "handler_failed", retryable: true }` |
+| Missing env key in `readWorkerBindings` | throws | `missing env: KEY` |
+
+Default `ackPolicy` is `provider_redelivery` (`scheduled_for_retry` → 503). `{ kind: "durable_worker" }` ACKs 200 only with `engine.mode === "durable_retry"` and `workerGuaranteed === true`.
+
+Status codes come from `mapInboxOutcome` in `@paykernel/integration-http`, **not** from `@paykernel/webhooks`.
+
+## Stores on Workers
+
+D1 ≠ Durable Objects ≠ Turso ≠ local SQLite. Production Workers inject [D1](/stores/d1) or [Durable Objects](/stores/durable-objects) via the checkout kernel's `stores` / `storeFactory` / `executor` — never one global Durable Object, never local SQLite as multi-host, never Turso `/sync` (that export does not exist). Memory stores are **NON-PRODUCTION**. No published adapter declares `coordinationScope: "multi-region"`.
+
+## Re-exports
+
+```ts
+import {
+  handleCloudflareWebhook,
+  readWorkerBindings,
+  createCloudflareWebhookFetchHandler,
+  mapInboxOutcome,
+  retryAfterSeconds,
+  processWebhookHttp,
+  webhookHttpResultToResponse,
+  createWebhookOperationContext,
+  getHeader,
+  resolveCorrelationId,
+  requireStringBindings,
+  GATEWAY_WEBHOOK_SIGNATURE,
+  extractWebhookSignature,
+} from "@paykernel/integration-cloudflare-workers";
+```
+
+Types re-exported: `InboxHttpAckPolicy`, `HeaderBag`, `GatewayWebhookSignatureProfile`, `WebhookClient`, `WebhookHttpResult`, `ProcessWebhookHttpInput`.
+
+`OBJECT_HMAC_GATEWAYS` is **not** re-exported here. Import it from `@paykernel/integration-http`.
+
+Example `POST /internal/*` routes used by the checkout kernel tests are unauthenticated test hooks (`enableTestHooks`) and **must not be deployed**.

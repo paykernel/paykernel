@@ -148,7 +148,9 @@ See [`docs/monorepo.md`](./docs/monorepo.md) for layout details, boundary rules,
 
 ## Documentation
 
-**Start here:** [`docs/README.md`](./docs/README.md) · [`docs/getting-started.md`](./docs/getting-started.md) (create payment → verify → inbox claim → fulfill → reconcile)
+**Docs site:** [https://paykernel-docs.abshahin.workers.dev](https://paykernel-docs.abshahin.workers.dev) — start at [Quickstart](https://paykernel-docs.abshahin.workers.dev/quickstart).
+
+**Start here (in-repo):** [`docs/README.md`](./docs/README.md) · [`docs/getting-started.md`](./docs/getting-started.md) (create payment → verify → inbox claim → fulfill → reconcile)
 
 | Audience | Docs |
 | --- | --- |

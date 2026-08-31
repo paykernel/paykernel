@@ -1,0 +1,163 @@
+---
+title: Redis
+description: Optional Redis, Valkey, and Upstash stores for multi-host lease-aware coordination. Durability is configuration-dependent.
+sidebar:
+  order: 3
+---
+
+`@paykernel/store-redis` is **optional** coordination: lease-aware idempotency, webhook inbox, and reconciliation against shared Redis, Valkey, or Upstash. Claims are atomic **Lua** (never get-then-set). PostgreSQL alone can satisfy the same [store contracts](/packages/store-contracts).
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+Redis is **not** required to use `@paykernel/core` or the webhook engine. Do not add Redis only because this adapter exists. Manifest durability is **`configuration-dependent`**, not `durable`. Not recommended as the sole long-term audit store.
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-redis
+# optional drivers (pick a binding):
+bun add ioredis
+# or
+bun add redis
+# or
+bun add @upstash/redis
+# Bun native Redis needs no npm peer — use /bun
+```
+
+Root entry **never** statically imports ioredis, `redis`, `@upstash/redis`, or Bun Redis. This package does **not** depend on `@paykernel/sql-foundation` (Redis is not relational).
+
+## Quick start (driver-free root)
+
+```ts
+import {
+  createRedisIdempotencyStore,
+  type RedisCommandPort,
+} from "@paykernel/store-redis";
+
+const port: RedisCommandPort = {
+  async send(command, args) {
+    return client.send(command, args);
+  },
+};
+
+const store = createRedisIdempotencyStore({ port });
+const r = await store.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+```
+
+`createRedisStores({ port })` bundles all three contracts. There is no migrate step (no DDL).
+
+## Subpaths
+
+| Subpath | Package / runtime | Notes |
+| --- | --- | --- |
+| `/bun` | `Bun.RedisClient` | Prefer injected client. `createBunRedisFromEnv` / URL are convenience only. **Rejects** Cluster, Sentinel, and `clusterKeys` |
+| `/upstash` | `@upstash/redis` | HTTP REST; EVAL is still server-side Lua |
+| `/ioredis` | `ioredis` | Prefer `enableOfflineQueue: false` (`IOREDIS_STORE_CLIENT_DEFAULTS`). Cluster + `keys.clusterKeys` |
+| `/node-redis` | `redis` | Prefer `disableOfflineQueue: true` (`NODE_REDIS_STORE_CLIENT_DEFAULTS`). Cluster + hash tags |
+
+```ts
+import {
+  createRedisStoresFromBun,
+} from "@paykernel/store-redis/bun";
+
+const stores = createRedisStoresFromBun({ redis: { client } });
+// convenience only:
+// createRedisStoresFromBun({ redis: { url: process.env.REDIS_URL! } });
+// createRedisStoresFromBun({ redis: { fromEnv: true } });
+```
+
+`fromEnv` reads `PAYMENTS_SDK_REDIS_URL` / `REDIS_URL` / `VALKEY_URL`.
+
+```ts
+import Redis from "ioredis";
+import { createRedisStoresFromIoredis } from "@paykernel/store-redis/ioredis";
+
+const client = new Redis(process.env.PAYMENTS_SDK_REDIS_URL!, {
+  enableOfflineQueue: false,
+});
+const stores = createRedisStoresFromIoredis({ client });
+```
+
+```ts
+import { Redis } from "@upstash/redis";
+import { createRedisStoresFromUpstash } from "@paykernel/store-redis/upstash";
+
+const redis = Redis.fromEnv();
+const stores = createRedisStoresFromUpstash({ client: redis });
+```
+
+Bun + **Cluster or Sentinel** → do **not** use `/bun`; use `/ioredis` or `/node-redis` with `clusterKeys` so multi-key Lua (HASH + ZSET) hash-tags co-locate. Default `clusterKeys: false` is standalone-only; Cluster without hash tags fails `CROSSSLOT`.
+
+## Guarantees
+
+`REDIS_STORAGE_ADAPTER_MANIFEST`: `coordinationScope: "multi-host"`, `durability: "configuration-dependent"`, `claims: "strong"`, `supportsTransactions: false` (Lua atomicity, not MULTI/EXEC as the claim path).
+
+Four durability distinctions (do not blur them):
+
+| # | Distinction | Meaning |
+| --- | --- | --- |
+| 1 | Coordination-safe | Multi-worker claims while Redis is up and shared |
+| 2 | Durable across **process** restart | Keys still in the **running** Redis service |
+| 3 | Durable across **Redis** restart | Only with correct AOF/RDB or managed persistence |
+| 4 | Only-audit-store | **Not recommended**; prefer hybrid SQL |
+
+Do **not** use Pub/Sub for webhook delivery correctness or retries. Disable / control offline command queues for correctness-critical ops. Injectable `now` is Lua `ARGV` (FakeClock works).
+
+Completed idempotency fences never `EXPIRE` (`retentionTtlMs` ignored for complete). Use `deleteExpired` for cleanup. Invalid `dueAt`/`retryAt` ISO fails closed (`StoreInvalidSchemaError`) — never maps to epoch 0.
+
+## Hybrid (optional, app layer)
+
+Redis for claims/leases + SQL for long-term audit. Core/webhooks never import either adapter.
+
+```ts
+import {
+  createRedisIdempotencyStoreFromBun,
+  createRedisWebhookInboxStoreFromBun,
+} from "@paykernel/store-redis/bun";
+import {
+  createPostgresReconciliationStoreFromPg,
+  migratePostgresAdapter,
+  createPgPostgresExecutor,
+} from "@paykernel/store-postgres/pg";
+import { Pool } from "pg";
+
+const idempotency = createRedisIdempotencyStoreFromBun({
+  redis: { fromEnv: true },
+});
+const webhookInbox = createRedisWebhookInboxStoreFromBun({
+  redis: { fromEnv: true },
+});
+
+const pool = new Pool({ connectionString: process.env.PAYMENTS_SDK_PG_URL });
+const executor = createPgPostgresExecutor(pool);
+await migratePostgresAdapter(executor);
+const reconciliation = createPostgresReconciliationStoreFromPg({ client: pool });
+```
+
+No-Redis path: [`@paykernel/store-postgres`](/stores/postgres) `createPostgresStoresFromPg` implements all three contracts.
+
+## Failure paths
+
+| Event | Behavior |
+| --- | --- |
+| Crash mid-handler | Record stays leased until expiry; peer reclaims with new token + `generation++` |
+| Stale mutator | `StoreLeaseLostError` — not a payment failure |
+| Redis down | `StoreUnavailableError` / `StoreTimeoutError` (`retryable: true` where mapped) |
+| Indeterminate row | `reserve` returns `indeterminate`; **no** new lease. Do not `createPayment` again |
+| Eviction / no AOF | Terminals and leases can vanish — do not call this a durable audit trail |
+| Bun Cluster config | Binding **rejects** Cluster/Sentinel/`clusterKeys` |
+
+**Never fulfill in `onWebhookVerified`.** Claim the inbox first; fulfill only on paid rematched events. See [Webhooks](/guides/webhooks).
+
+## Related
+
+- [Stores overview](/stores) · [PostgreSQL](/stores/postgres)
+- [Store contracts](/packages/store-contracts)
+- [Adapter selection](/guides/adapter-selection)

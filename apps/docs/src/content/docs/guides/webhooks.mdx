@@ -1,0 +1,469 @@
+---
+title: Webhooks
+description: Verify with handleWebhook, claim the inbox, then fulfill only on rematched paid events.
+sidebar:
+  order: 5
+---
+
+`PaymentClient.handleWebhook(gateway, payload, signatureOrHeaders?, headers?)` verifies the payload, normalizes it into a `WebhookEvent`, and runs webhook hooks. It does **not** claim an inbox, lease, or set HTTP status.
+
+:::caution
+**Never fulfill in `onWebhookVerified`.** That hook runs after verify/parse and **before** any inbox claim. A homemade `alreadyProcessed(event.id)` check there is not a lease: two workers can both pass it. Fulfill after `@paykernel/webhooks` claims, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+:::
+
+HTTP status codes live in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`, `processWebhookHttp`), not in `@paykernel/webhooks`.
+
+## Per-gateway verification
+
+Each gateway authenticates webhooks differently. Pass the **right** body shape and signature material or verification will fail closed. Do not paraphrase upstream PSP docs — link out from the gateway pages and document only PayKernel’s mapping.
+
+### Stripe — raw body + `stripe-signature`
+
+Stripe signs the **exact raw request body bytes**. Pass the unparsed body (`string` or `Buffer`) plus the `stripe-signature` header. A parsed JSON object will never verify.
+
+```typescript
+// Bun / Fetch-style handlers: read the body as text before JSON.parse
+app.post("/webhooks/stripe", async ({ request }) => {
+  const rawBody = await request.text();
+  const signature = request.headers.get("stripe-signature") ?? undefined;
+
+  const event = await client.handleWebhook("stripe", rawBody, signature);
+  // Verify only — claim + rematch before fulfillment.
+  return { received: true };
+});
+```
+
+Requires `stripe.webhookSecret` (`whsec_...`). Missing secret → verification fails. Details: [Stripe](/gateways/stripe).
+
+### PayPal — raw body + transmission headers
+
+PayPal verifies via their API using several transmission headers. Pass the **raw request body** (`string` / `Buffer` / `Uint8Array`) plus a **headers object**. Parsed objects are accepted but may fail verification. `handleWebhook` uses async verification automatically for PayPal (sync `verifyWebhook` throws).
+
+```typescript
+app.post("/webhooks/paypal", async (req) => {
+  const rawBody = req.rawBody ?? req.body;
+  const event = await client.handleWebhook("paypal", rawBody, {
+    "paypal-transmission-id": req.headers["paypal-transmission-id"],
+    "paypal-transmission-time": req.headers["paypal-transmission-time"],
+    "paypal-transmission-sig": req.headers["paypal-transmission-sig"],
+    "paypal-cert-url": req.headers["paypal-cert-url"],
+    "paypal-auth-algo": req.headers["paypal-auth-algo"],
+  });
+  return { received: true };
+});
+```
+
+Requires `paypal.webhookId`. `paypal-transmission-time` must be parseable. **Unparseable** or **far-future** timestamps are rejected before calling PayPal. **Aged** transmissions are **soft-accepted**: the SDK warns and still calls PayPal signature verify. There is **no hard 15-minute replay reject** — merchants **must** dedupe by **`event.id`**. `paypal-cert-url` must be HTTPS on `*.paypal.com`. Transient PayPal API failures during verification throw — return 5xx for those, 4xx only for genuinely invalid webhooks. Details: [PayPal](/gateways/paypal).
+
+### Moyasar — `secret_token` in the payload
+
+Moyasar embeds a `secret_token` field in the JSON body. No signature header is required; pass the parsed body only. Requires `moyasar.webhookSecret`. Compared against `payload.secret_token` with a constant-time check. Details: [Moyasar](/gateways/moyasar).
+
+```typescript
+app.post("/webhooks/moyasar", async (req) => {
+  const event = await client.handleWebhook("moyasar", req.body);
+  return { received: true };
+});
+```
+
+### Paymob — HMAC
+
+Pass the body and the HMAC string (query param, body field, or both — the gateway also reads `payload.hmac` when present). Requires `paymob.hmacSecret` in production. Details: [Paymob](/gateways/paymob).
+
+```typescript
+app.post("/webhooks/paymob", async (req) => {
+  const hmac = req.query.hmac ?? req.body.hmac;
+  const event = await client.handleWebhook("paymob", req.body, hmac);
+  return { received: true };
+});
+```
+
+## Raw body required (Stripe and HMAC-style)
+
+| Gateway | Body to pass | Why |
+| --- | --- | --- |
+| **Stripe** | Raw `string` or `Buffer` **required** | Stripe HMAC is over `timestamp.rawBody`. Parsed/re-serialized JSON **never** matches. `verifyWebhook` returns `false` if given an object. |
+| **Paymob** | Parsed object is fine for HMAC fields | HMAC is over selected payload fields, not the raw HTTP body. Still do not mutate fields before verifying. |
+| **PayPal** | Prefer raw `string` / `Buffer` / `Uint8Array` | Verification is an API postback. Raw payloads are embedded as `webhook_event` **without** re-serialization. |
+| **Moyasar** | Parsed JSON body | Checks `secret_token` on the object. |
+
+In frameworks that auto-parse JSON, register a **raw-body** parser for the webhook route only. Do not `JSON.stringify` a parsed object and expect Stripe verification to succeed.
+
+## Hook ordering
+
+`handleWebhook` runs **verify and parse as separate stages**:
+
+1. `onWebhookReceived(gateway, payload)` — fires **before** verification.
+2. **Verify** signature / authenticity. On failure: `onWebhookFailed` runs, then the error is rethrown (`InvalidWebhookError` for failed checks).
+3. **Parse** into a normalized `WebhookEvent` (only after verify succeeds). Parse failures throw **`InvalidRequestError` only** (gateway `InvalidWebhookError` from parse is reclassified) and **do not** call `onWebhookFailed`. Treat them as server/data-shape errors — **not** forged webhooks. With `@paykernel/webhooks` `processWithVerifier`, parse / `InvalidRequestError` maps to `handler_failed { retryable: true }` (~5xx) so authentic paid events redeliver; only verify-false `InvalidWebhookError` / `{ ok: false }` maps to `invalid_webhook` (~400).
+4. Dual-write / rematch — `handleWebhook` attaches a v1 `PaymentEvent` when missing, then **always** rematches incomplete-money / incomplete-refund even when `event.event` already passes `isPaymentEvent`. A complete v1 `payment.succeeded` arm with envelope `processing` / `partially_captured` / `authorized` / `approved` / `pending` / `failed` / `cancelled` / `reversed` / refunded is rematched before hooks run. Nested `event.payment.status` cannot stay `paid` when the envelope is not. Type-only handlers must not fulfill on a rematched arm.
+5. `onWebhookVerified(event)` — fires **after** verify + parse succeed.
+
+| Hook | Throw behavior | Why |
+| --- | --- | --- |
+| `onWebhookReceived` | **Log and continue** to verify | Untrusted path must never block authenticity checks |
+| `onWebhookFailed` | **Secondary**: logged if it throws; the **primary verification error** is always rethrown | Metrics/alerts must not replace `InvalidWebhookError` |
+| `onWebhookVerified` | **Rethrow** (after logging) | HTTP handler should return **5xx** so the provider retries delivery |
+
+`onWebhookVerified` is **fail-fast** — if the first composed handler throws, the second is **not** run. Use it for metrics only:
+
+```typescript
+hooks: {
+  onWebhookVerified: async (event) => {
+    await metrics.increment("webhook.verified", { gateway: event.gateway });
+  },
+}
+```
+
+The payload given to `onWebhookReceived` is **unverified and untrusted**. `onWebhookFailed` is authenticity failures only (bad signature, missing secret, provider rejected the transmission) — not malformed-but-authenticated payloads.
+
+## Deduplicate before fulfillment
+
+Merchants **must** claim via [`@paykernel/webhooks`](/packages/webhooks) (or an equivalent inbox) before fulfilling orders, capturing inventory, or sending goods.
+
+- For Stripe / PayPal / Moyasar the provider event id is `event.id`.
+- **Paymob:** redirect `TRANSACTION_RESPONSE` sets `event.id` to `{txn}:redirect`; processed `TRANSACTION` keeps the raw txn id — those raw ids do not collide. Still call `deriveWebhookEventKey("paymob", event.id, event.provider?.eventType ?? event.type, event.status)` so the engine canonicalizes to `paymob:TRANSACTION_RESPONSE:{txnId}` vs `paymob:TRANSACTION:{txnId}:{status}`. Prefer `provider.eventType` or known native classes (`TRANSACTION` / `TRANSACTION_RESPONSE`) — not remapped `payment.succeeded`. Do not inbox-dedupe on the unsigned Paymob txn id alone. Do **not** complete fulfillment on Paymob `payment.processing` — wait for processed `TRANSACTION`.
+
+```typescript
+import {
+  createWebhookInboxEngine,
+  resolveInboxPayloadHash,
+  type WebhookInboxStore,
+} from "@paykernel/webhooks";
+
+declare const store: WebhookInboxStore;
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+/** Bind webhook PI first. Metadata orderId must not fulfill a different stored PI. */
+function findOrderForEvent(
+  webhookEvent: { gatewayPaymentId?: string; paymentId?: string },
+  _event: unknown,
+): { kind: "ok"; order: Order } | { kind: "mismatch" } | { kind: "missing" } {
+  const webhookPi =
+    typeof webhookEvent.gatewayPaymentId === "string" &&
+    webhookEvent.gatewayPaymentId.length > 0
+      ? webhookEvent.gatewayPaymentId
+      : undefined;
+  if (webhookPi === undefined) return { kind: "missing" };
+  const byGw = findOrderByGatewayPaymentId(webhookPi);
+  if (byGw) return { kind: "ok", order: byGw };
+  const candidate = webhookEvent.paymentId
+    ? findOrderById(webhookEvent.paymentId)
+    : undefined;
+  if (!candidate) return { kind: "missing" };
+  if (candidate.gatewayPaymentId === undefined) {
+    candidate.gatewayPaymentId = webhookPi;
+    return { kind: "ok", order: candidate };
+  }
+  if (candidate.gatewayPaymentId === webhookPi) {
+    return { kind: "ok", order: candidate };
+  }
+  return { kind: "mismatch" };
+}
+
+const engine = createWebhookInboxEngine({ store, mode: "inline" });
+
+const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+
+const outcome = await engine.processVerified({
+  gateway: "stripe",
+  providerEventId: webhookEvent.id,
+  // Prefer event.payloadHash. Never hash rawBody as a fallback for an object hash.
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
+  }),
+  event: webhookEvent.event ?? webhookEvent,
+  handler: async (ctx) => {
+    if (!isPaidFulfillmentEvent(ctx.event)) return;
+    const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+    if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+      return;
+    }
+    const found = findOrderForEvent(webhookEvent, ctx.event);
+    if (found.kind === "mismatch") return;
+    if (found.kind === "missing") {
+      throw new Error("no local order for paid webhook");
+    }
+    await fulfillOrder(found.order, gatewayPaymentId);
+  },
+});
+// Map outcome → HTTP in your framework — never silent-ACK failures.
+```
+
+Do **not** call `isPaidOutcome(event)` on a `WebhookEvent` — that helper is for `GatewayPaymentResult` / `PaymentOperationResult`.
+
+Production HTTP path: `processWebhookHttp` from `@paykernel/integration-http` (see [Getting started](/guides/getting-started)).
+
+## Stable `PaymentEvent` (preferred for new handlers)
+
+`WebhookEvent.type` remains the **provider-native** free-form string (`payment_paid`, `payment_intent.succeeded`, …). Prefer the dual-write fields:
+
+```typescript
+import {
+  STABLE_PAYMENT_EVENT_TYPES,
+  isStablePaymentEventType,
+  toPersistedPaymentEventEnvelope,
+  webhookEventToPaymentEvent,
+} from "@paykernel/core";
+
+const event = await client.handleWebhook("moyasar", body);
+// event.type === "payment_paid"              // legacy free-form
+// event.stableType === "payment.succeeded"
+// event.event is PaymentEvent (schemaVersion: "1")
+// event.provider.eventType === "payment_paid"
+
+const envelope = toPersistedPaymentEventEnvelope(event.event!, {
+  payloadHash: event.payloadHash,
+  rawForHash: event.rawPayload,
+});
+```
+
+`PAYMENT_EVENT_SCHEMA_VERSION` is `'1'`. Consumers must switch on `schemaVersion` then `type`. Additive optional fields on an arm are OK within v1. Changing the meaning of a stable `type` string requires a **new** `schemaVersion`. Never silently rename a stable type. Provider-native names live only on `provider.eventType`.
+
+Stable names (`STABLE_PAYMENT_EVENT_TYPES`):
+
+`payment.created` · `payment.processing` · `payment.authorized` · `payment.succeeded` · `payment.failed` · `payment.cancelled` · `capture.completed` · `refund.pending` · `refund.completed` · `refund.failed` · `payment_method.setup_completed` · `dispute.opened` · `dispute.updated` · `dispute.closed`
+
+Unmapped / ambiguous provider events use `{ schemaVersion: "1"; type: "provider.unmapped"; ... }`. Do **not** invent stable names for ambiguous domains (Stripe invoice / subscription schedules, Paymob redirect-only without status context).
+
+| `type` | Required entity fields |
+| --- | --- |
+| `payment.created` / `processing` / `authorized` / `succeeded` / `cancelled` | `payment: Payment` |
+| `payment.failed` | `payment` + `failure: PaymentFailure` |
+| `capture.completed` | `capture: Capture`; optional `payment` |
+| `refund.pending` / `refund.completed` | `refund: Refund` |
+| `refund.failed` | `refund`; optional `failure` |
+| `payment_method.setup_completed` | `setup: PaymentMethodSetup` |
+| `dispute.opened` / `updated` / `closed` | `dispute: Dispute` |
+| `provider.unmapped` | optional `payment`, optional `note` |
+
+Timestamps on `ProviderEventMetadata` are **ISO-8601 strings**, not `Date`.
+
+### Provider-native → stable mapping
+
+```ts
+import { mapProviderEventTypeToStable } from "@paykernel/core";
+
+mapProviderEventTypeToStable("stripe", "payment_intent.succeeded");
+// → "payment.succeeded"
+
+mapProviderEventTypeToStable("moyasar", "payment_paid");
+// → "payment.succeeded"
+
+mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED");
+// → "capture.completed"
+
+mapProviderEventTypeToStable("stripe", "invoice.paid");
+// → "provider.unmapped"
+```
+
+| Gateway | Native type | Stable | Notes |
+| --- | --- | --- | --- |
+| Stripe | `payment_intent.succeeded` (full / status `paid`) | `payment.succeeded` | Default map when not partial |
+| Stripe | `payment_intent.succeeded` + status `partially_captured` / `processing` / `pending` / `approved` | **`payment.processing`** | Catalog rematch; not paid |
+| Stripe | `payment_intent.succeeded` + status `refunded` / `partially_refunded` | **`payment.processing`** | Not `payment.succeeded` |
+| Stripe | `payment_intent.succeeded` + status `failed` | **`payment.failed`** | Type-only handlers must not fulfill |
+| Stripe | `payment_intent.succeeded` + status `cancelled` / `reversed` | **`payment.cancelled`** | Rematch |
+| Stripe | `payment_intent.succeeded` + status `authorized` | **`payment.authorized`** | Auth hold is not paid |
+| Stripe | `payment_intent.payment_failed` | `payment.failed` | |
+| Stripe | `checkout.session.completed` + `payment_status=paid` | `payment.succeeded` | Needs context |
+| Stripe | `charge.refunded` | `refund.completed` | |
+| Stripe | `invoice.*` / `customer.subscription.*` | **unmapped** | Ambiguous |
+| Moyasar | `payment_paid` | `payment.succeeded` | |
+| Moyasar | `payment_failed` / `payment_faild` | `payment.failed` | Typo normalized by gateway |
+| Moyasar | `payment_authorized` | `payment.authorized` | |
+| PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded`. Rematch if domain status is `partially_captured` / `processing` / `failed` / `cancelled` / `refunded` |
+| PayPal | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | **`payment.processing`** | Status `partially_captured`; **not** capture completed / paid |
+| PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
+| Paymob | `TOKEN` | `payment_method.setup_completed` | |
+| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | **Processed** server webhook only |
+| Paymob | `TRANSACTION` `partially_captured` | **`payment.processing`** | Partial is not paid-like |
+| Paymob | `TRANSACTION` `is_capture` + success (no trusted `captured_amount`) | **`payment.processing`** | Not `capture.completed` / `paid` |
+| Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
+| Paymob | `TRANSACTION_RESPONSE` + success / paid / capture signals | **`payment.processing`** | **Never** `payment.succeeded` / `capture.completed` on redirect; wait for processed `TRANSACTION` |
+
+**PayPal capture choice:** `PAYMENT.CAPTURE.COMPLETED` maps to `capture.completed`, not `payment.succeeded`. Apps that fulfill when money is captured should handle `capture.completed`.
+
+**Paymob redirect vs processed:** Browser/query redirect callbacks parse as `TRANSACTION_RESPONSE` and dual-write `payment.processing` even when status is `paid` — so fulfill-on-`payment.succeeded` handlers never ship from redirect alone.
+
+**Stripe / Paymob partial capture:** Domain status `partially_captured` dual-writes `payment.processing`, not `payment.succeeded`. Fulfill only with status `paid` or `isPaidOutcome` on payment results.
+
+### Dual-write with legacy `WebhookEvent`
+
+| Field | Behavior |
+| --- | --- |
+| `WebhookEvent.type` | **Unchanged** — provider-native free-form |
+| `WebhookEvent.stableType` | Stable name when mappable; omitted when unmapped |
+| `WebhookEvent.event` | Full `PaymentEvent` |
+| `WebhookEvent.provider` | `ProviderEventMetadata` |
+| `WebhookEvent.rawPayload` | Still **required** request-local; **deprecated for persistence** |
+| `PaymentEvent.type` | **Always** stable name or `provider.unmapped` |
+
+Do **not** persist `rawPayload` by default. Use `toPersistedPaymentEventEnvelope` (strips raw / `clientSecret` / secrets). `hashWebhookPayload` redacts known secret keys before hashing. Core never ships a default encryptor — apps own keys via `RawWebhookPayloadCodec`.
+
+## Inbox engine (`@paykernel/webhooks`)
+
+Storage-agnostic **claim / dedupe / retry / audit** for verified webhook deliveries. The engine is gateway-agnostic: verification and normalization are injected; HTTP status codes are never hardcoded.
+
+| # | Step | Who |
+| - | ---- | --- |
+| 1 | Receive raw request | Your HTTP framework |
+| 2 | Verify signature / authenticity | `PaymentClient.handleWebhook` / `gateway.verifyWebhook` / injected `verifyAndNormalize` |
+| 3 | Normalize event | Same path; dual-write `PaymentEvent` preferred |
+| 4 | Calculate payload hash | Prefer gateway `event.payloadHash`; else `resolveInboxPayloadHash` (same object shape as gateway) |
+| 5 | Derive event key | `deriveWebhookEventKey(gateway, providerEventId)` → `gateway:providerEventId` |
+| 6 | Atomically claim | `store.claim` only (engine never get-then-set) |
+| 7 | Conflict / non-acquired | Map claim kinds → `WebhookProcessingOutcome` (no handler) |
+| 8 | Run application handler | Under lease; `ctx.renew` available |
+| 9 | Complete | `store.complete` with current lease token → `processed` |
+| 10 | Fail / retry | Sanitized `store.fail` → mode-specific outcome |
+
+Mode is **required** on `createWebhookInboxEngine` and is **fixed for the life of the engine**.
+
+| Mode | Behavior |
+| --- | --- |
+| `inline` | Await handler under lease. Retryable throw → `handler_failed { retryable: true }`. **Never** emits `scheduled_for_retry`. |
+| `durable_retry` | Await handler by default. Retryable throw → `scheduled_for_retry { reason: "handler_retry" }`. |
+| `durable_retry` + `ackAfterClaim: true` | After successful claim, park as `scheduled_for_retry { reason: "parked" }` **without** running the handler. **Requires `workerGuaranteed: true`**. Workers call `processRetryable`. |
+
+`processRetryable` is **only valid on `durable_retry` engines** (throws if `mode === "inline"`).
+
+### Event key and payload hash
+
+```typescript
+import { deriveWebhookEventKey, parseWebhookEventKey } from "@paykernel/webhooks";
+
+deriveWebhookEventKey("stripe", "evt_123"); // "stripe:evt_123"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
+// "paymob:TRANSACTION_RESPONSE:123456789"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
+// "paymob:TRANSACTION:123456789:paid"
+```
+
+- Both parts must be non-empty after trim; otherwise `deriveWebhookEventKey` throws and `processVerified` returns `invalid_webhook`.
+- **Gateway must not contain `:`** (colon is the key separator).
+- `hashWebhookPayload(rawBodyString) !== hashWebhookPayload(parsedObject)` even when the string is JSON of that object. Mixing them → `payload_conflict` on redelivery.
+
+| Existing row | New hash | Claim result |
+| --- | --- | --- |
+| `completed` / `dead_letter` / `failed` | any | terminal (`already_completed` / `duplicate_failed`) — no re-run |
+| Active lease + **same** hash | same | `in_progress` → `already_processing` |
+| Active lease + **different** hash | different | `payload_hash_conflict` → `payload_conflict` |
+| Idle non-terminal + different hash | different | **supersede** — acquire with new hash |
+| Pending + future `availableAt` + **same** hash | same | `not_available` → durable `scheduled_for_retry`; **inline** → `handler_failed { retryable: true }` |
+
+### Forbidden to store (by default)
+
+- Raw provider **payloads** (unredacted)
+- Signature headers (`stripe-signature`, PayPal transmission sigs, HMAC strings)
+- Authorization headers, Bearer tokens, API keys
+- Webhook secrets (`whsec_…`, Moyasar `secret_token`, …)
+- Unsanitized exception messages that may embed secrets
+
+**Handlers MUST be idempotent.** Crash after side effect and before `complete` → lease expires → reclaim → **handler runs again**.
+
+### `WebhookProcessingOutcome` and HTTP mapping
+
+The engine **never** hardcodes Express/Hono status codes. Map with `mapInboxOutcome` from `@paykernel/integration-http`.
+
+| Outcome | Meaning | `mapInboxOutcome` (default `provider_redelivery`) |
+| --- | --- | --- |
+| `processed` | Handler ran; inbox completed | 200 |
+| `duplicate_completed` | Already terminal success; handler not re-run | 200 |
+| `already_processing` | Another worker holds lease | 503 |
+| `scheduled_for_retry` `reason: "parked"` | Durable park **with `workerGuaranteed: true`** | 200 only if `ackPolicy: { kind: "durable_worker" }`; else 503 |
+| `scheduled_for_retry` `reason: "handler_retry"` | Retryable handler fail recorded | 200 with durable worker; 503 under `provider_redelivery` |
+| `scheduled_for_retry` `reason: "not_available"` | Claim backoff; no handler ran | 503 |
+| `handler_failed` `retryable: true` | Handler failed or verify infra/parse | 500 |
+| `handler_failed` `retryable: false` | Dead letter / non-retryable | 200 |
+| `payload_conflict` | Same key, different hash **while lease active** | 409 |
+| `invalid_webhook` | Bad input / verify-false MAC mismatch | 400 |
+
+:::caution
+Silent ACK of failed work is forbidden. Do not return 200 for `handler_failed` retryable work or for `scheduled_for_retry` without a real recovery path (worker or provider redelivery). Default `processWebhookHttp` ack policy is `provider_redelivery` (never 200 for `scheduled_for_retry`).
+:::
+
+Store claim kind mapping:
+
+| Claim kind | Outcome |
+| --- | --- |
+| `acquired` | Continue pipeline |
+| `already_completed` | `duplicate_completed` |
+| `in_progress` | `already_processing` |
+| `payload_hash_conflict` | `payload_conflict` |
+| `duplicate_failed` | `handler_failed { retryable: false }` |
+| `not_available` | **durable_retry:** `scheduled_for_retry { reason: "not_available" }`. **inline:** `handler_failed { retryable: true }` |
+
+### Injected verifier (verify-only)
+
+```typescript
+declare function fulfillPaidOrder(event: unknown): Promise<void>;
+
+const outcome = await engine.processWithVerifier({
+  raw: { body, headers },
+  // VERIFY ONLY — no fulfill / onWebhookVerified money work.
+  verifyAndNormalize: async (raw) => {
+    const event = await client.handleWebhook(
+      "stripe",
+      raw.body,
+      raw.headers["stripe-signature"],
+    );
+    return {
+      ok: true,
+      gateway: "stripe",
+      providerEventId: event.id,
+      payloadHash: resolveInboxPayloadHash({
+        eventPayloadHash: event.payloadHash,
+        payloadForHash: event.rawPayload ?? event.event ?? event,
+      }),
+      event: event.event ?? event,
+    };
+  },
+  handler: async (ctx) => {
+    await fulfillPaidOrder(ctx.event);
+  },
+});
+```
+
+Classification:
+
+- `InvalidWebhookError` (verify-false only) / `ok: false` → `invalid_webhook` (~400 forgery)
+- Missing `webhookSecret` / `hmacSecret` / `webhookId` → `handler_failed { retryable: true }` (~5xx; merchant config — **never** forgery)
+- Parse / `InvalidRequestError` / parse-stage `InvalidWebhookError` → `handler_failed { retryable: true }` (~5xx)
+- `RateLimitError` / `TypeError` / `NetworkError` / unknown → `handler_failed { retryable: true }`
+- Permanent structure `GatewayApiError` → `handler_failed { retryable: false }`
+
+Never map infrastructure/parse throws to `ok: false` (that stops redelivery).
+
+### Public inbox exports
+
+| Export | Role |
+| --- | --- |
+| `createWebhookInboxEngine` | Factory; fixed mode |
+| `computePayloadHash` | Core `hashWebhookPayload` wrapper |
+| `resolveInboxPayloadHash` | Prefer gateway hash; else hash the same object shape |
+| `deriveWebhookEventKey` / `parseWebhookEventKey` | Key helpers |
+| `sanitizeWebhookError` | Default `lastError` sanitizer |
+| `StoreLeaseLostError` / `isStoreLeaseLostError` | Portable fencing errors |
+| `NonRetryableHandlerError` | Dead-letter / non-retryable throws |
+| `WebhookInboxStore` | Domain store contract |
+| `WebhookProcessingMode` / `WebhookProcessingOutcome` | Modes + outcomes |
+
+Memory stores are **not** exported from `@paykernel/webhooks`. Tests: `createMemoryWebhookInboxStore` from `@paykernel/testkit` (**NON-PRODUCTION**). Production: `@paykernel/store-*`.
+
+Core **must not** depend on `@paykernel/webhooks`. Apps that need inbox behavior add the webhooks package as a separate dependency.
+
+See [Getting started](/guides/getting-started) for Postgres composition and [Outcomes](/guides/outcomes) for `isPaidOutcome`. The stable event catalog is `STABLE_PAYMENT_EVENT_TYPES` on this page.

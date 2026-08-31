@@ -1,0 +1,434 @@
+---
+title: Composition
+description: Wire core, inbox, a durable store, reconciliation, and optional routing at the application layer.
+sidebar:
+  order: 7
+---
+
+PayKernel is composed at the application layer. `@paykernel/core` never depends on webhooks, stores, routing, or OpenTelemetry. Current versions are `0.1.0-next.0`.
+
+```text
+@paykernel/core                 verify, money, createPayment, PaymentEvent
+        ↑
+@paykernel/webhooks            inbox engine + WebhookInboxStore types
+@paykernel/reconciliation      lookup + decideReconciliationPolicy + scheduler
+@paykernel/routing             select-only gateway choice
+@paykernel/opentelemetry       metrics / spans (optional; folder is packages/observability)
+        ↑
+@paykernel/store-*             durable adapters (migrate explicitly)
+@paykernel/integration-*       HTTP mapping + framework raw-body helpers
+```
+
+Pick a store with [Adapter selection](/guides/adapter-selection). This page uses PostgreSQL as the general multi-host default. Full copy-paste walkthrough: [Getting started](/guides/getting-started).
+
+:::caution
+Never fulfill in `onWebhookVerified`. After `outcome === "indeterminate"` do **not** `createPayment` again. Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx. HTTP status codes live in `@paykernel/integration-http`, not `@paykernel/webhooks`.
+:::
+
+## Production stack
+
+| Layer | Package | Role |
+| --- | --- | --- |
+| Client | `@paykernel/core` | `createPaymentClient` + gateway factories (`moyasarGateway`, `stripeGateway`, `paypalGateway`, `paymobGateway`). Extra gateways: [`@paykernel/gateway-tap`](/gateways/tap), [`@paykernel/gateway-myfatoorah`](/gateways/myfatoorah) (not `BuiltInGatewayName`). |
+| Inbox | `@paykernel/webhooks` | `createWebhookInboxEngine({ store, mode })` — `inline` or `durable_retry` |
+| HTTP | `@paykernel/integration-http` | `processWebhookHttp`, `mapInboxOutcome` |
+| Store | `@paykernel/store-postgres` (or another adapter) | `webhookInbox` + `reconciliation` + idempotency. Migrate explicitly. |
+| Reconcile | `@paykernel/reconciliation` | `createPaymentReconciler` + `createReconciliationScheduler` + `decideReconciliationPolicy` |
+| Route | `@paykernel/routing` (optional) | `createPaymentRouter` + `route(...).to(...)` — select-time only |
+| Telemetry | `@paykernel/opentelemetry` (optional) | Metrics / spans. Core has no `@opentelemetry/*` dependency. Subpath: `@paykernel/opentelemetry/otel`. |
+
+Do **not** install `@paykernel/internal-sql-store`. Relational adapters share schemas via `@paykernel/sql-foundation`.
+
+## Inbox + durable store
+
+Migrate **explicitly**. Importing a store package does not apply DDL. Run migrate in ops / CI — never on import or inside the request factory.
+
+```typescript
+import { createPaymentClient, stripeGateway } from "@paykernel/core";
+import { createWebhookInboxEngine } from "@paykernel/webhooks";
+import {
+  createPostgresStoresFromPg,
+  createPgPostgresExecutor,
+  migratePostgresAdapter,
+} from "@paykernel/store-postgres/pg";
+import { processWebhookHttp } from "@paykernel/integration-http";
+import { Pool } from "pg";
+
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+function findOrderForEvent(
+  webhookEvent: { gatewayPaymentId?: string; paymentId?: string },
+  _event: unknown,
+): { kind: "ok"; order: Order } | { kind: "mismatch" } | { kind: "missing" } {
+  const webhookPi =
+    typeof webhookEvent.gatewayPaymentId === "string" &&
+    webhookEvent.gatewayPaymentId.length > 0
+      ? webhookEvent.gatewayPaymentId
+      : undefined;
+  if (webhookPi === undefined) return { kind: "missing" };
+  const byGw = findOrderByGatewayPaymentId(webhookPi);
+  if (byGw) return { kind: "ok", order: byGw };
+  const candidate = webhookEvent.paymentId
+    ? findOrderById(webhookEvent.paymentId)
+    : undefined;
+  if (!candidate) return { kind: "missing" };
+  if (candidate.gatewayPaymentId === undefined) {
+    candidate.gatewayPaymentId = webhookPi;
+    return { kind: "ok", order: candidate };
+  }
+  if (candidate.gatewayPaymentId === webhookPi) {
+    return { kind: "ok", order: candidate };
+  }
+  return { kind: "mismatch" };
+}
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const executor = createPgPostgresExecutor(pool);
+await migratePostgresAdapter(executor);
+const stores = createPostgresStoresFromPg({ client: pool });
+
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: process.env.STRIPE_SECRET_KEY!,
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "stripe",
+});
+
+const engine = createWebhookInboxEngine({
+  store: stores.webhookInbox,
+  mode: "inline", // does not require a processRetryable worker
+});
+
+export async function onStripeWebhook(rawBody: string, signature: string) {
+  const result = await processWebhookHttp({
+    gateway: "stripe",
+    rawBody, // do not JSON.parse/stringify
+    headers: { "stripe-signature": signature },
+    client,
+    engine,
+    handler: async (ctx) => {
+      if (!isPaidFulfillmentEvent(ctx.event)) return;
+      const event = ctx.event as {
+        payment?: {
+          references?: { providerObjectId?: string; internalReference?: string };
+        };
+      };
+      const gatewayPaymentId = event.payment?.references?.providerObjectId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+        return;
+      }
+      const found = findOrderForEvent(
+        {
+          gatewayPaymentId,
+          paymentId: event.payment?.references?.internalReference,
+        },
+        ctx.event,
+      );
+      if (found.kind === "mismatch") return;
+      if (found.kind === "missing") {
+        throw new Error("no local order for paid webhook");
+      }
+      await fulfillOrder(found.order, gatewayPaymentId);
+    },
+  });
+  return { status: result.status };
+}
+```
+
+- `inline` does not require a `processRetryable` worker.
+- `durable_retry` is only safe to ACK if that worker is guaranteed (`workerGuaranteed: true` + `ackPolicy: { kind: "durable_worker" }`).
+- Default `processWebhookHttp` ack policy is fail-closed `provider_redelivery` (never 200 for `scheduled_for_retry`).
+- Framework helpers: `honoWebhook`, `elysiaWebhook` (`parse: "none"`), `expressWebhook` + `expressRawJson` (webhook route only), `handleCloudflareWebhook`.
+
+Fulfill only when the rematched stable type is still `payment.succeeded` / `capture.completed` **and** nested `payment.status === "paid"`, then bind `gatewayPaymentId`. Metadata `orderId` must not fulfill an order whose stored PI differs. See [Webhooks](/guides/webhooks).
+
+## Indeterminate create → reconcile
+
+Timeouts, dropped connections after POST, and `outcome: "indeterminate"` mean the provider **may already have the charge**. Invariant: **lookup + decide, never a second charge**.
+
+```typescript
+import {
+  createPaymentReconciler,
+  createReconciliationScheduler,
+  createGetPaymentLookupPort,
+  buildReconciliationTarget,
+  buildProviderPaymentSnapshot,
+  decideReconciliationPolicy,
+  type ReconciliationTarget,
+} from "@paykernel/reconciliation";
+import {
+  isMoney,
+  isPaymentDomainStatus,
+  type GatewayPaymentResult,
+} from "@paykernel/core";
+
+declare const params: Parameters<typeof client.createPayment>[0];
+declare const gateway: "stripe";
+
+function publishableCurrency(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
+  if (!got.gatewayId) return undefined;
+  if (!isPaymentDomainStatus(got.status)) return undefined;
+  const currency = publishableCurrency(got.currency);
+  const hasAmountLike =
+    got.amount !== undefined ||
+    got.capturedAmount !== undefined ||
+    got.refundedAmount !== undefined;
+  if (hasAmountLike && currency === undefined) return undefined;
+  const amount = isMoney(got.amount) ? got.amount : undefined;
+  if (amount === undefined) return undefined;
+  const input: Parameters<typeof buildProviderPaymentSnapshot>[0] = {
+    gatewayPaymentId: got.gatewayId,
+    status: got.status,
+    amount,
+    providerStatus: got.status,
+  };
+  if (got.capturedAmount !== undefined) {
+    const captured = isMoney(got.capturedAmount) ? got.capturedAmount : undefined;
+    if (captured === undefined) return undefined;
+    input.capturedAmount = captured;
+  }
+  if (got.refundedAmount !== undefined) {
+    const refunded = isMoney(got.refundedAmount) ? got.refundedAmount : undefined;
+    if (refunded === undefined) return undefined;
+    input.refundedAmount = refunded;
+  }
+  return buildProviderPaymentSnapshot(input);
+}
+
+async function loadTarget(job: { record: { subjectId: string } }): Promise<ReconciliationTarget> {
+  return buildReconciliationTarget({
+    gateway: "stripe",
+    gatewayPaymentId: job.record.subjectId,
+    expected: { status: "pending" },
+  });
+}
+
+const scheduler = createReconciliationScheduler({ store: stores.reconciliation });
+const reconciler = createPaymentReconciler({
+  lookup: createGetPaymentLookupPort({
+    getPayment: async ({ gateway, gatewayPaymentId }) => {
+      const got = await client.getPayment({ gatewayPaymentId }, gateway);
+      // Never copy catalog / local trusted amount onto the provider snapshot.
+      return providerSnapshotFromGetPayment(got);
+    },
+  }),
+});
+
+const result = await client.createPayment(params, gateway);
+if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  await scheduler.schedule({
+    target: buildReconciliationTarget({
+      gateway,
+      gatewayPaymentId: result.gatewayId,
+      idempotencyKey: params.idempotencyKey,
+      expected: { status: "pending" },
+    }),
+    runAt: new Date().toISOString(),
+    reason: "indeterminate_create",
+  });
+}
+
+// Production poll loop: processDue claims immediately before each handler
+// and auto-renews on leaseMs/3. claimDue is discovery / test inspection only —
+// do not serial-run handlers on a claimDue array.
+await scheduler.processDue({
+  limit: 10,
+  handler: async (job) => {
+    const target = await loadTarget(job); // rebuild from subjectId — store does not persist the full target
+    const result = await reconciler.reconcile(target);
+    const decision = decideReconciliationPolicy(result, target);
+    if (decision.action === "mark_consistent" && decision.safe) {
+      return { disposition: "complete" };
+    }
+    if (
+      (decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+      decision.safe
+    ) {
+      // Apply the local paid/failed update in YOUR app first, then complete.
+      return { disposition: "complete" };
+    }
+    if (decision.action === "do_not_create_replacement") {
+      return { disposition: "retry", error: new Error(decision.reason) };
+    }
+    if (decision.action === "retry_later") {
+      return { disposition: "retry_later", error: new Error("retry_later") };
+    }
+    return { disposition: "manual_review", note: decision.action };
+  },
+});
+```
+
+:::caution
+`claimDue` is discovery / test inspection: it still returns N live leases. Do **not** serial-work that array. Production poll loop is `processDue`.
+:::
+
+Do not `complete` on raw `result.outcome === "consistent"` — sparse pending vs provider pending is still settling (`retry_later`). Full worker: [Getting started](/guides/getting-started).
+
+## Routing (select ≠ execute)
+
+[`@paykernel/routing`](/packages/routing) chooses a gateway with **explicit ordered rules**. The package does **not** execute payments, and it does **not** automatically switch gateways after an unsafe or indeterminate attempt.
+
+| Surface | Role |
+| --- | --- |
+| **Rules** | `route(match).to(gateway)` — currency, country, method, amount range, tenant, capabilities, merchant preference |
+| **Select** | `createPaymentRouter` + pure `select(input)` → `RoutingDecision` with `gateway` always set on success |
+| **Select-time fallback** | Optional `fallback` when no rule matches (**not** post-attempt recovery) |
+| **Post-attempt eligibility** | `isSafeFallbackEligible` / `evaluateFallback` / `classifySubmissionState` — default-deny except not submitted / definitive pre-submit failure |
+| **Telemetry** | `decisionToTelemetryAttributes(decision)` — non-sensitive gateway + match metadata |
+
+```typescript
+import {
+  createPaymentRouter,
+  route,
+  decisionToTelemetryAttributes,
+  classifySubmissionState,
+  isSafeFallbackEligible,
+  evaluateFallback,
+  trySelectFallbackGateway,
+} from "@paykernel/routing";
+import { createOperationContext, money } from "@paykernel/core";
+
+const router = createPaymentRouter({
+  rules: [
+    route({ currency: "SAR", paymentMethod: "mada" }).to("moyasar"),
+    route({ currency: "USD" }).to("stripe"),
+  ],
+  fallback: "stripe", // select-time only
+});
+
+const amount = money("10.00", "SAR");
+const decision = router.select({
+  currency: amount.currency,
+  paymentMethod: "mada",
+  amount,
+});
+
+const ctx = createOperationContext({
+  operationId: crypto.randomUUID(),
+  gateway: decision.gateway,
+  operationType: "payment.create",
+});
+decisionToTelemetryAttributes(decision);
+void ctx;
+
+const selected = decision.gateway;
+if (selected !== "moyasar" && selected !== "stripe") {
+  throw new Error(`router selected unregistered gateway: ${selected}`);
+}
+await client.createPayment(
+  {
+    amount,
+    currency: amount.currency,
+    orderId: "o1",
+    callbackUrl: "https://example.com/callback",
+  },
+  selected,
+);
+```
+
+If `input.currency` and `amount.currency` are both set and differ, `select` throws `NoRouteMatchError` with reason `currency_mismatch_honesty`. Amount ranges use core `toMinorUnits` (bigint) — never float.
+
+### Design rules
+
+1. **Select ≠ execute** — pure, sync `select`. The router never calls `createPayment` / capture / refund / network I/O.
+2. **Deterministic first-match** — same rules + input → same decision (rule array order is significant).
+3. **Select-time `fallback` only** — default gateway when no rule matches; never post-attempt recovery.
+4. **Post-attempt default-deny** — only `not_submitted` / `pre_submission_failure` are auto-eligible.
+5. **Never after indeterminate / timeout / connection_reset / uncertain 5xx / submitted** without a loud expert override.
+6. **Expert override is opt-in** — `{ confirmUnsafeFallback: true, reason }` only; never defaulted; bare `true` rejected.
+7. **No secret telemetry** — gateway + match metadata only. Attributes exclude `tenantConfig` dumps, secrets, PII, health/cost maps.
+
+### Post-attempt fallback (restricted)
+
+```typescript
+const state = classifySubmissionState({ errorKind: "timeout" });
+// state === "timeout" → NOT safe
+
+if (isSafeFallbackEligible(state)) {
+  // only not_submitted | pre_submission_failure
+}
+
+const eligibility = evaluateFallback({
+  submissionState: state,
+  // expertOverride: { confirmUnsafeFallback: true, reason: "ops confirmed no charge" },
+});
+// eligibility.allowed === false for timeout without override — do not createPayment on another gateway
+
+if (eligibility.allowed) {
+  const routeInput = { currency: amount.currency, amount };
+  const next = trySelectFallbackGateway(router, routeInput, eligibility, {
+    attemptedGateways: [decision.gateway],
+  });
+  const nextGateway = next.gateway;
+  if (nextGateway !== "moyasar" && nextGateway !== "stripe") {
+    throw new Error(`fallback selected unregistered gateway: ${nextGateway}`);
+  }
+  await client.createPayment(
+    {
+      amount,
+      currency: amount.currency,
+      orderId: "o1",
+      callbackUrl: "https://example.com/callback",
+    },
+    nextGateway,
+  );
+}
+```
+
+`trySelectFallbackGateway` re-validates `isSafeFallbackEligible(submissionState)` and does **not** trust a forged `{ allowed: true }` without `expertOverride: true`.
+
+| `SubmissionState` | Auto-fallback eligible? |
+| --- | --- |
+| `not_submitted` | **Yes** |
+| `pre_submission_failure` | **Yes** |
+| `submitted` | **No** |
+| `indeterminate` | **No** |
+| `timeout` | **No** |
+| `connection_reset` | **No** |
+| `provider_5xx_uncertain` | **No** |
+
+AbortError / abort codes classify as **`indeterminate`** by default (not fallback-eligible). Use `aborted_before_submit` only when cancel is known pre-submit.
+
+**Non-goals:** automatically retrying or routing an **indeterminate** payment to another gateway; router-owned mutation retries; a hard dependency on `@paykernel/opentelemetry`.
+
+## Failure path (inbox)
+
+| Outcome | Meaning | Typical HTTP (`mapInboxOutcome`) |
+| --- | --- | --- |
+| `processed` | Handler ran; `complete` succeeded | 200 |
+| `duplicate_completed` | Same event already done | 200 |
+| `scheduled_for_retry` | Read `reason` (`parked` / `handler_retry` / `not_available`) | 200 only with a guaranteed worker; 503 under default `provider_redelivery` |
+| `handler_failed` | Handler threw; `retryable` says whether to redeliver | 5xx if retryable |
+| `invalid_webhook` | Bad input / forgery class | 400 |
+| `payload_conflict` | Hash mismatch on an active lease | 409 |
+
+Silent ACK of failed work is forbidden. See [Webhooks](/guides/webhooks).
+
+## Related
+
+- [Getting started](/guides/getting-started) — full inbox + Postgres + reconcile samples (`isPaidFulfillmentEvent`, `findOrderForEvent`)
+- [Runtime](/guides/runtime) — injectable fetch / clock / crypto
+- [Best practices](/guides/best-practices)
+- [Examples](/examples)

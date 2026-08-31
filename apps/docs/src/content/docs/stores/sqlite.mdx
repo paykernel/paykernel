@@ -1,0 +1,131 @@
+---
+title: SQLite
+description: Local single-host SQLite stores for Bun, Node, and better-sqlite3. Not multi-host coordination.
+sidebar:
+  order: 4
+---
+
+`@paykernel/store-sqlite` is **local/embedded SQLite** for a **single host**. One database file must have one durable filesystem authority. Claims use `BEGIN IMMEDIATE` (or equivalent) + conditional writes in **one synchronous transaction**.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+`SQLITE_STORAGE_ADAPTER_MANIFEST.coordinationScope` is **`single-host`**. Do not use this package for multi-host or multi-isolate coordination (including Cloudflare Workers). Do not share the file over NFS/SMB. `:memory:` is **one process** and does not satisfy the file-backed `durable` claim across restart.
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-sqlite
+# optional Node native binding:
+bun add better-sqlite3
+```
+
+Root entry **never** statically imports `bun:sqlite`, `node:sqlite`, or `better-sqlite3`.
+
+`engines.node` is `>=18` for root types and `/better-sqlite3`. **`@paykernel/store-sqlite/node` requires Node `>=22.5.0`** (`NODE_SQLITE_SUPPORT.minimumNode`).
+
+## Quick start
+
+```ts
+import {
+  createSqliteIdempotencyStore,
+  migrateSqliteAdapter,
+  applyRecommendedPragmas,
+  type SqliteExecutor,
+} from "@paykernel/store-sqlite";
+
+const executor: SqliteExecutor = /* from a driver subpath */;
+
+applyRecommendedPragmas(executor, { busyTimeoutMs: 5_000, wal: true });
+
+// Explicit migrate — NEVER automatic on import or factory construction.
+await migrateSqliteAdapter(executor);
+
+const store = createSqliteIdempotencyStore({ executor });
+const r = await store.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+```
+
+## Subpaths
+
+| Subpath | Driver |
+| --- | --- |
+| `/bun` | `bun:sqlite` (runtime-provided) |
+| `/node` | `node:sqlite` (`DatabaseSync`; Node 22.5+; **experimental**) |
+| `/better-sqlite3` | `better-sqlite3` (optional peer) |
+
+```ts
+import { Database } from "bun:sqlite";
+import {
+  createBunSqliteStores,
+  migrateSqliteAdapter,
+  applyRecommendedPragmas,
+} from "@paykernel/store-sqlite/bun";
+
+const db = new Database("payments.db");
+const stores = createBunSqliteStores({ db });
+applyRecommendedPragmas(stores.executor, { busyTimeoutMs: 5_000, wal: true });
+await migrateSqliteAdapter(stores.executor);
+```
+
+`createBunSqliteStores` / `createNodeSqliteStores` / `createBetterSqlite3Stores` **do not** migrate.
+
+### `/node` version matrix (`NODE_SQLITE_SUPPORT`)
+
+| Node | `node:sqlite` |
+| --- | --- |
+| 22.5.0+ | Experimental (`DatabaseSync`) |
+| 23.x | Experimental |
+| 24+ / 25+ | Experimental — verify release notes; prefer `better-sqlite3` until stable |
+
+## Four deployment limits
+
+1. **One durable filesystem authority per file.** Multiple workers on one host, one local path: OK. Two hosts writing the same path: not OK.
+2. **Do not share the file over unsupported network filesystems** (NFS, SMB, …). Locking/durability is unreliable for this workload.
+3. **Ephemeral serverless filesystems lose state.** Lambda `/tmp` and similar are not a durable inbox.
+4. **Horizontal multi-host scaling needs another service** — [`store-postgres`](/stores/postgres), [`store-turso`](/stores/turso), [`store-d1`](/stores/d1), [`store-durable-objects`](/stores/durable-objects), or optional [`store-redis`](/stores/redis).
+
+**Fail-closed:** if you need multi-host and the only option is this file DB → **STOP**. Do not “share the file.”
+
+## Migrate
+
+```ts
+import {
+  migrateSqliteAdapter,
+  verifySqliteAdapterSchema,
+} from "@paykernel/store-sqlite";
+
+await migrateSqliteAdapter(executor);
+const check = await verifySqliteAdapterSchema(executor);
+if (!check.ok) throw new Error(check.errors.join("; "));
+```
+
+Dialect is **`sqlite`** via [`@paykernel/sql-foundation`](/packages/sql-foundation). Importing the package never applies DDL.
+
+Recommended pragmas for persistent single-host apps: WAL, `busy_timeout` (e.g. 5000 ms), `foreign_keys = ON`.
+
+## Failure paths
+
+| Event | Behavior |
+| --- | --- |
+| Crash after claim, before complete | Lease until expiry; peer on the **same host** reclaims with new token |
+| Crash after provider work, before complete | Uncertain — `markIndeterminate` if you still hold the lease; **never invent failure** |
+| Stale token | `StoreLeaseLostError` |
+| `SQLITE_BUSY` | Wait via `busy_timeout`; still single-host locking, not distributed consensus |
+| Process restart with `:memory:` | **All state gone** |
+| Two hosts / Workers isolates writing one file | Split-brain / lost claims — out of scope for this manifest |
+
+Inbox `claim` is not webhook verify. **Never fulfill in `onWebhookVerified`.** See [Webhooks](/guides/webhooks).
+
+This is **not** the sql-foundation NON-PRODUCTION bun reference store.
+
+## Related
+
+- [Stores overview](/stores) · [Adapter selection](/guides/adapter-selection)
+- [Turso (remote SQLite-compatible)](/stores/turso) · [D1](/stores/d1)
+- [Store contracts](/packages/store-contracts)

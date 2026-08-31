@@ -1,0 +1,328 @@
+---
+title: "@paykernel/routing"
+description: Select-only gateway choice — deterministic first-match rules, money-safe amount ranges, and default-deny post-attempt fallback. Never auto-route after indeterminate.
+sidebar:
+  order: 5
+---
+
+`@paykernel/routing` chooses a gateway id. It does **not** execute payments and does **not** automatically switch gateways after timeout, indeterminate, or uncertain 5xx. Workspace version is `0.1.0-next.0` — not a released 1.0.
+
+`router.select` is pure and sync. Pass `decision.gateway` into `createPayment` yourself.
+
+:::caution[Two different “fallback” words]
+`createPaymentRouter({ fallback })` is a **select-time** default when **no rule matches**. It is **not** recovery after a failed attempt. After an attempt, only `not_submitted` / `pre_submission_failure` are auto-eligible. Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx.
+:::
+
+## Install
+
+Depends only on `@paykernel/core`. Single export map: `"."`.
+
+```bash
+bun add @paykernel/routing @paykernel/core
+```
+
+## Quickstart
+
+```typescript
+import {
+  createPaymentRouter,
+  route,
+} from "@paykernel/routing";
+
+const router = createPaymentRouter({
+  rules: [
+    route({ currency: "SAR", paymentMethod: "mada" }).to("moyasar"),
+    route({ currency: "USD" }).to("stripe"),
+  ],
+  fallback: "stripe", // select-time default only — NOT post-attempt recovery
+});
+
+const decision = router.select({
+  currency: "SAR",
+  paymentMethod: "mada",
+});
+// decision.gateway === "moyasar"
+// decision.matched === true
+// decision.usedFallback === false
+// decision.reason === "rule_match"
+```
+
+If you pass `Money`, `input.currency` must match `amount.currency` or `select` throws `NoRouteMatchError` `{ reason: "currency_mismatch_honesty" }`. Unconstrained fallback is not used.
+
+### With PaymentClient
+
+```typescript
+import { createPaymentClient, money } from "@paykernel/core";
+import { createPaymentRouter, route } from "@paykernel/routing";
+
+const payments = createPaymentClient({
+  gateways: {
+    moyasar: /* moyasarGateway({...}) */,
+    stripe: /* stripeGateway({...}) */,
+  },
+  defaultGateway: "stripe",
+});
+
+const router = createPaymentRouter({
+  rules: [
+    route({ currency: "SAR", paymentMethod: "mada" }).to("moyasar"),
+    route({ currency: "USD" }).to("stripe"),
+  ],
+  fallback: "stripe",
+});
+
+async function createRoutedPayment(input: {
+  amount: string;
+  currency: string;
+  paymentMethod?: string;
+}) {
+  const amount = money(input.amount, input.currency);
+  const decision = router.select({
+    currency: amount.currency,
+    paymentMethod: input.paymentMethod,
+    amount,
+  });
+  const gateway = decision.gateway;
+  if (gateway !== "moyasar" && gateway !== "stripe") {
+    throw new Error(`router selected unregistered gateway: ${gateway}`);
+  }
+  return payments.createPayment(
+    {
+      amount,
+      currency: amount.currency,
+      callbackUrl: "https://example.com/callback",
+    },
+    gateway,
+  );
+}
+```
+
+## Select vs execute
+
+| | `router.select` | `PaymentClient` |
+| --- | --- | --- |
+| Package | `@paykernel/routing` | `@paykernel/core` |
+| Side effects | None (pure, sync) | Provider network I/O |
+| Returns | `RoutingDecision` | Payment / operation result |
+
+The router never calls `createPayment`, `capturePayment`, `refundPayment`, or any fetch.
+
+### First-match
+
+1. Walk `rules` in array order.
+2. Skip `input.excludeGateways` and unhealthy gateways (`input.health` vs `healthThreshold`, default `1`).
+3. Keep rules where `ruleMatches` is true.
+4. If `merchantPreference` is set and any candidate equals it (case-insensitive), restrict to those.
+5. If `input.cost` is provided, sort by ascending cost, then gateway id, then rule index.
+6. Otherwise pick the first candidate in original rule order.
+7. If no candidates: select-time `fallback` (still subject to exclude / health / capabilities / honesty).
+
+Rule array order matters. Object-key iteration is never used.
+
+| `decision.reason` | When |
+| --- | --- |
+| `rule_match` | Matched rule; no preference/cost special-case |
+| `rule_match_merchant_preference` | Chosen gateway equals `merchantPreference` |
+| `rule_match_cost_tiebreak` | `input.cost` used for ranking |
+| `fallback` | Select-time `fallback` after no rule match |
+
+`RoutingDecision.gateway` is always set on success. On failure, `select` throws `NoRouteMatchError` (`code: "no_route_match"`) — the library never invents a gateway id.
+
+## Amount ranges and honesty
+
+Amount comparisons use core `toMinorUnits` (bigint) — never float.
+
+```typescript
+route({
+  currency: "USD",
+  amountMin: "0.50",
+  amountMax: "10000.00",
+  amountCurrency: "USD",
+}).to("stripe");
+```
+
+`amountCurrency` is required when either bound is set. Helpers: `amountInRange`, `resolveInputAmount`, `compareDecimalAmounts`.
+
+Select-time fallback is **blocked** (honesty) when using it would lie about a configured partition:
+
+| `NoRouteMatchError.reason` | Meaning |
+| --- | --- |
+| `no_usable_fallback` | No rule match and no usable fallback |
+| `amount_range_honesty` | Input amount is outside a matching rule’s inclusive min/max |
+| `capability_honesty` | A matching rule requires capabilities the fallback lacks |
+| `currency_mismatch_honesty` | `input.currency` disagrees with Money / `amountCurrency` |
+| `complementary_currency_honesty` | Complementary currency partition (e.g. USD vs EUR rules) |
+| `complementary_country_honesty` | Complementary country partition |
+| `complementary_method_honesty` | Complementary payment-method partition |
+| `complementary_tenant_honesty` | Complementary tenant partition |
+
+`isSelectHonestyReason(reason)` is true for every honesty reason above except `no_usable_fallback`. Complementary splits are **intentional fail-closed**: after excluding the matching bucket, unconstrained `fallback` must not send EUR to the USD gateway.
+
+Empty match `{}` is a catch-all rule (still subject to health / exclude / capabilities).
+
+## Post-attempt fallback (default-deny)
+
+After you already tried a gateway, switching providers can double-charge if the first request may have been accepted.
+
+```typescript
+import {
+  classifySubmissionState,
+  evaluateFallback,
+  isSafeFallbackEligible,
+} from "@paykernel/routing";
+
+const state = classifySubmissionState({ errorKind: "timeout" });
+// state === "timeout" → NOT safe
+
+isSafeFallbackEligible("not_submitted"); // true
+isSafeFallbackEligible("pre_submission_failure"); // true
+isSafeFallbackEligible("timeout"); // false
+isSafeFallbackEligible("indeterminate"); // false
+
+const eligibility = evaluateFallback({ submissionState: state });
+// eligibility.allowed === false for timeout without override
+```
+
+| `SubmissionState` | Auto-eligible? |
+| --- | --- |
+| `not_submitted` | Yes |
+| `pre_submission_failure` | Yes |
+| `submitted` | **No** |
+| `indeterminate` | **No** |
+| `timeout` | **No** |
+| `connection_reset` | **No** |
+| `provider_5xx_uncertain` | **No** |
+
+`classifyFromOperationOutcome`:
+
+| Outcome | State |
+| --- | --- |
+| `indeterminate` | `indeterminate` |
+| `succeeded` / `requires_action` / `declined` | `submitted` |
+| `failed` | `submitted` (generic failed is **not** assumed pre-submit) |
+
+**Never** maps `indeterminate` → `pre_submission_failure`.
+
+`classifySubmissionState` fail-closes to `indeterminate`. Bare `errorKind: "validation_error"` is **indeterminate** (same class as `invalid_request`). Only a ValidationError-**shaped object** (`name === "ValidationError"` / `code === "validation_error"`) is `pre_submission_failure`. Do not map a provider HTTP 400 onto `errorKind: "validation_error"`.
+
+AbortError / `abort_error` / `ABORT_ERR` classify as **`indeterminate`** (abort may race after provider accept). Known pre-submit cancel: `errorKind: "aborted_before_submit"` or `"cancelled_before_submit"`.
+
+`trySelectFallbackGateway` re-validates `isSafeFallbackEligible` and does **not** trust a forged `{ allowed: true }` without an authentic `evaluateFallback` expert result (WeakSet brand).
+
+### Expert override (opt-in, never defaulted)
+
+```typescript
+evaluateFallback({
+  submissionState: "timeout",
+  expertOverride: {
+    confirmUnsafeFallback: true,
+    reason: "provider confirmed no payment intent created",
+  },
+});
+```
+
+Bare `true` / empty reason is rejected. `isExpertUnsafeFallbackOverride` is the runtime guard. Denied paths throw `UnsafeFallbackDeniedError` (`code: "unsafe_fallback_denied"`).
+
+## Compose after createPayment
+
+```typescript
+import { createPaymentClient, money } from "@paykernel/core";
+import {
+  createPaymentRouter,
+  route,
+  classifySubmissionState,
+  evaluateFallback,
+  trySelectFallbackGateway,
+} from "@paykernel/routing";
+
+const payments = createPaymentClient({
+  gateways: {
+    moyasar: /* moyasarGateway({...}) */,
+    stripe: /* stripeGateway({...}) */,
+  },
+  defaultGateway: "stripe",
+});
+
+const router = createPaymentRouter({
+  rules: [
+    route({ currency: "SAR", paymentMethod: "mada" }).to("moyasar"),
+    route({ currency: "USD" }).to("stripe"),
+  ],
+  fallback: "stripe",
+});
+
+function assertRegistered(gateway: string): "moyasar" | "stripe" {
+  if (gateway !== "moyasar" && gateway !== "stripe") {
+    throw new Error(`router selected unregistered gateway: ${gateway}`);
+  }
+  return gateway;
+}
+
+async function charge(input: { amount: string; currency: string }) {
+  const amount = money(input.amount, input.currency);
+  const pay = {
+    amount,
+    currency: amount.currency,
+    callbackUrl: "https://example.com/callback",
+  };
+  const decision = router.select({
+    currency: amount.currency,
+    amount,
+  });
+  const gateway = assertRegistered(decision.gateway);
+
+  try {
+    const result = await payments.createPayment(pay, gateway);
+    if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+      // Typed post-submit uncertainty — do NOT select another gateway.
+      return result;
+    }
+    return result;
+  } catch (err) {
+    const state = classifySubmissionState({ error: err });
+    const eligibility = evaluateFallback({ submissionState: state });
+    if (!eligibility.allowed) {
+      throw err; // timeout-as-throw / submitted — do NOT auto-retry another gateway
+    }
+    const alt = trySelectFallbackGateway(
+      router,
+      { currency: amount.currency, amount },
+      eligibility,
+      { attemptedGateways: [decision.gateway] },
+    );
+    return await payments.createPayment(pay, assertRegistered(alt.gateway));
+  }
+}
+```
+
+If `createPayment` returns `{ outcome: "indeterminate" }` **without throwing**, classify from that outcome (`classifyFromOperationOutcome("indeterminate")`) and **do not** select another gateway. Schedule [reconciliation](/packages/reconciliation) instead.
+
+## Telemetry
+
+```typescript
+import {
+  decisionToTelemetryAttributes,
+  type RoutingDecision,
+} from "@paykernel/routing";
+
+declare const decision: RoutingDecision;
+const attrs = decisionToTelemetryAttributes(decision);
+// gateway, matched, usedFallback, reason, optional ruleIndex
+```
+
+Never includes `tenantConfig`, health/cost maps, secrets, or full `RoutingInput` dumps. Pass the same `decision.gateway` into `createOperationContext` ([`@paykernel/opentelemetry`](/packages/opentelemetry) or core).
+
+## Failure paths
+
+| Error | `code` | When |
+| --- | --- | --- |
+| `NoRouteMatchError` | `no_route_match` | No rule match and no usable select-time fallback (honesty reasons stay visible) |
+| `UnsafeFallbackDeniedError` | `unsafe_fallback_denied` | Post-attempt path denied / no alternate |
+
+Guards: `isNoRouteMatchError`, `isUnsafeFallbackDeniedError`, `isSelectHonestyReason`. `route().to("")` throws (`gateway id must be non-empty`).
+
+## Runtime exports
+
+`createPaymentRouter`, `route`, `decisionToTelemetryAttributes`, `isSafeFallbackEligible`, `evaluateFallback`, `classifySubmissionState`, `classifyFromOperationOutcome`, `trySelectFallbackGateway`, `isExpertUnsafeFallbackOverride`, `ruleMatches`, `gatewayHasCapabilities`, `isGatewayHealthy`, `costScore`, `stringsEqualCi`, `amountInRange`, `resolveInputAmount`, `compareDecimalAmounts`, `NoRouteMatchError`, `UnsafeFallbackDeniedError`, `isNoRouteMatchError`, `isUnsafeFallbackDeniedError`, `isSelectHonestyReason`.
+
+See also: [composition](/guides/composition), [outcomes](/guides/outcomes), [adapter selection](/guides/adapter-selection).

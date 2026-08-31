@@ -1705,6 +1705,9 @@ export function createWebhookInboxEngine(
     get mode() {
       return mode;
     },
+    get workerGuaranteed() {
+      return workerGuaranteed;
+    },
     processVerified,
     processWithVerifier,
     processRetryable,

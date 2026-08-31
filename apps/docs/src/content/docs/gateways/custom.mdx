@@ -1,0 +1,297 @@
+---
+title: Custom gateways
+description: Implement PaymentGateway via BaseGateway, wrap it in a GatewayAdapter, and register it with createPaymentClient — no core edits.
+sidebar:
+  order: 8
+---
+
+Third-party gateways are first-class: implement `PaymentGateway` (usually via `BaseGateway`), wrap it in a `GatewayAdapter`, and pass the adapter to `createPaymentClient`. No core source edits.
+
+`BuiltInGatewayName` stays closed: `"moyasar" | "paypal" | "paymob" | "stripe"`. Custom and extra adapters use **open** `GatewayId` strings inferred from your registry (`TMap`).
+
+## Preferred path: `createPaymentClient`
+
+```ts
+import {
+  applyOutcomeToGatewayResult,
+  BaseGateway,
+  createPaymentClient,
+  defineGatewayCapabilities,
+  money,
+  type GatewayAdapter,
+  type GatewayContext,
+  type CreatePaymentParams,
+  type CaptureParams,
+  type RefundParams,
+  type GatewayPaymentResult,
+  type GatewayRefundResult,
+  type WebhookEvent,
+} from "@paykernel/core";
+
+class ExampleGateway extends BaseGateway {
+  readonly name = "example" as const;
+
+  constructor(
+    private readonly apiKey: string,
+    hooks: ConstructorParameters<typeof BaseGateway>[1],
+    logger?: ConstructorParameters<typeof BaseGateway>[2],
+  ) {
+    super(
+      { apiKey },
+      hooks,
+      logger,
+      defineGatewayCapabilities({
+        payments: true,
+        refunds: true,
+        // unspecified keys default to false (fail-closed)
+      }),
+    );
+  }
+
+  async createPayment(params: CreatePaymentParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("createPayment", params, async (p) => {
+      return applyOutcomeToGatewayResult(
+        {
+          gatewayId: "ex_123",
+          status: "paid",
+          redirectUrl: undefined,
+          rawResponse: {},
+          amount: p.amount, // Money — payment APIs reject number
+          currency: p.currency,
+          gateway: "example",
+        },
+        "succeeded",
+      );
+    });
+  }
+
+  async capturePayment(params: CaptureParams): Promise<GatewayPaymentResult> {
+    return this.executeWithHooks("capturePayment", params, async () => {
+      throw new Error("Not implemented");
+    });
+  }
+
+  async refundPayment(params: RefundParams): Promise<GatewayRefundResult> {
+    return this.executeWithHooks("refundPayment", params, async () => {
+      throw new Error("Not implemented");
+    });
+  }
+
+  verifyWebhook(
+    _payload: unknown,
+    signature?: string,
+    _headers?: Record<string, string>,
+  ): boolean {
+    return signature === "valid";
+  }
+
+  parseWebhookEvent(payload: unknown): WebhookEvent {
+    return {
+      id: "evt_1",
+      type: "payment_paid",
+      gateway: "example",
+      paymentId: undefined,
+      gatewayPaymentId: "ex_123",
+      status: "paid",
+      timestamp: new Date(),
+      rawPayload: payload,
+    };
+  }
+}
+
+/** Close over secrets. Never put them on context or manifest. */
+function exampleGateway(config: { apiKey: string }): GatewayAdapter<"example", ExampleGateway> {
+  const closed = { ...config };
+  return {
+    name: "example",
+    manifest: {
+      name: "example",
+      displayName: "Example Provider",
+      version: "1.0.0",
+      capabilities: defineGatewayCapabilities({
+        payments: true,
+        refunds: true,
+      }),
+    },
+    create(context: GatewayContext) {
+      return new ExampleGateway(closed.apiKey, context.hooks, context.logger);
+    },
+  };
+}
+
+const client = createPaymentClient({
+  gateways: {
+    example: exampleGateway({ apiKey: process.env.EXAMPLE_API_KEY! }),
+  },
+  defaultGateway: "example",
+  hooks: {
+    beforeCreatePayment: (ctx) => {
+      return { proceed: true };
+    },
+    onWebhookVerified: async (event) => {
+      // Authenticity only — metrics/logging. Never fulfill here.
+      void event.status;
+    },
+  },
+});
+
+await client.createPayment({
+  amount: money("10.00", "USD"),
+  currency: "USD",
+  callbackUrl: "https://merchant.example/callback",
+});
+
+await client.handleWebhook("example", rawBody, signatureHeader);
+```
+
+:::note[Code wins over an older sample]
+`packages/core/docs/custom-gateways.md` still shows `amount: 10` (a number) on `createPayment`. Payment APIs reject `number` (`AmountInput = Money`). Pass `money("10.00", "USD")`. `GatewayPaymentResult.amount` is `Money`, not a major-unit number.
+:::
+
+`verifyWebhook` must return **boolean `true`** for success. A `Promise` is awaited; any other truthy value is not treated as verified. Implement `verifyWebhookAsync` when verification needs I/O (PayPal-style postback).
+
+## Mix with built-ins
+
+```ts
+import {
+  createPaymentClient,
+  stripeGateway,
+  moyasarGateway,
+} from "@paykernel/core";
+
+const payments = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }),
+    moyasar: moyasarGateway({ secretKey: process.env.MOYASAR_SECRET_KEY! }),
+    example: exampleGateway({ apiKey: process.env.EXAMPLE_API_KEY! }),
+  },
+  defaultGateway: "moyasar",
+});
+
+payments.gateway("stripe"); // StripeGateway
+payments.gateway("example"); // ExampleGateway
+// payments.gateway("adyen"); // compile-time error — not registered
+```
+
+Map keys must equal `adapter.name` or construction throws `InvalidRequestError`.
+
+## Extra first-party packages (not `BuiltInGatewayName`)
+
+Tap and MyFatoorah use the same adapter shape from **their own packages**. They are **not** members of `BuiltInGatewayName`.
+
+```ts
+import { createPaymentClient } from "@paykernel/core";
+import { tapGateway } from "@paykernel/gateway-tap";
+
+const tapPayments = createPaymentClient({
+  gateways: {
+    tap: tapGateway({ secretKey: process.env.TAP_SECRET_KEY! }),
+  },
+  defaultGateway: "tap",
+});
+```
+
+```ts
+import { myfatoorahGateway } from "@paykernel/gateway-myfatoorah";
+
+const myfatoorahPayments = createPaymentClient({
+  gateways: {
+    myfatoorah: myfatoorahGateway({
+      apiToken: process.env.MYFATOORAH_API_TOKEN!,
+      country: "KWT",
+      webhookSecret: process.env.MYFATOORAH_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "myfatoorah",
+});
+```
+
+See [Tap](/gateways/tap) and [MyFatoorah](/gateways/myfatoorah).
+
+## Registry builder
+
+```ts
+import { createGatewayRegistry, createPaymentClient } from "@paykernel/core";
+
+const registry = createGatewayRegistry()
+  .register(stripeGateway({ secretKey: "..." }))
+  .register(exampleGateway({ apiKey: "..." }))
+  .build(); // immutable
+
+const client = createPaymentClient({
+  registry,
+  defaultGateway: "stripe",
+});
+```
+
+| Builder | Behavior |
+| --- | --- |
+| `register(adapter)` | Fails if the name is already present (`InvalidRequestError`) |
+| `replace(adapter)` | Overwrite or insert |
+| `registerDynamic(adapter)` | Same runtime as register; erases static map precision |
+| `build()` | Freezes adapters, names, manifests |
+
+Provide **exactly one** of `registry` or `gateways`. Mixing both, or omitting both, throws `InvalidRequestError`. `defaultGateway` must be registered. Two or more gateways without `defaultGateway` and without a named `gateway` argument on the op throws `InvalidRequestError`. A **one-gateway** map may omit `defaultGateway`.
+
+There is **no** live `unregisterGateway`. Build a new client to change the set.
+
+`createDynamicGatewayRegistry()` starts a string-keyed builder when names are only known at runtime (explicit loss of static inference).
+
+## What you get without editing core
+
+| Concern | How it works |
+| --- | --- |
+| Payments | `client.createPayment` / capture / refund / void / get |
+| Webhooks | `client.handleWebhook(name, …)` → verify → parse → hooks. Still **verify only** — claim via [`@paykernel/webhooks`](/packages/webhooks). |
+| Hooks | Shared `HooksManager` via `GatewayContext.hooks` |
+| Logging | Redacting logger on client + context |
+| Errors | Throw `PaymentError` subclasses; they propagate unchanged |
+| Runtime | `GatewayContext` extends `PaymentRuntime` (`fetch`, `crypto`, `clock`, `randomUUID`). Use `this.fetch`, not bare `fetch`. |
+| Capabilities | `gateway.supports("partialRefunds")` / `gateway.capabilities`. Unspecified keys are `false`. |
+
+Never put API keys, webhook secrets, DB handles, or request objects on `GatewayContext` or `GatewayManifest`. Pass optional `runtime` on `createPaymentClient`; the client builds context via `createDefaultGatewayContext`.
+
+## Naming
+
+| Type | Meaning |
+| --- | --- |
+| `BuiltInGatewayName` | `"moyasar" \| "paypal" \| "paymob" \| "stripe"` |
+| `GatewayName` | 0.x alias of `BuiltInGatewayName` (closed) — legacy config |
+| `GatewayId` | Open `string` for hooks, webhooks, and plugin contracts |
+| Registry / `TMap` | Inferred names from your adapters |
+
+0.x `new PaymentClient({ moyasar, … })` was **removed at 1.0**. The constructor is `private` and throws `InvalidRequestError`. It does **not** construct the four built-ins. Use `createPaymentClient`. [1.0 migration](/guides/migrate-to-1-0).
+
+## Outcomes and webhooks for plugins
+
+- Dual-write Phase 6 `outcome` with `applyOutcomeToGatewayResult` / `applyOutcomeToGatewayRefundResult`. The helper writes `outcome` + `references` (and `reconciliationRequired` for indeterminate). It does **not** write `success` (`success` was removed in 1.0).
+- Post-submit timeouts should be **indeterminate** (`applyIndeterminatePaymentOutcome`), not a fake decline. Callers must not `createPayment` again.
+- Fulfillment is `isPaidOutcome` / `status === "paid"` — not `success: true`.
+- **Never fulfill in `onWebhookVerified`.** After inbox claim, fulfill only on rematched `payment.succeeded` | `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+- `onWebhookReceived` sees **unverified** payloads (logging/metrics only).
+
+## Conformance (`@paykernel/testkit`)
+
+Core does **not** depend on testkit. Validate adapters offline / with fixture-driven doubles — never live provider credentials in CI:
+
+```ts
+import { defineGatewayCapabilities } from "@paykernel/core";
+import { runGatewayConformanceSuite, mockGateway } from "@paykernel/testkit";
+
+const capabilities = defineGatewayCapabilities({
+  payments: true,
+  immediateCapture: true,
+  refunds: true,
+  partialRefunds: true,
+});
+
+await runGatewayConformanceSuite({
+  name: "example",
+  createGateway: () => mockGateway({ name: "example", capabilities }),
+  capabilities,
+});
+```
+
+In-memory stores in testkit are **NON-PRODUCTION**. Lease-aware contracts: [`@paykernel/store-contracts`](/packages/store-contracts).
+
+Related: [core](/packages/core) · [plugin runtime](/guides/runtime) · [capabilities](/reference/capabilities) · [gateways](/gateways)

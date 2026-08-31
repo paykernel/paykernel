@@ -1,0 +1,295 @@
+---
+title: MyFatoorah
+description: Extra package @paykernel/gateway-myfatoorah — V3 hosted payments, refunds, and Webhook V2 signatures for createPaymentClient.
+sidebar:
+  order: 7
+---
+
+`@paykernel/gateway-myfatoorah` is a portable extra adapter (`GatewayAdapter<"myfatoorah", MyFatoorahGateway>`) you pass into [`createPaymentClient`](/packages/core). It is **not** a `BuiltInGatewayName` (`"moyasar" | "paypal" | "paymob" | "stripe"`). Core does not import this package. Current version is `0.1.0-next.0` (`MYFATOORAH_ADAPTER_VERSION`). It is not a released 1.0 on npm.
+
+Runtime dependency is `@paykernel/core` only. Manifest `apiVersion` is `"V3"`. Surface: V3 hosted payments (`POST /v3/payments`), V2 inquiry/refund (`GetPaymentStatus`, `MakeRefund`, `GetRefundStatus`), Webhook V2 signatures. `gatewayId` is the **InvoiceId**. PaymentId (when present) rides `references.relatedIds.paymentId`. Secrets stay closed over by `myfatoorahGateway` — they are never copied onto the gateway context or manifest.
+
+:::caution
+Do not `import { myfatoorahGateway } from "@paykernel/core"`. Register the adapter yourself. Two or more gateways still need `defaultGateway` or a named `gateway` argument. `capture: false` and `capturePayment` throw `OperationNotSupportedError` (`authorization` unclaimed). `voidPayment` is not implemented.
+:::
+
+## Install
+
+Package name `@paykernel/gateway-myfatoorah`, export `"."` only (`./dist/index.js`). Version `0.1.0-next.0`. Install from this monorepo workspace until a publish happens.
+
+```bash
+bun add @paykernel/gateway-myfatoorah @paykernel/core
+```
+
+## Public exports
+
+From `@paykernel/gateway-myfatoorah` (`packages/gateway-myfatoorah/src/index.ts`):
+
+| Export | Kind |
+| --- | --- |
+| `myfatoorahGateway` | factory → `GatewayAdapter<"myfatoorah", MyFatoorahGateway>` |
+| `MyFatoorahGateway` | class (`name: "myfatoorah"`) |
+| `MYFATOORAH_ADAPTER_VERSION` | `"0.1.0-next.0"` |
+| `MYFATOORAH_CAPABILITIES` | frozen capability map |
+| `MyFatoorahConfig` | config type |
+| `MyFatoorahCountry` | `"KWT" \| "SAU" \| "ARE" \| "QAT" \| "BHR" \| "OMN" \| "JOR" \| "EGY"` |
+| `MyFatoorahCreatePaymentParams` | create payload (`myfatoorah*` fields) |
+| `MyFatoorahCustomerInput` | optional customer block |
+| `MyFatoorahGetPaymentParams` | get payload (`myfatoorahKeyType`) |
+| `MyFatoorahRefundParams` | refund payload |
+| `MyFatoorahPaymentMethod` | `"INVOICE" \| "CARD" \| "APPLE_PAY" \| "GOOGLE_PAY" \| "KNET"` |
+
+`MyFatoorahGateway` methods: `createPayment`, `capturePayment` (throws), `refundPayment`, `getPayment`, `verifyWebhook`, `parseWebhookEvent`. Prefer `PaymentClient.handleWebhook("myfatoorah", …)` over calling verify/parse yourself. See [/guides/webhooks](/guides/webhooks).
+
+There is no public `isMyFatoorahPaidTerminal` export. Treat Paid as terminal with `status === "paid"` / `isPaidOutcome` at the inbox layer.
+
+## Quickstart
+
+```ts
+import { createPaymentClient, isPaidOutcome, money } from "@paykernel/core";
+import { myfatoorahGateway } from "@paykernel/gateway-myfatoorah";
+
+const payments = createPaymentClient({
+  gateways: {
+    myfatoorah: myfatoorahGateway({
+      apiToken: process.env.MYFATOORAH_API_TOKEN!, // sandbox: portal API token
+      country: "KWT",
+      // live: true, // use the live host for the country
+      webhookSecret: process.env.MYFATOORAH_WEBHOOK_SECRET, // portal secure key, NOT the API token
+      webhookUrl: "https://merchant.example/webhooks/myfatoorah",
+      // defaultPaymentMethod: "KNET", // optional; omitted → all enabled methods
+    }),
+  },
+  defaultGateway: "myfatoorah",
+});
+
+const result = await payments.createPayment({
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://merchant.example/return",
+  idempotencyKey: crypto.randomUUID(), // required — adapter does not mint a UUID
+  orderId: "ord_01", // required outside KWT/SAU (CustomerReference replay)
+  // myfatoorahCustomer: { name: "Ada", email: "ada@example.com" }, // optional
+});
+
+if (result.outcome === "requires_action" && result.redirectUrl) {
+  // PaymentURL hosted page — persist it before ACK, redirect the customer, do not fulfill
+} else if (isPaidOutcome(result) && result.status === "paid") {
+  // PaymentCompleted: true (or settled inquiry) — still verify via webhook + inbox claim
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // existing InvoiceId when known — getPayment; do not create a second invoice
+} else {
+  // failed / cancelled — do not mark the order paid
+}
+```
+
+`success: true` is not the fulfillment signal. Use `isPaidOutcome` / `outcome` ([/guides/outcomes](/guides/outcomes)). Redirect return URLs are browser callbacks, not webhooks — confirm settlement with `GetPaymentStatus` / the signed webhook.
+
+With `defaultGateway: "myfatoorah"`, or a MYFATOORAH-only `gateways` map without `defaultGateway`, `payments.createPayment({ myfatoorahCustomer, … })` is typed as `MyFatoorahCreatePaymentParams`. Core does **not** add `myfatoorah*` to `CreatePaymentParams`.
+
+## Config (`MyFatoorahConfig`)
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `apiToken` | yes | Portal API token (`Bearer …`). Trimmed; whitespace-only throws. **Never** the webhook HMAC key. |
+| `country` | yes | `KWT`, `SAU`, `ARE`, `QAT`, `BHR`, `OMN`, `JOR`, `EGY`. Selects the live host when `live: true`. |
+| `live` | no | Default `false` (sandbox `https://apitest.myfatoorah.com`). Must be a boolean when set. |
+| `webhookSecret` | no | Webhook V2 HMAC secret (portal **secure key**). `verifyWebhook` fails closed (`false`) when omitted. |
+| `timeoutMs` | no | Finite `> 0`. Default `30000`. |
+| `webhookUrl` | no | HTTPS `IntegrationUrls.Webhook` for create. Not localhost / private hosts (MyFatoorah rejects them). No URL credentials. |
+| `defaultPaymentMethod` | no | V3 `PaymentMethod`. Omitted: all enabled methods on the hosted page. |
+
+Auth header is `Authorization: Bearer <apiToken>`. Sandbox country host is ignored. Live hosts:
+
+| Country | Live API base | Portal base currency |
+| --- | --- | --- |
+| `KWT` | `https://api.myfatoorah.com` | `KWD` |
+| `BHR` | `https://api.myfatoorah.com` | `BHD` |
+| `JOR` | `https://api.myfatoorah.com` | `JOD` |
+| `OMN` | `https://api.myfatoorah.com` | `OMR` |
+| `ARE` | `https://api-ae.myfatoorah.com` | `AED` |
+| `SAU` | `https://api-sa.myfatoorah.com` | `SAR` |
+| `QAT` | `https://api-qa.myfatoorah.com` | `QAR` |
+| `EGY` | `https://api-eg.myfatoorah.com` | `EGP` |
+
+Sandbox (`live: false`) inquiry/refund **base currency is always `KWD`**, regardless of `country`. ISO lookups: [MyFatoorah ISO lookups](https://docs.myfatoorah.com/docs/iso-lookups).
+
+## Capabilities
+
+Claimed: `payments`, `immediateCapture`, `refunds`, `partialRefunds`, `tokenization` (via `myfatoorahToken` / `myfatoorahSessionId` → `SourceOfFund.Token` / `SessionId`; direct `SourceOfFund.Card` PAN is still rejected).
+
+Unclaimed (fail-closed): `authorization`, `partialCapture`, `voids`, `hostedCheckout`, `customers`, `paymentMethods`, `marketplaceSplits`, `disputes`, `paymentLinks`, `providerRecurring`.
+
+`PaymentURL` is a **redirect**, not a Checkout Session product. Authorize / capture / void exist on MyFatoorah but need portal enablement and are **not** implemented here. Query with `gateway.supports("tokenization")` etc. See [/reference/capabilities](/reference/capabilities).
+
+## Charges
+
+`createPayment` (sale only) calls `POST /v3/payments`.
+
+Required: `amount` (`> 0`), `currency` (3-letter), HTTPS `callbackUrl`, and a caller `idempotencyKey`. Outside KWT/SAU, `orderId` or `myfatoorahCustomer.reference` is also required.
+
+Optional: `myfatoorahCustomer` (all fields optional), `myfatoorahPaymentMethod` (`CARD` \| `APPLE_PAY` \| `GOOGLE_PAY` \| `KNET` \| `INVOICE`; default: config `defaultPaymentMethod`; both omitted → all enabled methods), `myfatoorahDisplayPaymentMethods` (lowercase tokens `card`, `knet`, `mada`, `benefit`, `stcpay`, `qpay`, `omannet`, …), `myfatoorahLanguage` (`EN` \| `AR`), `myfatoorahWebhookUrl` (HTTPS), `myfatoorahSessionId` / `myfatoorahToken` (mutually exclusive → `SourceOfFund`). Legacy V2 methods `BENEFIT` / `STC_PAY` / `MADA` / `QPAY` / `OMANNET` are `DisplayPaymentMethods` tokens, not `PaymentMethod`.
+
+Never sent: `OperationType` (defaults PAY), `SaveCardOptions`, raw `SourceOfFund.Card` blobs (rejected before any fetch). `offSession: true` throws `OperationNotSupportedError` (`paymentMethods`). `metadata` keys must be `UDF1`..`UDF5` with string values (other keys/types throw `InvalidRequestError`).
+
+`Customer.Reference` is `myfatoorahCustomer.reference` when provided, otherwise `orderId`. `orderId` is also sent as `Order.ExternalIdentifier`. **`customerId` is not `Order.ExternalIdentifier` and does not become `Customer.Reference`.** Webhook `Invoice.ExternalIdentifier` (merchant `paymentId`) is that reference.
+
+Response mapping:
+
+- `PaymentCompleted: true` alone → `succeeded` / `paid` with no redirect, even without nested `Invoice.Status=PAID` or `Transaction.Status=SUCCESS`. `PaymentURL` on a paid completion is the Result URL, not checkout — ignored when paid.
+- Nested PAID/SUCCESS **without** `PaymentCompleted: true` is **not** treated as paid (hosted create is `PaymentCompleted: false` + `PaymentURL`).
+- Non-empty `PaymentURL` when not paid → `requires_action` / `pending` + `redirectUrl`.
+- Mutating 2xx with neither → `indeterminate` (`afterProviderSubmit`).
+
+Paid create amount is currency-aware: `ValueInPayCurrency` / `ValueInDisplayCurrency` / `ValueInBaseCurrency` is chosen to **match the request `currency`**; mismatched currency is omitted rather than published as the wrong amount.
+
+### Pending `PaymentURL` cannot be recovered
+
+[`GetPaymentStatus`](https://docs.myfatoorah.com/docs/get-payment-status) has **no** `PaymentURL`. `GET /v3/invoices/{id}` returns `"No invoices match this InvoiceId"` when there are no transactions. Persist `PaymentURL` from `createPayment` **before ACK**. After a crash, query status but the redirect is lost — to let the customer pay, create a **new** invoice with a **new** `orderId` / `CustomerReference`. Do not retry `createPayment` with the same reference expecting a recovered URL.
+
+### `getPayment`
+
+`POST /v2/GetPaymentStatus` (`KeyType` `InvoiceId` by default; `myfatoorahKeyType: "PaymentId"` for PaymentId lookups). Long `gatewayPaymentId` (≥14 digits) with `InvoiceId` throws with a hint to use `PaymentId`. Uses `InvoiceTransactions` (legacy `Transactions` fallback); picks the **last** `SUCCESS` / `SUCCSS` transaction. Never use `GET /v3/invoices/{id}` for unpaid invoices.
+
+A pending invoice stays `pending` even when the latest transaction failed or is `AUTHORIZE` (the customer can retry the same invoice; `AUTHORIZE` is not fulfilled until capture — which this adapter does not implement). `PAID` without a success transaction stays `pending`. Inquiry POSTs are not money-mutating: `5xx` / empty / HTML on `GetPaymentStatus` / `GetRefundStatus` never becomes `afterProviderSubmit` / `indeterminate`.
+
+:::note
+`getPayment` is **refund-blind**. After a refund, `GetPaymentStatus` still returns `Paid`. Observe refunds via `GetRefundStatus` or `REFUND_STATUS_CHANGED`. Do not treat `Paid` as “not refunded.”
+:::
+
+## Refunds
+
+`refundPayment` requires `idempotencyKey` and `gatewayPaymentId` = the **InvoiceId** (digits) by default. Long (≥14 digit) ids look like a callback PaymentId and are rejected unless you pass `myfatoorahKeyType: "PaymentId"`. GetRefundStatus is always keyed by the resolved InvoiceId.
+
+Flow:
+
+1. `POST /v2/GetRefundStatus` (`KeyType: InvoiceId`). Official `Data.RefundStatusResult[]` (legacy `Refunds` still accepted). `2xx` with `Data: null` or official not-found is empty history.
+2. If any entry has `ExternalIdentifier` exactly equal to this `idempotencyKey`, that refund is returned immediately — **MakeRefund is never re-POSTed**, even when `remaining > 0`.
+3. `POST /v2/GetPaymentStatus` for invoice value + currency. `InvoiceValue` is **base currency**.
+4. `remaining = InvoiceValue − (Refunded/Pending refunds)`. Canceled refunds do not count. Remaining `0` with no matching key → `InvalidRequestError` (never re-POST the invoice amount).
+5. `POST /v2/MakeRefund` with `ServiceChargeOnCustomer: false`, `Amount` in **account base currency**, `ExternalIdentifier: idempotencyKey`, optional `Comment` (`myfatoorahComment` or trimmed `reason`, max 500 chars).
+
+MakeRefund acceptance is **never** settlement: the result is `pending` / `refund_pending`. Fulfill refunds only after `REFUND_STATUS_CHANGED` with `Refund.Status=REFUNDED` (or `GetRefundStatus` `Refunded`). `currency` must match the **base** currency (`RefundStatusResult[].BaseCurrency` when present). First refund with empty history: sandbox (`live: false`) base is always `KWD`; live infers base from `country` (KWT→KWD, SAU→SAR, …). A pay-currency `currency` (e.g. `SAR` after `BaseCurrency: KWD`) throws before MakeRefund.
+
+The `Idempotency-Key` header is only honored in KWT/SAU. A provider “header not supported” validation error retries **once** without the header (`retry: false`). The first `MakeRefund` does **not** auto-retry `429`. Conflicts such as “key already used with a different request” are not retried. `MakeRefund` is not auto-retried after submit.
+
+:::caution
+**Concurrent refunds.** `ExternalIdentifier` is **not** provider-deduped. Two parallel `refundPayment` calls with **different** keys for the same InvoiceId can both observe the same remaining and both `MakeRefund` (double-refund outside KWT/SAU). Require a caller-side distributed lock per InvoiceId (or `orderId`) for `refundPayment` outside KWT/SAU — hold it across GetRefundStatus + GetPaymentStatus + MakeRefund. Same-key crash-retry is safe via the GetRefundStatus preflight.
+:::
+
+## Money
+
+MyFatoorah amounts are **major units with ISO decimal places**, not integer minor units. Internals use `@paykernel/core` `Money` / bigint (`rounding: "reject"`). Outbound `Order.Amount` (create) and `Amount` (MakeRefund) are ISO-padded JSON **number** tokens (`10.50` SAR, `1.200` KWD) — never JSON strings and never `amount * 100`. Zero outbound create/refund amounts throw `InvalidRequestError`. Grouping commas (`12,345.000`) are stripped. `KD` / `SR` and dotted variants (`K.D.` / `S.R.`) alias to `KWD` / `SAR`.
+
+Which currency each surface publishes:
+
+| Surface | Currency published |
+| --- | --- |
+| `createPayment` (paid) | **pay** when available and it matches the request `currency`; otherwise omit rather than mix |
+| `getPayment` | **pay** (`PaidCurrency` + value) when available; else `InvoiceValue` + `Currency` (**base**). Never mix `InvoiceValue` (base) with `PaidCurrency` (pay). |
+| Webhooks | **base** (`ValueInBaseCurrency`). A SAR checkout can webhook as KWD. |
+| `refundPayment` / MakeRefund | **base** only |
+
+Do **not** compare webhook `amount` to the create/getPayment pay amount for fulfillment — use `status === "paid"` / `isPaidOutcome` and `getPayment`. See [/guides/money](/guides/money) and [GetPaymentStatus](https://docs.myfatoorah.com/docs/get-payment-status).
+
+## Idempotency and recovery
+
+`createPayment` requires a caller `idempotencyKey`, sent as the `Idempotency-Key` header **only in KWT/SAU** ([MyFatoorah idempotency](https://docs.myfatoorah.com/docs/idempotency)). The header is cached **250 minutes** — after expiry the same key creates a **new** invoice even in KWT/SAU. Also pass a stable `orderId` even in KWT/SAU and retain the key server-side until settlement.
+
+Outside KWT/SAU the header is omitted. Create first looks up `CustomerReference` via `POST /v2/GetPaymentStatus` (not unique — returns the **last** invoice per [payment inquiry](https://docs.myfatoorah.com/docs/payment-inquiry)):
+
+| Existing invoice | Adapter |
+| --- | --- |
+| `Paid` + amount+currency match | reuse (no second create) |
+| `Pending` / `Refunded` / `PartiallyRefunded` / paid-mismatch / missing amount | `indeterminate` with existing InvoiceId when known — **no** second create |
+| `Canceled` / `Failed` (including `Expired` → `failed`) | **allows** a new `POST /v3/payments` |
+| Lookup `429` | `RateLimitError` with `Retry-After` — back off; do not mint a second invoice |
+| Other lookup `5xx` / non-404 `4xx` / empty success `Data` | `indeterminate` with existing InvoiceId when known |
+
+KWT/SAU may do a best-effort `CustomerReference` preflight for 250-minute hardening: `Paid`+match reuses, otherwise falls through to `POST` without blocking. Create auto-retries (`withRetry`) when KWT/SAU (header dedupes, including `429`). Outside those countries only connect-fail retries run; `429` after `/v3/payments` is **not** retried.
+
+:::caution
+Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx. If you already have an InvoiceId, `getPayment` + [`decideReconciliationPolicy`](/packages/reconciliation) — do not `createPayment` again for that order. Replay the **same** `idempotencyKey` / `orderId` only as documented above.
+:::
+
+## Webhooks
+
+Webhook V2 only. Header: `MyFatoorah-Signature` (case-insensitive). Signature = **Base64**(HMAC-SHA256 over the canonical string) with a **separate** `webhookSecret` — never the API token. Raw `string` bodies (e.g. Workers `request.text()`) are JSON-parsed before verify. Unparseable strings fail closed (`false`). `@paykernel/integration-http` profile: header `MyFatoorah-Signature`. Official refund `Data` model: [Webhook V2 refund](https://docs.myfatoorah.com/docs/webhook-v2-refund-data-model). Paid-terminal rule: [updating payment status](https://docs.myfatoorah.com/docs/v3-updating-payment-status-guidelines).
+
+Canonical strings use **fixed field order — never sort keys**. Null / missing fields become empty strings.
+
+Payment (`PAYMENT_STATUS_CHANGED` / `Event.Code` 1):
+
+```text
+Invoice.Id={id},Invoice.Status={status},Transaction.Status={status},Transaction.PaymentId={paymentId},Invoice.ExternalIdentifier={ext}
+```
+
+Refund (`REFUND_STATUS_CHANGED` / `Event.Code` 2) — official siblings `{ Refund, Amount, ReferencedInvoice }` (legacy nested under `Refund` still accepted):
+
+```text
+Refund.Id={id},Refund.Status={status},Amount.ValueInBaseCurrency={amount},ReferencedInvoice.Id={id}
+```
+
+`verifyWebhook` fails closed (`false`) when: `webhookSecret` missing, header missing, unsupported `Event.Name` (present and unknown — does **not** fall back to `Event.Code`), unsupported `Event.Code` when `Name` is empty (code `1`/`2` accepted as number or string), unparseable payload, invalid Base64, or byte mismatch (constant-time). Codes 3–7 (`BALANCE_TRANSFERRED`, …) are unsupported. `Event.Name` is authoritative.
+
+Normalized payment event: `gatewayPaymentId` = `Invoice.Id`; merchant `paymentId` = `Invoice.ExternalIdentifier` (never `UserDefinedField`); `Invoice.Status=PAID` is authoritative (`paid` regardless of `Transaction.Status` — KNET duplicates must not un-fulfill). `AUTHORIZE` → `pending`. Unknown `Invoice.Status` with `Transaction.Status=SUCCESS` stays `failed` (never `paid`). `Transaction.PaymentId` rides `relatedIds.paymentId`. Webhook amount is **base currency**.
+
+Normalized refund event: `gatewayPaymentId` = `ReferencedInvoice.Id`; `gatewayObjectId` = `Refund.Id`; `paymentId` = `ReferencedInvoice.ExternalIdentifier` **only** (never the refund’s own ExternalIdentifier idempotency key). `REFUNDED` → `refunded`; `CANCELED` → `refund_failed`.
+
+:::caution
+The payment webhook mapper is **stateless**. `Invoice.Status=PAID` is terminal at MyFatoorah, but a later webhook with `PENDING` would map to `pending` if you trusted the mapper alone. After you have fulfilled `paid` for an `Invoice.Id` / `ExternalIdentifier`, ignore later `pending` / `failed` for that id. `handleWebhook` only verifies and normalizes; inbox `claim` dedupes the same `Event.Reference` / `payloadHash` but your handler must still treat `paid` as final.
+:::
+
+```ts
+const rawBody = await request.text(); // do not request.json() before verify
+const signature = request.headers.get("MyFatoorah-Signature") ?? undefined;
+const webhookEvent = await payments.handleWebhook("myfatoorah", rawBody, signature);
+// handleWebhook verifies and normalizes only. It does not claim, lease, or set HTTP status.
+```
+
+:::caution
+**Never fulfill in `onWebhookVerified`.** Fulfill after an inbox **claim** ([`@paykernel/webhooks`](/packages/webhooks)), and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. HTTP status codes live in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+:::
+
+## Status mapping
+
+Unknown provider values fail closed to `failed`.
+
+Invoice (`Invoice.Status` / `InvoiceStatus`):
+
+| MyFatoorah | Payment status |
+| --- | --- |
+| `PAID` / `Paid` | `paid` |
+| `PENDING` | `pending` |
+| `CANCELED` / `CANCELLED` | `cancelled` |
+| `REFUNDED` | `refunded` |
+| `PARTIALLY_REFUNDED` (hyphen/space variants) | `partially_refunded` |
+| anything else (including `Expired`) | `failed` |
+
+[`GetPaymentStatus`](https://docs.myfatoorah.com/docs/get-payment-status) only returns `Pending` / `Paid` / `Canceled` (plus `Expired` → `failed`). `REFUNDED` / `PARTIALLY_REFUNDED` are observed via refund webhooks / `GetRefundStatus`, not `getPayment`. `getPayment` maps `PENDING` → `pending` **regardless** of the last transaction (`FAILED` / `AUTHORIZE` / `INPROGRESS` stay pending because the invoice is retryable). Only `PAID` + a `SUCCESS`/`SUCCSS` transaction becomes `paid`.
+
+Transaction evidence: `SUCCESS` / `SUCCSS` (official V2 typo) = success; `FAILED` = failed; `CANCELED`/`CANCELLED` = cancelled; `AUTHORIZE` = pending (until auth/capture is implemented); `INPROGRESS` / `IN PROGRESS` / `IN_PROGRESS` = pending; anything else = unknown.
+
+Refund (`Refund.Status` / `RefundStatus`):
+
+| MyFatoorah | Refund status | Payment-domain |
+| --- | --- | --- |
+| `REFUNDED` | `completed` | `refunded` |
+| `PENDING` | `pending` | `refund_pending` |
+| `CANCELED` / `CANCELLED` | `failed` | `refund_failed` |
+| anything else | `failed` | `refund_failed` |
+
+## Runtime
+
+`paymentsSdk.portable: true`. Production sources use injected `fetch` and core portable crypto (`hmacSha256`, `bytesToBase64`, `timingSafeEqualBytes`). No `node:` / `bun:` / `cloudflare:` imports. Supported: Node ≥ 18, Bun ≥ 1.0, Deno, Cloudflare Workers (Web APIs). Pass `runtime` on `createPaymentClient` to override `fetch` / clock / UUID. See [/guides/runtime](/guides/runtime).
+
+## Production notes
+
+- Configure `webhookSecret` separately from `apiToken`. Verify, then inbox-claim, then fulfill. Enforce Paid terminal at the inbox (`status === "paid"`).
+- Never fulfill `requires_action` / `redirectUrl` results. Persist `PaymentURL` before ACK.
+- HTTPS `callbackUrl` and `webhookUrl`. MyFatoorah rejects localhost.
+- No raw cards. Embedded sessions use `myfatoorahSessionId`; saved cards use `myfatoorahToken`.
+- Always pass `idempotencyKey` on create/refund **and** `orderId` (or `myfatoorahCustomer.reference`) for replay safety.
+- MakeRefund amount is account **base** currency. Sandbox base is always `KWD`.
+- Caller-side lock for concurrent `refundPayment` outside KWT/SAU.
+- `getPayment` cannot observe refunds — poll `GetRefundStatus` / wait for `REFUND_STATUS_CHANGED`.

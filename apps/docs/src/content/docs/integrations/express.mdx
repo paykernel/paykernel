@@ -1,0 +1,113 @@
+---
+title: "@paykernel/integration-express"
+description: Thin Express adapter using express.raw on the webhook route and gateway-aware object-body handling.
+sidebar:
+  order: 5
+  label: Express
+---
+
+`expressRawJson()` plus `expressWebhook` adapt Node/Express to `processWebhookHttp`. **Node-only** (`paymentsSdk.runtime: "node-only"`), not portable. Depends only on [`@paykernel/integration-http`](/integrations/http) among workspace packages.
+
+Version `0.1.0-next.0` (workspace). Not a released 1.0. Peer `express >= 4`. Export map: `"."` only. Engines: Node `>= 18`.
+
+```bash
+bun add @paykernel/integration-express
+# dependency: @paykernel/integration-http
+# peer: express >= 4
+```
+
+## Usage
+
+```ts
+import express from "express";
+import { expressRawJson, expressWebhook } from "@paykernel/integration-express";
+
+const app = express();
+
+app.post(
+  "/webhooks/stripe",
+  expressRawJson(),
+  expressWebhook({
+    gateway: "stripe",
+    client, // PaymentClient with no onWebhookVerified fulfillment
+    engine,
+    handler,
+  }),
+);
+
+app.post("/payments", express.json(), (req, res) => {
+  // JSON parser is fine on non-webhook routes.
+});
+```
+
+`expressWebhook` accepts `Omit<ProcessWebhookHttpInput, "rawBody" | "headers" | "query">`.
+
+`expressRawJson()` returns `express.raw({ type: "application/json" })`. `type-is` matches `application/json` with or without `; charset=utf-8`. Use it **only** on webhook routes.
+
+Runnable host: [Express + SQLite](/examples/express-sqlite). That example's SQLite is **single-host**. The example itself requires Bun `bun:sqlite` for `:memory:`; Node without `bun:sqlite` needs a `store-sqlite` `/node` or `/better-sqlite3` driver.
+
+:::caution[Do not use express.json() on webhook routes]
+Mount `expressRawJson()` on the webhook route. A global `express.json()` that runs first parses the body into an object and **breaks** Stripe / PayPal / MyFatoorah HMAC (those verify exact bytes).
+:::
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill only in `handler` after the inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `handleWebhook` verifies and normalizes; it does not claim, lease, or set HTTP status. See [HTTP mapping](/integrations/http) and [Webhooks](/guides/webhooks).
+:::
+
+## How the body is read
+
+`expressWebhook` inspects `req.body` in this order:
+
+1. `Buffer.isBuffer(body)` → forward as `Uint8Array` (preserves the Buffer guard)
+2. `typeof body === "string"` → forward the string
+3. `body instanceof Uint8Array` → forward bytes
+4. parsed **object or array**:
+   - object-HMAC gateways (`tap`, `moyasar`, `paymob` — `OBJECT_HMAC_GATEWAYS` in `@paykernel/integration-http`) → `JSON.stringify(body)` and forward that string (`processWebhookHttp` re-parses objects; arrays stay a string and the verifier fail-closes)
+   - string-HMAC gateways (`stripe`, `paypal`, `myfatoorah`, and any other non-object-HMAC name) → **fail closed** `400 { error: "invalid_webhook" }` **without** calling the client (re-serialization is not byte-identical)
+5. `undefined` / `null` → empty string `""`
+6. anything else → `String(body)`
+
+Query: string values from `req.query`, or the first string entry of an array. Headers: `req.headers`. The adapter writes `result.headers` with `res.setHeader`, then `res.status(result.status).json(result.body)`. Unexpected throws go to `next(err)`.
+
+## Failure paths
+
+| Request | Status | Body |
+| --- | --- | --- |
+| Stripe (or PayPal / MyFatoorah) with a **parsed object** body | 400 | `{ error: "invalid_webhook" }` — client **not** called |
+| Missing `stripe-signature` (raw body present) | 400 | `{ error: "invalid_webhook" }` — client **not** called |
+| Forgery (bad HMAC) | 400 | `{ error: "invalid_webhook" }` |
+| Parse / missing-config `InvalidWebhookError` | 500 | `{ outcome: "handler_failed", retryable: true }` |
+| `already_processing` | 503 | `{ outcome: "already_processing" }`; `Retry-After` when `retryAfterMs` is set |
+| `payload_conflict` | 409 | `{ outcome: "payload_conflict" }` |
+| Handler throws | 500 | `{ outcome: "handler_failed", retryable: true }` |
+
+Tap / Moyasar / Paymob tolerate a pre-parsed object by stringifying it. That is **not** safe for Stripe. Prefer `expressRawJson()` for every webhook route.
+
+Default `ackPolicy` is `provider_redelivery` (`scheduled_for_retry` → 503). `{ kind: "durable_worker" }` ACKs 200 only with `engine.mode === "durable_retry"` and `workerGuaranteed === true`.
+
+Status codes come from `mapInboxOutcome` in `@paykernel/integration-http`, **not** from `@paykernel/webhooks`.
+
+## Re-exports
+
+```ts
+import {
+  expressRawJson,
+  expressWebhook,
+  mapInboxOutcome,
+  retryAfterSeconds,
+  processWebhookHttp,
+  webhookHttpResultToResponse,
+  createWebhookOperationContext,
+  getHeader,
+  resolveCorrelationId,
+  requireStringBindings,
+  GATEWAY_WEBHOOK_SIGNATURE,
+  extractWebhookSignature,
+} from "@paykernel/integration-express";
+```
+
+Types re-exported: `InboxHttpAckPolicy`, `HeaderBag`, `GatewayWebhookSignatureProfile`, `WebhookClient`, `WebhookHttpResult`, `ProcessWebhookHttpInput`.
+
+`OBJECT_HMAC_GATEWAYS` is **not** re-exported here (the adapter imports it internally). Import the set from `@paykernel/integration-http` if you need it.
+
+Example `POST /internal/*` routes in the Express checkout example are unauthenticated test hooks (`enableTestHooks`) and **must not be deployed**.

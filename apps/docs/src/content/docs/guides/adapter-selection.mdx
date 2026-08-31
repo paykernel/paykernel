@@ -1,0 +1,174 @@
+---
+title: Adapter selection
+description: Honest store matrix — coordination scope, durability, and which @paykernel/store-* to run.
+sidebar:
+  order: 6
+---
+
+Payment safety depends on **honest storage** for idempotency (reserve / complete with lease fencing), webhook inbox (claim, lease, dual-mode processing), and reconciliation stores.
+
+Source of truth: each package’s `StorageAdapterManifest` + shared testkit conformance suites — not marketing copy. Frozen matrix: `ADAPTER_SELECTION_MATRIX` in `@paykernel/testkit` and `docs/adapter-capability-matrix.json`. Live cross-check: `scripts/check-adapter-selection-honesty.test.ts`.
+
+Domain reconciliation primitives live in [`@paykernel/reconciliation`](/packages/reconciliation) and inject any conforming `ReconciliationStore` — **no** mandatory queue product.
+
+## Core honesty
+
+| Fact | Implication |
+| --- | --- |
+| **Redis is optional** | You do **not** need Redis to use `@paykernel/core` or the webhook engine. |
+| **Local SQLite is single-host only** | Bun / Node / better-sqlite3 file DBs must not be used for multi-host coordination. `:memory:` is one process. |
+| **Memory is NON-PRODUCTION** | `MEMORY_STORAGE_ADAPTER_MANIFEST` is test-only (`single-process` + `ephemeral`). |
+| **Matrix cells must match manifests** | If a cell would overclaim, this guide uses the **weaker honest** value and names the limitation. |
+| **No published adapter declares `coordinationScope: "multi-region"`** | Do not invent multi-region strong consistency. |
+| **Turso has no `/sync` export** | Remote multi-host ≠ local SQLite. D1 ≠ Durable Objects ≠ Turso. |
+| **`@paykernel/internal-sql-store` is private** | Do not install it. Relational adapters share schemas via publishable **`@paykernel/sql-foundation`**. |
+
+Manifests are validated by `assertStorageAdapterManifest` from `@paykernel/store-contracts` (re-exported by `@paykernel/testkit`). Store interfaces are dual-owned across domain packages, `@paykernel/store-contracts`, and testkit re-exports — inject production adapters at the app layer.
+
+Importing a store package does **not** apply DDL. Migrate explicitly (`migratePostgresAdapter`, `migrateSqliteAdapter`, `migrateTursoAdapter`, `migrateD1Adapter`, `migrateDoAdapter`).
+
+## Capability matrix
+
+**Distributed** ≈ safe multi-worker coordination scope from `coordinationScope` (honest wording, not “multi-region” unless tested). **Durable audit** ≈ `durability` (rows/keys survive process restart under declared assumptions). **Atomic claim** ≈ `consistency.claims: "strong"` via engine-level ops (conditional SQL / Lua) — never get-then-set.
+
+Cells match `docs/adapter-capability-matrix.json`.
+
+| Adapter | Package | Distributed | Durable audit | Atomic claim | Best use | Important limitation |
+| --- | --- | --- | --- | --- | --- | --- |
+| **PostgreSQL** | [`@paykernel/store-postgres`](/stores/postgres) | **Yes** (`multi-host`) | **Yes** (`durable`) | **Yes** (`strong`) | General production default when you already have (or will run) PostgreSQL | Needs managed/self-hosted DB; multi-primary without consensus is **out of scope** |
+| **Redis/Valkey** (Bun, ioredis, node-redis) | [`@paykernel/store-redis`](/stores/redis) `/bun`, `/ioredis`, `/node-redis` | **Yes** (`multi-host`), except **Bun: no Cluster/Sentinel** | **Configuration-dependent** (AOF/RDB / managed persistence) | **Yes** (atomic Lua) | Low-latency coordination, TTLs, lease claims | **Optional** infra; not automatic long-term audit alone; Bun rejects Cluster/Sentinel/`clusterKeys` |
+| **Upstash Redis** | [`@paykernel/store-redis/upstash`](/stores/redis) | **Yes** (`multi-host`) | **Configuration-dependent** | **Yes** (server-side EVAL) | Serverless coordination / idempotency over HTTP REST | HTTP/network model + platform persistence policy; same hybrid-audit caveats as other Redis |
+| **Bun SQLite** | [`@paykernel/store-sqlite/bun`](/stores/sqlite) | **No — single host** (`single-host`) | **Yes** with durable disk file (`durable`; `:memory:` is process-local) | **Yes** (`BEGIN IMMEDIATE` + conditional SQL) | Bun local / single-server apps | **Not** cross-host; no network FS sharing of the file |
+| **Node SQLite** | [`@paykernel/store-sqlite/node`](/stores/sqlite) | **No — single host** | **Yes** (file-backed) | **Yes** | Node local / single server | `node:sqlite` stability varies by Node line (experimental); optional subpath only |
+| **better-sqlite3** | [`@paykernel/store-sqlite/better-sqlite3`](/stores/sqlite) | **No — single host** | **Yes** (file-backed) | **Yes** | Mature Node SQLite deployments | Native dependency; synchronous API |
+| **Turso serverless** | [`@paykernel/store-turso/serverless`](/stores/turso) | **Yes** (`multi-host` remote) | **Yes** (`durable`) | **Yes** after conformance (strong claims) | Shared remote SQLite-compatible store | Remote/async txn semantics; **not** local `store-sqlite`; **no** `/sync` export |
+| **libSQL** | [`@paykernel/store-turso/libsql`](/stores/turso) | **Yes** remote multi-host; local `file:` is single-host testing only | **Yes** remote; local file follows SQLite file rules | **Yes** after conformance | Existing Turso / `@libsql/client` projects | Embedded-replica / offline multi-writer **not** advertised; no `/sync`; clients **not** interchangeable with `/serverless` |
+| **Cloudflare D1** | [`@paykernel/store-d1`](/stores/d1) | **Yes** (`multi-host`, shared D1) | **Yes** (`durable`) | **Yes** (`strong` claims) | Worker-native shared relational store | **Not** local SQLite, Turso, or DO; `readAfterWrite: "session"`; `staleReadsPossible: true` without Sessions under read replication |
+| **Cloudflare Durable Objects** | [`@paykernel/store-durable-objects`](/stores/durable-objects) | **Yes, partitioned** (`multi-host` + per-DO strong coordination) | **Yes** (SQLite-backed DO) | **Yes** within a partition | Strong **per-key / per-partition** coordination and retries | Requires sharding; **never** one global DO; no global total order across partitions; **not** D1/shared multi-primary SQL |
+| **Memory (testkit)** | `@paykernel/testkit` | **No — single process** (`single-process`) | **No** (`ephemeral`) | Strong **only in one isolate** | Unit tests, local examples, conformance self-proof | **NON-PRODUCTION.** Never on a production payment path. Restart loses all state. |
+
+### Manifest field cheat sheet
+
+| Adapter | `coordinationScope` | `durability` | `consistency.claims` | `readAfterWrite` | `staleReadsPossible` |
+| --- | --- | --- | --- | --- | --- |
+| postgres | `multi-host` | `durable` | `strong` | `strong` | `false` |
+| redis (all bindings) | `multi-host` | `configuration-dependent` | `strong` | `strong` | `false` |
+| sqlite (all bindings) | `single-host` | `durable` | `strong` | `strong` | `false` |
+| turso (both bindings) | `multi-host` | `durable` | `strong` | `strong` | `false` |
+| cloudflare-d1 | `multi-host` | `durable` | `strong` | **`session`** | **`true`** |
+| cloudflare-do | `multi-host` (partitioned) | `durable` | `strong` | `strong` (per DO) | `false` (per partition) |
+| memory | `single-process` | `ephemeral` | `strong` (isolate only) | `strong` | `false` |
+
+## Decision tree (answer in order; stop at the first clear fit)
+
+| # | Question | Choice |
+| - | --- | --- |
+| 1 | Do you already run PostgreSQL that all workers will share? | **`@paykernel/store-postgres`** (general production default). Subpaths: `.` `/pg` `/postgres-js` `/bun-sql` `/drizzle`. |
+| 2 | Cloudflare Workers? (including greenfield; do **not** jump to Turso; **never** `@paykernel/store-sqlite` — Workers are multi-isolate with no durable local FS) | Need strong **per-key / per-partition** serialization (including if you already use D1)? → **`@paykernel/store-durable-objects`** with an explicit sharding strategy. **Never** route all payment work through one global Durable Object. Shared relational / greenfield (no existing D1)? → **`@paykernel/store-d1`** as the **Worker-native** default. Prefer Sessions (`first-primary` / bookmarks) when read replication is on. |
+| 3 | Ephemeral serverless FS / no durable local disk (not Workers)? | Do **not** use `@paykernel/store-sqlite`. Continue to remote SQLite (Turso), optional Redis, or STOP. |
+| 4 | Bun app, single host, durable local file is acceptable? | **`@paykernel/store-sqlite/bun`**. |
+| 5 | Node app, single host, local file OK? | **`/node`** or **`/better-sqlite3`** on `@paykernel/store-sqlite` (prefer better-sqlite3 until `node:sqlite` is stable for your line). |
+| 6 | Need multi-host remote SQLite-compatible storage (not a local file)? | **`@paykernel/store-turso`** (`/serverless` or `/libsql`). **Not** interchangeable with local SQLite or D1. **No `/sync`**. |
+| 7 | Already operate Redis, Valkey, or Upstash for coordination? | Matching Redis binding; optionally **hybrid** with SQL for long-term audit. Bun + plain Redis URL → prefer **`/bun`**. Bun + **Cluster or Sentinel** → **do not use `/bun`**; use **`/ioredis`** or **`/node-redis`**. Upstash → **`/upstash`**. |
+| 8 | No Redis today and moderate load? | Pick the **primary** relational / D1 / DO adapter from above. **Do not add Redis** only because PayKernel exists. |
+
+:::caution
+**Fail-closed default:** if **multi-host** or **multi-isolate** coordination is required and the only option under consideration is **local SQLite** (`store-sqlite` file DB) → **STOP**. Choose PostgreSQL, Turso (remote), D1, or Durable Objects (sharded). Do not “share the file” across hosts or isolates.
+:::
+
+**Tests / examples only:** `createMemoryStores()` from `@paykernel/testkit` — **NON-PRODUCTION**.
+
+Same logic as a compact If / Then table:
+
+| If | Then |
+| --- | --- |
+| Shared PostgreSQL already | `@paykernel/store-postgres` |
+| Cloudflare + per-key serialization | `@paykernel/store-durable-objects` (sharded; never one global DO) |
+| Cloudflare + shared relational / greenfield | `@paykernel/store-d1` |
+| Bun single host + durable local file | `@paykernel/store-sqlite/bun` |
+| Node single host + durable local file | `@paykernel/store-sqlite/node` or `/better-sqlite3` |
+| Need remote SQLite-compatible multi-host | `@paykernel/store-turso` `/serverless` or `/libsql` (no `/sync`) |
+| Already run Redis / Valkey / Upstash | Matching `@paykernel/store-redis` binding (optional hybrid with SQL) |
+| Multi-host needed but only local SQLite | **Refuse** — Postgres, Turso, D1, or DO |
+| Unit tests / in-process examples | `@paykernel/testkit` memory — **NON-PRODUCTION** |
+
+## Recommended defaults
+
+- **Existing PostgreSQL application** → `@paykernel/store-postgres`. Factories: `createPostgresStores` / binding helpers (`/pg`, `/postgres-js`, `/bun-sql`, `/drizzle`). Example: `createPostgresStoresFromPg({ client })` + `migratePostgresAdapter(executor)`.
+- **Cloudflare application already using D1** → `@paykernel/store-d1`. Factory: `createD1PaymentStores({ db })` + explicit `migrateD1Adapter`.
+- **Cloudflare application needing strong per-key coordination** → `@paykernel/store-durable-objects`. Factory: `createDoPaymentStores({ namespace, sharding })` — sharding required; never global/singleton default.
+- **Bun single-server application** → `@paykernel/store-sqlite/bun`. Factory: `createBunSqliteStores({ db })` + `migrateSqliteAdapter`.
+- **Globally deployed app wanting remote SQLite compatibility** → `@paykernel/store-turso`. Prefer `/serverless` (`createTursoServerlessStores`) or `/libsql` (`createLibsqlStores`) against a **shared remote** primary (not local file as multi-host) + `migrateTursoAdapter`.
+- **Existing Redis or Valkey needing fast coordination** → `@paykernel/store-redis` matching binding (`createRedisStoresFromBun` / `FromIoredis` / `FromNodeRedis` / `FromUpstash`), **optionally paired** with SQL/D1/Turso for durable audit.
+- **Bun application already using Redis or Valkey** → prefer `@paykernel/store-redis/bun` unless Cluster or Sentinel is required (then ioredis/node-redis).
+- **No existing Redis and moderate workload** → prefer the **primary** relational / D1 / DO adapter above; **avoid adding Redis infrastructure** solely for this SDK.
+
+Real subpaths (do not invent others):
+
+| Package | Subpaths |
+| --- | --- |
+| `@paykernel/store-postgres` | `.` `/bun-sql` `/postgres-js` `/pg` `/drizzle` |
+| `@paykernel/store-redis` | `.` `/bun` `/upstash` `/ioredis` `/node-redis` |
+| `@paykernel/store-sqlite` | `.` `/bun` `/node` `/better-sqlite3` |
+| `@paykernel/store-turso` | `.` `/serverless` `/libsql` — **no** `/sync` |
+| `@paykernel/store-d1` | `.` only |
+| `@paykernel/store-durable-objects` | `.` only — never one global DO |
+
+## Honesty / anti-marketing
+
+| Do **not** market… | Because |
+| --- | --- |
+| Local SQLite (Bun / Node / better-sqlite3) as multi-host or multi-region | Manifest: `coordinationScope: "single-host"` only |
+| Redis as required for PayKernel | Redis adapter is **optional**; many apps use SQL/D1/DO alone |
+| D1 as interchangeable with local SQLite, Turso, or Durable Objects | Separate packages, APIs, and consistency models |
+| Durable Objects as one global object or shared multi-primary SQL | Partitioned strong coordination only; sharding required |
+| Multi-region strong consistency for any adapter | No adapter manifest uses `multi-region`; most are `multi-host` at most |
+| Turso embedded-replica **`/sync`** | Package has **no** `./sync` export; offline multi-writer not advertised |
+| Bun Redis Cluster / Sentinel support | `/bun` **rejects** Cluster/Sentinel; use ioredis/node-redis |
+| Memory stores as production-safe | `single-process` + `ephemeral` — **NON-PRODUCTION** only |
+| D1 strong read-after-write without sessions under replication | Manifest: `readAfterWrite: "session"`, `staleReadsPossible: true` |
+| Redis as blindly durable audit storage | `durability: "configuration-dependent"`; hybrid SQL preferred for long-term audit |
+| libSQL and Turso serverless clients as drop-in interchangeable | Different subpaths; test independently |
+
+When uncertain: **fail closed** (weaker guarantee, or refuse the deployment shape) rather than invent capability.
+
+## Package quick reference
+
+| npm package | `coordinationScope` | Primary factory example |
+| --- | --- | --- |
+| `@paykernel/store-postgres` | `multi-host` | `createPostgresStores({ executor })` or `createPostgresStoresFromPg({ client })` |
+| `@paykernel/store-redis` | `multi-host` | `createRedisStoresFromBun` / `FromIoredis` / `FromNodeRedis` / `FromUpstash` |
+| `@paykernel/store-sqlite` | `single-host` | `createBunSqliteStores({ db })` / Node / better-sqlite3 counterparts |
+| `@paykernel/store-turso` | `multi-host` | `createTursoServerlessStores` / `createLibsqlStores` (+ `migrateTursoAdapter`) |
+| `@paykernel/store-d1` | `multi-host` | `createD1PaymentStores({ db: env.PAYMENTS_DB })` |
+| `@paykernel/store-durable-objects` | `multi-host` (partitioned) | `createDoPaymentStores({ namespace, sharding })` |
+| `@paykernel/testkit` (memory) | `single-process` | `createMemoryStores()` |
+
+Manifest constants:
+
+| Constant | Package |
+| --- | --- |
+| `POSTGRES_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-postgres` |
+| `REDIS_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-redis` |
+| `SQLITE_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-sqlite` |
+| `TURSO_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-turso` |
+| `D1_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-d1` |
+| `DO_STORAGE_ADAPTER_MANIFEST` | `@paykernel/store-durable-objects` |
+| `MEMORY_STORAGE_ADAPTER_MANIFEST` | `@paykernel/testkit` |
+
+Helpers: `assertStorageAdapterManifest`, `isProductionSafeCoordination`, `isStrongClaimAdapter` from `@paykernel/store-contracts` (re-exported by `@paykernel/testkit`).
+
+## Agent checklist
+
+When recommending an adapter:
+
+1. State **package name + subpath** (if any).
+2. State **`coordinationScope` and `durability`** from the manifest, not assumptions.
+3. For multi-host or multi-isolate need + local SQLite only → **refuse** and offer Postgres / Turso / D1 / DO. For Cloudflare Workers → D1 or DO, **never** `store-sqlite`.
+4. For Redis → say **optional**; mention Bun Cluster/Sentinel rejection when relevant.
+5. For D1 → mention **session** RAW / stale-read caveat under replication.
+6. For DO → require **sharding**; forbid global singleton.
+7. For Turso → **no `/sync`**; remote multi-host ≠ local SQLite.
+8. Never recommend **memory** for production paths.
+
+See [Getting started](/guides/getting-started) for Postgres composition, [Store contracts](/packages/store-contracts), and [SQL foundation](/packages/sql-foundation).

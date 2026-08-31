@@ -1,0 +1,53 @@
+---
+title: Guides
+description: How to compose PayKernel — money, outcomes, webhooks, stores, routing, and the 1.0 API.
+sidebar:
+  order: 1
+---
+
+Compose `@paykernel/core` at the application layer. Webhooks, stores, reconciliation, routing, and OpenTelemetry are **separate packages**. Current versions are `0.1.0-next.0` — not a released npm 1.0.
+
+:::caution
+Never fulfill an order in `onWebhookVerified` or from `handleWebhook` alone. Claim the inbox first, then fulfill only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `success: true` is not the fulfillment signal — use `isPaidOutcome` / `outcome`.
+:::
+
+## Start here
+
+| Guide | Use when |
+| --- | --- |
+| [Getting started](/guides/getting-started) | First `createPayment`, then inbox + PostgreSQL + reconcile |
+| [Money](/guides/money) | `money()`, minor units, exponents, 1.0 `AmountInput` |
+| [Outcomes](/guides/outcomes) | `outcome`, `isPaidOutcome`, indeterminate, refunds |
+| [Webhooks](/guides/webhooks) | Verify, `PaymentEvent`, inbox claim, HTTP mapping |
+| [Adapter selection](/guides/adapter-selection) | Which `@paykernel/store-*` to run |
+| [Composition](/guides/composition) | Wire core + inbox + store + recon + routing |
+| [Runtime](/guides/runtime) | Node / Bun / Deno / Workers, `PaymentRuntime` |
+| [Best practices](/guides/best-practices) | Production checklist (honesty rules) |
+| [Migrate to 1.0](/guides/migrate-to-1-0) | Breaking changes from 0.x → 1.0 API |
+
+## Honesty that applies on every page
+
+| Fact | Implication |
+| --- | --- |
+| Packages are `0.1.0-next.0` | Do not treat them as a published 1.0 on npm |
+| Folder `packages/observability` publishes as **`@paykernel/opentelemetry`** | Do not use the folder name as the npm specifier |
+| `@paykernel/internal-sql-store` is **private** | Do not install it. It is a BC shim over `@paykernel/sql-foundation` |
+| Redis is **optional** | Core and the inbox engine do not require it |
+| Local SQLite is **single-host** | `:memory:` is one process. Do not share a file across hosts |
+| Turso is **remote multi-host** | **No** `/sync` export. Not local SQLite, D1, or Durable Objects |
+| D1 ≠ Durable Objects ≠ Turso ≠ local SQLite | Separate packages, APIs, and consistency models |
+| Memory stores are **NON-PRODUCTION** | `@paykernel/testkit` `createMemoryStores()` only |
+| No adapter declares `coordinationScope: "multi-region"` | Do not invent multi-region strong consistency |
+| `handleWebhook` verifies and normalizes | It does **not** claim, lease, or set HTTP status |
+| HTTP status codes live in `@paykernel/integration-http` | `mapInboxOutcome` — not `@paykernel/webhooks` |
+| After `outcome === "indeterminate"` | Lookup + `decideReconciliationPolicy` only. Do **not** `createPayment` again |
+| Never auto-route a second gateway | After timeout / indeterminate / uncertain 5xx |
+
+Core never depends on webhooks, stores, routing, or OpenTelemetry. You wire those at the application layer.
+
+## Related
+
+- [Quickstart](/quickstart) — smallest `createPaymentClient` sample
+- [Packages](/packages) — publishable package map
+- [Stores](/stores) — Postgres, Redis, SQLite, Turso, D1, Durable Objects
+- [Examples](/examples) — private runnable hosts (not published)

@@ -1,0 +1,252 @@
+---
+title: "@paykernel/integration-http"
+description: Portable HTTP mapping and processWebhookHttp for inbox outcomes. No framework imports.
+sidebar:
+  order: 2
+  label: HTTP
+---
+
+`@paykernel/integration-http` owns the webhook HTTP status table and raw-body orchestration so Hono, Elysia, Express, and Workers cannot drift. It depends only on `@paykernel/core` and `@paykernel/webhooks`. It has **no** framework imports.
+
+Version `0.1.0-next.0` (workspace). Not a released 1.0. Export map: `"."` only (`types` + `import`).
+
+```bash
+bun add @paykernel/integration-http
+# workspace peers: @paykernel/core @paykernel/webhooks
+```
+
+## HTTP policy
+
+`@paykernel/webhooks` never hardcodes status codes. Map `WebhookProcessingOutcome` with `mapInboxOutcome`:
+
+```ts
+import { mapInboxOutcome, retryAfterSeconds } from "@paykernel/integration-http";
+
+const status = mapInboxOutcome(outcome); // default { kind: "provider_redelivery" }
+const statusWithWorker = mapInboxOutcome(outcome, { kind: "durable_worker" });
+
+if (status === 503) {
+  const seconds = retryAfterSeconds(outcome);
+}
+```
+
+`InboxHttpAckPolicy` is `{ kind: "provider_redelivery" } | { kind: "durable_worker" }`.
+
+Exhaustive on `WebhookProcessingOutcome.outcome`:
+
+| outcome | `provider_redelivery` (default) | `durable_worker` |
+| --- | --- | --- |
+| `processed` | 200 | 200 |
+| `duplicate_completed` | 200 | 200 |
+| `invalid_webhook` | 400 | 400 |
+| `payload_conflict` | 409 | 409 |
+| `already_processing` | 503 | 503 |
+| `handler_failed` retryable | 500 | 500 |
+| `handler_failed` not retryable | 200 | 200 |
+| `scheduled_for_retry` `not_available` | 503 | 503 |
+| `scheduled_for_retry` `parked` | 503 | 200 |
+| `scheduled_for_retry` `handler_retry` | 503 | 200 |
+
+Default `provider_redelivery` **never** ACKs 200 for `scheduled_for_retry`. `durable_worker` ACKs 200 only for persisted deferrals (`parked` / `handler_retry`). `not_available` and `already_processing` stay 503 in both policies.
+
+`retryAfterSeconds` reads `retryAfterMs` only on `already_processing` and `scheduled_for_retry`. It returns `ceil(ms / 1000)`, at least 1, or `undefined` if `retryAfterMs` is absent. `processWebhookHttp` sets `Retry-After` **only** when the mapped status is 503 and seconds are defined.
+
+:::caution[durable_worker needs a real worker]
+When `ackPolicy.kind === "durable_worker"` and the outcome is `scheduled_for_retry` with reason `parked` or `handler_retry`, `processWebhookHttp` ACKs 200 only if `engine.mode === "durable_retry"` **and** `engine.workerGuaranteed === true`. Otherwise it `console.warn`s and falls back to 503. Do not ACK a parked event with no `processRetryable` worker. `inline` engines never emit `scheduled_for_retry`.
+:::
+
+## processWebhookHttp
+
+```ts
+import { createPaymentClient, stripeGateway } from "@paykernel/core";
+import { createWebhookInboxEngine } from "@paykernel/webhooks";
+import type { WebhookInboxStore } from "@paykernel/webhooks";
+import {
+  processWebhookHttp,
+  webhookHttpResultToResponse,
+} from "@paykernel/integration-http";
+
+declare const store: WebhookInboxStore; // from a @paykernel/store-* adapter after explicit migrate
+
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function findOrderById(orderId: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: process.env.STRIPE_SECRET_KEY!,
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "stripe",
+  // WEBHOOKS-2: no onWebhookVerified fulfillment. Verify-only client.
+});
+
+const engine = createWebhookInboxEngine({
+  store,
+  mode: "inline",
+});
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+export async function onStripeWebhook(rawBody: string, headers: Headers): Promise<Response> {
+  const result = await processWebhookHttp({
+    gateway: "stripe",
+    rawBody, // string | Uint8Array from request.text() — do not JSON.parse
+    headers,
+    client,
+    engine,
+    handler: async (ctx) => {
+      if (!isPaidFulfillmentEvent(ctx.event)) return;
+      const event = ctx.event as {
+        payment?: { references?: { providerObjectId?: string; internalReference?: string } };
+      };
+      const gatewayPaymentId = event.payment?.references?.providerObjectId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) return;
+      const byGw = findOrderByGatewayPaymentId(gatewayPaymentId);
+      if (byGw) {
+        await fulfillOrder(byGw, gatewayPaymentId);
+        return;
+      }
+      const ref = event.payment?.references?.internalReference;
+      if (ref) {
+        const candidate = findOrderById(ref);
+        if (candidate) {
+          await fulfillOrder(candidate, gatewayPaymentId);
+          return;
+        }
+      }
+      throw new Error("no local order for paid webhook");
+    },
+  });
+  return webhookHttpResultToResponse(result);
+}
+```
+
+`ProcessWebhookHttpInput`:
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `gateway` | `string` | Looked up case-insensitively in `GATEWAY_WEBHOOK_SIGNATURE`. |
+| `rawBody` | `string \| Uint8Array` | `Uint8Array` decoded with `TextDecoder("utf-8", { fatal: true })`. |
+| `headers` | `HeaderBag` | `Headers` or `Record<string, string \| string[] \| undefined>`. Case-insensitive. |
+| `query` | `Record<string, string \| undefined>` | Optional. Paymob HMAC may arrive as `?hmac=`. |
+| `client` | `WebhookClient` | Structural `handleWebhook(...)`. Must be a `PaymentClient` with **no** `onWebhookVerified` fulfillment. |
+| `engine` | `WebhookInboxEngine` | Calls `processWithVerifier`. |
+| `handler` | `WebhookHandler` | Runs **after** inbox claim/lease. Fulfill here only. |
+| `ackPolicy` | `InboxHttpAckPolicy` | Default `{ kind: "provider_redelivery" }`. |
+| `correlationId` | `string` | Optional. Else `resolveCorrelationId(headers)`. |
+| `signatureProfile` | `GatewayWebhookSignatureProfile` | Optional override of `GATEWAY_WEBHOOK_SIGNATURE[gateway]`. |
+
+`WebhookHttpResult`:
+
+- `status: number`
+- `headers: Record<string, string>` — always includes `x-request-id`; `retry-after` only on 503 when seconds are known
+- `body`: `{ error: "invalid_webhook" }` for forgery / missing required signature / invalid UTF-8; `{ outcome, reason }` for `scheduled_for_retry`; `{ outcome, retryable }` for `handler_failed`; otherwise `{ outcome }`
+
+`webhookHttpResultToResponse` builds a `Response` with `content-type: application/json` (if not already set) and `JSON.stringify(result.body)`.
+
+:::caution[Never fulfill in onWebhookVerified]
+`client.handleWebhook` is the verify-only path inside `engine.processWithVerifier`. If `processWebhookHttp` detects populated `onWebhookVerified` hooks it `console.warn`s once per client and **does not throw**. Fulfillment that runs in that hook can run before the inbox claim. Put money side effects only in `handler` after claim, rematching `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `success: true` is not the fulfillment signal. See [Getting started](/guides/getting-started) and [Webhooks](/guides/webhooks).
+:::
+
+After `outcome === "indeterminate"` or `reconciliationRequired` on **create**, do not `createPayment` again — lookup + `decideReconciliationPolicy` only ([Outcomes](/guides/outcomes)). That rule is independent of this package; the HTTP adapter never auto-routes a second gateway.
+
+## Raw body vs object-HMAC
+
+`rawBody` stays a string (or fatal-UTF-8 decoded bytes) at the HTTP layer.
+
+- **String-HMAC** (`stripe`, `paypal`, `myfatoorah`): the raw string is passed unchanged into `handleWebhook`. Do not `JSON.parse` / `JSON.stringify`.
+- **Object-HMAC** (`tap`, `moyasar`, `paymob` — `OBJECT_HMAC_GATEWAYS`): `processWebhookHttp` defensively `JSON.parse`s a JSON **object** and passes that object. Arrays and invalid JSON stay the raw string (fail-closed at the verifier).
+
+## Signature profiles
+
+`GATEWAY_WEBHOOK_SIGNATURE` (keys lowercased at lookup):
+
+| Gateway | Kind | Material |
+| --- | --- | --- |
+| `stripe` | `header` required | `stripe-signature` |
+| `tap` | `header` required | `hashstring` |
+| `myfatoorah` | `header` required | `MyFatoorah-Signature` |
+| `paypal` | `headers` | all five: `paypal-transmission-id`, `paypal-transmission-time`, `paypal-transmission-sig`, `paypal-cert-url`, `paypal-auth-algo` |
+| `paymob` | `header_or_query` | `hmac` header, else `hmac` query (query key match is case-insensitive) |
+| `moyasar` | `payload` | signature lives in the body; `extractWebhookSignature` returns `undefined` |
+
+`extractWebhookSignature(gateway, headers, query?, profile?)` returns a string, a lowercased header record (PayPal), or `undefined`. Unknown gateways return `undefined` (no early 400 from a missing profile).
+
+## Failure paths
+
+| Condition | HTTP | Body | `handleWebhook` called? |
+| --- | --- | --- | --- |
+| Required header missing (Stripe / Tap / MyFatoorah) | 400 | `{ error: "invalid_webhook" }` | no |
+| PayPal any of the five headers missing or empty | 400 | `{ error: "invalid_webhook" }` | no |
+| Paymob `hmac` missing from both header and query | 400 | `{ error: "invalid_webhook" }` | no |
+| `Uint8Array` is not valid UTF-8 | 400 | `{ error: "invalid_webhook" }` | no |
+| Forgery-class `InvalidWebhookError` (bad HMAC / signature) | 400 | `{ error: "invalid_webhook" }` | yes (threw) |
+| Parse-stage `InvalidWebhookError` (`invalid paymob` / `invalid moyasar` / `webhook parse failed`) | 500 | `{ outcome: "handler_failed", retryable: true }` | yes |
+| Missing-config `InvalidWebhookError` (`webhookSecret` / `hmacSecret` / `webhookId`) | 500 | `{ outcome: "handler_failed", retryable: true }` | yes |
+| Missing `providerEventId` (`id`) on the verified event | 500 | `{ outcome: "handler_failed", retryable: true }` | yes |
+| Other throws from verify/handler/store | 500 | `{ outcome: "handler_failed", retryable: true }` | maybe |
+| `payload_conflict` | 409 | `{ outcome: "payload_conflict" }` | yes |
+| `already_processing` | 503 | `{ outcome: "already_processing" }` | yes |
+| `handler_failed` not retryable | 200 | `{ outcome: "handler_failed", retryable: false }` | yes |
+
+Parse-stage and missing-config errors are **retryable 500** so the provider redelivers an authentic paid event instead of treating it as forgery. Do not map those to 400.
+
+Headers always include `x-request-id` (from `correlationId`, else `x-request-id` → `x-correlation-id` → `cf-ray` → `crypto.randomUUID()` / timestamp fallback).
+
+## Header and env helpers
+
+```ts
+import {
+  getHeader,
+  resolveCorrelationId,
+  requireStringBindings,
+  extractWebhookSignature,
+} from "@paykernel/integration-http";
+
+getHeader(headers, "stripe-signature"); // case-insensitive; first non-empty array entry
+
+const correlationId = resolveCorrelationId(headers);
+// x-request-id → x-correlation-id → cf-ray → generated id
+
+const { STRIPE_WEBHOOK_SECRET } = requireStringBindings(env, ["STRIPE_WEBHOOK_SECRET"]);
+// throws `missing env: KEY, ...` listing keys only, never values
+```
+
+`HeaderBag` is `Headers | Record<string, string | string[] | undefined>`. Empty strings are treated as missing.
+
+## Other exports
+
+| Export | Kind |
+| --- | --- |
+| `mapInboxOutcome` | function |
+| `retryAfterSeconds` | function |
+| `getHeader` | function |
+| `resolveCorrelationId` | function |
+| `requireStringBindings` | function |
+| `GATEWAY_WEBHOOK_SIGNATURE` | const |
+| `OBJECT_HMAC_GATEWAYS` | `ReadonlySet<string>` (`tap`, `moyasar`, `paymob`) |
+| `extractWebhookSignature` | function |
+| `processWebhookHttp` | function |
+| `webhookHttpResultToResponse` | function |
+| `createWebhookOperationContext` | function — `{ gateway, operationId, inboxEventKey? }` → `OperationContext` with `operationType: "payment.webhook.process"` |
+| `InboxHttpAckPolicy` | type |
+| `HeaderBag` | type |
+| `GatewayWebhookSignatureProfile` | type |
+| `WebhookClient` | type |
+| `WebhookHttpResult` | type |
+| `ProcessWebhookHttpInput` | type |
+
+Test-only memory inbox stores come from `@paykernel/testkit` (`createMemoryWebhookInboxStore`) and are **NON-PRODUCTION**. Do not use them as a multi-host store. See [Stores](/stores) and [Webhooks](/guides/webhooks).
+
+Framework wrappers: [Hono](/integrations/hono), [Elysia](/integrations/elysia), [Express](/integrations/express), [Cloudflare Workers](/integrations/cloudflare-workers).

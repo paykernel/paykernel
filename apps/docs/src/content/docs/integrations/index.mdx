@@ -1,0 +1,81 @@
+---
+title: Integrations
+description: Thin HTTP adapters that read a raw webhook body, call processWebhookHttp, and map inbox outcomes to status codes.
+sidebar:
+  order: 1
+  label: Overview
+---
+
+Framework packages in PayKernel are thin HTTP wrappers around [`@paykernel/integration-http`](/integrations/http). They read the **raw** webhook body, run `processWebhookHttp`, and return the status from `mapInboxOutcome`. They do not fulfill orders, pick a store, or put HTTP status codes in [`@paykernel/webhooks`](/packages/webhooks).
+
+Version of every integration package is `0.1.0-next.0` (workspace). They are not a released 1.0.
+
+## Packages
+
+| Package | Page | Role |
+| --- | --- | --- |
+| `@paykernel/integration-http` | [HTTP](/integrations/http) | Portable mapping. Owns `mapInboxOutcome` and `processWebhookHttp`. Depends on `@paykernel/core` and `@paykernel/webhooks` only. |
+| `@paykernel/integration-hono` | [Hono](/integrations/hono) | `honoWebhook`. Reads `c.req.raw.text()`. Peer `hono >= 4`. Portable. |
+| `@paykernel/integration-elysia` | [Elysia](/integrations/elysia) | `elysiaWebhook(path, options)` with `{ parse: "none" }`. Peer `elysia >= 1`. Portable. |
+| `@paykernel/integration-express` | [Express](/integrations/express) | `expressRawJson()` + `expressWebhook`. Peer `express >= 4`. **Node-only.** |
+| `@paykernel/integration-cloudflare-workers` | [Cloudflare Workers](/integrations/cloudflare-workers) | `handleCloudflareWebhook` + `readWorkerBindings`. No `cloudflare:workers` static import. Portable. |
+
+Each framework package depends only on `@paykernel/integration-http` among workspace packages, and **re-exports** `mapInboxOutcome`, `processWebhookHttp`, `requireStringBindings`, and the other HTTP helpers so the app can import one package. They do **not** re-export `OBJECT_HMAC_GATEWAYS` — import that from `@paykernel/integration-http` if you need the set.
+
+## Request path
+
+```text
+HTTP request
+  -> framework adapter (raw text / Buffer, never JSON.parse for Stripe)
+  -> processWebhookHttp
+       1. signature header/query guard (missing required material -> 400, client not called)
+       2. engine.processWithVerifier
+            verifyAndNormalize: client.handleWebhook (verify + normalize only)
+            inbox claim / lease
+            handler (fulfill only after claim)
+       3. mapInboxOutcome -> status
+  -> JSON body { outcome } or { error: "invalid_webhook" }
+```
+
+`handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. Status codes live in `@paykernel/integration-http`, not in `@paykernel/webhooks`.
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill only in the inbox `handler` after a claim, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. Do not use `success: true` or `isPaidOutcome` on the webhook event (`isPaidOutcome` is for `GatewayPaymentResult`). See [Getting started](/guides/getting-started), [Webhooks](/guides/webhooks), and [Outcomes](/guides/outcomes).
+:::
+
+## Raw body before verify
+
+Webhook routes must read the body as text (or `Buffer` / `Uint8Array`) **before** any JSON parser.
+
+| Adapter | How the body is read |
+| --- | --- |
+| HTTP | You pass `rawBody: string \| Uint8Array`. Do not `JSON.parse` / `JSON.stringify` Stripe / PayPal / MyFatoorah bytes. |
+| Hono | `c.req.raw` then `request.text()`. Never `c.req.json()`. |
+| Elysia | `request.text()` on a route registered with `{ parse: "none" }`. |
+| Express | `expressRawJson()` (`express.raw({ type: "application/json" })`) on the webhook route only. |
+| Workers | `request.text()`. |
+
+Stripe, PayPal, and MyFatoorah HMAC over the **exact** raw bytes. Tap, Moyasar, and Paymob HMAC over parsed object fields (`OBJECT_HMAC_GATEWAYS` in `@paykernel/integration-http`).
+
+## HTTP policy
+
+Default `ackPolicy` is `{ kind: "provider_redelivery" }`: `scheduled_for_retry` is **503**, not 200. `{ kind: "durable_worker" }` ACKs 200 only for persisted `parked` / `handler_retry` when `engine.mode === "durable_retry"` and `workerGuaranteed === true`; otherwise `processWebhookHttp` warns and returns 503. Full table: [HTTP mapping](/integrations/http#http-policy).
+
+## What these packages are not
+
+- Not store adapters. Inject a `WebhookInboxStore` from a `@paykernel/store-*` package after an **explicit** migrate. Local SQLite is **single-host**. `:memory:` is one process. Memory stores from `@paykernel/testkit` are **NON-PRODUCTION**.
+- Not gateway packages. Built-in gateways (`stripe`, `paypal`, `paymob`, `moyasar`) come from `@paykernel/core`.
+- They never call `createPayment`, capture, refund, or fulfillment.
+- They do not implement `/internal/*` test hooks. Those routes in the examples are unauthenticated (`enableTestHooks`) and **must not be deployed**.
+
+## Runnable hosts
+
+Thin apps that call these adapters:
+
+- [Bun + Hono + SQLite](/examples/bun-hono-sqlite)
+- [Bun + Hono + Postgres](/examples/bun-hono-postgres)
+- [Bun + Elysia + SQLite](/examples/bun-elysia-sqlite)
+- [Express + SQLite](/examples/express-sqlite)
+- [Cloudflare Workers fetch](/examples/cloudflare-workers-fetch)
+
+See also [Getting started](/guides/getting-started) and [Webhooks](/guides/webhooks).

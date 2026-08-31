@@ -1,0 +1,154 @@
+---
+title: Cloudflare D1
+description: Workers-native shared D1 stores. Not local SQLite, not Turso, not Durable Objects. Session read-after-write.
+sidebar:
+  order: 6
+---
+
+`@paykernel/store-d1` is the **Worker-native shared relational** adapter. Multi-host when every Worker binds the **same** D1 database. Single root export (no driver subpaths). Claims prefer single-statement UPSERT + `RETURNING`; multi-statement only inside D1 `batch()`.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+This is **not** [`store-sqlite`](/stores/sqlite), **not** [`store-turso`](/stores/turso), and **not** [`store-durable-objects`](/stores/durable-objects). Manifest `readAfterWrite` is **`session`**; `staleReadsPossible` is **`true`** without Sessions under read replication. Never `@paykernel/store-sqlite` on Workers (no durable local FS; multi-isolate).
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-d1
+# optional DX types (not required at runtime):
+bun add -d @cloudflare/workers-types
+```
+
+`paymentsSdk.runtime: "cloudflare-only"`. Root does **not** import `cloudflare:workers`. Normal operation uses the **D1 Workers binding only** — no Cloudflare REST API or account token for store construction.
+
+## Quick start
+
+```ts
+import {
+  createD1PaymentStores,
+  migrateD1Adapter,
+} from "@paykernel/store-d1";
+
+// Explicit migrate — NEVER automatic on import or factory construction.
+// Run once in ops/CI or a one-shot Worker, not on every request.
+await migrateD1Adapter(env.PAYMENTS_DB);
+
+const stores = createD1PaymentStores({
+  db: env.PAYMENTS_DB,
+  // Defaults to session: "first-primary" when db.withSession exists.
+  // Opt out with session: false.
+});
+
+const r = await stores.idempotency.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+```
+
+### Executor factories
+
+```ts
+import {
+  createD1Executor,
+  createD1IdempotencyStore,
+  createD1Stores,
+  migrateD1Adapter,
+} from "@paykernel/store-d1";
+
+const executor = createD1Executor(env.PAYMENTS_DB);
+await migrateD1Adapter(executor);
+const store = createD1IdempotencyStore({ executor });
+const bundle = createD1Stores({ executor });
+```
+
+`createD1PaymentStores` / `createD1Stores` **do not** migrate.
+
+## Wrangler
+
+`store-d1` imports `node:async_hooks` (`AsyncLocalStorage`). Workers without `nodejs_compat` fail at module load.
+
+```toml
+name = "payments-worker"
+main = "src/index.ts"
+compatibility_date = "2026-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "PAYMENTS_DB"
+database_name = "payments"
+database_id = "<your-d1-id>"
+```
+
+Migration SQL for Wrangler must **omit** `BEGIN`/`COMMIT` wrappers. Prefer `migrateD1Adapter` for schema parity. Package snapshots: `migrations/0001_foundation.sql`, `migrations/0002_list_indexes.sql`.
+
+## Sessions (read-after-write)
+
+Claims are **writes** and stay strong at the engine. Unbound `get` / list after a write may hit a **replica** when D1 read replication is on.
+
+| Call | Session behavior |
+| --- | --- |
+| `createD1PaymentStores({ db })` (session omitted) | **`first-primary`** when `db.withSession` exists; otherwise unbound |
+| `createD1Executor(db)` / `migrateD1Adapter(db)` | Same default |
+| `session: "first-primary"` / bookmark | Explicit constraint |
+| `session: false` | Opt out — stale replica reads possible under replication |
+
+Why default: after a claim UPSERT returns empty, stores may `SELECT` to classify. Without a session under replication, that SELECT can misclassify.
+
+```ts
+import {
+  createD1PaymentStores,
+  withD1Session,
+  D1_SESSION_FIRST_PRIMARY,
+  supportsD1Sessions,
+} from "@paykernel/store-d1";
+
+const storesNoSession = createD1PaymentStores({
+  db: env.PAYMENTS_DB,
+  session: false,
+});
+
+const db = withD1Session(env.PAYMENTS_DB, D1_SESSION_FIRST_PRIMARY);
+```
+
+Official Sessions API: [Cloudflare D1 `withSession`](https://developers.cloudflare.com/d1/worker-api/d1-database/#withsession) (binding pin in this adapter: 2026-08-03).
+
+## Guarantees
+
+`D1_STORAGE_ADAPTER_MANIFEST` (`name: "cloudflare-d1"`):
+
+| Field | Value |
+| --- | --- |
+| `coordinationScope` | `multi-host` (shared D1) |
+| `durability` | `durable` |
+| `consistency.claims` | `strong` |
+| `consistency.readAfterWrite` | `session` |
+| `consistency.staleReadsPossible` | `true` |
+
+`createD1Executor` does **not** attach `transaction()` and never issues `BEGIN IMMEDIATE` on live D1. `withTransaction` fails closed (`StoreUnsupportedFeatureError`) when `D1Executor.transaction` is unavailable. Prefer single-statement claims or `batch()`.
+
+D1 `batch()` is a SQL transaction: statement failure aborts/rolls back the sequence.
+
+Need strong **per-key / per-partition** serialization instead? That is [`store-durable-objects`](/stores/durable-objects) — a different consistency model.
+
+## Failure paths
+
+| Event | Behavior |
+| --- | --- |
+| Isolate restart after claim, before complete | Lease until expiry; another isolate reclaims |
+| Crash after provider work, before complete | Uncertain — `markIndeterminate` if lease still valid; **never invent failure** |
+| Stale token | `StoreLeaseLostError` |
+| Stale replica SELECT (no session) | Possible misclassification — keep `first-primary` |
+| Migrate on every request | Forbidden; run ops/CI / one-shot Worker |
+| Wrangler SQL with `BEGIN`/`COMMIT` | Wrong for D1 apply path |
+
+**Never fulfill in `onWebhookVerified`.** Claim the inbox; fulfill only when rematched `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`. See [Webhooks](/guides/webhooks). HTTP status mapping is `@paykernel/integration-http`, not `@paykernel/webhooks`.
+
+## Related
+
+- [Stores overview](/stores) · [Durable Objects](/stores/durable-objects)
+- [Cloudflare Workers integration](/integrations/cloudflare-workers)
+- [Store contracts](/packages/store-contracts) · [Adapter selection](/guides/adapter-selection)

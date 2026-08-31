@@ -4,7 +4,7 @@
 
 Omitted `tapSource` defaults to `src_card` (not `src_all`). `createPayment` rejects `auth_…` source ids — capture with `capturePayment`.
 
-Optional config `autoVoidHours` is sent **only** on authorize create as `auto: { type: "VOID", time }`. It is **not** defaulted. It is rejected when authorize source is omitted / `src_card` (`InvalidRequestError`). Token sources (`tok_…`) may send it. Omit it unless you want Tap to auto-VOID the hold.
+Optional config `autoVoidHours` is sent **only** on authorize create as `auto: { type: "VOID", time }`. It is **not** defaulted. It is rejected when authorize source is omitted / `src_card` / `src_all` (`InvalidRequestError`). Token sources (`tok_…`) and other local methods (`src_kw.knet`, `src_sa.mada`, …) may send it. Omit it unless you want Tap to auto-VOID the hold.
 
 **Capture** (`capturePayment`): `gatewayPaymentId` must be `auth_…`. The adapter GETs the authorize.
 

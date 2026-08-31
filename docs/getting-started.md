@@ -231,8 +231,8 @@ import {
 } from "@paykernel/reconciliation";
 import {
   isMoney,
+  isPaymentDomainStatus,
   money,
-  NetworkError,
   type GatewayPaymentResult,
   type Money,
 } from "@paykernel/core";
@@ -247,6 +247,7 @@ function publishableCurrency(value: unknown): string | undefined {
 /** Provider recon snapshot from `getPayment` Money only. Incomplete money fails closed. */
 function providerSnapshotFromGetPayment(got: GatewayPaymentResult) {
   if (!got.gatewayId) return undefined;
+  if (!isPaymentDomainStatus(got.status)) return undefined;
   const currency = publishableCurrency(got.currency);
   const hasAmountLike =
     got.amount !== undefined ||
@@ -291,38 +292,22 @@ const reconciler = createPaymentReconciler({
 
 async function createOrSchedule(
   params: Parameters<typeof client.createPayment>[0],
-  gateway = "stripe",
+  gateway = "stripe" as const,
 ) {
-  try {
-    const result = await client.createPayment(params, gateway);
-    if (result.outcome === "indeterminate" || result.reconciliationRequired) {
-      await scheduler.schedule({
-        target: buildReconciliationTarget({
-          gateway,
-          gatewayPaymentId: result.gatewayId,
-          idempotencyKey: params.idempotencyKey,
-          expected: { status: "pending" },
-        }),
-        runAt: new Date().toISOString(),
-        reason: "indeterminate_create",
-      });
-    }
-    return result;
-  } catch (err) {
-    if (err instanceof NetworkError && err.afterProviderSubmit) {
-      await scheduler.schedule({
-        target: buildReconciliationTarget({
-          gateway,
-          idempotencyKey: params.idempotencyKey,
-          expected: { status: "pending" },
-        }),
-        runAt: new Date().toISOString(),
-        reason: "indeterminate_create",
-      });
-      return;
-    }
-    throw err;
+  const result = await client.createPayment(params, gateway);
+  if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+    await scheduler.schedule({
+      target: buildReconciliationTarget({
+        gateway,
+        gatewayPaymentId: result.gatewayId,
+        idempotencyKey: params.idempotencyKey,
+        expected: { status: "pending" },
+      }),
+      runAt: new Date().toISOString(),
+      reason: "indeterminate_create",
+    });
   }
+  return result;
 }
 
 // Worker: the store row is subjectId + reason, not a serialized target.
@@ -377,7 +362,7 @@ The store does not persist the full target. Rebuild it from `subjectId` / your o
 
 Invariant: **lookup + decide, never a second charge**.
 
-`createPayment` / capture / refund that may have reached the provider return `outcome: "indeterminate"` (and often `reconciliationRequired: true`) instead of throwing in several post-submit paths. Thrown `NetworkError` with `afterProviderSubmit: true` is the remaining uncertain class (for example Moyasar mutating HTTP 200 + invalid JSON).
+`createPayment` / capture / refund that may have reached the provider return `outcome: "indeterminate"` (and often `reconciliationRequired: true`) instead of throwing. `BaseGateway` maps `NetworkError.afterProviderSubmit` into that result — those paths do **not** throw to the caller. Pre-submit / GET `NetworkError` still throws.
 
 ---
 
@@ -397,7 +382,19 @@ const decision = router.select({
   currency: amount.currency,
   amount,
 });
-await client.createPayment({ amount, currency: amount.currency, orderId: "o1" }, decision.gateway);
+const gateway = decision.gateway;
+if (gateway !== "moyasar" && gateway !== "stripe") {
+  throw new Error(`router selected unregistered gateway: ${gateway}`);
+}
+await client.createPayment(
+  {
+    amount,
+    currency: amount.currency,
+    orderId: "o1",
+    callbackUrl: "https://example.com/callback",
+  },
+  gateway,
+);
 ```
 
 If `input.currency` and `amount.currency` are both set and differ, `select` throws `NoRouteMatchError` with reason `currency_mismatch_honesty`. Pass `money()` (or the same currency on both fields). After a timeout or indeterminate attempt, do **not** `select` another gateway. [safe-fallback.md](../packages/routing/docs/safe-fallback.md).

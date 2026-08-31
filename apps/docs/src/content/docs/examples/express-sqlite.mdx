@@ -1,0 +1,83 @@
+---
+title: Express + SQLite
+description: Thin Express adapter over the private checkout kernel. Tests wrap listen(0); default kernel needs bun:sqlite.
+sidebar:
+  order: 6
+---
+
+`@paykernel/example-express-sqlite` is a **private** workspace host (`private: true`). It is **not** published and is **not** [`@paykernel/integration-express`](/integrations/express). The [checkout kernel](/examples/checkout-kernel) owns checkout, inbox, and reconciliation.
+
+Source: [`examples/express-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/express-sqlite) ([README](https://github.com/paykernel/paykernel/blob/main/examples/express-sqlite/README.md)). There is no listen `index.ts` in this package — tests only.
+
+## Mapping
+
+[`createExpressCheckoutApp`](https://github.com/paykernel/paykernel/blob/main/examples/express-sqlite/src/app.ts) — imports and Stripe route as in source:
+
+```ts
+import express from "express";
+import { expressRawJson, expressWebhook } from "@paykernel/integration-express";
+import {
+  checkoutJsonResponse,
+  createCheckoutHandlers,
+  createPaymentInputFromUnknown,
+  gatewayPaymentIdFromUnknown,
+  type CheckoutHttpOptions,
+  type CheckoutKernel,
+  type CheckoutFetchApp,
+} from "@paykernel/example-checkout-kernel";
+import { createServer } from "node:http";
+
+app.post(
+  "/webhooks/stripe",
+  expressRawJson(),
+  expressWebhook({
+    gateway: kernel.webhook.gateway,
+    client: kernel.webhook.client,
+    engine: kernel.webhook.engine,
+    handler: kernel.webhook.handler,
+  }),
+);
+```
+
+`expressRawJson()` is `express.raw({ type: "application/json" })` and is used **only** on `/webhooks/stripe`. Other JSON routes use `express.json()`. Do not run `express.json()` on the Stripe path — Stripe HMAC is over the exact raw bytes. If a string-HMAC gateway sees a pre-parsed object body, `expressWebhook` fail-closes with `400 { "error": "invalid_webhook" }` without calling the client.
+
+Fulfillment is only `kernel.webhook.handler` after the inbox claim. Never fulfill in `onWebhookVerified`. Status codes come from `mapInboxOutcome`, not [`@paykernel/webhooks`](/packages/webhooks).
+
+Unmatched routes return JSON `404 { "error": "not_found" }` (not Express’s default HTML). `express.json()` parse failures and `URIError` map to `400 { "error": "invalid_json" }` / `invalid_order_id`.
+
+## `expressAppToFetch`
+
+Tests need a `fetch(Request)` surface for `runCheckoutHttpScenarios`. `expressAppToFetch` is **not** “without a network port”: each `fetch` starts `http.createServer(app).listen(0)` on `127.0.0.1`, proxies the request, then closes the server. Ephemeral loopback port per request — no fixed port.
+
+## `:memory:` needs Bun
+
+Default `createCheckoutKernel()` uses `createBunSqliteStoresInMemory` (`bun:sqlite`). **Node without `bun:sqlite` cannot run this example.** For Node, inject [`@paykernel/store-sqlite/node`](/stores/sqlite) or `/better-sqlite3` via `createCheckoutKernel({ stores | storeFactory | executor })`. Local SQLite is still **single-host**. `:memory:` is one process. This host is not a distributed store.
+
+## Routes
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/payments` | `express.json()` |
+| `POST` | `/webhooks/stripe` | `expressRawJson()` + `expressWebhook` |
+| `GET` | `/orders/:orderId` | Order book |
+| `POST` | `/internal/reconcile` | **Test hook.** Unauthenticated. Do not deploy. |
+| `POST` | `/internal/provider-paid` | **Test hook.** Unauthenticated. Do not deploy. |
+| `GET` | `/internal/create-count` | **Test hook.** Unauthenticated. Do not deploy. |
+
+:::caution[Test hooks]
+`runCheckoutHttpScenarios("express", …)` passes `{ enableTestHooks: true }`. Without the flag, `/internal/reconcile` and `/internal/create-count` return `404`. Do not deploy those routes.
+:::
+
+Shared failure paths: [Checkout kernel](/examples/checkout-kernel).
+
+## Run
+
+```bash
+bun test examples/express-sqlite
+```
+
+Requires Bun for the default kernel. There is no `start` script in this example’s `package.json`.
+
+## Related
+
+- [Checkout kernel](/examples/checkout-kernel) · [Express integration](/integrations/express) · [SQLite store](/stores/sqlite) · [Webhooks](/guides/webhooks)

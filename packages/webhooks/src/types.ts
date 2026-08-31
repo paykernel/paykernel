@@ -349,6 +349,12 @@ export type CreateWebhookInboxEngineOptions = {
 export type WebhookInboxEngine = {
   readonly mode: WebhookProcessingMode;
   /**
+   * True when the host passed `workerGuaranteed: true` at construction.
+   * HTTP adapters (`processWebhookHttp` `durable_worker` ACK) read this
+   * property — it is not only an options-bag flag.
+   */
+  readonly workerGuaranteed: boolean;
+  /**
    * Primary path: verified + normalized input → claim → handler (per mode) → outcome.
    */
   processVerified(input: ProcessVerifiedInput): Promise<WebhookProcessingOutcome>;

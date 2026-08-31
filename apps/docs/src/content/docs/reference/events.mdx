@@ -1,0 +1,375 @@
+---
+title: Payment events
+description: Stable PaymentEvent names (schema version 1), STABLE_PAYMENT_EVENT_TYPES, and provider-native mapping from @paykernel/core.
+sidebar:
+  order: 5
+---
+
+Stable, provider-agnostic payment events for fulfillment and persistence. This page is the **public contract** for `PaymentEvent` schema version `1`, ported from `packages/core/docs/webhook-events.md` plus `STABLE_PAYMENT_EVENT_TYPES` in `packages/core/src/types/stable-payment-event-types.ts`.
+
+Cross-links: [webhooks](/guides/webhooks) (verify, raw body, hooks), [outcomes](/guides/outcomes) (Payment snapshots), [`@paykernel/webhooks`](/packages/webhooks) (inbox claim / lease — **not** in core).
+
+`handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. HTTP status lives in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`).
+
+:::caution[Never fulfill in `onWebhookVerified`]
+That hook runs after verify/parse and **before** any inbox claim. Fulfill after `@paykernel/webhooks` claims, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `success: true` is not the fulfillment signal. Type-only switches on `payment.succeeded` without status rematch can over-fulfill partials.
+:::
+
+Workspace version **`0.1.0-next.0`**. Not a released npm 1.0.
+
+## Why
+
+Legacy `WebhookEvent.type` is a **free-form, provider-native** string (`payment_paid`, `payment_intent.succeeded`, `PAYMENT.CAPTURE.COMPLETED`, `TRANSACTION_RESPONSE`, …). Apps should not re-implement provider mapping.
+
+| Concept | Role |
+| --- | --- |
+| **Stable names** | Public fulfillment contract (`payment.succeeded`, …) |
+| **`PaymentEvent`** | Discriminated union on `type` + `schemaVersion: "1"` |
+| **`ProviderEventMetadata`** | Native `eventType`, ISO times, livemode, apiVersion |
+| **`PersistedPaymentEventEnvelope`** | Sanitized store shape (no raw / secrets) |
+| **Dual-write on `WebhookEvent`** | Additive `event` / `stableType` / `provider` without breaking `type` |
+
+## Schema versioning
+
+```ts
+import { PAYMENT_EVENT_SCHEMA_VERSION } from "@paykernel/core";
+// PAYMENT_EVENT_SCHEMA_VERSION === "1"
+// every PaymentEvent arm includes: schemaVersion: "1"
+```
+
+Inventory field `paymentEventSchemaVersion` is `"1"` (`public-api.inventory.json`).
+
+### Compatibility rules (v1)
+
+1. **Consumers must switch on `schemaVersion` then `type`.**
+2. **Additive optional fields** on an arm are OK within `schemaVersion: "1"`.
+3. **Changing the meaning** of a stable `type` string requires a **new** `schemaVersion`.
+4. **Never silently rename** a stable type once shipped (e.g. do not redefine `payment.succeeded` as “authorized only”).
+5. Provider-native names live only on `provider.eventType` — they are **not** the public stable contract.
+
+## `STABLE_PAYMENT_EVENT_TYPES`
+
+Source order from `packages/core/src/types/stable-payment-event-types.ts` (14 names). The inventory file lists the same set alphabetically.
+
+```ts
+import {
+  STABLE_PAYMENT_EVENT_TYPES,
+  isStablePaymentEventType,
+} from "@paykernel/core";
+```
+
+| Index | Stable type |
+| --- | --- |
+| 0 | `payment.created` |
+| 1 | `payment.processing` |
+| 2 | `payment.authorized` |
+| 3 | `payment.succeeded` |
+| 4 | `payment.failed` |
+| 5 | `payment.cancelled` |
+| 6 | `capture.completed` |
+| 7 | `refund.pending` |
+| 8 | `refund.completed` |
+| 9 | `refund.failed` |
+| 10 | `payment_method.setup_completed` |
+| 11 | `dispute.opened` |
+| 12 | `dispute.updated` |
+| 13 | `dispute.closed` |
+
+`isStablePaymentEventType(v)` is the type guard. **Do not invent** additional stable names.
+
+Unmapped / ambiguous provider events use a dedicated arm that is **not** in `STABLE_PAYMENT_EVENT_TYPES`:
+
+```ts
+{
+  schemaVersion: "1";
+  type: "provider.unmapped";
+  provider: ProviderEventMetadata;
+  payment?: Payment;
+  note?: string;
+}
+```
+
+Do **not** invent stable names for ambiguous domains (Stripe invoice / subscription schedules, Paymob redirect-only without status context).
+
+## `ProviderEventMetadata`
+
+```ts
+type ProviderEventMetadata = {
+  gateway: string;
+  eventId: string;
+  /** Provider-native event type — never silently renamed */
+  eventType: string;
+  apiVersion?: string;
+  livemode?: boolean;
+  /** ISO-8601 when the provider says the event occurred */
+  occurredAt: string;
+  /** ISO-8601 when the SDK received/parsed the event */
+  receivedAt: string;
+  requestId?: string;
+};
+```
+
+Timestamps are **ISO-8601 strings**, not `Date`.
+
+## `PaymentEvent` (discriminated union)
+
+Every arm has `schemaVersion: "1"` and `provider: ProviderEventMetadata`.
+
+| `type` | Required entity fields |
+| --- | --- |
+| `payment.created` / `processing` / `authorized` / `succeeded` / `cancelled` | `payment: Payment` |
+| `payment.failed` | `payment` + `failure: PaymentFailure` |
+| `capture.completed` | `capture: Capture`; optional `payment` |
+| `refund.pending` / `refund.completed` | `refund: Refund` |
+| `refund.failed` | `refund`; optional `failure` |
+| `payment_method.setup_completed` | `setup: PaymentMethodSetup` |
+| `dispute.opened` / `updated` / `closed` | `dispute: Dispute` |
+| `provider.unmapped` | optional `payment`, optional `note` |
+
+`Payment` reuses the Phase 6 snapshot type (`status`, `amount?`, `currency?`, `references: ProviderReferences`, …). `PaymentFailure` is shape-aligned with `PaymentDecline` (no secrets in `raw`).
+
+### After verify: claim, then rematch
+
+`attachPaymentEvent` / `webhookEventToPaymentEvent` do **not** claim the inbox. `handleWebhook` verifies only. Then `processVerified` on [`@paykernel/webhooks`](/packages/webhooks):
+
+```ts
+import {
+  createWebhookInboxEngine,
+  resolveInboxPayloadHash,
+  type WebhookInboxStore,
+} from "@paykernel/webhooks";
+import { mapInboxOutcome } from "@paykernel/integration-http";
+
+declare const store: WebhookInboxStore;
+declare const client: import("@paykernel/core").PaymentClient;
+declare const rawBody: string;
+declare const signature: string | undefined;
+declare function fulfillBoundToGatewayPaymentId(id: string): Promise<void>;
+
+const engine = createWebhookInboxEngine({
+  store,
+  mode: "inline",
+  owner: "api-worker-1",
+  defaultLeaseMs: 30_000,
+});
+
+const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+// handleWebhook verifies only. Never fulfill here.
+
+const outcome = await engine.processVerified({
+  gateway: "stripe",
+  providerEventId: webhookEvent.id,
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
+  }),
+  event: webhookEvent.event ?? webhookEvent,
+  handler: async (ctx) => {
+    const rec = ctx.event as { type?: string; payment?: { status?: string } };
+    const paid =
+      (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+      rec.payment?.status === "paid";
+    if (!paid) return;
+    const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+    if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+      return;
+    }
+    await fulfillBoundToGatewayPaymentId(gatewayPaymentId);
+  },
+});
+return mapInboxOutcome(outcome); // HTTP lives here, not in @paykernel/webhooks
+```
+
+## Provider-native → stable mapping
+
+```ts
+import { mapProviderEventTypeToStable } from "@paykernel/core";
+
+mapProviderEventTypeToStable("stripe", "payment_intent.succeeded");
+// → "payment.succeeded"  (then rematch on domain status — see table)
+
+mapProviderEventTypeToStable("moyasar", "payment_paid");
+// → "payment.succeeded"
+
+mapProviderEventTypeToStable("paypal", "PAYMENT.CAPTURE.COMPLETED");
+// → "capture.completed"  (capture domain)
+
+mapProviderEventTypeToStable("stripe", "invoice.paid");
+// → "provider.unmapped"
+```
+
+Tables are pure data (`STRIPE_EVENT_TYPE_MAP`, `MOYASAR_EVENT_TYPE_MAP`, `PAYPAL_EVENT_TYPE_MAP`, `PAYMOB_TOKEN_EVENT_TYPES`, `STRIPE_UNMAPPED_EVENT_TYPES`) plus `mapProviderEventTypeToStable`. Extra gateways ([Tap](/gateways/tap), [MyFatoorah](/gateways/myfatoorah)) are not in these core maps.
+
+### Mapping policy highlights
+
+Ported from `packages/core/docs/webhook-events.md`. Do not paraphrase upstream PSP docs.
+
+| Gateway | Native type | Stable | Notes |
+| --- | --- | --- | --- |
+| Stripe | `payment_intent.succeeded` (full / status `paid`) | `payment.succeeded` | Default map when not partial |
+| Stripe | `payment_intent.succeeded` + status `partially_captured` / `processing` / `pending` / `approved` | **`payment.processing`** | Catalog rematch (`coerceStableSucceededToDomainStatus`); not paid |
+| Stripe | `payment_intent.succeeded` + status `refunded` / `partially_refunded` | **`payment.processing`** | Not `payment.succeeded` — no refund entity invented here |
+| Stripe | `payment_intent.succeeded` + status `failed` | **`payment.failed`** | Rematch; type-only handlers must not fulfill |
+| Stripe | `payment_intent.succeeded` + status `cancelled` / `reversed` | **`payment.cancelled`** | Rematch |
+| Stripe | `payment_intent.succeeded` + status `authorized` | **`payment.authorized`** | Rematch; auth hold is not paid |
+| Stripe | `payment_intent.payment_failed` | `payment.failed` | |
+| Stripe | `payment_intent.canceled` | `payment.cancelled` | |
+| Stripe | `checkout.session.completed` + `payment_status=paid` | `payment.succeeded` | Needs context |
+| Stripe | `charge.refunded` | `refund.completed` | |
+| Stripe | `setup_intent.succeeded` | `payment_method.setup_completed` | |
+| Stripe | `charge.dispute.*` | `dispute.*` | |
+| Stripe | `invoice.*` / `customer.subscription.*` | **unmapped** | Ambiguous |
+| Moyasar | `payment_paid` | `payment.succeeded` | |
+| Moyasar | `payment_failed` / `payment_faild` | `payment.failed` | Typo normalized by gateway |
+| Moyasar | `payment_authorized` | `payment.authorized` | |
+| PayPal | `PAYMENT.CAPTURE.COMPLETED` | **`capture.completed`** | Not `payment.succeeded`. Rematch if domain status is `partially_captured` / `processing` / `failed` / `cancelled` / `refunded` |
+| PayPal | `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | **`payment.processing`** | Status `partially_captured`; **not** `capture.completed` / `payment.succeeded` |
+| PayPal | `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` when status is `refunded`; otherwise `refund.pending` | Type-only / refund-shaped / `partially_refunded` must not close a capture as fully refunded |
+| PayPal | `PAYMENT.REFUND.COMPLETED` | `refund.completed` | Refund resource |
+| PayPal | `PAYMENT.CAPTURE.REVERSED` | **unmapped** | No stable `reversed` arm |
+| Paymob | `TOKEN` | `payment_method.setup_completed` | `PAYMOB_TOKEN_EVENT_TYPES` is `TOKEN` / `token` |
+| Paymob | `TRANSACTION` + success flags | `payment.succeeded` / … | Use `flags` / `status` / `amounts` context; **processed** server webhook only |
+| Paymob | `TRANSACTION` + signed `is_refunded` (or HMAC `is_refund` alias) | **`refund.pending`** | Domain status **`refund_completed`** (incomplete snapshot) — **not** full `refunded` / `partially_refunded`. Unsigned `refunded_amount_cents` is stripped after HMAC |
+| Paymob | `TRANSACTION` amount-only refund (`refunded_amount_cents` without signed refund flags) | **ignored for refund** | Status stays non-refund; **not** `payment.succeeded` and **not** forged `refunded` |
+| Paymob | `TRANSACTION` `is_auth` + full `captured_amount` / status `paid` | `payment.succeeded` | Not `payment.authorized` when fully settled |
+| Paymob | `TRANSACTION` `partially_captured` | **`payment.processing`** | Aligns with `isPaidOutcome` (partial is not paid-like) |
+| Paymob | `TRANSACTION` `is_capture` + success (no trusted `captured_amount`) | **`payment.processing`** | Fail-closes — **not** `capture.completed` / `paid`. Use transaction inquiry |
+| Paymob | `TRANSACTION_RESPONSE` without status | **unmapped** | Do not fulfill on redirect-only |
+| Paymob | `TRANSACTION_RESPONSE` + success / paid / capture signals | **`payment.processing`** | **Never** `payment.succeeded` / `capture.completed` on redirect; wait for processed `TRANSACTION` |
+
+**PayPal capture choice:** `PAYMENT.CAPTURE.COMPLETED` maps to `capture.completed`, not `payment.succeeded`. Apps that fulfill when money is captured should handle `capture.completed` **and** `payment.status === "paid"`.
+
+**PayPal partial auth capture:** `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` dual-writes **`payment.processing`** with domain status `partially_captured`. Do not fulfill remaining authorized amount on this event alone.
+
+**Paymob redirect vs processed:** Native type is the distinguisher. Browser/query redirect callbacks parse as `TRANSACTION_RESPONSE` and dual-write `payment.processing` even when status is `paid` — so fulfill-on-`payment.succeeded` handlers never ship from redirect alone. Use processed `TRANSACTION` or transaction inquiry.
+
+**Paymob inbox key:** Redirect `TRANSACTION_RESPONSE` sets `WebhookEvent.id` to `{txn}:redirect`; processed `TRANSACTION` keeps the raw txn id (`paymob.gateway.ts` `paymobWebhookEventId`). `gatewayPaymentId` stays the signed txn id on both. Raw `event.id` values **do not collide**, so inbox-deduping on `event.id` does **not** swallow later paid. `@paykernel/webhooks` `deriveWebhookEventKey("paymob", id, type)` strips the `:redirect` suffix and qualifies by class: `paymob:TRANSACTION_RESPONSE:{txn}` vs `paymob:TRANSACTION:{txn}` (processed + status → `paymob:TRANSACTION:{txn}:{status}`). Still do not inbox-dedupe on the unsigned Paymob txn id alone.
+
+**Stripe / Paymob partial capture:** Domain status `partially_captured` dual-writes `payment.processing`, not `payment.succeeded`. Fulfill only with status `paid` or `isPaidOutcome`.
+
+### Direct maps (runtime constants)
+
+`MOYASAR_EVENT_TYPE_MAP`:
+
+| Native | Stable |
+| --- | --- |
+| `payment_paid` | `payment.succeeded` |
+| `payment_failed` | `payment.failed` |
+| `payment_faild` | `payment.failed` |
+| `payment_authorized` | `payment.authorized` |
+| `payment_abandoned` | `payment.failed` |
+| `payment_voided` | `payment.cancelled` |
+| `payment_refunded` | `refund.completed` |
+| `payment_captured` | `capture.completed` |
+| `payment_verified` | `payment_method.setup_completed` |
+
+`PAYPAL_EVENT_TYPE_MAP` (status-gated exceptions in the policy table still apply):
+
+| Native | Stable |
+| --- | --- |
+| `PAYMENT.CAPTURE.COMPLETED` | `capture.completed` |
+| `PAYMENT.CAPTURE.DENIED` | `payment.failed` |
+| `PAYMENT.CAPTURE.DECLINED` | `payment.failed` |
+| `PAYMENT.CAPTURE.PENDING` | `payment.processing` |
+| `PAYMENT.CAPTURE.REFUNDED` | `refund.completed` (status-gated to `refund.pending` unless `refunded`) |
+| `PAYMENT.REFUND.PENDING` | `refund.pending` |
+| `PAYMENT.REFUND.COMPLETED` | `refund.completed` |
+| `PAYMENT.REFUND.FAILED` | `refund.failed` |
+| `PAYMENT.AUTHORIZATION.CREATED` | `payment.authorized` |
+| `PAYMENT.AUTHORIZATION.VOIDED` | `payment.cancelled` |
+| `PAYMENT.AUTHORIZATION.CAPTURED` | `capture.completed` |
+| `PAYMENT.AUTHORIZATION.PARTIALLY_CAPTURED` | `payment.processing` |
+| `CHECKOUT.ORDER.APPROVED` | `payment.processing` |
+| `CHECKOUT.PAYMENT-APPROVAL.REVERSED` | `payment.cancelled` |
+| `CUSTOMER.DISPUTE.CREATED` | `dispute.opened` |
+| `CUSTOMER.DISPUTE.UPDATED` | `dispute.updated` |
+| `CUSTOMER.DISPUTE.RESOLVED` | `dispute.closed` |
+
+`STRIPE_UNMAPPED_EVENT_TYPES` includes `invoice.*`, `customer.subscription.*`, and `subscription_schedule.*` names listed in `packages/core/src/types/webhook-event-map.ts`. Unknown types return `provider.unmapped`.
+
+## Dual-write with legacy `WebhookEvent`
+
+| Field | Behavior |
+| --- | --- |
+| `WebhookEvent.type` | **Unchanged** — provider-native / gateway-normalized free-form |
+| `WebhookEvent.stableType` | Stable name when mappable; omitted when unmapped |
+| `WebhookEvent.event` | Full `PaymentEvent` |
+| `WebhookEvent.provider` | `ProviderEventMetadata` |
+| `WebhookEvent.rawPayload` | Still **required** request-local; **deprecated for persistence** |
+| `PaymentEvent.type` | **Always** stable name or `provider.unmapped` |
+
+```ts
+import { webhookEventToPaymentEvent } from "@paykernel/core";
+
+const event = await client.handleWebhook("moyasar", body);
+// event.type === "payment_paid"           // legacy free-form (unchanged)
+// event.stableType === "payment.succeeded"
+// event.event.type === "payment.succeeded"
+// event.provider.eventType === "payment_paid"
+
+const onlyPaymentEvent = webhookEventToPaymentEvent(event);
+```
+
+**Do not** rewrite gateway tests to expect stable names on `.type` without an explicit migration. Dual-write is additive.
+
+### Migration from free-form `type`
+
+1. Prefer `event.event` or `webhookEventToPaymentEvent(event)`.
+2. Switch on `schemaVersion` + `PaymentEvent.type`.
+3. Inbox-dedupe with `deriveWebhookEventKey(gateway, event.id, event.type)` from `@paykernel/webhooks` (Paymob **must** include notification class).
+4. For persistence, call `toPersistedPaymentEventEnvelope` (never store `rawPayload` by default); prefer `event.payloadHash` when present.
+
+## Raw payload retention
+
+| Path | Raw body |
+| --- | --- |
+| Request-local handlers | `WebhookEvent.rawPayload` (required 0.x) |
+| `PaymentEvent` default | **No** raw on nested `payment` |
+| `PersistedPaymentEventEnvelope` | **Strips** raw / `clientSecret` / secrets |
+| Long-term encrypted storage | App implements `RawWebhookPayloadCodec` + `encryptRawWebhookPayload` |
+
+```ts
+import {
+  toPersistedPaymentEventEnvelope,
+  webhookEventToPaymentEvent,
+  encryptRawWebhookPayload,
+  type RawWebhookPayloadCodec,
+} from "@paykernel/core";
+
+const paymentEvent = webhookEventToPaymentEvent(webhookEvent);
+const envelope = toPersistedPaymentEventEnvelope(paymentEvent, {
+  rawForHash: webhookEvent.rawPayload,
+  storedAt: new Date().toISOString(),
+});
+```
+
+Core never ships a default encryptor — apps own keys via `RawWebhookPayloadCodec`. **Never** re-expose Moyasar `secret_token`, Stripe signatures, PayPal transmission sigs, or HMAC headers in envelopes, logs, or `payloadHash` inputs. `hashWebhookPayload` redacts known secret keys before hashing.
+
+## Helpers (public exports)
+
+| Symbol | Purpose |
+| --- | --- |
+| `STABLE_PAYMENT_EVENT_TYPES` / `isStablePaymentEventType` | Stable name set + guard |
+| `PAYMENT_EVENT_SCHEMA_VERSION` | `"1"` |
+| `mapProviderEventTypeToStable` | Native → stable / unmapped |
+| `webhookEventToPaymentEvent` | Legacy → `PaymentEvent` |
+| `attachPaymentEvent` | Dual-write onto `WebhookEvent` |
+| `buildProviderEventMetadata` | Metadata builder |
+| `paymentFromWebhookEvent` | Phase 6 `Payment` from webhook fields |
+| `hashWebhookPayload` | Redacted canonical sha256 |
+| `toPersistedPaymentEventEnvelope` | Sanitized envelope |
+| `encryptRawWebhookPayload` | App codec encryption helper |
+| `assertNoSecretsInEnvelope` | Test/runtime guard |
+| `isPaymentEvent` / `isPaymentSucceededEvent` / `isPaymentFailedEvent` / `isRefundCompletedEvent` / `isProviderUnmappedEvent` | Arm guards |
+
+All of these are runtime exports of `@paykernel/core` (`.` only). See [core API](/reference/core-api).
+
+## What this does **not** do
+
+- Does not change `handleWebhook` return type (still `WebhookEvent`; dual-write is additive).
+- Does not implement the inbox engine. Lease-aware store contracts live in `@paykernel/store-contracts` / `@paykernel/testkit`. The inbox **engine** is `@paykernel/webhooks`.
+- Does not remap gateway `parseWebhookEvent` `.type` strings (keeps native; stable names live on `stableType` / `event.type`).
+- Does not store raw provider payloads by default.
+- Does not set HTTP status codes.
+
+Failure path: unknown native type → `provider.unmapped` → log `provider.eventType` → **do not fulfill**. Redirect Paymob `TRANSACTION_RESPONSE` → `payment.processing` → **do not fulfill**. Verify failure → `InvalidWebhookError` ([errors](/reference/errors)).

@@ -1,0 +1,183 @@
+---
+title: "@paykernel/store-contracts"
+description: Portable lease-aware store interfaces, StoreError taxonomy, and storage adapter manifests.
+sidebar:
+  order: 6
+---
+
+Lease-aware **idempotency**, **webhook inbox**, and **reconciliation** contracts live in `@paykernel/store-contracts`. Production adapters implement these interfaces; inject stores at the app layer. Core and the webhook engine do **not** depend on a specific database.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::note
+Canonical import is `@paykernel/store-contracts`. `@paykernel/testkit` re-exports the same types for backward compatibility and hosts conformance suites plus **NON-PRODUCTION** memory factories.
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-contracts
+```
+
+Zero runtime workspace dependencies.
+
+```ts
+import {
+  StoreLeaseLostError,
+  assertStorageAdapterManifest,
+  type LeaseAwareIdempotencyStore,
+  type WebhookInboxStore,
+  type ReconciliationStore,
+  type StorageAdapterManifest,
+} from "@paykernel/store-contracts";
+```
+
+## Three contracts (not one bag)
+
+Adapters implement **only** the contracts they claim. Do not fold all three into a mixed “storage” object.
+
+| Contract | Type | Acquire | Token-gated mutators |
+| --- | --- | --- | --- |
+| Idempotency | `IdempotencyStore` / `LeaseAwareIdempotencyStore` | `reserve` | `renew`, `complete`, `markIndeterminate` |
+| Webhook inbox | `WebhookInboxStore` | `claim` | `renew`, `complete`, `fail` |
+| Reconciliation | `ReconciliationStore` | `schedule` then `claim` | `renew`, `complete`, `fail`, `markManualReview` |
+
+Prefer `LeaseAwareIdempotencyStore` when `@paykernel/core` is also in scope — core 0.x `IdempotencyStore` is a **different** API (`get` / `set` / optional `reserve`). Never mix the two.
+
+### Result kinds
+
+| Store | Discriminants |
+| --- | --- |
+| Idempotency `reserve` | `acquired` \| `already_completed` \| `in_progress` \| `indeterminate` \| `fingerprint_conflict` (classify `completed` / `indeterminate` **before** `fingerprint_conflict`) |
+| Webhook `claim` | `acquired` \| `already_completed` \| `in_progress` \| `payload_hash_conflict` \| `duplicate_failed` \| `not_available` |
+| Reconciliation `claim` | `acquired` \| `not_due` \| `in_progress` \| `already_terminal` \| `not_found` |
+| Reconciliation `schedule` | `scheduled` \| `already_exists` |
+
+`listDue` **must** soft-release expired `claimed` jobs so poll workers rediscover abandoned work. Key-addressed reclaim after expiry is not enough.
+
+## Atomic claims
+
+`reserve` / `claim` **must** be a single engine-level claim (conditional `INSERT`/`UPDATE`, Redis Lua, Durable Object transactional write). Concurrent workers serialize **in the storage engine**.
+
+```text
+// FORBIDDEN multi-process claim
+const row = await store.get(key);
+if (!row || expired(row)) await store.set(key, claimedRow);
+```
+
+`withTransaction` is an optional helper. It is **not** a substitute for atomic `reserve`/`claim`. Do not `await` provider HTTP inside a **synchronous** SQLite / Durable Object transaction callback.
+
+## Dual fencing
+
+Every claimable record has `key`, `status`, `leaseOwner`, `leaseToken`, `leaseExpiresAt`, `attempts`, `generation`, `createdAt`, `updatedAt`.
+
+| Field | Rule |
+| --- | --- |
+| `generation` | Monotonic; increment on every successful `reserve` / `claim` / `renew` that issues a new lease |
+| `leaseToken` | Unguessable opaque string; after reclaim or renew the **prior** token must fail |
+
+`complete` / `renew` require an **unexpired** lease. Webhook `fail` succeeds after expiry when the token still matches `status === "claimed"` (hang/timeout still records the attempt). `markIndeterminate` may park an unreclaimed `reserved` row near/at expiry; after reclaim the prior token is fenced.
+
+Treat `lease_lost` as “another worker owns the work” — **not** as a payment failure.
+
+## Indeterminate (A4)
+
+When a mutation’s outcome is uncertain, call `markIndeterminate` while you still hold the lease. **Do not invent** `completed` or failed.
+
+After status is `indeterminate`:
+
+- `reserve` returns `kind: "indeterminate"` and **must not** issue a new lease
+- Automatic replay is forbidden
+- `deleteExpired` **must not** remove indeterminate rows by default
+- Resolve with lookup + [`decideReconciliationPolicy`](/packages/reconciliation) — **do not** `createPayment` again after `outcome === "indeterminate"` or `reconciliationRequired`
+
+## Inbox vs webhook HTTP
+
+`handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. HTTP mapping lives in `@paykernel/integration-http` (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+
+:::caution
+**Never fulfill in `onWebhookVerified`.** Fulfill after an inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. `success: true` is not the fulfillment signal — use `isPaidOutcome` / `outcome`.
+:::
+
+## Error taxonomy
+
+`STORE_ERROR_CODES` and subclasses from `@paykernel/store-contracts`:
+
+| Code | Subclass | Default `retryable` |
+| --- | --- | --- |
+| `unavailable` | `StoreUnavailableError` | `true` |
+| `conflict` | `StoreConflictError` | `false` |
+| `lease_lost` | `StoreLeaseLostError` | `false` |
+| `timeout` | `StoreTimeoutError` | `true` |
+| `serialization_failure` | `StoreSerializationFailureError` | `true` |
+| `invalid_schema` | `StoreInvalidSchemaError` | `false` |
+| `unsupported_feature` | `StoreUnsupportedFeatureError` | `false` |
+| `corrupted_record` | `StoreCorruptedRecordError` | `false` |
+| `payload_hash_conflict` | `StorePayloadHashConflictError` | `false` |
+
+`StoreError.message` must never include secrets, signatures, authorization headers, or raw provider payloads.
+
+`isStoreLeaseLostError(error)` is true for `StoreLeaseLostError`, `name === "StoreLeaseLostError"`, **or** a plain `StoreError` with `code: "lease_lost"`. **Adapters must throw `name === "StoreLeaseLostError"`.** The webhook engine does not treat a bare domain throw with only that code as fencing, so handlers that reuse the code still reach `store.fail`.
+
+## Manifests
+
+Every adapter that implements these contracts should export a `StorageAdapterManifest`. All fields are required. `consistency.claims` is always `"strong"` for a conforming manifest — **only** when claims use engine-level atomic ops.
+
+```ts
+import {
+  MEMORY_STORAGE_ADAPTER_MANIFEST,
+  assertStorageAdapterManifest,
+  isProductionSafeCoordination,
+  isStrongClaimAdapter,
+} from "@paykernel/store-contracts";
+
+assertStorageAdapterManifest(MEMORY_STORAGE_ADAPTER_MANIFEST);
+isProductionSafeCoordination(MEMORY_STORAGE_ADAPTER_MANIFEST); // false
+isStrongClaimAdapter(MEMORY_STORAGE_ADAPTER_MANIFEST); // false
+```
+
+| Helper | Behavior (code) |
+| --- | --- |
+| `assertStorageAdapterManifest(m)` | Runtime shape/enum validation; throws `TypeError` |
+| `isProductionSafeCoordination(m)` | `false` when `coordinationScope === "single-process"` **or** `durability === "ephemeral"` |
+| `isStrongClaimAdapter(m)` | `claims === "strong"` **and** `supportsLeases` **and** `isProductionSafeCoordination(m)` |
+
+:::note
+In-repo `packages/store-contracts/docs/contracts.md` §7 describes `isStrongClaimAdapter` as `claims === "strong"` and `supportsLeases` only. The implementation in `src/adapter-manifest.ts` also requires production-safe coordination, so **NON-PRODUCTION** memory returns `false`. Code wins.
+:::
+
+`coordinationScope` values: `single-process` \| `single-host` \| `multi-host` \| `multi-region`. **No published adapter declares `multi-region`.**
+
+Adapter constants (import from the adapter package, not from this one):
+
+| Constant | Package |
+| --- | --- |
+| `POSTGRES_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-postgres`](/stores/postgres) |
+| `REDIS_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-redis`](/stores/redis) |
+| `SQLITE_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-sqlite`](/stores/sqlite) |
+| `TURSO_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-turso`](/stores/turso) |
+| `D1_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-d1`](/stores/d1) |
+| `DO_STORAGE_ADAPTER_MANIFEST` | [`@paykernel/store-durable-objects`](/stores/durable-objects) |
+| `MEMORY_STORAGE_ADAPTER_MANIFEST` | this package (`@paykernel/testkit` re-exports) |
+
+## Memory (NON-PRODUCTION)
+
+`MEMORY_STORAGE_ADAPTER_MANIFEST`: `coordinationScope: "single-process"`, `durability: "ephemeral"`. Factories (`createMemoryStores`, `createMemoryIdempotencyStore`, …) live in [`@paykernel/testkit`](/packages/testkit), **not** here.
+
+Restart loses all state. Do not put memory stores on a production payment path.
+
+## Dual ownership
+
+| Interface | Also exported from | Why |
+| --- | --- | --- |
+| `WebhookInboxStore` | [`@paykernel/webhooks`](/packages/webhooks) | Engine must not import testkit |
+| `ReconciliationStore` | [`@paykernel/reconciliation`](/packages/reconciliation) | Domain package must not import testkit |
+
+Types are structurally compatible. Durable adapters must still pass `run*StoreConformanceSuite` from `@paykernel/testkit`.
+
+## Related
+
+- How to pick an adapter: [Adapter selection](/guides/adapter-selection) and [Stores](/stores)
+- Shared SQL schemas: [`@paykernel/sql-foundation`](/packages/sql-foundation)
+- Inbox engine: [Webhooks guide](/guides/webhooks)
+- Outcomes: [Outcomes](/guides/outcomes)

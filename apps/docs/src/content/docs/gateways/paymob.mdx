@@ -1,0 +1,197 @@
+---
+title: Paymob
+description: Built-in Paymob Unified Intention adapter in @paykernel/core — region hosts, transaction IDs, HMAC webhooks, and fail-closed mutations.
+sidebar:
+  order: 4
+---
+
+Paymob uses the Unified Intention API for hosted checkout. The adapter lives in `@paykernel/core` as `paymobGateway` (`BuiltInGatewayName` `"paymob"`). This page documents PayKernel’s mapping. Upstream: [Paymob developers](https://developers.paymob.com/).
+
+Amounts are `Money`. Conversion uses ISO 4217 exponents via `getCurrencyExponent` (optional `currencyExponentOverrides`). Example: `money("20.125", "OMR")` → `20125` (×1000). Confirm OMR scaling with your Paymob Oman account; override only after Paymob confirms.
+
+## Configuration
+
+```ts
+import { createPaymentClient, paymobGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    paymob: paymobGateway({
+      secretKey: process.env.PAYMOB_SECRET_KEY!,
+      publicKey: process.env.PAYMOB_PUBLIC_KEY!,
+      hmacSecret: process.env.PAYMOB_HMAC_SECRET!,
+      integrationId: 123456,
+      authIntegrationId: 456789, // required for capture: false unless per-request override
+      region: "ksa", // default ksa
+      timeoutMs: 30000,
+      // idempotencyStore: redisBackedPaymobIdempotencyStore, // required for capture/refund/void
+    }),
+  },
+  defaultGateway: "paymob",
+});
+```
+
+Factory requires **`secretKey` or legacy `apiKey`** as a non-empty string. Unified Intention checkout wants `secretKey` + `publicKey`. `hmacSecret` is required in production webhook handling (constructor warns if `secretKey` is set without it — verification fails closed until configured).
+
+`publicKey` launches Unified Checkout; it is not used for capture/refund/void or HMAC verify.
+
+:::caution[Mutations require a store]
+Paymob has **no** native mutation idempotency. Capture, refund, and void throw `InvalidRequestError` unless `paymob.idempotencyStore` implements atomic `reserve()` **and** the call includes `idempotencyKey`. Process-local cache is wiped on serverless isolates. Create / get / webhooks stay unfenced (create may still use a process-local cache when a key is provided).
+:::
+
+`allowUnverifiedWebhooks: true` is for **local/test only** (`NODE_ENV=test` / `development` or `APP_ENV=local`). The SDK refuses unverified webhooks when the environment is production or unidentified.
+
+### Regions
+
+**Default is `ksa`.** Egypt merchants **must** set `region: "eg"` or an explicit `baseUrl` (e.g. `https://accept.paymob.com`); otherwise requests go to the KSA host.
+
+| Region | Base URL | Notes |
+| --- | --- | --- |
+| `ksa` (default) | `https://ksa.paymob.com` | Default when `region` and `baseUrl` are omitted |
+| `eg` | `https://accept.paymob.com` | **Required for Egypt accounts** |
+| `pk` | `https://pakistan.paymob.com` | **Experimental / unofficial** — prefer explicit `baseUrl` |
+| `om` | `https://oman.paymob.com` | Confirm OMR exponent with Paymob |
+| `ae` | `https://uae.paymob.com` | |
+
+`baseUrl` overrides `region`.
+
+## Create payment
+
+```ts
+import { money } from "@paykernel/core";
+
+const result = await client.createPayment(
+  {
+    amount: money("100", "SAR"),
+    currency: "SAR",
+    callbackUrl: "https://example.com/payment-result",
+    orderId: "order_123",
+    metadata: {
+      paymentId: "payment_123",
+      email: "customer@example.com",
+      firstName: "Mohammed",
+      lastName: "Ali",
+      phone: "+966500000000",
+    },
+  },
+  "paymob",
+);
+
+if (result.redirectUrl) {
+  redirect(result.redirectUrl);
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Do not createPayment again.
+}
+```
+
+Create `gatewayId` is the Paymob **intention** ID (often `pi_...`). `nextAction` exposes checkout URL, intention ID, client secret, and payment keys.
+
+**Capture, refund, void, and inquiry require the numeric Paymob transaction ID** from a verified processed webhook (`obj.id`) or the dashboard — **not** the intention ID. Passing `pi_...` or any non-numeric value is rejected before the SDK calls Paymob.
+
+Deprecated iframe flow: `gatewayId` is a non-numeric `legacy:…` handle; ecommerce **order** id is on `orderId` / `nextAction.orderId` only. Never pass create `gatewayId` from iframe checkout into refund/capture/void/inquiry.
+
+There is **no** `returnUrl` on `PaymobCreatePaymentParams`. Optional `callbackUrl` is sent as **both** Intention `notification_url` and `redirection_url`. TOKEN (saved-card) server callbacks typically go to the dashboard Integration Transaction Processed Callback, not that URL.
+
+### Auth / capture dual model
+
+`createPayment` with `capture: false`:
+
+1. Resolves `payment_methods` from `authIntegrationId` when no per-request `paymobIntegrationId` / `paymobPaymentMethods` override is supplied. Sale `integrationId` is **not** a silent fallback.
+2. Sets `is_auth: true` and `payment_type: "AUTH"` on the Intention body.
+
+Without `authIntegrationId` and without a per-request override, the SDK **rejects** the request.
+
+## Capture, void, refund
+
+```ts
+import { money } from "@paykernel/core";
+
+await client.capturePayment(
+  {
+    gatewayPaymentId: "123456789", // numeric transaction ID
+    amount: money("100", "SAR"),
+    currency: "SAR",
+    idempotencyKey: "capture-order-123",
+  },
+  "paymob",
+);
+
+await client.voidPayment(
+  {
+    gatewayPaymentId: "123456789",
+    idempotencyKey: "void-order-123",
+  },
+  "paymob",
+);
+
+await client.refundPayment(
+  {
+    gatewayPaymentId: "123456789",
+    amount: money("50", "SAR"),
+    currency: "SAR",
+    idempotencyKey: "refund-order-123",
+  },
+  "paymob",
+);
+```
+
+If `amount` is omitted, the SDK inquires first and sends remaining capturable / refundable. Explicit `amount` still inquires to verify currency and remaining balance. `reason` on refund is ignored.
+
+**`result.gatewayId` on capture is always the parent** transaction id you passed in. A distinct child capture id is dual-written on `captureId` / `references.relatedIds.captureId` only.
+
+Pending capture/refund/void (`pending: true`) → `status: "pending"` / `outcome: "requires_action"`. Pending capture omits `capturedAmount`; pending refund omits `totalRefunded`. Do not treat that as `completed` + `totalRefunded: 0`.
+
+Refund/capture of unpaid sales is refused (`InvalidRequestError`) **before** the mutating POST when inquiry is `pending: true` or `success: false` without a positive `captured_amount`. Refund also refuses uncaptured authorizations (use void).
+
+When inquiry reports terminal `is_captured` / `is_refunded` without a positive cumulative amount, remaining math is refused (fail-closed).
+
+`capturePayment` success without a positive cumulative captured total maps to `processing` (not `paid` / not `isPaidOutcome`). When the provider omits `captured_amount`, the SDK estimates cumulative as inquiry prior + this request amount — it does **not** treat response `amount_cents` as this-op.
+
+Fence: network / Paymob 5xx **or 408 / 409 / 425 / 429**, abort after POST, or HTTP 200 with empty/malformed body marks the key `unknown` and blocks automatic replay. 408/409/425/429 is **not** a definite reject. Reconcile via processed callback, inquiry, or dashboard before a new mutation.
+
+## Get payment
+
+```ts
+const payment = await client.getPayment(
+  { gatewayPaymentId: "123456789" },
+  "paymob",
+);
+```
+
+Inquiry empty / non-JSON HTTP 200 throws `GatewayApiError` — **not** declined. Do not map that to `failed` (that would mark a captured payment failed). Identified inquiry with missing `success` maps `processing` / `requires_action` — never `failed` / `declined`. Explicit `success: false` still maps `failed`.
+
+`getPayment` `is_captured` (or signed `is_capture`) **without** a positive cumulative `captured_amount` → `processing` (not `paid`). Prefer `isPaidOutcome(result)` after inquiry.
+
+Auth holds dual-write `outcome: "succeeded"` (hold placed) but are **not** paid-like. Partial captures dual-write `outcome: "requires_action"` with status `partially_captured`.
+
+## Webhooks
+
+Pass the body and HMAC (query param, body field, or `payload.hmac`). Parsed objects are fine — HMAC is over selected fields, not the raw HTTP body. Still do not mutate fields before verifying.
+
+```ts
+const hmac = req.query.hmac ?? req.body.hmac;
+const event = await client.handleWebhook("paymob", req.body, hmac);
+// verifies only — never fulfill here
+```
+
+:::caution[Never fulfill on redirect-only callbacks]
+Browser/redirect callbacks always parse with `event.type === "TRANSACTION_RESPONSE"`. Paymob’s query `type` is **not** HMAC-bound, so the SDK forces this value. Envelope **`event.status` is `processing`**, never `paid` / `cancelled` / `failed` / `refund_completed`. Use the **processed** backend notification (`type: "TRANSACTION"`) as the sole source of truth. Redirect deliveries set `event.id` to the transaction id plus the suffix `:redirect`. Processed `TRANSACTION` `event.id` is raw `obj.id` so a redirect ACK cannot suppress the later paid callback.
+:::
+
+:::caution[Do not fulfill on `event.paymentId`]
+HMAC binds `id`, `order.id`, money flags, and amounts — **not** `merchant_order_id` or `payment_key_claims.extra.paymentId`. The SDK leaves `event.paymentId` undefined on transaction webhooks. Map `event.gatewayPaymentId` (signed transaction id) to your order in your own store.
+:::
+
+HMAC covers `is_auth`, `is_capture`, `is_refunded`, `is_voided`, `success`, `pending`, `amount_cents`, `error_occured`, `has_parent_transaction` — **not** `is_captured`, `captured_amount`, or `refunded_amount_cents`. After verify the SDK strips unsigned money-total slots.
+
+Consequences:
+
+- Auth-only (`is_auth` + not `is_capture`) stays `authorized` even if the payload injects `is_captured`.
+- Signed `is_capture` + success **without** trusted cumulative `captured_amount` → `processing` (not `paid` / not `capture.completed`); `amount` omitted.
+- Signed `is_refunded: true` → `refund_completed` (incomplete money) — not full `refunded`. Inquire for totals.
+- HMAC-covered `error_occured: true` → `failed` / `payment.failed`.
+- TOKEN callbacks → `setup_completed`. `paymentId` is undefined. `gatewayPaymentId` is HMAC-covered `order_id` (never unsigned `next_payment_intention`).
+
+**Never fulfill in `onWebhookVerified`.** After inbox claim, fulfill only on rematched `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+
+Related: [core](/packages/core) · [outcomes](/guides/outcomes) · [webhooks](/guides/webhooks) · [money](/guides/money)

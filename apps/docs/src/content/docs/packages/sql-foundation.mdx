@@ -1,0 +1,170 @@
+---
+title: "@paykernel/sql-foundation"
+description: Shared relational schemas, codecs, migrations, and claim SQL templates for PayKernel SQL adapters. Not an ORM.
+sidebar:
+  order: 7
+---
+
+`@paykernel/sql-foundation` is the **shared relational foundation** used by PostgreSQL, SQLite, Turso, D1, and Durable Object adapters. It is **not** a query builder or ORM.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+Do **not** install `@paykernel/internal-sql-store`. That name is a **private** monorepo shim (thin re-export of this package). Store adapters depend on `@paykernel/sql-foundation` at runtime. Application code usually gets this package **transitively** via a store adapter.
+:::
+
+## Install
+
+Usually pulled in by an adapter:
+
+```bash
+bun add @paykernel/store-postgres
+# runtime graph includes @paykernel/sql-foundation + @paykernel/store-contracts
+```
+
+Direct install is valid if you are writing a relational adapter:
+
+```bash
+bun add @paykernel/sql-foundation
+```
+
+Redis (`@paykernel/store-redis`) does **not** depend on this package.
+
+## In scope vs out of scope
+
+| In scope | Out of scope |
+| --- | --- |
+| Canonical logical tables / columns | Production drivers (`pg`, `bun:sqlite`, D1 bindings, …) |
+| Validated namespace (prefix, PG schema, `tenantColumn` flag) | Auto-migrate on import or store construction |
+| Row codecs + validation | General SQL product / ORM |
+| Versioned `migrate()` / `verifySchema()` | Core or webhooks depending on this package |
+| Pure `decide*` / `evaluateClaim` + dialect SQL templates | Pretending PostgreSQL === SQLite syntax |
+| In-process memory-relational **reference** (NON-PRODUCTION) | Replacing testkit memory stores |
+
+Consumers: [`@paykernel/store-postgres`](/stores/postgres), [`store-sqlite`](/stores/sqlite), [`store-turso`](/stores/turso), [`store-d1`](/stores/d1), [`store-durable-objects`](/stores/durable-objects).
+
+## Schema
+
+Logical names in `LOGICAL_TABLES` are resolved through `createSchemaNamespace` / `resolveTableName` before any SQL is built.
+
+| Logical table | Contract | Role |
+| --- | --- | --- |
+| `payment_idempotency` | `LeaseAwareIdempotencyStore` | Reserve / complete / indeterminate |
+| `payment_webhook_inbox` | `WebhookInboxStore` | Claim / complete / fail / retry |
+| `payment_reconciliation_jobs` | `ReconciliationStore` | Schedule / claim due / complete / fail / review |
+| `payment_storage_migrations` | Foundation ledger | Applied versions + checksums |
+
+Timestamps are ISO-8601 **TEXT**. Lease tokens and keys are opaque **strings**. `payload_hash` is TEXT. `last_error` is sanitized and capped (`MAX_SANITIZED_ERROR_LENGTH` = 512). Raw provider payloads and signatures are **not** stored by default.
+
+**CHECK statuses:**
+
+- Idempotency: `reserved` \| `completed` \| `indeterminate` \| `expired`
+- Webhook inbox: `pending` \| `claimed` \| `completed` \| `failed` \| `dead_letter`
+- Reconciliation: `scheduled` \| `claimed` \| `completed` \| `failed` \| `manual_review`
+
+Official adapters do **not** write every CHECK-legal status. Postgres never writes idempotency `expired` (reclaim uses `lease_expires_at`). Webhook `fail` writes `pending` / `dead_letter`, not `failed`.
+
+Webhook columns `gateway`, `provider_event_id`, `first_received_at`, `last_received_at` exist for operator/index use. Store `claim()` does **not** populate them (`ClaimWebhookInput` has no `gateway`).
+
+```ts
+import {
+  createSchemaNamespace,
+  resolveTableName,
+} from "@paykernel/sql-foundation";
+
+const ns = createSchemaNamespace({
+  tablePrefix: "pay_",
+  sqlSchema: "payments",
+  tenantColumn: true,
+});
+const table = resolveTableName("payment_idempotency", ns);
+// "payments"."pay_payment_idempotency"
+```
+
+`tablePrefix` is `[A-Za-z0-9_]+`, max **36** (`MAX_SAFE_TABLE_PREFIX_LENGTH`). `sqlSchema` is a strict identifier (max 63). Invalid config throws `SchemaNamespaceError`.
+
+:::caution
+`tenantColumn` enables a nullable `tenant_id` column + index **only**. v1 DDL always emits that column and index (always named `tenant_id`). It does **not** isolate tenants, does **not** write `tenant_id` from stores, and is **not** part of the primary key (`key`). Prefix keys or wait for a later schema if you need isolation.
+:::
+
+## Migrations are explicit
+
+`CURRENT_SCHEMA_VERSION` is **2**. `SCHEMA_FAMILY` is `"payments-storage"` (not an npm version).
+
+| Version | Name | What it does |
+| --- | --- | --- |
+| 1 | `create_payment_storage_foundation` | Four tables + indexes |
+| 2 | `create_payment_storage_list_indexes` | Composite list/cleanup indexes (`CREATE INDEX IF NOT EXISTS`) |
+
+```ts
+import {
+  migrate,
+  verifySchema,
+  createSchemaNamespace,
+  type SqlExecutor,
+} from "@paykernel/sql-foundation";
+
+const executor: SqlExecutor = {
+  async execute(sql, params) {
+    /* prepared / bound params */
+  },
+  async query(sql, params) {
+    /* optional; used to read applied versions */
+  },
+};
+
+const ns = createSchemaNamespace({ tablePrefix: "pay_" });
+const result = await migrate(executor, {
+  dialect: "postgres", // | "sqlite" | "generic"
+  namespace: ns,
+});
+// result.applied, result.alreadyApplied, result.currentVersion
+
+const check = await verifySchema(executor, { dialect: "postgres", namespace: ns });
+if (!check.ok) {
+  throw new Error("schema invalid");
+}
+```
+
+Rules:
+
+1. Call `migrate` from ops / adapter helpers — never as a silent side effect.
+2. Importing `@paykernel/sql-foundation` does **not** touch a database.
+3. Creating a store adapter must **not** apply DDL.
+4. When `sqlSchema` is set **and** `dialect` is `"postgres"`, `migrate()` issues `CREATE SCHEMA IF NOT EXISTS`. SQLite adapters reject `sqlSchema`. Operators still need `CREATE` privilege.
+5. `migrate()` does **not** acquire a portable advisory lock. **Serialize migrate across hosts** (one job). Concurrent runs can race on the version INSERT after multi-statement DDL.
+
+Failures throw `MigrationError` (`code: "migration_error"`). Adapter wrappers map driver errors into `StoreError`.
+
+## Atomic claims
+
+Forbidden: get-then-set across connections.
+
+Required: engine-level conditional writes. Pure decisions (`decideIdempotencyReserve`, `decideWebhookClaim`, `decideReconciliationClaim`, `evaluateClaim`, `decideLeaseMutation`) perform **no I/O**. SQL templates are dialect-tagged (`postgres` \| `sqlite` \| `generic`).
+
+```ts
+import {
+  createSchemaNamespace,
+  idempotencyReserveTemplates,
+  pickClaimTemplate,
+} from "@paykernel/sql-foundation";
+
+const ns = createSchemaNamespace({ tablePrefix: "pay_" });
+const frag = pickClaimTemplate(idempotencyReserveTemplates(ns), "postgres");
+// frag.sql, frag.params (names), frag.intent
+```
+
+| Dialect | Typical execution |
+| --- | --- |
+| PostgreSQL | Single-statement `INSERT … ON CONFLICT DO UPDATE … WHERE … RETURNING` |
+| Local SQLite | `INSERT OR IGNORE` + conditional `UPDATE` in **one sync** `BEGIN IMMEDIATE` transaction |
+| Async SQLite-compatible (Turso / D1) | Prefer single-statement UPSERT + RETURNING; multi-statement only in `batch()` / write txn |
+
+User values are **bound parameters**. Table names come only from `resolveTableName`.
+
+`createMemoryRelationalStore` is **NON-PRODUCTION / NON-DISTRIBUTED** (`MEMORY_RELATIONAL_NON_PRODUCTION`). Do not treat its always-ok executor as a production migrate signal.
+
+## Related
+
+- Contracts: [`@paykernel/store-contracts`](/packages/store-contracts)
+- Adapter picker: [Stores](/stores) · [Adapter selection](/guides/adapter-selection)

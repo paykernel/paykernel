@@ -1,0 +1,135 @@
+---
+title: PayKernel
+description: Type-safe payment orchestration for TypeScript. Workspace packages are 0.1.0-next.0 and are not published to npm as 1.0.
+sidebar:
+  order: 1
+next:
+  link: /quickstart
+  label: Quickstart
+---
+
+PayKernel is a TypeScript payment orchestration toolkit. You compose **`@paykernel/core`** (create / capture / refund / verify) with optional inbox, reconciliation, routing, stores, and HTTP adapters at the application layer. Core never depends on those packages.
+
+Workspace version of every public `packages/*` package is **`0.1.0-next.0`**. Packages are **not** published to npm as a released 1.0. Clone the [monorepo](https://github.com/paykernel/paykernel) and `bun install` until the first npm publish.
+
+<CardGrid>
+  <Card title="Quickstart" icon="ph:rocket-launch">
+    [Create a first Moyasar payment](/quickstart) with `createPaymentClient`, `moyasarGateway`, `money()`, and `isPaidOutcome` — including declined and indeterminate branches.
+  </Card>
+  <Card title="Guides" icon="ph:books">
+    [Getting started](/guides/getting-started) (inbox + store + reconcile), [outcomes](/guides/outcomes), [webhooks](/guides/webhooks), [stores](/guides/adapter-selection), [best practices](/guides/best-practices).
+  </Card>
+  <Card title="Packages" icon="ph:package">
+    Full map on [Packages](/packages). Built-in gateways live in core; Tap and MyFatoorah are extra packages, not `BuiltInGatewayName`.
+  </Card>
+  <Card title="Examples" icon="ph:code">
+    Private hosts under [Examples](/examples) (never published). `POST /internal/*` test hooks require `enableTestHooks` and **must not be deployed**.
+  </Card>
+</CardGrid>
+
+## Honesty
+
+:::caution[Not an npm 1.0]
+Do not treat registry install commands as proof that a 1.0 tarball exists. Current versions are `0.1.0-next.0`.
+:::
+
+- Folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Do not invent an npm name from the folder.
+- `@paykernel/internal-sql-store` (`internal/sql-store`) is **private**. It is a BC shim over `@paykernel/sql-foundation`. Do not add it to an app.
+- Redis is **optional**. Local SQLite is **single-host**. `:memory:` is one process. Turso is **remote multi-host** and has **no** `/sync` export. D1 ≠ Durable Objects ≠ Turso ≠ local SQLite. Memory stores are **NON-PRODUCTION**.
+- No published adapter declares `coordinationScope: "multi-region"`.
+- `handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status.
+- **Never fulfill in `onWebhookVerified`.** Fulfill after an inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+- 1.0 removed `success` from `GatewayPaymentResult`. Use `isPaidOutcome` / `outcome`. `authorized`, `approved`, and pending are not paid.
+- After `outcome === "indeterminate"` or `reconciliationRequired`, **do not** `createPayment` again. Lookup + `decideReconciliationPolicy` only.
+- Never auto-route a second gateway after timeout / indeterminate / uncertain 5xx.
+- HTTP status codes live in `@paykernel/integration-http` (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+- Example `POST /internal/*` routes are unauthenticated test hooks (`enableTestHooks`) and **must not be deployed**.
+
+If markdown and implementation disagree, **code wins**.
+
+## Package map
+
+All names below are the `package.json` `"name"` fields. Extra Tap / MyFatoorah adapters depend only on `@paykernel/core` and are **not** `BuiltInGatewayName` (`"moyasar" | "paypal" | "paymob" | "stripe"`).
+
+### Core and engines
+
+| Package | Role |
+| --- | --- |
+| [`@paykernel/core`](/packages/core) | Unified SDK: client, money, outcomes, hooks, built-in Moyasar / PayPal / Paymob / Stripe |
+| [`@paykernel/webhooks`](/packages/webhooks) | Portable webhook inbox (claim, lease fencing, modes). No HTTP status codes |
+| [`@paykernel/reconciliation`](/packages/reconciliation) | Safe lookup, drift, decision-only policy, store-backed schedule. No mandatory queue |
+| [`@paykernel/routing`](/packages/routing) | Select-only gateway routing. Select-time fallback is not post-attempt recovery |
+| [`@paykernel/opentelemetry`](/packages/opentelemetry) | Metrics, spans, redacting telemetry, optional OTEL bridge (`./otel`). No hard OTEL in core |
+
+### Extra gateways
+
+| Package | Role |
+| --- | --- |
+| [`@paykernel/gateway-tap`](/gateways/tap) | Tap Payments adapter. Not a core built-in |
+| [`@paykernel/gateway-myfatoorah`](/gateways/myfatoorah) | MyFatoorah adapter. Not a core built-in |
+
+Built-ins: [Moyasar](/gateways/moyasar), [PayPal](/gateways/paypal), [Paymob](/gateways/paymob), [Stripe](/gateways/stripe), [custom plugins](/gateways/custom).
+
+### Stores
+
+| Package | Role |
+| --- | --- |
+| [`@paykernel/store-contracts`](/packages/store-contracts) | Lease-aware contracts, `StoreError`, manifests |
+| [`@paykernel/sql-foundation`](/packages/sql-foundation) | Relational schemas, migrations, claim SQL templates |
+| [`@paykernel/store-postgres`](/stores/postgres) | PostgreSQL durable stores; multi-host claims |
+| [`@paykernel/store-redis`](/stores/redis) | Optional Redis / Valkey / Upstash. Redis is never required |
+| [`@paykernel/store-sqlite`](/stores/sqlite) | **Single-host** SQLite (Bun / Node / better-sqlite3). Not multi-host |
+| [`@paykernel/store-turso`](/stores/turso) | **Remote multi-host** Turso / libSQL. Not local SQLite. No `/sync` |
+| [`@paykernel/store-d1`](/stores/d1) | **Multi-host** Cloudflare D1. Not SQLite, not Turso, not Durable Objects |
+| [`@paykernel/store-durable-objects`](/stores/durable-objects) | **Multi-host partitioned** SQLite-backed DOs. Not D1. Never one global DO |
+
+Importing a store package does **not** apply DDL. Migrate explicitly. Which store: [adapter selection](/guides/adapter-selection).
+
+### Integrations and tests
+
+| Package | Role |
+| --- | --- |
+| [`@paykernel/integration-http`](/integrations/http) | `mapInboxOutcome`, `processWebhookHttp` (raw-body-safe) |
+| [`@paykernel/integration-hono`](/integrations/hono) | Thin Hono adapter over HTTP helpers |
+| [`@paykernel/integration-elysia`](/integrations/elysia) | Thin Elysia adapter (`parse: "none"`) |
+| [`@paykernel/integration-express`](/integrations/express) | Thin Express adapter (`expressRawJson`) |
+| [`@paykernel/integration-cloudflare-workers`](/integrations/cloudflare-workers) | Thin Workers adapter |
+| [`@paykernel/testkit`](/packages/testkit) | Mock gateway, conformance, **NON-PRODUCTION** memory stores |
+
+Webhook routes must read the **raw body** (`text()`), never `json()`, before verify. See [HTTP integration](/integrations/http).
+
+**Not published:** `@paykernel/internal-sql-store` (private BC shim), everything under `examples/*`, the monorepo root, and this docs app (`apps/docs`).
+
+## First payment
+
+```typescript
+import { createPaymentClient, money, isPaidOutcome, moyasarGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({
+      secretKey: process.env.MOYASAR_SECRET_KEY!,
+      webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "moyasar",
+});
+
+const result = await client.createPayment({
+  amount: money("100.00", "SAR"),
+  currency: "SAR",
+  orderId: "order_123",
+  callbackUrl: "https://example.com/callback",
+  moyasarSource: { type: "token", token: "token_xxx" },
+});
+
+if (isPaidOutcome(result)) {
+  // Paid-like settlement only (`outcome === "succeeded"` and status `paid`).
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Charge may already exist. Schedule reconcile. Do not createPayment again.
+} else {
+  // declined / pending / authorized — see /guides/outcomes
+}
+```
+
+Full branches (declined, `requires_action`, thrown declines): [Quickstart](/quickstart). Production inbox + store + reconcile: [Getting started](/guides/getting-started).

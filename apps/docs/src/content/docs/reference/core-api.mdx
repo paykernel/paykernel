@@ -1,0 +1,181 @@
+---
+title: Core API
+description: Runtime and type-only exports of @paykernel/core, copied from packages/core/docs/baseline/public-api.inventory.json.
+sidebar:
+  order: 3
+---
+
+`@paykernel/core` exports **`.` only** (`package.json` `exports["."]` → `./dist/index.js` / `./dist/index.d.ts`). There are no documented subpaths. Import values and types from `@paykernel/core`.
+
+The lists on this page are copied from [`packages/core/docs/baseline/public-api.inventory.json`](https://github.com/paykernel/paykernel/blob/main/packages/core/docs/baseline/public-api.inventory.json) (generated from `packages/core/src/index.ts` / dist). **Do not add names by memory.** If this page and the inventory disagree, regenerate the inventory (`bun run baseline:api`) and treat **code as source of truth**.
+
+Workspace version **`0.1.0-next.0`**. Not a released npm 1.0.
+
+```ts
+import {
+  createPaymentClient,
+  isPaidOutcome,
+  money,
+  moyasarGateway,
+} from "@paykernel/core";
+```
+
+`createPaymentClient` requires **exactly one** of `gateways` or `registry`. Mixing both, or omitting both, throws `InvalidRequestError`. After `outcome === "indeterminate"` or `reconciliationRequired`, do **not** `createPayment` again — lookup + `decideReconciliationPolicy` only ([outcomes](/guides/outcomes), [reconciliation](/packages/reconciliation)).
+
+`handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. **Never fulfill in `onWebhookVerified`.** HTTP status lives in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+
+## Frozen contract extras (same inventory file)
+
+| Field | Value |
+| --- | --- |
+| `paymentEventSchemaVersion` | `"1"` |
+| `stablePaymentEventTypes` | See [events](/reference/events). Inventory lists the same 14 names as `STABLE_PAYMENT_EVENT_TYPES`. |
+
+## Runtime exports (158)
+
+Copied in inventory order from `public-api.inventory.json` `"runtime"`.
+
+| | | |
+| --- | --- | --- |
+| `AuthenticationError` | `BUILTIN_ADAPTER_VERSION` | `BUILTIN_GATEWAY_CAPABILITIES` |
+| `BUILTIN_GATEWAY_MANIFESTS` | `BaseGateway` | `CAPABILITY_DOCS_BANNER` |
+| `CAPABILITY_OPERATION_MAP` | `CardDeclinedError` | `DEFAULT_GATEWAY_CAPABILITIES` |
+| `DEFAULT_RETRY_CONFIG` | `DISPUTE_STATUSES` | `GATEWAY_CAPABILITY_KEYS` |
+| `GatewayApiError` | `GatewayNotConfiguredError` | `HooksManager` |
+| `InMemoryIdempotencyStore` | `InsufficientFundsError` | `InvalidRequestError` |
+| `InvalidWebhookError` | `MOYASAR_CAPABILITIES` | `MOYASAR_EVENT_TYPE_MAP` |
+| `MoneyAmountError` | `MoyasarGateway` | `NetworkError` |
+| `OperationNotSupportedError` | `PAID_LIKE_PAYMENT_STATUSES` | `PAYMENT_DOMAIN_STATUSES` |
+| `PAYMENT_EVENT_SCHEMA_VERSION` | `PAYMOB_CAPABILITIES` | `PAYMOB_TOKEN_EVENT_TYPES` |
+| `PAYPAL_CAPABILITIES` | `PAYPAL_EVENT_TYPE_MAP` | `PayPalGateway` |
+| `PaymentAbortedError` | `PaymentClient` | `PaymentError` |
+| `PaymobGateway` | `RateLimitError` | `ResourceNotFoundError` |
+| `STABLE_PAYMENT_EVENT_TYPES` | `STRIPE_CAPABILITIES` | `STRIPE_EVENT_TYPE_MAP` |
+| `STRIPE_UNMAPPED_EVENT_TYPES` | `StripeGateway` | `WEBHOOK_PAYLOAD_SECRET_KEYS` |
+| `applyIndeterminateCheckoutSessionOutcome` | `applyIndeterminateCustomerOutcome` | `applyIndeterminateDisputeOutcome` |
+| `applyIndeterminatePaymentLinkOutcome` | `applyIndeterminatePaymentMethodOutcome` | `applyIndeterminatePaymentOutcome` |
+| `applyIndeterminateRefundOutcome` | `applyOutcomeToGatewayRefundResult` | `applyOutcomeToGatewayResult` |
+| `assertNoSecretsInEnvelope` | `attachPaymentEvent` | `base64ToBytes` |
+| `buildProviderEventMetadata` | `buildProviderReferences` | `bytesToBase64` |
+| `bytesToHex` | `combineAbortSignals` | `concatBytes` |
+| `createDefaultGatewayContext` | `createDynamicGatewayRegistry` | `createGatewayRegistry` |
+| `createOperationContext` | `createPaymentClient` | `createPaymentRuntime` |
+| `createRedactingLogger` | `createRedactingTelemetrySink` | `createTimeoutSignal` |
+| `defineGatewayCapabilities` | `encryptRawWebhookPayload` | `extractAbortSignal` |
+| `finalizeOperationContext` | `fingerprintParams` | `formatMoney` |
+| `freezeCapabilities` | `fromMinorUnits` | `generateGatewayCapabilitiesMarkdown` |
+| `getCurrencyExponent` | `hashWebhookPayload` | `hexToBytes` |
+| `hmacSha256` | `hmacSha256Hex` | `hmacSha512` |
+| `hmacSha512Hex` | `inferOperationOutcome` | `inferRefundOperationOutcome` |
+| `isAbortError` | `isApplePaySource` | `isCardTokenSource` |
+| `isCreditCardSource` | `isDisputeStatus` | `isGatewayCapabilityKey` |
+| `isGatewayPaymentResult` | `isHostedCheckoutRedirect` | `isIndeterminateOutcome` |
+| `isKnownCurrencyCode` | `isMoney` | `isPaidLikePaymentStatus` |
+| `isPaidOutcome` | `isPaymentDomainStatus` | `isPaymentEvent` |
+| `isPaymentFailedEvent` | `isPaymentSucceededEvent` | `isProviderUnmappedEvent` |
+| `isRefundCompletedEvent` | `isRequiresActionOutcome` | `isSamsungPaySource` |
+| `isStablePaymentEventType` | `isStcPaySource` | `mapGatewayRefundToOperationResult` |
+| `mapGatewayResultToOperationResult` | `mapHttpAbortError` | `mapNativeDisputeStatus` |
+| `mapProviderEventTypeToStable` | `mergePaymentRuntime` | `minorAmountToNumber` |
+| `money` | `moneyToMajorNumber` | `moyasarGateway` |
+| `noopLogger` | `normalizeAmountInput` | `normalizeCurrencyCode` |
+| `operationContextToTelemetryData` | `parseRetryAfterSeconds` | `paymentFromGatewayResult` |
+| `paymentFromWebhookEvent` | `paymentNextActionToAction` | `paymentRuntimeFromContext` |
+| `paymobGateway` | `paypalGateway` | `redact` |
+| `redactWebhookPayloadSecrets` | `resolveDefaultCrypto` | `sha256` |
+| `sha256Hex` | `sha512` | `sha512Hex` |
+| `stableStringifyForHash` | `stripAbortSignal` | `stripRawFromPaymentEvent` |
+| `stripeGateway` | `systemClock` | `timingSafeEqualBytes` |
+| `timingSafeEqualHex` | `toMinorUnits` | `toPaymentErrorLike` |
+| `toPersistedPaymentEventEnvelope` | `utf8Encode` | `utf8ToBase64` |
+| `uuidV4FromGetRandomValues` | `validateMoney` | `webhookEventToPaymentEvent` |
+| `withAbortSignal` | `withRetry` | |
+
+`InMemoryIdempotencyStore` is a core helper. Inbox / reconciliation **memory stores** are **NON-PRODUCTION** and live in [`@paykernel/testkit`](/packages/testkit), not in this package.
+
+Built-in factories: `moyasarGateway`, `paypalGateway`, `paymobGateway`, `stripeGateway`. Extra adapters `tapGateway` / `myfatoorahGateway` are **not** in this list — import them from [`@paykernel/gateway-tap`](/gateways/tap) and [`@paykernel/gateway-myfatoorah`](/gateways/myfatoorah).
+
+## Type-only exports (183)
+
+Copied in inventory order from `public-api.inventory.json` `"typeOnly"`. These exist on the TypeScript surface (`import type`) and are not runtime values.
+
+| | | |
+| --- | --- | --- |
+| `AfterHook` | `AfterHookResult` | `AmountInput` |
+| `ApplePayDecryptedSource` | `ApplePaySource` | `ApplyOutcomeGatewayBase` |
+| `ApplyOutcomeGatewayRefundBase` | `AttachPaymentEventOptions` | `AttachPaymentMethodParams` |
+| `AuthorizationStatus` | `BeforeHook` | `BeforeHookResult` |
+| `BuildProviderEventMetadataOptions` | `BuildProviderReferencesInput` | `BuiltInGatewayMap` |
+| `BuiltInGatewayName` | `BuiltinGatewayCapabilityName` | `Capture` |
+| `CaptureParams` | `CaptureStatus` | `CardTokenSource` |
+| `CheckoutSession` | `CheckoutSessionOperationOutcome` | `CheckoutSessionOperationResult` |
+| `CheckoutSessionStatus` | `Clock` | `CommonCheckoutSessionInput` |
+| `CommonCustomerInput` | `CommonPaymentInput` | `CommonPaymentLinkInput` |
+| `CreateCheckoutSessionParams` | `CreateCustomerParams` | `CreateDefaultGatewayContextOptions` |
+| `CreateOperationContextInput` | `CreatePaymentClientOptions` | `CreatePaymentLinkParams` |
+| `CreatePaymentParams` | `CreditCardSource` | `CryptoProvider` |
+| `CurrencyCode` | `CurrencyExponentOverrides` | `Customer` |
+| `CustomerOperationOutcome` | `CustomerOperationResult` | `CustomerStatus` |
+| `DeactivatePaymentLinkParams` | `DecimalString` | `DetachPaymentMethodParams` |
+| `Dispute` | `DisputeEvidenceInput` | `DisputeOperationOutcome` |
+| `DisputeOperationResult` | `DisputeStatus` | `EncryptedRawPayloadRecord` |
+| `ErrorHook` | `FinalizeOperationContextPatch` | `GatewayAdapter` |
+| `GatewayAdaptersMap` | `GatewayCapabilities` | `GatewayCapabilityKey` |
+| `GatewayConfig` | `GatewayContext` | `GatewayId` |
+| `GatewayManifest` | `GatewayMap` | `GatewayName` |
+| `GatewayPaymentResult` | `GatewayPaymentStatus` | `GatewayRefundResult` |
+| `GatewayRegistryBuilder` | `GatewayRuntimeDeps` | `GetCheckoutSessionParams` |
+| `GetCurrencyExponentOptions` | `GetCustomerParams` | `GetDisputeParams` |
+| `GetPaymentLinkParams` | `GetPaymentParams` | `HookContext` |
+| `IdempotencyRecord` | `IdempotencyStatus` | `IdempotencyStore` |
+| `ImmutableGatewayRegistry` | `InferGatewayMapFromAdapters` | `ListDisputesParams` |
+| `ListDisputesResult` | `ListPaymentMethodsParams` | `ListPaymentMethodsResult` |
+| `LogLevel` | `Logger` | `MappedStableEventType` |
+| `MarketplaceSplit` | `MinorAmount` | `Money` |
+| `MoneyFailureKind` | `MoneyParseOptions` | `MoneyRoundingMode` |
+| `MoyasarAftRecipient` | `MoyasarAftSender` | `MoyasarBackendPaymentSource` |
+| `MoyasarConfig` | `MoyasarConfirmStcPayOtpParams` | `MoyasarCreatePaymentParams` |
+| `MoyasarPaymentSource` | `MoyasarPaymentSplit` | `MoyasarStcPayOtpNextAction` |
+| `MoyasarWebhookPayload` | `OperationContext` | `OperationNotSupportedErrorOptions` |
+| `OperationRequestOptions` | `OperationType` | `PayPalConfig` |
+| `PayPalCreatePaymentParams` | `PayPalWebhookPayload` | `Payment` |
+| `PaymentAction` | `PaymentDecline` | `PaymentDomainStatus` |
+| `PaymentErrorLike` | `PaymentEvent` | `PaymentEventSchemaVersion` |
+| `PaymentFailure` | `PaymentGateway` | `PaymentHooks` |
+| `PaymentLink` | `PaymentLinkOperationOutcome` | `PaymentLinkOperationResult` |
+| `PaymentLinkStatus` | `PaymentMetadata` | `PaymentMethodOperationResult` |
+| `PaymentMethodSetup` | `PaymentNextAction` | `PaymentOperationOutcome` |
+| `PaymentOperationResult` | `PaymentOperationType` | `PaymentRuntime` |
+| `PaymentStatus` | `PaymobCardTokenWebhookPayload` | `PaymobConfig` |
+| `PaymobCreatePaymentParams` | `PaymobIdempotencyRecord` | `PaymobIdempotencyStore` |
+| `PaymobRedirectWebhookPayload` | `PaymobWebhookPayload` | `Payout` |
+| `PayoutStatus` | `PersistedPaymentEventEnvelope` | `ProviderEventMapContext` |
+| `ProviderEventMetadata` | `ProviderReferences` | `RawWebhookPayloadCodec` |
+| `RedirectPaymentNextAction` | `Refund` | `RefundDomainStatus` |
+| `RefundOperationOutcome` | `RefundOperationResult` | `RefundParams` |
+| `RefundStatus` | `RequestLocalWebhookContext` | `RetryConfig` |
+| `SamsungPaySource` | `SetupTokenStatus` | `StablePaymentEventType` |
+| `StcPaySource` | `StoredPaymentMethod` | `StoredPaymentMethodType` |
+| `StripeConfig` | `StripeCreatePaymentParams` | `StripeWebhookPayload` |
+| `SubmitDisputeEvidenceParams` | `TelemetrySink` | `TimeoutSignalHandle` |
+| `ToPersistedEnvelopeOptions` | `Transfer` | `TransferStatus` |
+| `UnmappedPaymentEventType` | `VoidParams` | `WebhookEnvelopeStatus` |
+| `WebhookEvent` | `WebhookEventToPaymentEventOptions` | `WebhookFailedHook` |
+| `WebhookReceivedHook` | `WebhookVerifiedHook` | `WithRetryOptions` |
+
+`BuiltInGatewayName` is `"moyasar" | "paypal" | "paymob" | "stripe"`. Tap and MyFatoorah are extra packages.
+
+## Failure paths
+
+| Situation | What you get |
+| --- | --- |
+| Import a name that is not in the tables | TypeScript / bundler error — it is not a public export |
+| Import a `./money` (or any other) subpath of `@paykernel/core` | There is no subpath map. `exports` is `.` only |
+| `new PaymentClient({ moyasar: { secretKey } })` | Throws `InvalidRequestError` — constructor is `private` and was **removed at 1.0**. Use `createPaymentClient` + factories. |
+| `createPaymentClient({ gateways, registry })` or neither | `InvalidRequestError` |
+| Capture/refund/void on a gateway that does not claim the capability | `OperationNotSupportedError` — see [errors](/reference/errors) |
+| Webhook signature fail | `InvalidWebhookError`. Parse-shape fail after verify is `InvalidRequestError` |
+| `isPaidOutcome` false (`authorized`, `approved`, `partially_captured`, pending, declined, indeterminate) | Do **not** fulfill. `success: true` is not the signal |
+| `outcome === "indeterminate"` / `reconciliationRequired` | Do **not** `createPayment` again. Do **not** auto-route a second gateway |
+
+Related: [errors](/reference/errors), [events](/reference/events), [capabilities](/reference/capabilities), [core package](/packages/core).

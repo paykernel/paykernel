@@ -1,0 +1,80 @@
+---
+title: Best practices
+description: Integrator rules for fulfillment, indeterminate creates, webhooks, stores, retries, and package names.
+sidebar:
+  order: 9
+---
+
+These rules are the product contract. Details and matrices: [behavioral contracts](https://github.com/paykernel/paykernel/blob/main/packages/core/docs/behavioral-contracts.md) (in-repo), [outcomes](/guides/outcomes), [webhooks](/guides/webhooks), [adapter selection](/guides/adapter-selection), [stability](https://github.com/paykernel/paykernel/blob/main/docs/stability.md).
+
+## Fulfillment
+
+| Do | Do not |
+| --- | --- |
+| Fulfill when `isPaidOutcome(result)` (`outcome === "succeeded"` **and** status `paid`) | Branch on a missing `success` field (removed in 1.0) or on `outcome === "succeeded"` alone |
+| After webhooks: inbox **claim**, then rematch `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId` | Fulfill in `onWebhookVerified`, on verify alone, or on `payment.processing` / `partially_captured` / buyer `approved` |
+| Prefer verified webhooks or a fresh `getPayment` over browser redirects | Treat `authorized` (auth hold) or PayPal `approved` as paid |
+| Amount-aware logic for `partially_captured` / `partially_refunded` | Assume full capture or full refund from the status string |
+
+`PAID_LIKE_PAYMENT_STATUSES` is **`paid` only**. `isPaidOutcome` returns false when `reconciliationRequired === true` even if status looks settled.
+
+:::caution[Never fulfill in onWebhookVerified]
+`handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. Verification can succeed on a payload you must still claim. HTTP status codes live in `@paykernel/integration-http` (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+:::
+
+## Indeterminate create
+
+After `outcome === "indeterminate"` or `reconciliationRequired`, **do not** `createPayment` again. Lookup + `decideReconciliationPolicy` only (`@paykernel/reconciliation`).
+
+Post-submit timeout / connection drop (`NetworkError.afterProviderSubmit`) is mapped by `executeWithHooks` to **`outcome: "indeterminate"`** + **`reconciliationRequired: true`**. The SDK does **not** invent `status: "failed"` and does **not** claim the provider rejected the charge. GET / preflight / pre-submit transport still throw `NetworkError`. Caller abort before submit throws `PaymentAbortedError`.
+
+Never auto-route a **second** gateway after timeout / indeterminate / uncertain 5xx. `@paykernel/routing` `fallback` is select-time only. See [routing](/packages/routing) and [composition](/guides/composition).
+
+## Webhooks
+
+- Pass the body shape the gateway signed. **Stripe** and **PayPal**: raw `string` / `Buffer` (Stripe: `stripe-signature`; PayPal: transmission headers + `webhookId`). Parsed/re-serialized JSON may never verify. **Moyasar**: parsed JSON is fine (`secret_token`). **Paymob**: HMAC over gateway field orderings — do not mutate fields before verify.
+- Framework routes must read **raw body** (`text()` / `expressRawJson()`), never `json()`, before verify. Helpers: [HTTP](/integrations/http), [Hono](/integrations/hono), [Elysia](/integrations/elysia), [Express](/integrations/express), [Workers](/integrations/cloudflare-workers).
+- Core does **not** store processed event ids. Dedup at the app layer or use `@paykernel/webhooks` claim/lease.
+- `InvalidWebhookError` is forgery → 4xx in **your** adapter. Silent ACK of failed work is forbidden.
+- Hash the same object shape the gateway hashed (`webhookEvent.payloadHash` / `resolveInboxPayloadHash`). Do not mix `hashWebhookPayload(rawBody)` with a hashed parsed event (`payload_conflict`).
+
+## Stores
+
+| Fact | Implication |
+| --- | --- |
+| Redis is **optional** | Not required to use core or the inbox engine |
+| Local SQLite is **single-host** | Not multi-host; `:memory:` is one process |
+| Turso is **remote multi-host** | Not local SQLite. **No** `/sync` export |
+| D1 ≠ Durable Objects ≠ Turso ≠ local SQLite | Separate packages and coordination models |
+| Memory stores are **NON-PRODUCTION** | Testkit in-memory stores: `single-process` + ephemeral |
+| `coordinationScope: "multi-region"` | **No** published adapter declares it |
+| Durable Objects | Partitioned. Never one global DO for all payment work |
+| Migrate explicitly | Importing a store package does **not** apply DDL |
+| `@paykernel/internal-sql-store` | **Private** BC shim over `@paykernel/sql-foundation`. Do not add it to an app |
+
+Pick a store with [adapter selection](/guides/adapter-selection). Moyasar capture/refund/void (and Paymob capture/refund/void) **require** an injectable `idempotencyStore` with atomic `reserve()` plus a caller `idempotencyKey`. `InMemoryIdempotencyStore` is process-local.
+
+## Retry and IDs
+
+Rule of thumb (SDK `withRetry`): GETs are auto-retried on transient transport. Money mutations are auto-retried **only** when protected by provider-native or SDK-level idempotency. Definite 4xx validation / business declines are not retried.
+
+Capture / void / refund use `gatewayPaymentId`, but **each provider expects a different resource**. Always call follow-ups on the **same** gateway that created the payment. Store the correct ID at create/capture/notify time (Moyasar payment UUID; PayPal order vs authorization vs capture IDs; Paymob **numeric transaction** id, not Intention `pi_...`; Stripe PaymentIntent `pi_...`, not Checkout Session `cs_...`). Per-gateway tables: [Moyasar](/gateways/moyasar), [PayPal](/gateways/paypal), [Paymob](/gateways/paymob), [Stripe](/gateways/stripe).
+
+## Hooks
+
+Before-hooks can abort with `{ proceed: false }` or throw → `PaymentAbortedError`, **no** provider money side effect. After-hooks run **after** the provider operation succeeded. `{ proceed: false }` and throws in after-hooks are isolated; the provider effect **stays committed**. After-hooks cannot flip `outcome`, `status`, amounts, or gateway IDs. They are not a financial undo.
+
+## Tests and examples
+
+- `@paykernel/testkit` mocks and memory stores are **NON-PRODUCTION**.
+- Example `POST /internal/provider-paid`, `POST /internal/reconcile`, and `GET /internal/create-count` are unauthenticated **test hooks**. Serve them only with `{ enableTestHooks: true }`. **Must not be deployed.** See [Examples](/examples).
+
+## Names and runtime
+
+- Import **`@paykernel/opentelemetry`**. Folder `packages/observability` is not the npm name. Optional OTEL bridge is the `./otel` subpath.
+- Stripe / PayPal / Paymob / Moyasar built-ins ship in `@paykernel/core`. Tap (`@paykernel/gateway-tap`) and MyFatoorah (`@paykernel/gateway-myfatoorah`) are extra packages and are **not** `BuiltInGatewayName`.
+- Packages are **`0.1.0-next.0`**, not an npm 1.0 release.
+- ESM-only. Node `>=18`, Bun `>=1.0.0`. Deno is Web-API-intended, not CI-gated. No secrets on `PaymentRuntime`.
+- Unmapped provider statuses fail closed toward non-fulfillment. Do not invent fulfillment from unknown strings. Do not paraphrase upstream PSP docs — document PayKernel’s mapping only.
+
+If markdown and `packages/*/src` disagree, **code wins**.

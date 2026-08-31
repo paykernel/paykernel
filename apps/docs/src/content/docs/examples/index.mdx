@@ -1,0 +1,98 @@
+---
+title: Examples
+description: Private workspace checkout hosts over a shared kernel. Not published to npm.
+sidebar:
+  order: 1
+---
+
+PayKernel ships **private** workspace apps under [`examples/`](https://github.com/paykernel/paykernel/tree/main/examples). They are consumer hosts, not SDK packages: `private: true`, never published. `packages/*` must not import `examples/*`.
+
+The shared kernel is [`@paykernel/example-checkout-kernel`](/examples/checkout-kernel). Five thin HTTP hosts map routes onto it. SDK packages used here are **`0.1.0-next.0` and are not on npm as a released 1.0**.
+
+:::caution[Do not deploy these apps as-is]
+Local SQLite is **single-host**. Default kernels use in-memory Bun SQLite (`:memory:`), which is **one process**. `POST /internal/*` and `GET /internal/create-count` are unauthenticated test hooks served only when `enableTestHooks` is `true`. Listen scripts leave that flag off. Do not enable it in a deployed host.
+:::
+
+## Hosts
+
+| Directory | Package | Docs |
+| --- | --- | --- |
+| [`checkout-kernel`](https://github.com/paykernel/paykernel/tree/main/examples/checkout-kernel) | `@paykernel/example-checkout-kernel` | [Checkout kernel](/examples/checkout-kernel) |
+| [`bun-hono-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/bun-hono-sqlite) | `@paykernel/example-bun-hono-sqlite` | [Bun + Hono + SQLite](/examples/bun-hono-sqlite) |
+| [`bun-hono-postgres`](https://github.com/paykernel/paykernel/tree/main/examples/bun-hono-postgres) | `@paykernel/example-bun-hono-postgres` | [Bun + Hono + Postgres](/examples/bun-hono-postgres) |
+| [`bun-elysia-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/bun-elysia-sqlite) | `@paykernel/example-bun-elysia-sqlite` | [Bun + Elysia + SQLite](/examples/bun-elysia-sqlite) |
+| [`express-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/express-sqlite) | `@paykernel/example-express-sqlite` | [Express + SQLite](/examples/express-sqlite) |
+| [`cloudflare-workers-fetch`](https://github.com/paykernel/paykernel/tree/main/examples/cloudflare-workers-fetch) | `@paykernel/example-cloudflare-workers-fetch` | [Cloudflare Workers fetch](/examples/cloudflare-workers-fetch) |
+
+Source index: [`examples/README.md`](https://github.com/paykernel/paykernel/blob/main/examples/README.md).
+
+## Honesty
+
+- Charges use the **server catalog** amount (`money("10.00", "USD")`). Client JSON `amount` is ignored. Provider recon snapshots use `getPayment` money, never `order.amount` from the client.
+- `createPayment` goes through the **mock** gateway. Stripe is wired for **webhook verify** only. Stripe metadata `orderId` cannot fulfill a mock-charged order whose stored `gatewayPaymentId` differs.
+- HTTP status codes live in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`), **not** in [`@paykernel/webhooks`](/packages/webhooks). The kernel re-exports `mapInboxOutcome`.
+- Fulfillment runs only after an inbox **claim**, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. **Never fulfill in `onWebhookVerified`.**
+- `success: true` is not the fulfillment signal. After `outcome === "indeterminate"` or `reconciliationRequired`, **do not** `createPayment` again. Lookup + `decideReconciliationPolicy` only.
+- Webhook routes must read the **raw** body (`text()` / `express.raw`), never `json()`, before verify. See [Webhooks](/guides/webhooks).
+
+## Shared routes
+
+Hosts stay thin: `createCheckoutKernel()`, then `createCheckoutHandlers(kernel)` plus JSON helpers, or `createCheckoutFetchApp` / `dispatchCheckoutRequest` for a framework-less `fetch`.
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/payments` | Create order + mock charge. Catalog amount only. Duplicate `orderId` → `409`. |
+| `POST` | `/webhooks/stripe` | Raw body + `stripe-signature`. Status from `mapInboxOutcome`. |
+| `GET` | `/orders/:orderId` | Order book lookup (`200` / `404`). Kernel dispatch uses this path; [`examples/README.md`](https://github.com/paykernel/paykernel/blob/main/examples/README.md) writes `/orders/:id`. |
+| `POST` | `/internal/reconcile` | **Test hook.** Unauthenticated. Do not deploy. |
+| `POST` | `/internal/provider-paid` | **Test hook.** Injects a paid provider snapshot. Do not deploy. |
+| `GET` | `/internal/create-count` | **Test hook.** `createPayment` call count. Do not deploy. |
+
+Without `enableTestHooks: true`, the three `/internal/*` handlers return `404 { "error": "not_found" }`.
+
+## Kernel helpers
+
+Do **not** reimplement `mapInboxOutcome` or Stripe HMAC. Import from the kernel:
+
+```ts
+import {
+  createCheckoutKernel,
+  createCheckoutHandlers,
+  createCheckoutFetchApp,
+  mapInboxOutcome,
+  signedStripePaidWebhook,
+  signStripeWebhook,
+  runCheckoutHttpScenarios,
+} from "@paykernel/example-checkout-kernel";
+```
+
+Webhook hosts pass raw text into the kernel / integration helper (`processWebhookHttp`: verify-only `handleWebhook`, then inbox claim; fulfillment only in the inbox `handler`):
+
+```ts
+const raw = await request.text(); // Hono: never c.req.json()
+const sig = request.headers.get("stripe-signature");
+await handlers.handleStripeWebhook(raw, sig);
+```
+
+Hono / Elysia / Express / Workers examples use the matching [`@paykernel/integration-*`](/integrations) helper instead of calling `handleStripeWebhook` themselves. Same kernel `webhook.handler`.
+
+## Run
+
+From the repository root (workspace packages, not npm):
+
+```bash
+bun install
+bun test examples
+# or
+bun run test:examples
+```
+
+Root `lint` includes `examples/*/src/**/*.ts`. Root `typecheck` includes **`@paykernel/example-checkout-kernel` only**; the thin hosts have their own `typecheck` scripts. Production composition (Postgres, inbox, reconcile) is in [Getting started](/guides/getting-started), not these hosts.
+
+## Related
+
+- [Checkout kernel](/examples/checkout-kernel) — composition, fulfillment, recon, fixtures
+- [Outcomes](/guides/outcomes) — `isPaidOutcome` / indeterminate
+- [Money](/guides/money) — catalog amounts
+- [Adapter selection](/guides/adapter-selection) — SQLite vs Postgres vs D1 vs Durable Objects
+- [Stores: SQLite](/stores/sqlite) · [Postgres](/stores/postgres) · [D1](/stores/d1) · [Durable Objects](/stores/durable-objects)

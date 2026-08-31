@@ -1,0 +1,269 @@
+---
+title: "@paykernel/core"
+description: Type-safe payment client, gateway registry, money types, operation outcomes, and built-in Moyasar, PayPal, Paymob, and Stripe adapters.
+sidebar:
+  order: 2
+---
+
+`@paykernel/core` is the kernel: `createPaymentClient`, money, Phase 6 outcomes, lifecycle hooks, portable runtime, and the four **built-in** adapters (`moyasar`, `paypal`, `paymob`, `stripe`). It is ESM-only (`exports.import` only — no CommonJS `require` build). Server-side only for secret keys.
+
+**Production fulfillment is not this package alone.** `handleWebhook` verifies and normalizes. It does **not** claim, lease, or set HTTP status. Claim via [`@paykernel/webhooks`](/packages/webhooks) plus a [store](/stores). HTTP status lives in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`).
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo. Intended specifier:
+
+```bash
+bun add @paykernel/core
+```
+
+Node ≥ 18 (LTS 18/20/22 recommended) or Bun ≥ 1.0, plus Deno and Cloudflare Workers via Web APIs. See [runtime](/guides/runtime).
+
+## First payment
+
+Preferred construction is `createPaymentClient` + adapter factories. Provide **exactly one** of `gateways` or `registry` — mixing both, or omitting both, throws `InvalidRequestError`.
+
+```ts
+import {
+  createPaymentClient,
+  isPaidOutcome,
+  money,
+  moyasarGateway,
+} from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({
+      secretKey: process.env.MOYASAR_SECRET_KEY!,
+      webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "moyasar",
+});
+
+const result = await client.createPayment({
+  amount: money("100.00", "SAR"),
+  currency: "SAR",
+  orderId: "order_123",
+  callbackUrl: "https://example.com/callback",
+  moyasarSource: { type: "token", token: "token_xxx" },
+});
+
+if (isPaidOutcome(result)) {
+  // Paid settlement only: outcome === "succeeded" AND status === "paid".
+} else if (result.redirectUrl) {
+  // 3DS / redirect — do not fulfill yet.
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Charge may already exist. Lookup + decideReconciliationPolicy.
+  // Do NOT createPayment again.
+} else {
+  // declined / pending / authorized / failed — see /guides/outcomes
+}
+```
+
+`success: true` is **not** the fulfillment signal. Prefer `isPaidOutcome` / `outcome`. `authorized` and `approved` are never paid-like. Paid-like is **`paid` only**.
+
+:::caution[Indeterminate is not a decline]
+After `outcome === "indeterminate"` or `reconciliationRequired`, do **not** `createPayment` again and do **not** auto-route a second gateway. Reconcile with [`@paykernel/reconciliation`](/packages/reconciliation): lookup + `decideReconciliationPolicy` only.
+:::
+
+Amounts are `Money` only (`AmountInput = Money`). Pass `money("10.50", "SAR")`. Payment APIs reject a plain `number`. `money(number)` can still construct a `Money` value, but do not pass numbers into create/capture/refund. Conversion uses bigint minor units — never `amount * 100` float math. `moneyToMajorNumber` is display-only. See [money](/guides/money).
+
+0.x `new PaymentClient({ moyasar, … })` was **removed at 1.0**. The constructor is `private` and throws `InvalidRequestError` (`PaymentClient is constructed via createPaymentClient only`). It does **not** construct the four built-ins. Use `createPaymentClient` + factories: [1.0 migration](/guides/migrate-to-1-0).
+
+## Built-in vs extra gateways
+
+`BuiltInGatewayName` is closed: `"moyasar" | "paypal" | "paymob" | "stripe"`.
+
+| Kind | Names | Package |
+| --- | --- | --- |
+| Built-in factories | `moyasarGateway`, `paypalGateway`, `paymobGateway`, `stripeGateway` | `@paykernel/core` |
+| Extra first-party | `tapGateway`, `myfatoorahGateway` | [`@paykernel/gateway-tap`](/gateways/tap), [`@paykernel/gateway-myfatoorah`](/gateways/myfatoorah) |
+| Your adapter | any registry name | implement `GatewayAdapter` — [custom gateways](/gateways/custom) |
+
+Tap and MyFatoorah are **not** `BuiltInGatewayName`. There is no `@paykernel/gateway-stripe` package.
+
+```ts
+import { createPaymentClient, moyasarGateway, stripeGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({ secretKey: process.env.MOYASAR_SECRET_KEY! }),
+    stripe: stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }),
+  },
+  defaultGateway: "moyasar",
+});
+
+await client.createPayment({ /* … */ }); // default
+await client.createPayment({ /* … */ }, "stripe");
+client.gateway("stripe"); // StripeGateway
+```
+
+Always use the gateway that created the payment for capture / refund / void. IDs are **not** interchangeable — [gateways](/gateways).
+
+## Outcomes
+
+| Signal | Meaning |
+| --- | --- |
+| `success: true` | API call OK (0.x; **not** fulfillment) |
+| `outcome: "succeeded"` | Operation completed; may still be auth-only — check `status` |
+| `outcome: "requires_action"` | 3DS, redirect, OTP, or client confirm |
+| `outcome: "declined"` | Definitive issuer/provider decline |
+| `outcome: "failed"` | Definitive failure |
+| `outcome: "indeterminate"` | Uncertain after submit — **must reconcile** |
+
+`isPaidOutcome(result)` is `outcome === "succeeded"` **and** `status === "paid"`. Auth holds (`authorized`), buyer approval (`approved`), and `partially_captured` are **not** paid.
+
+Post-submit timeout / connection drop / 5xx after a mutating POST maps to `outcome: "indeterminate"` + `reconciliationRequired: true` (not a thrown `NetworkError` on create/capture/refund/void). Preflight auth and GET still throw `NetworkError`. Details: [outcomes](/guides/outcomes).
+
+## Webhooks — verify only
+
+```ts
+const webhookEvent = await client.handleWebhook("moyasar", rawBody, signature);
+```
+
+`handleWebhook(gateway, payload, signatureOrHeaders?, headers?)`:
+
+1. `onWebhookReceived` — **unverified** payload (logging/metrics only).
+2. Verify. Failure → `onWebhookFailed`, then `InvalidWebhookError`.
+3. Parse. Parse failures throw `InvalidRequestError` (not a forged-webhook 4xx).
+4. Phase 7 dual-write / rematch (`PaymentEvent` on `event.event` / `stableType`).
+5. `onWebhookVerified` — authenticity only.
+
+:::caution[Never fulfill in `onWebhookVerified`]
+That hook runs **before** any inbox claim. A homemade `alreadyProcessed(event.id)` check is not a lease. Claim via [`@paykernel/webhooks`](/packages/webhooks), then fulfill only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+:::
+
+```ts
+import {
+  createWebhookInboxEngine,
+  resolveInboxPayloadHash,
+  type WebhookInboxStore,
+} from "@paykernel/webhooks";
+import { mapInboxOutcome } from "@paykernel/integration-http";
+
+declare const store: WebhookInboxStore;
+declare const rawBody: string;
+declare const signature: string | undefined;
+declare function fulfillBoundToGatewayPaymentId(id: string): Promise<void>;
+
+const engine = createWebhookInboxEngine({
+  store,
+  mode: "inline",
+  owner: "api-worker-1",
+  defaultLeaseMs: 30_000,
+});
+
+const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+// handleWebhook verifies only. Never fulfill here.
+
+const outcome = await engine.processVerified({
+  gateway: "stripe",
+  providerEventId: webhookEvent.id,
+  payloadHash: resolveInboxPayloadHash({
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash: webhookEvent.rawPayload ?? webhookEvent,
+  }),
+  event: webhookEvent.event ?? webhookEvent,
+  handler: async (ctx) => {
+    const rec = ctx.event as { type?: string; payment?: { status?: string } };
+    const paid =
+      (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+      rec.payment?.status === "paid";
+    if (!paid) return;
+    const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+    if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+      return;
+    }
+    await fulfillBoundToGatewayPaymentId(gatewayPaymentId);
+  },
+});
+return mapInboxOutcome(outcome); // HTTP lives here, not in @paykernel/webhooks
+```
+
+Raw body is required for Stripe (and preferred for PayPal). Moyasar checks `secret_token` on the JSON object. Paymob HMAC is over selected fields. Per-gateway notes: [webhooks guide](/guides/webhooks), [Moyasar](/gateways/moyasar), [PayPal](/gateways/paypal), [Paymob](/gateways/paymob), [Stripe](/gateways/stripe).
+
+Prefer Phase 7 `PaymentEvent` (`event.event` / `stableType`) plus nested `payment.status === "paid"`. Persist with `toPersistedPaymentEventEnvelope` — do not store `rawPayload` by default. `WebhookEvent.type` stays provider-native.
+
+## Client operations
+
+`PaymentClient` (from `createPaymentClient`):
+
+| Method | Notes |
+| --- | --- |
+| `createPayment` / `capturePayment` / `refundPayment` / `voidPayment` | Money mutations. Omit `gateway` only when `defaultGateway` is set or the map has one gateway. |
+| `getPayment` / `getPaymentStatus` | Lookup — required after 3DS/callback and after indeterminate. |
+| `handleWebhook` | Verify + parse + hooks. Not a claim. |
+| `gateway(name)` | Typed instance (`StripeGateway`, …). Throws `GatewayNotConfiguredError` if missing. |
+| `configuredGateways()` / `hasGateway(name)` | Registry inspection. |
+| `createCheckoutSession` / `getCheckoutSession` | Capability `hostedCheckout` (Stripe). Create success is **not** paid. |
+| `createCustomer` / `getCustomer` | Capability `customers` (Stripe). |
+| `attachPaymentMethod` / `listPaymentMethods` / `detachPaymentMethod` | Capability `paymentMethods`. Never raw PAN/CVC. |
+| `getDispute` / `listDisputes` / `submitDisputeEvidence` | Capability `disputes` (Stripe). |
+| `createPaymentLink` / `getPaymentLink` / `deactivatePaymentLink` | Capability `paymentLinks` (Stripe). Not a Checkout Session. |
+
+Unclaimed capabilities throw `OperationNotSupportedError`. Query first: `gateway.supports("partialRefunds")` / `gateway.capabilities`. Claims are explicit and fail-closed — method presence alone does not set `true`. Generated matrix: [capabilities](/reference/capabilities), [gateway index](/gateways).
+
+Registry form:
+
+```ts
+import { createGatewayRegistry, createPaymentClient, stripeGateway } from "@paykernel/core";
+
+const registry = createGatewayRegistry()
+  .register(stripeGateway({ secretKey: process.env.STRIPE_SECRET_KEY! }))
+  .build(); // immutable — no unregister on a live client
+
+const client = createPaymentClient({
+  registry,
+  defaultGateway: "stripe",
+});
+```
+
+`register` rejects duplicate names (`InvalidRequestError`). `replace` overwrites. Change the gateway set by building a **new** client. `createDynamicGatewayRegistry()` is string-keyed (explicit loss of static inference).
+
+## Hooks
+
+Pass `hooks` on `createPaymentClient`. Before-hooks can abort (`proceed: false`) **before** the provider call. After-hooks **cannot** undo money: `proceed: false` is ignored (warn-logged) and throws are isolated — the SDK still returns success because the side effect already happened.
+
+:::caution
+**Never fulfill in `onWebhookVerified`.** Use it for metrics on a verified payload only.
+:::
+
+| Hook | Can abort money? |
+| --- | --- |
+| `onBefore` / `beforeCreatePayment` / `beforeCapture` / `beforeRefund` / `beforeVoid` / `beforeAuthorize` | Yes |
+| `onAfter` / `afterCreatePayment` / … | No (ignored) |
+| `onError` | No |
+| `onWebhookReceived` | No (unverified; log and continue) |
+| `onWebhookVerified` | No (throw → rethrow / 5xx so the provider retries) |
+| `onWebhookFailed` | No (secondary; primary verify error is rethrown) |
+
+After-hooks cannot rewrite money identity fields (`outcome`, `status`, `amount`, `gatewayId`, `captureId`, …). `MONEY_IDENTITY_KEYS` has no `success` (`success` was removed in 1.0). Details in core `docs/hooks.md`.
+
+## Money, logging, telemetry, runtime
+
+- **Money:** `money`, `toMinorUnits`, `fromMinorUnits`, `formatMoney`, `getCurrencyExponent`. [money](/guides/money).
+- **Logging:** default is a no-op. Pass a `Logger`; the client wraps it with `createRedactingLogger`. `redact()` scrubs secrets/PII keys. Do not log PAN, tokens, or webhook secrets yourself.
+- **Telemetry:** optional `TelemetrySink` on `GatewayContext`. Wrap with `createRedactingTelemetrySink`. Metrics/spans/OTEL live in [`@paykernel/opentelemetry`](/packages/opentelemetry) (import that name, not `@paykernel/observability`). Core does not depend on OTEL.
+- **Runtime:** injectable `PaymentRuntime` (`fetch`, `crypto`, `clock`, `randomUUID`) via `createPaymentClient` `runtime`. Gateways call `this.fetch`, not bare `fetch`. [runtime](/guides/runtime).
+- **Storage:** core does **not** depend on store packages. Idempotency / inbox / reconciliation stores are injected at the app layer. [adapter selection](/guides/adapter-selection).
+
+## Errors
+
+Catch `PaymentError` subclasses from `@paykernel/core`:
+
+`PaymentAbortedError`, `GatewayNotConfiguredError`, `OperationNotSupportedError`, `InvalidWebhookError`, `GatewayApiError`, `CardDeclinedError`, `InsufficientFundsError`, `AuthenticationError`, `RateLimitError`, `ResourceNotFoundError`, `InvalidRequestError`, `NetworkError`, `MoneyAmountError`.
+
+Full list: [errors](/reference/errors). Runtime export inventory: [core API](/reference/core-api).
+
+## Keys
+
+This package is **server-side only**. Configure secret keys (`secretKey`, PayPal `clientSecret`, Stripe `sk_…` / `whsec_…`, Moyasar `sk_…`, Paymob `secretKey` / `hmacSecret`) on the backend.
+
+Moyasar `publishableKey` is client-side only and is **not** used by this package. Paymob **`publicKey` is required together with `secretKey` for Intention create** (Unified Checkout URL query) — capture / refund / void / HMAC verify still ignore it. Never put secret keys in a browser bundle.
+
+## Related
+
+- [Getting started](/guides/getting-started) — inbox + store composition
+- [Outcomes](/guides/outcomes) · [Webhooks](/guides/webhooks) · [Money](/guides/money)
+- [Gateways](/gateways) · [Custom plugins](/gateways/custom)
+- [Migrate to 1.0](/guides/migrate-to-1-0)
+- [Events](/reference/events) · [Capabilities](/reference/capabilities)

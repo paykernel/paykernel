@@ -1,0 +1,157 @@
+---
+title: Durable Objects
+description: Partitioned SQLite-backed Durable Object stores. Never one global DO. Not D1, not local SQLite, not Turso.
+sidebar:
+  order: 7
+---
+
+`@paykernel/store-durable-objects` is **per-partition** strong coordination on **SQLite-backed** Durable Objects (`new_sqlite_classes`). The Worker client is async (stub RPC). In-object SQL is sync (`storage.sql.exec`). Single root export.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+**Never** route all payment work through one global Durable Object. `createDoPaymentStores` requires an explicit `sharding` strategy. This is **not** [`store-d1`](/stores/d1) (shared D1), **not** [`store-sqlite`](/stores/sqlite), **not** [`store-turso`](/stores/turso). There is no `packages/adapter-cloudflare` umbrella.
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-durable-objects
+# optional DX types (not required at runtime):
+bun add -d @cloudflare/workers-types
+```
+
+`paymentsSdk.runtime: "cloudflare-only"`. Root does **not** static-import `cloudflare:workers`. No Cloudflare REST API or account token for store construction.
+
+## Quick start (Worker + sharding)
+
+```ts
+import {
+  createDoPaymentStores,
+  RECOMMENDED_HASH_PARTITIONS,
+} from "@paykernel/store-durable-objects";
+
+const stores = createDoPaymentStores({
+  namespace: env.PAYMENTS_DO,
+  sharding: { kind: "hash", partitions: RECOMMENDED_HASH_PARTITIONS },
+});
+
+const r = await stores.idempotency.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+// 1) claim  2) exit storage txn  3) external provider work  4) complete with leaseToken
+```
+
+`createDoPaymentStores` **does not** migrate and **does not** default to a global object. `kind: "global"` / `"singleton"` is **rejected**. `RECOMMENDED_HASH_PARTITIONS` is `16`. The package README also shows `partitions: 32`.
+
+### Direct storage path (tests / in-object)
+
+```ts
+import {
+  createDoPaymentStoresFromStorage,
+  migrateDoAdapter,
+  PaymentsStoreObject,
+} from "@paykernel/store-durable-objects";
+
+await migrateDoAdapter(storage); // DoStorageLike or DoExecutor
+
+const bundle = createDoPaymentStoresFromStorage({ storage });
+const object = new PaymentsStoreObject({ storage });
+await object.ensureSchema();
+```
+
+Worker-client `withTransaction` **hard-fails** (`StoreUnsupportedFeatureError`) — no cross-object multi-mutation atomicity. In-object `createDo*Store` / `PaymentsStoreObject` may use `transactionSync`.
+
+## Wrangler (SQLite-backed DO)
+
+Use **`new_sqlite_classes`**, not legacy KV-only `new_classes`. This adapter requires `storage.sql` / `transactionSync`.
+
+```toml
+[[durable_objects.bindings]]
+name = "PAYMENTS_DO"
+class_name = "PaymentsStoreDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PaymentsStoreDurableObject"]
+```
+
+Call `ensureDoSchema` / `migrateDoAdapter` in the DO constructor (for example `blockConcurrencyWhile`) or via ops — **not** on package import. That constructor path is DO lifecycle, not npm-import auto-migrate.
+
+Forward **every** name in `REQUIRED_DO_RPC_METHODS` from your wrapper onto `PaymentsStoreObject`. Hash sharding **requires** `bindHashPartitionLayout` (DO-1). `tableNamespace` is sent on every store RPC and applied inside the DO.
+
+Official SQLite storage API: [Cloudflare Durable Objects SQLite storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) (adapter pin: 2026-08-03).
+
+## Sharding
+
+| Strategy | Behavior |
+| --- | --- |
+| `key` | One object per key — strongest per-key serialization. **No** global `listDue` / `listRetryable` / `deleteExpired` (hard-fail `StoreUnsupportedFeatureError`) |
+| `hash` | Bounded partitions (`partitions >= 1`, recommend ≥ 16 / `RECOMMENDED_HASH_PARTITIONS`). Fan-out discovery. **`partitions = 1` is a single partition** (all keys share one DO; not a silent global default) |
+| `tenant` | One object per tenant. Worker strategy: **static `tenantId` string**, or a function of **key only** (store contracts have no `tenantId`) |
+
+- **Within a shard:** single-threaded serialization.
+- **Across shards:** no global total order.
+- **Hot-key:** many ops for the same key/tenant hit the same object.
+
+Hash partitions are sealed on a layout meta DO named with suffix `__pk_layout__` (`DO_HASH_LAYOUT_META_SUFFIX`). Changing partition count under the same layout **hard-throws**. Use a new `layoutId` / `objectNamePrefix` to reshard after an explicit migration — never silent empty DOs.
+
+```ts
+createDoPaymentStores({
+  namespace: env.PAYMENTS_DO,
+  sharding: { kind: "hash", partitions: RECOMMENDED_HASH_PARTITIONS },
+});
+```
+
+## Claims and transactions
+
+Prefer engine-level single-statement:
+
+```sql
+INSERT … ON CONFLICT DO UPDATE … WHERE … RETURNING …
+```
+
+Multi-statement only inside `storage.transactionSync` — **sync callback, no await**. **Never** `BEGIN`/`COMMIT` via `sql.exec`. **Never** unprotected get-then-set.
+
+Pattern: **claim → commit → external work → complete with lease token**. Do not `await` provider HTTP inside `transactionSync`. Consume `SqlStorageCursor` (`toArray`) before any `await` — no snapshot isolation.
+
+## Guarantees
+
+`DO_STORAGE_ADAPTER_MANIFEST` (`name: "cloudflare-do"`):
+
+| Field | Value |
+| --- | --- |
+| `coordinationScope` | `multi-host` (partitioned) |
+| `durability` | `durable` |
+| `consistency.claims` | `strong` (within partition) |
+| `consistency.readAfterWrite` | `strong` (within one DO instance) |
+| `staleReadsPossible` | `false` (within partition) |
+
+## Optional alarms (default-off)
+
+`createAlarmScheduler` / `ensureAlarmQueueSchema`. One alarm **per DO** + due queue table. Handlers are **at-least-once** and must re-check lease/claim state. Bounded retries + backoff/jitter.
+
+Alarms are **not** wired to `failWebhook` — webhook recovery is **pull-only** (`listRetryable`). Calling `alarm()` without a handler only re-schedules; it does not drain.
+
+## Failure paths
+
+| Event | Behavior |
+| --- | --- |
+| Crash / eviction after claim, before complete | Lease until expiry; reclaim with new token on that partition |
+| Crash after provider work, before complete | Uncertain — `markIndeterminate` if lease still valid; **never invent failure** |
+| Stale token after reclaim | `StoreLeaseLostError` |
+| `listDue` with `kind: "key"` | `StoreUnsupportedFeatureError` — prefer `hash` for recovery pollers |
+| Worker-client `withTransaction` | `StoreUnsupportedFeatureError` |
+| One global DO / omitted sharding | Forbidden — must pass `sharding` |
+| KV-only `new_classes` | Unsupported — no `storage.sql` |
+
+**Never fulfill in `onWebhookVerified`.** Fulfill after inbox claim on paid rematched events only. See [Webhooks](/guides/webhooks).
+
+## Related
+
+- [Stores overview](/stores) · [D1](/stores/d1)
+- [Cloudflare Workers integration](/integrations/cloudflare-workers)
+- [Store contracts](/packages/store-contracts) · [Adapter selection](/guides/adapter-selection)

@@ -1,0 +1,231 @@
+---
+title: Moyasar
+description: Built-in Moyasar adapter in @paykernel/core — token, Apple Pay, Samsung Pay, STC Pay, splits, and secret_token webhooks.
+sidebar:
+  order: 2
+---
+
+Moyasar is a Saudi payment gateway. The adapter lives in `@paykernel/core` as `moyasarGateway` (`BuiltInGatewayName` `"moyasar"`). This page documents PayKernel’s mapping — not Moyasar’s product docs. Upstream: [Moyasar documentation](https://docs.moyasar.com).
+
+## Configuration
+
+```ts
+import { createPaymentClient, moyasarGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({
+      secretKey: process.env.MOYASAR_SECRET_KEY!, // sk_test_… or sk_live_…
+      webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
+      timeoutMs: 30000, // default 30000
+      // idempotencyStore: sharedStoreWithAtomicReserve, // required at runtime for mutations
+    }),
+  },
+  defaultGateway: "moyasar",
+});
+```
+
+`MoyasarConfig` has **no** `sandbox` field (removed in 1.0). Test vs live is the secret-key prefix (`sk_test_…` / `sk_live_…`) only.
+
+`publishableKey` is optional and unused by this backend SDK (Moyasar.js in the browser).
+
+:::caution[Mutations require a store]
+Capture, refund, void, and `confirmStcPayOtp` have **no** native Moyasar idempotency. Omitting `idempotencyStore` (with atomic `reserve()`) or `idempotencyKey` throws `InvalidRequestError` — the SDK refuses the POST. `InMemoryIdempotencyStore` only protects **one process**. Prefer a shared Redis/SQL store in multi-worker production. Create / get / webhook parse do not require a store.
+:::
+
+## Payment sources (backend)
+
+Raw `creditcard` PAN/CVC is **not** accepted. A `type: "creditcard"` source is rejected with `InvalidRequestError` before any HTTP request. Collect cards with Moyasar.js, Apple Pay, Samsung Pay, or STC Pay.
+
+| Source | Use | Key fields |
+| --- | --- | --- |
+| `token` | Moyasar.js tokenized card | `token` (must start with `token_`), `cvc?`, `_3ds?`, `manualCapture?` |
+| `stcpay` | STC Pay wallet | `mobile`, `cashier?`, `branch?` |
+| `applepay` | Apple Pay | `token`, `saveCard?`, `manualCapture?` |
+| `samsungpay` | Samsung Pay | `token`, `saveCard?`, `manualCapture?` |
+
+`callbackUrl` is required for card/token sources. When omitting it (STC Pay) or using Moyasar-only fields (`splits`), pass `'moyasar'` as the second argument or call `client.gateway("moyasar").createPayment(...)`.
+
+```ts
+import { isPaidOutcome, money } from "@paykernel/core";
+import type { CardTokenSource } from "@paykernel/core";
+
+const result = await client.createPayment({
+  amount: money("100", "SAR"),
+  currency: "SAR",
+  orderId: "order_123",
+  callbackUrl: "https://example.com/callback",
+  moyasarSource: {
+    type: "token",
+    token: "token_abc123xyz",
+  } satisfies CardTokenSource,
+});
+
+if (isPaidOutcome(result)) {
+  // Also verify amount/currency against the order before shipping.
+} else if (result.redirectUrl) {
+  // 3DS — do not fulfill yet.
+} else if (result.status === "authorized") {
+  // Auth-only hold — capture later.
+} else if (result.outcome === "requires_action" || result.status === "pending") {
+  // Wait for 3DS/OTP/webhook.
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Do not createPayment again — getPayment / reconcile.
+} else {
+  // failed / declined
+}
+```
+
+Create idempotency: `idempotencyKey` as a UUID becomes Moyasar’s created payment ID (`given_id`).
+
+## STC Pay
+
+Manual / authorize-only capture is **not** supported — `capture: false` or `manualCapture: true` is `InvalidRequestError` (same fail-closed pattern as decrypted Apple Pay DPAN).
+
+Saudi mobile formats (pass as documented; the SDK does not reformat): `05xxxxxxxx`, `+9665xxxxxxxx`, `9665xxxxxxxx`, `009665xxxxxxxx`.
+
+`transactionUrl` is an **OTP submission endpoint**, not a browser redirect. `redirectUrl` is undefined for STC Pay. Narrow `nextAction`:
+
+```ts
+const nextAction = result.nextAction as
+  | { type: "stcpay_otp"; transactionUrl: string }
+  | undefined;
+if (nextAction?.type === "stcpay_otp") {
+  showOtpForm(nextAction.transactionUrl);
+}
+
+const moyasar = client.gateway("moyasar");
+const confirmed = await moyasar.confirmStcPayOtp({
+  transactionUrl: stcTransactionUrl,
+  otpValue: "123456",
+  idempotencyKey: "stc-otp-order-123",
+});
+if (confirmed.status === "paid") {
+  // Verify amount/currency against the order.
+}
+```
+
+## Apple Pay / Samsung Pay
+
+Encrypted Apple Pay `token` supports `manualCapture` / `capture: false`. **Decrypted DPAN** (`dpan`, `cryptogram`, `deviceId`, …) has no Moyasar `manual` field — `capture: false` is `InvalidRequestError`.
+
+## Status mapping
+
+| Moyasar | SDK |
+| --- | --- |
+| `initiated` | `pending` (`outcome: "requires_action"`, not paid) |
+| `paid` | `paid` |
+| `authorized` | `authorized` |
+| `verified` | `setup_completed` (zero-amount card setup — **not** an auth hold) |
+| `captured` | `paid` (or `partially_captured` when amount-derived) |
+| `failed` / `abandoned` | `failed` |
+| `refunded` | `refunded` when `refunded` amount covers baseline; **`refund_completed`** when amount is missing/zero |
+| `voided` | `cancelled` |
+| unmapped string | `failed` (fail-closed) |
+
+`isPaidOutcome` requires `outcome === "succeeded"` **and** `status === "paid"`. Do not fulfill on `outcome` alone. `initiated` is not paid.
+
+Amount-derived: `refunded > 0 && refunded < baseline` → `partially_refunded`; `refunded >= baseline && baseline > 0` → `refunded`; `captured > 0 && captured < amount` → `partially_captured` (`outcome: "requires_action"`, `isPaidOutcome` false). Refund baseline is `captured > 0 ? captured : amount`. Incomplete paid snapshots (missing amount/currency, or `captured: 0` on a paid map) demote to `processing`.
+
+## Failure paths (create / mutations)
+
+| Situation | SDK |
+| --- | --- |
+| HTTP 201 with `status: "failed"` / `abandoned` | `outcome: "failed"` (or `declined`), `status: "failed"` |
+| Create HTTP 200 `{}` / missing `payment.id` | **`indeterminate`** + `reconciliationRequired` — not declined. Reconcile via `given_id` / `getPayment`. Do not mint a new idempotency key. |
+| Refund HTTP 200 without id | `indeterminate`; fence stays `unknown`. Resolve via `getPayment` before retrying — a new key can double-refund. |
+| Mutation 2xx invalid JSON | `indeterminate`; fence `unknown`. GET invalid JSON stays `GatewayApiError`. |
+| `3ds_auth_error` | `CardDeclinedError` (not `AuthenticationError`) |
+| Non-UUID payment IDs | Rejected before calling Moyasar |
+
+The SDK does **not** auto-retry capture/refund/void/`confirmStcPayOtp` with `withRetry`. Fence behavior (keyed by `idempotencyKey + operation + paymentId`):
+
+- **Completed** — cached result, no API call.
+- **In progress / unknown** — refused (no second POST).
+- **Definite 4xx** (excluding 408/409/425/429) — reservation cleared; retry allowed.
+- **Indeterminate** (network/5xx/408/409/425/429, post-2xx invalid JSON) — keep `unknown`; `getPayment` before reusing the key.
+
+## Capture, refund, void
+
+Payment operation IDs are **UUIDs**.
+
+```ts
+import { money } from "@paykernel/core";
+
+await client.capturePayment(
+  {
+    gatewayPaymentId: "760878ec-d1d3-5f72-9056-191683f55872",
+    amount: money("100", "SAR"), // omit for full capture
+    currency: "SAR", // required whenever amount is set; must match payment
+    idempotencyKey: "capture-order-123",
+  },
+  "moyasar",
+);
+
+await client.refundPayment(
+  {
+    gatewayPaymentId: "760878ec-d1d3-5f72-9056-191683f55872",
+    amount: money("50", "SAR"),
+    currency: "SAR",
+    idempotencyKey: "refund-order-123",
+  },
+  "moyasar",
+);
+// Proven refund total → status "completed" / outcome "succeeded".
+// Incomplete snapshots stay pending and omit totalRefunded.
+
+await client.voidPayment(
+  {
+    gatewayPaymentId: "760878ec-d1d3-5f72-9056-191683f55872",
+    idempotencyKey: "void-order-123",
+  },
+  "moyasar",
+);
+// Confirmed voided → status cancelled. Residual still-paid 2xx is money-honest
+// (isPaidOutcome true) — key void success on status === "cancelled".
+```
+
+`reason` on refund is ignored (Moyasar’s refund endpoint has no reason field). When `amount` is set, the SDK GETs the payment first and converts with the **payment** currency.
+
+**Capture window:** issuer-controlled. **mada** holds are typically capturable ~14 days; other schemes follow issuer rules. Moyasar may still report `authorized` after the issuer released funds — re-fetch before capturing.
+
+**Void window:** authorized (uncaptured) while the hold is active. Paid / auto-captured may void only within a short settlement window (commonly ~2 hours); after that use refund.
+
+## Splits and AFT
+
+Capability `marketplaceSplits`. Pass gateway `'moyasar'`. Split `amount` is `Money` in the same currency; the sum must equal the payment amount in minor units. Generic `MarketplaceSplit.destination` is **not** mapped — use `recipient_id`.
+
+Optional `recipient` / `sender` are Account Funding Transaction fields. They require AFT enabled on the Moyasar account; omit them for ordinary payments.
+
+## Callback / 3DS return
+
+After the customer returns to `callback_url`, **never trust query-string status**. Read at most the payment id, then `getPayment` (or a verified webhook), then confirm `status === "paid"` (or `authorized` for auth-only) and amount/currency match the order.
+
+## Webhooks
+
+Moyasar embeds `secret_token` in the JSON body — no signature header. Requires `webhookSecret`. Compared with a constant-time check.
+
+```ts
+const event = await client.handleWebhook("moyasar", req.body);
+// verifies only — claim via @paykernel/webhooks before fulfillment
+```
+
+`event.rawPayload` is a clone **without** `secret_token`. `event.payloadHash` is a compact identity digest (`id`, `type`, `created_at`, nested `data.id`) — not a hash of the full payment tree. Inbox claim must use this digest.
+
+Moyasar documents failed payment webhooks as `payment_faild`; the SDK normalizes that typo to `payment_failed`. Boolean `live` → `event.livemode`.
+
+**Fulfill only** on rematched `payment.succeeded` / `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. Never fulfill in `onWebhookVerified`.
+
+Webhook `event.amount` for refund/capture is the cumulative **refunded** / **captured** slice when present — not always the payment total. Incomplete refunds that omit `refunded` leave `event.amount` undefined.
+
+Standalone `card_auth_*` webhooks parse as `provider.unmapped` (setup-like). Do not fulfill from them.
+
+`payment_voided` maps to `payment.cancelled` only when domain status is actually `cancelled`. A void envelope whose payment is still `paid` / `authorized` / `partially_captured` stays residual and dual-write is `payment.processing`.
+
+## Metadata and money
+
+- Amounts: `Money` only. `money("100", "SAR")` → 10000 halalas.
+- Metadata: up to 30 string pairs; keys ≤ 40 chars, values ≤ 500.
+- `orderId` is copied into `metadata.orderId` and `metadata.paymentId` unless you set those keys yourself.
+
+Related: [core](/packages/core) · [outcomes](/guides/outcomes) · [webhooks](/guides/webhooks) · [money](/guides/money)

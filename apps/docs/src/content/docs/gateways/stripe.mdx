@@ -1,0 +1,207 @@
+---
+title: Stripe
+description: Built-in Stripe adapter in @paykernel/core — PaymentIntents, Checkout Sessions, customers, disputes, payment links, and signed webhooks.
+sidebar:
+  order: 5
+---
+
+The Stripe adapter lives in `@paykernel/core` as `stripeGateway` (`BuiltInGatewayName` `"stripe"`). There is **no** `@paykernel/gateway-stripe` package. This page documents PayKernel’s mapping. Upstream: [Stripe API](https://docs.stripe.com/api).
+
+## Configuration
+
+```ts
+import { createPaymentClient, stripeGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    stripe: stripeGateway({
+      secretKey: process.env.STRIPE_SECRET_KEY!,
+      publishableKey: process.env.STRIPE_PUBLISHABLE_KEY, // browser only — unused here
+      webhookSecret: process.env.STRIPE_WEBHOOK_SECRET!,
+      apiVersion: "2026-02-25.clover", // optional; default is this pin
+      timeoutMs: 30000,
+    }),
+  },
+  defaultGateway: "stripe",
+});
+```
+
+Missing `webhookSecret` throws `InvalidRequestError` on verify (operator configuration) rather than returning `false` as if the signature were forged.
+
+`publishableKey` is for Stripe.js / Elements. It is **not** used for create/capture/refund/void or webhook verification.
+
+Optional `webhookApiVersion` rejects snapshot events whose `api_version` does not match. It is **not** defaulted from `apiVersion` — omit it to accept any webhook API version Stripe delivers.
+
+## PaymentIntents
+
+```ts
+import { money } from "@paykernel/core";
+
+const stripe = client.gateway("stripe");
+
+const result = await stripe.createPayment({
+  amount: money("50", "USD"),
+  currency: "USD",
+  callbackUrl: "https://example.com/stripe/return",
+  description: "Order #1234",
+  orderId: "order_1234",
+  stripePaymentMethodId: "pm_card_visa",
+  stripeCustomerId: "cus_123456789",
+  capture: true,
+  idempotencyKey: crypto.randomUUID(),
+});
+```
+
+Amounts are `Money` only. The gateway converts to Stripe minor units (zero-decimal, whole-unit specials such as ISK/UGX, three-decimal BHD/JOD/KWD/OMR/TND). Default non-card cap is **8 digits** (`99_999_999` minor units); per-currency overrides never exceed the **12-digit card max**. Stripe remains the source of truth for **minimum** charge amounts.
+
+When `stripePaymentMethodId` is provided, the SDK confirms immediately and sends `callbackUrl` as Stripe `return_url` when present. Without `callbackUrl`, it sets `automatic_payment_methods.allow_redirects` to `never`.
+
+Metadata: scalar strings/numbers/booleans only; nested objects/arrays rejected. At most 50 keys; key names ≤ 40 chars without square brackets; values ≤ 500 chars.
+
+## Checkout Sessions — create is not paid
+
+Capability `hostedCheckout`. Create returns a Phase 6 outcome union (`succeeded` with `session`, or `indeterminate`). **Never fulfill on checkout create.** `isHostedCheckoutRedirect(result)` is true when `outcome === "succeeded"` and `session.url` is a non-empty string. Session `status` stays `open`; this is not paid settlement.
+
+`createCheckoutSession` **requires** a caller `idempotencyKey`. Payment and subscription modes require `cancelUrl`. `successUrl` / `cancelUrl` must be http(s). Pass either `customerId` **or** `customerEmail`, not both.
+
+```ts
+import { money } from "@paykernel/core";
+
+const result = await stripe.createCheckoutSession({
+  mode: "payment",
+  successUrl: "https://example.com/success",
+  cancelUrl: "https://example.com/cancel",
+  metadata: { paymentId: "order_1234" },
+  idempotencyKey: crypto.randomUUID(),
+  lineItems: [
+    {
+      priceData: {
+        currency: "USD",
+        productData: { name: "Premium Plan" },
+        amount: money("100", "USD"),
+      },
+      quantity: 1,
+    },
+  ],
+});
+
+if (result.outcome === "succeeded") {
+  if (result.session.url) {
+    redirect(result.session.url);
+  }
+  const sessionId = result.session.references.providerObjectId;
+} else if (result.outcome === "indeterminate") {
+  // Timeout / empty / non-JSON 200 after POST. Lookup id is on
+  // session.references.providerObjectId (caller key, or "unknown").
+  // Do NOT retry as a fresh session.
+}
+```
+
+Simple one-item form: `amount` + `currency` instead of `lineItems` (not both). Setup mode requires `currency` or `paymentMethodTypes` and does not accept `lineItems` / `amount`. Subscription inline `priceData` must include `recurring`. Caps: payment mode ≤ 100 line items; subscription ≤ 40 total / ≤ 20 known recurring inline prices. Unsupported Checkout fields are rejected, not ignored.
+
+When Stripe omits `url` after a successful create, `session.url` is **omitted** — do not invent a hosted URL.
+
+`getCheckoutSession` requires `sessionId` matching `cs_...`. HTTP 404 is `outcome: "failed"` (not a thrown transport error). GET transport failures still throw `NetworkError`. Expanded PaymentIntent: `result.session.references.relatedIds.paymentIntentId`. **Do not fulfill on GET checkout amount.**
+
+**Subscription-mode IDs:** `checkout.session.completed` with `mode: "subscription"` may set webhook `gatewayPaymentId` to `sub_*`. `capturePayment` / `refundPayment` / `voidPayment` still require `pi_*`. Resolve via `getCheckoutSession` → `relatedIds.paymentIntentId` or `getPayment`.
+
+`mode: "subscription"` does **not** set capability `providerRecurring`.
+
+## Manual capture, refund, void
+
+```ts
+const auth = await stripe.createPayment({
+  amount: money("100", "USD"),
+  currency: "USD",
+  callbackUrl: "https://example.com/stripe/return",
+  stripePaymentMethodId: "pm_card_visa",
+  capture: false,
+  idempotencyKey: crypto.randomUUID(),
+});
+
+const capture = await stripe.capturePayment({
+  gatewayPaymentId: auth.gatewayId,
+  amount: money("100", "USD"),
+  currency: "USD", // required with amount; must match PI currency
+  idempotencyKey: crypto.randomUUID(),
+});
+
+const refund = await stripe.refundPayment({
+  gatewayPaymentId: "pi_1234567890", // must be pi_...
+  amount: money("50", "USD"),
+  currency: "USD",
+  reason: "requested_by_customer",
+  idempotencyKey: crypto.randomUUID(),
+});
+
+await client.voidPayment(
+  { gatewayPaymentId: "pi_1234567890", idempotencyKey: crypto.randomUUID() },
+  "stripe",
+);
+```
+
+:::caution[Money mutations require `pi_...`]
+`capturePayment` / `refundPayment` / `voidPayment` reject Checkout Session IDs (`cs_...`) and Subscription IDs (`sub_...`). Resolve the PaymentIntent first.
+:::
+
+Partial capture/refund `currency` **must match the PaymentIntent**. The gateway GETs the PI before converting majors. Omit `amount` for a full capture/refund.
+
+After capture, settled amount is `amount_received` → `latest_charge.amount_captured`. Finite settled &lt; authorized → `partially_captured`. Missing settled fields → `processing` (fail closed — not full `paid`).
+
+Stripe-supported refund reasons (`duplicate`, `fraudulent`, `requested_by_customer`) are sent as `reason`; other strings go to `metadata.reason`. `totalRefunded` counts **succeeded** refunds only. Empty/pending-only lists do **not** publish `totalRefunded: 0`.
+
+## Idempotency
+
+- **`capturePayment` / `refundPayment` / `voidPayment` / `createCheckoutSession` require a caller `idempotencyKey`.** Omitting it throws `InvalidRequestError` before POST. Empty/whitespace-only keys are rejected.
+- **`createPayment`** still mints an ephemeral `crypto.randomUUID()` when omitted, **and logs a warning**. That key exists only for in-process `withRetry`. Crash retries mint a new key and can create a second PaymentIntent.
+
+HTTP 200 empty/non-JSON after a mutating request is `NetworkError` with `afterProviderSubmit: true`, mapped to `outcome: "indeterminate"` + `reconciliationRequired: true`. Checkout create maps to a **checkout-shaped** indeterminate result (lookup id on `session.references.providerObjectId`) — not a payment snapshot. Do not treat as `failed` / `pending` / `success: true`. Do not `createPayment` / `createCheckoutSession` again with a new key.
+
+## Customers, disputes, payment links
+
+Stripe claims `customers` and `paymentMethods`. Create/attach/detach require `idempotencyKey`. Off-session PaymentIntents need `customerId` + `paymentMethodId` (or Stripe aliases). The SDK **never** accepts raw PAN/CVC (`InvalidRequestError`). Stripe `attachPaymentMethod` with a `tok_…` card token is `paymentMethods`, not `tokenization` (Stripe keeps `tokenization: false`).
+
+`listDisputes` requires a `pi_…` or `ch_…` bound. Empty evidence is rejected. `charge.dispute.*` dual-writes `dispute.opened` / `updated` / `closed`. Envelope `status` is the Stripe **dispute** lifecycle — never generic payment `pending`. Do not last-write it onto a paid payment.
+
+Payment links are capability `paymentLinks` — **not** Checkout Sessions and not PayPal Pay Links. Create/deactivate require `idempotencyKey`. Do not treat create/deactivate as payment settlement.
+
+## Webhooks
+
+**Prefer `client.handleWebhook("stripe", rawBody, signature)`.** Pass the exact raw body `string` or `Buffer`. Parsed JSON objects **never** verify. `parseWebhookEvent` alone does **not** verify authenticity. Thin events: hydrate a snapshot (`data.object`) first.
+
+```ts
+const signature = headers.get("stripe-signature") ?? undefined;
+const event = await client.handleWebhook("stripe", rawBody, signature);
+// verifies only — never fulfill here / never isPaidOutcome(event)
+```
+
+:::caution[Never fulfill in `onWebhookVerified`]
+Claim via [`@paykernel/webhooks`](/packages/webhooks). Fulfill only when rematched `payment.succeeded` | `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`.
+:::
+
+Webhook signature uses **bidirectional** 300s tolerance (`Math.abs(now - t) > 300` rejects).
+
+`payment_intent.succeeded`: amount prefers `amount_received` → captured. Finite settled &lt; authorized → `partially_captured` (`payment.processing`, `isPaidOutcome` false). Missing settled → `processing`. Stripe does not decrement `amount_received` on refund and leaves PI status `succeeded` — when `latest_charge` / `charges.data[0]` shows refunds, domain is `refunded` / `partially_refunded` and dual-write is `refund.completed` (not `payment.succeeded`). Do not last-write `payment_intent.succeeded` over `charge.refunded`.
+
+Checkout `payment_status: paid` with an unexpanded string `payment_intent` maps to **`processing`** (Stripe leaves `payment_status: paid` after refunds). Expand `payment_intent` or fulfill from PI / invoice money events.
+
+**Invoice money events** (`invoice.paid` / `invoice.payment_succeeded`): not always domain `paid`. `void` / `uncollectible` → `cancelled` / `failed`. Finite `post_payment_credit_notes_amount > 0` → `processing`. Amount uses **`amount_paid` only**. When a PaymentIntent is present: `gatewayPaymentId` → `pi_...`, `gatewaySubscriptionId` → `sub_...`, `gatewayObjectId` → `in_...`.
+
+### Subscription status (not fulfillment)
+
+| Stripe subscription `status` | SDK |
+| --- | --- |
+| `active` | `processing` (**not** `paid`) |
+| `trialing` / `past_due` / `incomplete` / `paused` / `unpaid` | `pending` |
+| `canceled` / `incomplete_expired` | `cancelled` |
+| other / unknown | `pending` |
+
+**Never fulfill inventory on subscription domain status alone.** Subscription lifecycle and subscription-mode Checkout may set `gatewayPaymentId` to `sub_*` and dual-write `provider.unmapped`.
+
+`checkout.session.completed` with `payment_status: "no_payment_required"` and `status: "complete"`: setup/`setup_intent` → `setup_completed`; subscription → `pending`; payment mode ($0 / 100% coupon) → `paid`; missing mode → `pending`.
+
+`refund.failed` maps to domain **`refund_failed`** (not payment `failed`). In-flight refund object statuses → **`refund_pending`**. Incomplete `charge.refunded` snapshots (`refunded !== true` and missing/zero `amount_refunded`) → `refund_completed` (dual-write `refund.pending`). Webhook `amount` on `charge.refunded` is cumulative `amount_refunded`, not the charge total.
+
+Unhandled event types with foreign statuses (subscription `active`, etc.) normalize as `pending` — they do **not** run through the PaymentIntent fail-closed `failed` map.
+
+Related: [core](/packages/core) · [outcomes](/guides/outcomes) · [webhooks](/guides/webhooks)

@@ -7,7 +7,8 @@
   "workspaces": [
     "packages/*",
     "internal/*",
-    "examples/*"
+    "examples/*",
+    "apps/*"
   ],
   "scripts": {
     "build": "bun run --filter @paykernel/core build && bun run --filter @paykernel/webhooks build && bun run --filter @paykernel/reconciliation build && bun run --filter @paykernel/opentelemetry build && bun run --filter @paykernel/routing build && bun run --filter @paykernel/integration-http build && bun run --filter @paykernel/integration-hono build && bun run --filter @paykernel/integration-elysia build && bun run --filter @paykernel/integration-express build && bun run --filter @paykernel/integration-cloudflare-workers build && bun run --filter @paykernel/gateway-tap build && bun run --filter @paykernel/gateway-myfatoorah build && bun run --filter @paykernel/store-contracts build && bun run --filter @paykernel/testkit build && bun run --filter @paykernel/sql-foundation build && bun run --filter @paykernel/internal-sql-store build && bun run --filter @paykernel/store-postgres build && bun run --filter @paykernel/store-redis build && bun run --filter @paykernel/store-sqlite build && bun run --filter @paykernel/store-turso build && bun run --filter @paykernel/store-d1 build && bun run --filter @paykernel/store-durable-objects build",
@@ -35,6 +36,9 @@
     "baseline:package": "bun run scripts/record-package-baseline.ts",
     "baseline": "bun run baseline:api && bun run baseline:schema && bun run baseline:package",
     "docs:capabilities": "bun run --filter @paykernel/core docs:capabilities",
+    "docs:dev": "bun run --filter @paykernel/docs dev",
+    "docs:build": "bun run --filter @paykernel/docs build",
+    "docs:deploy": "bun run docs:build && bun --cwd apps/docs x wrangler deploy",
     "pack:check": "bun run --filter @paykernel/core pack:check",
     "publint": "bun run --filter @paykernel/core publint",
     "attw": "bun run --filter @paykernel/core attw",

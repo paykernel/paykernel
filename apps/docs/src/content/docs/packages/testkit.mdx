@@ -1,0 +1,151 @@
+---
+title: "@paykernel/testkit"
+description: Mock gateway, capability-gated conformance, fixture safety, and NON-PRODUCTION in-memory stores. Core does not depend on this package.
+sidebar:
+  order: 8
+---
+
+`@paykernel/testkit` is the **dev/test** kit for `@paykernel/core`: a scriptable mock gateway, capability-gated conformance, fixture safety, lease-aware store contract re-exports, and **NON-PRODUCTION** in-memory stores. Core must **not** depend on this package.
+
+Workspace version is **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo. Export map is `"."` only.
+
+```bash
+bun add -d @paykernel/testkit
+```
+
+Runtime deps (workspace): `@paykernel/core`, `@paykernel/webhooks`, `@paykernel/reconciliation`, `@paykernel/store-contracts`. Portable — no Node-only imports in the production entrypoint.
+
+:::caution[Memory stores are NON-PRODUCTION]
+`createMemoryStores` / `createMemoryIdempotencyStore` / `createMemoryWebhookInboxStore` / `createMemoryReconciliationStore` are **test-only**. `coordinationScope: "single-process"`, `durability: "ephemeral"`. Crash or restart loses all state. Not multi-host. Never on a production payment path.
+:::
+
+There is **no** `moneyCases` export. Script payments with `mockGateway({ createPayment: [{ outcome: "succeeded" }] })`. Conformance amount fixtures are `fixtures.amountCases`.
+
+## Mock gateway
+
+```ts
+import { mockGateway } from "@paykernel/testkit";
+import { defineGatewayCapabilities, isPaidOutcome, money } from "@paykernel/core";
+
+const gateway = mockGateway({
+  name: "demo",
+  capabilities: defineGatewayCapabilities({
+    payments: true,
+    immediateCapture: true,
+    refunds: true,
+  }),
+  createPayment: [
+    { outcome: "requires_action" },
+    { outcome: "succeeded" },
+    { outcome: "indeterminate" },
+  ],
+});
+
+const params = {
+  amount: money("10.50", "SAR"),
+  currency: "SAR",
+  callbackUrl: "https://merchant.example/callback",
+};
+
+const a = await gateway.createPayment(params);
+// a.outcome === "requires_action"; isPaidOutcome(a) === false
+
+const b = await gateway.createPayment(params);
+if (isPaidOutcome(b)) {
+  // outcome === "succeeded" and status === "paid"
+}
+
+const c = await gateway.createPayment(params);
+// c.outcome === "indeterminate"; c.reconciliationRequired === true
+// Do NOT createPayment again for the same intent.
+```
+
+`success` was removed from `GatewayPaymentResult` / `GatewayRefundResult` in 1.0. Assert `outcome` / `isPaidOutcome`. Mock results dual-write via core `applyOutcomeToGatewayResult` (no `success` field).
+
+| Scripted `outcome` | What happens |
+| --- | --- |
+| `succeeded` | `outcome: "succeeded"`; immediate-capture create is `status: "paid"` |
+| `requires_action` | `outcome: "requires_action"`, pending + `redirectUrl` / `nextAction` |
+| `indeterminate` | `outcome: "indeterminate"`, `reconciliationRequired: true` (not a decline) |
+| `failed` | `outcome: "failed"`, `status: "failed"` |
+| `declined` / `insufficient_funds` | throws `CardDeclinedError` / `InsufficientFundsError` |
+| `timeout` / `network_error` | throws `NetworkError` |
+| `provider_ok_client_timeout` | provider-side paid retained; client throws `NetworkError` |
+
+After a queue drains, the mock reuses the last step (or `defaultOutcome`).
+
+Related helpers (all from `"."`): `majorToMinor`, `minorToMajor`, `defaultPaymentResult`, `defaultRefundResult`, `paymentStatusToOperationOutcome`, `generateWebhookEvent`, `signMockWebhook`, `mockPayloadToWebhookEvent`.
+
+Persist mock webhooks with core `toPersistedPaymentEventEnvelope(event.event!, { rawForHash: event.rawPayload })` — omitting both `payloadHash` and `rawForHash` throws `InvalidRequestError`.
+
+**Never fulfill in `onWebhookVerified`.** Fulfill after an inbox claim, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`.
+
+## Conformance
+
+Offline-first. Do **not** pass live provider credentials.
+
+```ts
+import { mockGateway, runGatewayConformanceSuite } from "@paykernel/testkit";
+import { defineGatewayCapabilities, money } from "@paykernel/core";
+
+const capabilities = defineGatewayCapabilities({
+  payments: true,
+  immediateCapture: true,
+  refunds: true,
+  partialRefunds: true,
+});
+
+const report = await runGatewayConformanceSuite({
+  name: "demo",
+  mode: "full", // full | structural | applicable
+  createGateway: () => mockGateway({ name: "demo", capabilities }),
+  capabilities,
+  fixtures: {
+    amountCases: [
+      { amount: money("10.50", "SAR"), currency: "SAR" },
+    ],
+  },
+});
+// report.ok === true when report.failed.length === 0
+```
+
+`runBuiltinGatewayConformance` runs **applicable/structural** cases against dummy credentials (`BUILTIN_TEST_CREDENTIALS`) — never live HTTP.
+
+Store adapters: `runIdempotencyStoreConformanceSuite`, `runWebhookInboxStoreConformanceSuite`, `runReconciliationStoreConformanceSuite`.
+
+## Memory stores (tests only)
+
+```ts
+import {
+  NON_PRODUCTION,
+  MEMORY_STORE_WARNING,
+  MEMORY_STORAGE_ADAPTER_MANIFEST,
+  createMemoryStores,
+  createFakeClock,
+} from "@paykernel/testkit";
+
+const clock = createFakeClock();
+const stores = createMemoryStores({ clock });
+// stores.idempotency / stores.webhookInbox / stores.reconciliation
+if (NON_PRODUCTION !== true) throw new Error(MEMORY_STORE_WARNING);
+if (MEMORY_STORAGE_ADAPTER_MANIFEST.coordinationScope !== "single-process") {
+  throw new Error("memory stores are not a production coordination scope");
+}
+```
+
+Lease-aware types (`LeaseAwareIdempotencyStore`, `WebhookInboxStore`, `ReconciliationStore`, `StoreLeaseLostError`, …) are re-exported from [`@paykernel/store-contracts`](/packages/store-contracts). Prefer importing contracts from that package in app code. Do not install `@paykernel/internal-sql-store`.
+
+## Fixture safety
+
+`sanitizeFixture`, `assertFixtureSafe`, `redactSecretsFromFixture`, `findSecretLeaks` — fail closed on live-looking secrets (`sk_live_`, `cs_live_`, …).
+
+## Failure paths
+
+| Situation | What you get |
+| --- | --- |
+| Import `moneyCases` | TypeScript / bundler error — it is not a public export |
+| `createMemoryStores` in production | Ephemeral, single-process — restart loses claims/leases |
+| Script `{ outcome: "indeterminate" }` then `createPayment` again | May charge twice if you also hit a real gateway. Lookup + `decideReconciliationPolicy` only |
+| Persist `toPersistedPaymentEventEnvelope(event)` with no hash opts | `InvalidRequestError` |
+
+Related: [core](/packages/core) · [store contracts](/packages/store-contracts) · [reconciliation](/packages/reconciliation) · [custom gateways](/gateways/custom)

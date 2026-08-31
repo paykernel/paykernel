@@ -1,0 +1,187 @@
+---
+title: Checkout kernel
+description: Private shared kernel for the HTTP examples — mock charge, Stripe inbox, SQLite, HTTP policy.
+sidebar:
+  order: 2
+---
+
+`@paykernel/example-checkout-kernel` is the shared checkout kernel for every HTTP example. It is a **private** workspace package (`private: true`, version `0.1.0`). It is **not** published. Hosts import its public helpers; they do not reimplement inbox HTTP mapping or Stripe signing.
+
+Source: [`examples/checkout-kernel`](https://github.com/paykernel/paykernel/tree/main/examples/checkout-kernel). There is no package README; this page follows `src/index.ts`, `kernel.ts`, `handlers.ts`, `http-policy.ts`, `stripe-webhook.ts`, and `scenarios.ts`.
+
+## Public exports
+
+From [`src/index.ts`](https://github.com/paykernel/paykernel/blob/main/examples/checkout-kernel/src/index.ts) (`exports: { ".": "./src/index.ts" }`):
+
+```ts
+import {
+  createCheckoutKernel,
+  createCheckoutHandlers,
+  createCheckoutFetchApp,
+  dispatchCheckoutRequest,
+  checkoutJsonResponse,
+  readRequestJson,
+  createPaymentInputFromUnknown,
+  gatewayPaymentIdFromUnknown,
+  mapInboxOutcome,
+  CHECKOUT_STRIPE_WEBHOOK_SECRET,
+  stripePaidPaymentIntentFixture,
+  stripeCreatedPaymentIntentFixture,
+  signStripeWebhook,
+  signedStripePaidWebhook,
+  signedStripeCreatedWebhook,
+  runCheckoutHttpScenarios,
+} from "@paykernel/example-checkout-kernel";
+```
+
+`mapInboxOutcome` is re-exported from [`@paykernel/integration-http`](/integrations/http). Status codes do **not** live in [`@paykernel/webhooks`](/packages/webhooks).
+
+## What the kernel composes
+
+[`createCheckoutKernel`](https://github.com/paykernel/paykernel/blob/main/examples/checkout-kernel/src/kernel.ts) builds:
+
+| Piece | Package | Role in this example |
+| --- | --- | --- |
+| `createPaymentClient` | [`@paykernel/core`](/packages/core) | `mock` adapter (`@paykernel/testkit` `mockGateway`) + `stripeGateway`. `defaultGateway: "mock"`. |
+| `createWebhookInboxEngine` | [`@paykernel/webhooks`](/packages/webhooks) | `mode: "inline"` on `stores.webhookInbox`. |
+| `createReconciliationScheduler` + `createPaymentReconciler` | [`@paykernel/reconciliation`](/packages/reconciliation) | Due jobs; `decideReconciliationPolicy` only — no second `createPayment`. |
+| Stores | [`@paykernel/store-sqlite/bun`](/stores/sqlite) | Default: `createBunSqliteStoresInMemory` then `migrateSqliteAdapter`. |
+| HTTP | [`@paykernel/integration-http`](/integrations/http) | `processWebhookHttp` + `mapInboxOutcome`. |
+
+Charge path is **mock**. Stripe is for **webhook HMAC + PaymentEvent mapping**. The Stripe secret in source is `sk_test_example_not_live`; the webhook secret is `CHECKOUT_STRIPE_WEBHOOK_SECRET` (`whsec_test_example_checkout`). Those are fixtures, not live credentials.
+
+The client is created with **no `onWebhookVerified` hooks**. Fulfillment belongs only in the inbox `handler` after claim.
+
+## Store options
+
+`CreateCheckoutKernelOptions` precedence: `storeFactory` > `stores` > `executor` > in-memory Bun SQLite.
+
+Default path (sqlite hosts and tests that omit options):
+
+```ts
+const mem = createBunSqliteStoresInMemory({ clock });
+await migrateSqliteAdapter(mem.executor);
+```
+
+`:memory:` is **process-local and single-host**. It is not multi-host coordination. Importing a store package does **not** apply DDL; the kernel migrates explicitly.
+
+:::caution[Kernel always sqlite-migrates when `stores.executor` exists]
+After resolving stores, `createCheckoutKernel` calls `migrateSqliteAdapter(stores.executor)` whenever `stores.executor` is present. That helper expects a **SQLite** executor (`?` placeholders, sync `query`/`run`). Postgres and D1 executors are a different shape. Host READMEs that inject those bundles via `storeFactory` disagree with this migrate call — see [Bun + Hono + Postgres](/examples/bun-hono-postgres) and [Cloudflare Workers](/examples/cloudflare-workers-fetch).
+:::
+
+Do **not** install `@paykernel/internal-sql-store`. Inbox/recon tables come from `@paykernel/store-sqlite` (or the store you inject).
+
+## Create payment
+
+`POST /payments` → `createOrderPayment`:
+
+1. Amount is always the server catalog: `money("10.00", "USD")`. Extra JSON fields (including client `amount`) are ignored. Only `orderId` is read from the body.
+2. Duplicate `orderId` → `409 { "error": "order_exists" }`.
+3. `client.createPayment` on **mock**. `NetworkError` keeps the order, schedules recon, returns `200` with `outcome: "indeterminate"` and `reconciliationRequired: true`, and **does not leak `err.message`**.
+4. Other create failures delete the order and return `500 { "error": "create_failed" }`.
+5. If `result.outcome === "indeterminate"` or `reconciliationRequired === true`, the kernel schedules recon. It does **not** call `createPayment` again.
+6. A successful mock create still leaves the order **`unpaid`**. Paid create does not fulfill. Fulfillment is webhook-claim or recon `update_local_to_paid`.
+
+## Webhook fulfillment
+
+`handleStripeWebhook` calls `processWebhookHttp` with `ackPolicy: { kind: "provider_redelivery" }`, `client` as verify-only verifier, then inbox claim, then `webhookHandler`.
+
+The handler returns without fulfilling unless:
+
+- event type is `payment.succeeded` or `capture.completed`, **and**
+- `payment.status === "paid"`, **and**
+- a `gatewayPaymentId` is present (`payment.references.providerObjectId`, or `gatewayPaymentId` on the event).
+
+Binding:
+
+- Match stored `gatewayPaymentId` first.
+- Else, if the order has **no** stored id, bind the webhook PaymentIntent id and fulfill.
+- If the stored id **differs**, do not fulfill (Stripe fixture metadata cannot pay a different mock charge).
+- No local order → handler throws → retryable `handler_failed` → HTTP `500`.
+
+`payment_intent.created` verifies and acks `200` and leaves the order unpaid.
+
+Never fulfill in `onWebhookVerified`. `handleWebhook` verifies and normalizes; it does not claim, lease, or set HTTP status.
+
+## HTTP status (`mapInboxOutcome`)
+
+Default policy in this kernel is `provider_redelivery` ([`packages/integration-http/src/http-policy.ts`](https://github.com/paykernel/paykernel/blob/main/packages/integration-http/src/http-policy.ts)):
+
+| Inbox outcome | Status |
+| --- | --- |
+| `processed` | `200` |
+| `duplicate_completed` | `200` |
+| `invalid_webhook` | `400` |
+| `payload_conflict` | `409` |
+| `already_processing` | `503` |
+| `handler_failed` (`retryable: true`) | `500` |
+| `handler_failed` (`retryable: false`) | `200` |
+| `scheduled_for_retry` (`not_available`) | `503` |
+| `scheduled_for_retry` (`parked` / `handler_retry`) | `503` |
+
+## Route helpers
+
+[`createCheckoutHandlers`](https://github.com/paykernel/paykernel/blob/main/examples/checkout-kernel/src/handlers.ts) / `dispatchCheckoutRequest` / `createCheckoutFetchApp`:
+
+```ts
+const kernel = await createCheckoutKernel();
+const app = createCheckoutFetchApp(kernel, { enableTestHooks: true }); // tests only
+const res = await app.fetch(req);
+```
+
+`dispatchCheckoutRequest` reads `POST /webhooks/stripe` with `req.text()` and `stripe-signature` / `Stripe-Signature`. Invalid JSON on `/payments` or `/internal/provider-paid` → `400 { "error": "invalid_json" }`. Bad `orderId` decode → `400 { "error": "invalid_order_id" }`. Unknown path → `404 { "error": "not_found" }`.
+
+:::caution[`enableTestHooks` is not for production]
+`/internal/reconcile`, `/internal/provider-paid`, and `/internal/create-count` are unauthenticated. Pass `{ enableTestHooks: true }` **only in local tests**. When the flag is off (the default, including every example listen script), those handlers return `404`. Do not deploy with the flag on.
+:::
+
+## Reconciliation test hook
+
+`reconcileDue` (behind the flag) runs `scheduler.processDue`. For each job it rebuilds a `ReconciliationTarget`, calls `reconciler.reconcile`, then `decideReconciliationPolicy`:
+
+- `update_local_to_paid` + `safe` → fulfill once
+- `update_local_to_failed` + `safe` → mark failed
+- `do_not_create_replacement` → retry with the decision reason (still **no** new `createPayment`)
+- otherwise `manual_review` / `retry_later`
+
+`POST /internal/provider-paid` with `{ "gatewayPaymentId": "…" }` injects a paid `buildProviderPaymentSnapshot` for local tests. Missing id → `400`; unknown id → `404`.
+
+## Stripe fixtures
+
+[`stripe-webhook.ts`](https://github.com/paykernel/paykernel/blob/main/examples/checkout-kernel/src/stripe-webhook.ts) builds sanitized PaymentIntent events and signs `t=<unix>,v1=<hmac-hex>` with `hmacSha256Hex` from core. Paid fixtures include `amount_received` and omit string `latest_charge` (an unexpanded charge id demotes domain status to `processing`). Checkout Session `cs_test_` / `cs_live_` ids fail `assertFixtureSafe` from [`@paykernel/testkit`](/packages/testkit). Use `signStripeWebhook` / `signedStripePaidWebhook` — do not copy HMAC helpers.
+
+## Shared HTTP scenarios
+
+`runCheckoutHttpScenarios(name, createApp)` is the bun:test suite the **SQLite / Workers** hosts run (`bun-hono-sqlite`, `bun-elysia-sqlite`, `express-sqlite`, `cloudflare-workers-fetch`, plus `checkout-kernel` itself). Each `it` builds its own kernel, passes `{ enableTestHooks: true }` in the host wrapper, and `close()`s. `bun-hono-postgres` does **not** call it — that host uses `describe.skipIf(!hasPg)` over a live Postgres URL.
+
+Covered failure / honesty paths:
+
+| Scenario | Expected |
+| --- | --- |
+| Paid mock create | Order stays `unpaid`, `fulfillCount === 0` |
+| Signed paid webhook whose PI matches stored id | `200`, fulfill once |
+| Paid fixture with a **different** PI | `200`, still unpaid |
+| Indeterminate create (no stored id) + paid webhook | Bind PI from webhook, then fulfill |
+| Redelivery | Second `200`, still one fulfill |
+| Bad signature | `400`, unpaid |
+| `JSON.parse` + `stringify` (or pretty-print) body | `400`, unpaid |
+| Concurrent same body | `200` or `503`, exactly one fulfill |
+| `fulfillThrows: true` | `500`, unpaid |
+| `payment_intent.created` | `200`, unpaid |
+| Indeterminate create + provider-paid + reconcile | Pays **without** a second `createPayment` |
+| Client-posted `amount: "10.001"` | Ignored; catalog charge |
+| `provider_ok_client_timeout` | `200` + `indeterminate` + `reconciliationRequired`; no second charge |
+| `NetworkError` | `200` + `indeterminate`; message not in JSON |
+| Two indeterminate orders | Recon does not bind the other order’s provider id |
+
+## Run
+
+```bash
+bun test examples/checkout-kernel
+```
+
+From the repo root, `bun test examples` / `bun run test:examples` runs the kernel and every host.
+
+## Related
+
+- [Examples index](/examples) · [Getting started](/guides/getting-started) · [Webhooks](/guides/webhooks) · [Outcomes](/guides/outcomes) · [Reconciliation](/packages/reconciliation)

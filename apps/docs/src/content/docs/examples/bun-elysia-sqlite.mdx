@@ -1,0 +1,83 @@
+---
+title: Bun + Elysia + SQLite
+description: Thin Elysia fetch adapter over the private checkout kernel with in-memory Bun SQLite.
+sidebar:
+  order: 5
+---
+
+`@paykernel/example-bun-elysia-sqlite` is a **private** workspace host (`private: true`). It is **not** published and is **not** [`@paykernel/integration-elysia`](/integrations/elysia). The [checkout kernel](/examples/checkout-kernel) owns checkout, inbox, and reconciliation.
+
+Source: [`examples/bun-elysia-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/bun-elysia-sqlite) ([README](https://github.com/paykernel/paykernel/blob/main/examples/bun-elysia-sqlite/README.md)).
+
+## Mapping
+
+[`createElysiaCheckoutApp`](https://github.com/paykernel/paykernel/blob/main/examples/bun-elysia-sqlite/src/app.ts) returns an `Elysia` instance. JSON routes use `parse: "none"` and `readRequestJson(request)`. Imports and Stripe route as in source:
+
+```ts
+import { Elysia } from "elysia";
+import { elysiaWebhook } from "@paykernel/integration-elysia";
+import {
+  checkoutJsonResponse,
+  createCheckoutHandlers,
+  createPaymentInputFromUnknown,
+  gatewayPaymentIdFromUnknown,
+  readRequestJson,
+  type CheckoutHttpOptions,
+  type CheckoutKernel,
+} from "@paykernel/example-checkout-kernel";
+
+const noParse = { parse: "none" as const };
+
+app.use(
+  elysiaWebhook("/webhooks/stripe", {
+    gateway: kernel.webhook.gateway,
+    client: kernel.webhook.client,
+    engine: kernel.webhook.engine,
+    handler: kernel.webhook.handler,
+  }),
+);
+```
+
+`elysiaWebhook` posts with `parse: "none"`, then `await request.text()`, then `processWebhookHttp`. Do not put a JSON body parser on that path. Stripe HMAC needs the original bytes.
+
+HTTP status lives in the checkout kernel (`mapInboxOutcome`), **not** in [`@paykernel/webhooks`](/packages/webhooks). Fulfillment runs only after an inbox **claim**, and only when the rematched event is `payment.succeeded` / `capture.completed` with `payment.status === "paid"`. Never fulfill in `onWebhookVerified`. Never `createPayment` again after an indeterminate create — lookup + `decideReconciliationPolicy` only.
+
+This package does not reimplement `mapInboxOutcome` or HMAC signing. Stripe fixtures live in the kernel.
+
+## `:memory:` is process-local
+
+Default `createCheckoutKernel()` uses in-memory Bun SQLite after an explicit `migrateSqliteAdapter`. **One process, one memory DB** — not multi-host or multi-region. See [SQLite store](/stores/sqlite).
+
+## Routes
+
+`createElysiaCheckoutApp(kernel)` wires:
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/payments` | `parse: "none"` + `readRequestJson`. Invalid JSON → `400 { "error": "invalid_json" }`. |
+| `POST` | `/webhooks/stripe` | `elysiaWebhook` / `request.text()`. |
+| `GET` | `/orders/:orderId` | Order book. |
+| `POST` | `/internal/reconcile` | **Test hook.** Unauthenticated. Do not deploy (`enableTestHooks`). |
+| `POST` | `/internal/provider-paid` | **Test hook.** Unauthenticated. Do not deploy. |
+| `GET` | `/internal/create-count` | **Test hook.** Unauthenticated. Do not deploy (`enableTestHooks`). |
+
+:::caution[Test hooks]
+Tests wrap the app as `{ fetch: (req) => app.handle(req) }` with `{ enableTestHooks: true }`. Without the flag, `/internal/reconcile` and `/internal/create-count` return `404`. `bun run start` leaves the flag off. Do not deploy this example as-is.
+:::
+
+Shared failure paths: [Checkout kernel](/examples/checkout-kernel) (`runCheckoutHttpScenarios("elysia", …)`).
+
+## Run
+
+```bash
+bun install
+bun test
+# optional listen (PORT, default 3000)
+bun run start
+```
+
+`bun run start` → `bun src/index.ts` → `app.listen(port)`. Tests drive `app.handle(req)` and do not use that listener.
+
+## Related
+
+- [Checkout kernel](/examples/checkout-kernel) · [Elysia integration](/integrations/elysia) · [SQLite store](/stores/sqlite) · [Webhooks](/guides/webhooks)

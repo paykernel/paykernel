@@ -1,0 +1,105 @@
+---
+title: Cloudflare Workers fetch
+description: Thin Workers fetch adapter over the checkout kernel. Tests use single-host SQLite; production must not.
+sidebar:
+  order: 7
+---
+
+`@paykernel/example-cloudflare-workers-fetch` is a **private** workspace host (`private: true`). It is **not** published. The [checkout kernel](/examples/checkout-kernel) owns checkout, inbox, and reconciliation. This package maps `fetch`.
+
+Source: [`examples/cloudflare-workers-fetch`](https://github.com/paykernel/paykernel/tree/main/examples/cloudflare-workers-fetch) ([README](https://github.com/paykernel/paykernel/blob/main/examples/cloudflare-workers-fetch/README.md)). There is no Wrangler config and no `index.ts` in this example — tests in Bun only.
+
+## Mapping
+
+[`createCloudflareCheckoutFetch`](https://github.com/paykernel/paykernel/blob/main/examples/cloudflare-workers-fetch/src/app.ts):
+
+```ts
+import { handleCloudflareWebhook } from "@paykernel/integration-cloudflare-workers";
+import {
+  dispatchCheckoutRequest,
+  type CheckoutFetchApp,
+  type CheckoutHttpOptions,
+  type CheckoutKernel,
+} from "@paykernel/example-checkout-kernel";
+
+export function createCloudflareCheckoutFetch(
+  kernel: CheckoutKernel,
+  options: CheckoutHttpOptions = {},
+): CheckoutFetchApp {
+  return {
+    async fetch(req: Request): Promise<Response> {
+      const url = new URL(req.url);
+      if (req.method === "POST" && url.pathname === "/webhooks/stripe") {
+        return handleCloudflareWebhook(req, {
+          gateway: kernel.webhook.gateway,
+          client: kernel.webhook.client,
+          engine: kernel.webhook.engine,
+          handler: kernel.webhook.handler,
+        });
+      }
+      return dispatchCheckoutRequest(kernel, req, options);
+    },
+  };
+}
+```
+
+`handleCloudflareWebhook` reads `request.text()`, `request.headers`, and `URL.searchParams`, then `processWebhookHttp`. Correlation id is `x-request-id`, then `x-correlation-id`, then `cf-ray` ([`resolveCorrelationId`](https://github.com/paykernel/paykernel/blob/main/packages/integration-http/src/headers.ts)).
+
+The helper **only** rejects non-`POST` with `405`. Callers **must** guard the path (`POST /webhooks/stripe`) before delegating. Without that guard every POST on the Worker would hit the Stripe verifier. This example already checks pathname.
+
+Other routes (`/payments`, `/orders/:orderId`, test hooks) go through `dispatchCheckoutRequest` (raw `req.text()` on the Stripe path is not used there because the path already branched).
+
+Fulfillment is only `kernel.webhook.handler` after the inbox claim. Never fulfill in `onWebhookVerified`. Status codes come from `mapInboxOutcome`, not [`@paykernel/webhooks`](/packages/webhooks).
+
+:::note[No `cloudflare:workers` import]
+This file must not static-import `cloudflare:workers`. Tests run in Bun. Keep Cloudflare runtime imports in a real Worker entry, not in this adapter.
+:::
+
+## Tests use SQLite — not production Workers
+
+`runCheckoutHttpScenarios("cloudflare-workers", …)` calls `createCheckoutKernel()` with the default **in-memory Bun SQLite** store. That is **single-host** and **one process**. Do **not** use this example’s SQLite in production Workers.
+
+D1 ≠ Durable Objects ≠ Turso ≠ local SQLite. Pick one production store and migrate **explicitly** (never on import / every request).
+
+| Store | Package | Factories in source (not invented) |
+| --- | --- | --- |
+| D1 | [`@paykernel/store-d1`](/stores/d1) | `createD1PaymentStores({ db: env.PAYMENTS_DB, clock? })` after `migrateD1Adapter(env.PAYMENTS_DB)`. Or `createD1Stores({ executor, clock? })` with `createD1Executor(db)`. |
+| Durable Objects | [`@paykernel/store-durable-objects`](/stores/durable-objects) | `createDoPaymentStores({ namespace: env.PAYMENTS_DO, sharding })`. **Never one global DO.** Hash sharding needs `bindHashPartitionLayout` / `ensureDoHashPartitionLayout`. |
+| Local SQLite | [`@paykernel/store-sqlite`](/stores/sqlite) | What this example’s tests actually run. Not a Workers production store. |
+
+`CreateCheckoutKernelOptions` accepts `stores` | `storeFactory` | `executor` (SQLite-shaped `executor` builds `createSqliteStores`).
+
+:::caution[Example README vs store APIs]
+The example README writes `createD1Stores({ d1Binding, clock })`. **`createD1Stores` requires `{ executor }`**, not `d1Binding`. The binding factory is `createD1PaymentStores({ db })`. Code in `@paykernel/store-d1` wins.
+
+The kernel also calls `migrateSqliteAdapter(stores.executor)` whenever `stores.executor` is present. D1 bundles include a D1 executor; the Worker-client DO bundle from `createDoPaymentStores` does **not** expose `executor`. Confirm migrate behavior before you inject a non-SQLite bundle.
+:::
+
+## Routes
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/payments` | `dispatchCheckoutRequest` |
+| `POST` | `/webhooks/stripe` | `handleCloudflareWebhook` after path guard |
+| `GET` | `/orders/:orderId` | Order book |
+| `POST` | `/internal/reconcile` | **Test hook.** Unauthenticated. Do not deploy. |
+| `POST` | `/internal/provider-paid` | **Test hook.** Unauthenticated. Do not deploy. |
+| `GET` | `/internal/create-count` | **Test hook.** Unauthenticated. Do not deploy. |
+
+:::caution[Test hooks]
+Tests pass `{ enableTestHooks: true }`. Without the flag, `/internal/reconcile` and `/internal/create-count` return `404`. Do not deploy those routes on a Worker.
+:::
+
+Shared failure paths: [Checkout kernel](/examples/checkout-kernel). Non-POST on the webhook helper → `405` from `handleCloudflareWebhook`.
+
+## Run
+
+```bash
+bun test examples/cloudflare-workers-fetch
+```
+
+That is Bun + sqlite, not `wrangler dev`.
+
+## Related
+
+- [Checkout kernel](/examples/checkout-kernel) · [Cloudflare Workers integration](/integrations/cloudflare-workers) · [D1](/stores/d1) · [Durable Objects](/stores/durable-objects) · [Adapter selection](/guides/adapter-selection)

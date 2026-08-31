@@ -1,0 +1,111 @@
+---
+title: Contributing
+description: How to develop PayKernel in the Bun workspace — commands, package boundaries, docs, and releases.
+sidebar:
+  order: 99
+---
+
+PayKernel is a **Bun workspaces** monorepo. The publishable SDK is `@paykernel/core` under `packages/core`. Domain engines, store adapters, extra gateways, and HTTP integrations are separate `packages/*` with independent versions. The root package `paykernel` is **private** and is never published.
+
+:::note[Workspaces (code)]
+Root `package.json` `"workspaces"` is `packages/*`, `internal/*`, `examples/*`, and `apps/*` (this docs site). Older in-repo markdown (`README.md` / `docs/monorepo.md`) still lists three globs and omits `apps/*`. **Code wins.**
+:::
+
+Contributor-only files stay off the primary docs nav. Use GitHub:
+
+- [Monorepo DX](https://github.com/paykernel/paykernel/blob/main/docs/monorepo.md) — layout, commands, build order
+- [Workspace boundaries](https://github.com/paykernel/paykernel/blob/main/docs/workspace-boundaries.md) — `bun run check:boundaries`
+- [Releases](https://github.com/paykernel/paykernel/blob/main/docs/releases.md) — Changesets, provenance, prerelease
+- [Stability](https://github.com/paykernel/paykernel/blob/main/docs/stability.md) — semver, events, schema, runtimes
+- [Core baseline](https://github.com/paykernel/paykernel/blob/main/packages/core/docs/baseline/README.md) — generated public-api / pack inventory (not a product guide)
+- [roadmap.md](https://github.com/paykernel/paykernel/blob/main/roadmap.md) — completed phase log (0–25 shipped; Phase 23 leftover gateways). Not the consumer index
+
+## Install and commands
+
+```bash
+bun install
+bun run build
+bun test
+bun test examples
+bun run test:coverage
+bun run typecheck
+bun run typecheck:types
+bun run typecheck:all
+bun run format
+bun run format:check
+bun run lint
+bun run check:boundaries
+bun run check:runtime-portability
+bun run test:runtime
+bun run pack:check
+bun run publint
+bun run attw
+bun run validate:package
+bun run baseline
+```
+
+Root scripts forward into workspace packages. Package-local work (example):
+
+```bash
+cd packages/core
+bun run build
+bun test
+```
+
+Live adapter suites skip unless env is set (`PAYMENTS_SDK_PG_URL`, `PAYMENTS_SDK_REDIS_URL`, `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN`, D1/DO harness vars). See [monorepo.md](https://github.com/paykernel/paykernel/blob/main/docs/monorepo.md).
+
+Docs site (this app under `apps/docs`, `"private": true`, not in Changesets publish):
+
+```bash
+bun run docs:dev
+bun run docs:build
+```
+
+## Boundaries
+
+Enforced by `bun run check:boundaries` (`scripts/check-workspace-boundaries.ts`). CI runs the same gate.
+
+| Rule | Meaning |
+| --- | --- |
+| Core isolation | `@paykernel/core` must **not** depend on adapters, webhooks, reconciliation, observability, routing, testkit, ORMs, frameworks, or `@opentelemetry/*` |
+| Observability name | Folder `packages/observability` publishes as **`@paykernel/opentelemetry`** |
+| SQL foundation | Public `@paykernel/sql-foundation`. Private `@paykernel/internal-sql-store` (`internal/sql-store`) is a thin re-export — **never publish, never add it to an app** |
+| Redis | Optional. Core and webhooks never depend on Redis |
+| SQLite | Single-host only. Never advertise as multi-host |
+| Turso | Remote multi-host. Subpaths `/serverless` and `/libsql` only — **no** `/sync` |
+| D1 vs DO | Separate packages. Shared D1 ≠ partitioned Durable Objects |
+| Extra gateways | `@paykernel/gateway-tap` and `@paykernel/gateway-myfatoorah` depend on **core only**. Not `BuiltInGatewayName` |
+| Examples | `examples/*` are private consumer apps. `packages/*` must never import `examples/*` |
+
+## Docs you write
+
+Content lives in `apps/docs/src/content/docs`. The filesystem **is** the URL. Import paths in samples must match `package.json` `exports`. Copy from in-repo docs/examples that already compile. Show the failure path. Internal links use site paths (`/guides/money`), not repo-relative markdown.
+
+Honesty that reviewers will reject:
+
+- Claiming packages are already published to npm as 1.0 (they are `0.1.0-next.0`)
+- An npm name derived from folder `packages/observability` (use `@paykernel/opentelemetry`) or a separate Stripe gateway package (Stripe is built into core)
+- Fulfill in `onWebhookVerified` or on webhook verify alone
+- `createPayment` retry after indeterminate
+- SQLite / memory described as multi-host; Turso `/sync`; D1 interchangeable with Durable Objects
+- Telling consumers to add `internal/sql-store` to an app
+- Test-hook `POST /internal/*` documented as production (`enableTestHooks` only)
+- HTTP status invented in `@paykernel/webhooks`
+
+No mermaid (Nimbus Sätteri does not run remark plugins). Use tables or ASCII. Do not paraphrase upstream PSP docs — [link out](https://github.com/paykernel/paykernel) from gateway pages and document only PayKernel’s mapping.
+
+## Releases
+
+Versioning is **independent** (`fixed: []`, `linked: []` in `.changeset/config.json`). `0.x` had no stability guarantee. Each public `packages/*` has its own version and `CHANGELOG.md`. Internal packages and `examples/*` are never published.
+
+```bash
+bun run changeset              # record intent under .changeset/
+bun run version-packages       # apply → version bump + CHANGELOG.md
+bun run release                # changeset publish (CI)
+```
+
+CI publish uses npm provenance (OIDC). Do not `npm publish` from `internal/*`. Full pipeline: [releases.md](https://github.com/paykernel/paykernel/blob/main/docs/releases.md). Consumer-facing 1.0 policy: [stability.md](https://github.com/paykernel/paykernel/blob/main/docs/stability.md) (engines Node `>=18`, Bun `>=1.0.0`; Deno is Web-API-intended, **not CI-gated**).
+
+## License
+
+MIT. Repository: [paykernel/paykernel](https://github.com/paykernel/paykernel).

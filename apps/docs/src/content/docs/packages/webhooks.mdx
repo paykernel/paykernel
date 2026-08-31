@@ -1,0 +1,318 @@
+---
+title: "@paykernel/webhooks"
+description: Storage-agnostic webhook inbox engine — atomic claim, payload-hash conflict detection, and framework-agnostic outcomes. HTTP status lives in @paykernel/integration-http.
+sidebar:
+  order: 3
+---
+
+`@paykernel/webhooks` claims a verified delivery under a lease, then runs **your** handler. It does **not** verify PSP signatures, pick HTTP status codes, or fulfill orders. Version in this workspace is `0.1.0-next.0` — not a released 1.0.
+
+`handleWebhook` on [`@paykernel/core`](/packages/core) verifies and normalizes. The inbox engine is the next step: **claim, then fulfill**.
+
+:::caution[Never fulfill in onWebhookVerified]
+Fulfill **after** an inbox claim, and only when the rematched event is `payment.succeeded` or `capture.completed` **and** `payment.status === "paid"`, bound to `gatewayPaymentId`. Homemade `alreadyProcessed(event.id)` in a verify hook is not a lease.
+:::
+
+## Install
+
+Depends only on `@paykernel/core`. Single export map: `"."`.
+
+```bash
+bun add @paykernel/webhooks
+# workspace / peer: @paykernel/core
+```
+
+Inject a durable [`WebhookInboxStore`](/packages/store-contracts) from a `@paykernel/store-*` adapter ([adapter selection](/guides/adapter-selection)). Memory stores from `@paykernel/testkit` are **test-only / NON-PRODUCTION**.
+
+This package does **not** export `createMemoryWebhookInboxStore`. Do not install `@paykernel/internal-sql-store`.
+
+## Pipeline
+
+1. Receive the raw request in your HTTP framework (Stripe/PayPal: **raw body**, never `json()` first — see [webhook guide](/guides/webhooks)).
+2. Verify + normalize with `PaymentClient.handleWebhook` or `gateway.verifyWebhook` / `parseWebhookEvent`. **No money side effects.**
+3. Hash with `resolveInboxPayloadHash` (prefer gateway `payloadHash`; else the same object shape the gateway hashed).
+4. `createWebhookInboxEngine({ store, mode }).processVerified(...)` — atomic `store.claim`, then handler under lease.
+5. Map `WebhookProcessingOutcome` to HTTP in [`@paykernel/integration-http`](/integrations/http) (`mapInboxOutcome`). This package never hardcodes status codes.
+
+```text
+raw request
+  → handleWebhook (verify + normalize only)
+  → resolveInboxPayloadHash
+  → processVerified / processWithVerifier  (claim + lease)
+  → handler (fulfill only here, after rematch)
+  → mapInboxOutcome  (@paykernel/integration-http)
+```
+
+## Quickstart (claim before fulfill)
+
+```typescript
+import {
+  createWebhookInboxEngine,
+  resolveInboxPayloadHash,
+  type WebhookInboxStore,
+} from "@paykernel/webhooks";
+import { mapInboxOutcome } from "@paykernel/integration-http";
+
+declare const store: WebhookInboxStore;
+declare const client: {
+  handleWebhook: (
+    gateway: string,
+    payload: unknown,
+    signatureOrHeaders?: unknown,
+  ) => Promise<{
+    id: string;
+    event?: unknown;
+    payloadHash?: string;
+    rawPayload?: unknown;
+    gatewayPaymentId?: string;
+    paymentId?: string;
+  }>;
+};
+
+type Order = { orderId: string; gatewayPaymentId?: string };
+declare function findOrderByGatewayPaymentId(id: string): Order | undefined;
+declare function fulfillOrder(order: Order, gatewayPaymentId: string): Promise<void>;
+
+const engine = createWebhookInboxEngine({
+  store,
+  mode: "inline", // or "durable_retry" — fixed at construction
+  owner: "api-worker-1",
+  defaultLeaseMs: 30_000,
+});
+
+function isPaidFulfillmentEvent(event: unknown): boolean {
+  if (event === null || typeof event !== "object") return false;
+  const rec = event as { type?: unknown; payment?: { status?: unknown } };
+  return (
+    (rec.type === "payment.succeeded" || rec.type === "capture.completed") &&
+    rec.payment?.status === "paid"
+  );
+}
+
+async function onStripeWebhook(rawBody: string, signature: string) {
+  const webhookEvent = await client.handleWebhook("stripe", rawBody, signature);
+
+  const payloadHash = resolveInboxPayloadHash({
+    eventPayloadHash: webhookEvent.payloadHash,
+    payloadForHash: webhookEvent.rawPayload ?? webhookEvent.event ?? webhookEvent,
+  });
+
+  const outcome = await engine.processVerified({
+    gateway: "stripe",
+    providerEventId: webhookEvent.id,
+    payloadHash,
+    event: webhookEvent.event ?? webhookEvent,
+    handler: async (ctx) => {
+      if (!isPaidFulfillmentEvent(ctx.event)) return;
+      const gatewayPaymentId = webhookEvent.gatewayPaymentId;
+      if (typeof gatewayPaymentId !== "string" || gatewayPaymentId.length === 0) {
+        return;
+      }
+      const order = findOrderByGatewayPaymentId(gatewayPaymentId);
+      if (!order) {
+        throw new Error("no local order for paid webhook");
+      }
+      await fulfillOrder(order, gatewayPaymentId);
+    },
+  });
+
+  return mapInboxOutcome(outcome); // number — not defined in this package
+}
+```
+
+`success: true` is not a fulfillment signal. Do not call `isPaidOutcome` on a webhook event (that helper is for `GatewayPaymentResult`). Rematch stable type + `payment.status === "paid"` and bind `gatewayPaymentId`.
+
+Optional sanitized dual-write envelope (never raw signatures / secrets):
+
+```typescript
+import { toPersistedPaymentEventEnvelope } from "@paykernel/core";
+
+declare const webhookEvent: { event?: unknown };
+declare const payloadHash: string;
+const envelope = toPersistedPaymentEventEnvelope(webhookEvent.event as never, {
+  payloadHash,
+});
+```
+
+Pass `envelope` on `processVerified` when you want a durable `payloadRef`. Prefer this over stuffing `rawPayload` / headers into the store.
+
+## Payload hash
+
+```typescript
+import { resolveInboxPayloadHash } from "@paykernel/webhooks";
+
+declare const webhookEvent: {
+  payloadHash?: string;
+  rawPayload?: unknown;
+  event?: unknown;
+};
+
+const payloadHash = resolveInboxPayloadHash({
+  eventPayloadHash: webhookEvent.payloadHash, // preferred when non-empty
+  payloadForHash: webhookEvent.rawPayload ?? webhookEvent.event ?? webhookEvent,
+});
+```
+
+`resolveInboxPayloadHash` (engine.ts):
+
+1. Trimmed `eventPayloadHash` when non-empty — returned as-is.
+2. Else `hashWebhookPayload(payloadForHash)` (same as `computePayloadHash`).
+3. Else throws (`need eventPayloadHash or payloadForHash`).
+
+Do **not** mix `hashWebhookPayload(rawBodyString)` with an object `event.payloadHash`. Non-object strings are not JSON-parsed before hashing, so digests differ. Idle pending rows **supersede** a mismatched hash; an **active lease** with a different hash returns `payload_conflict`.
+
+## Modes
+
+Mode is required on `createWebhookInboxEngine` and never switches inside `process*`.
+
+| Mode | Behavior |
+| --- | --- |
+| `inline` | Await handler under lease. Failure → `handler_failed { retryable }`. **Never** emits `scheduled_for_retry` (`not_available` → `handler_failed { retryable: true }`). |
+| `durable_retry` | Await handler by default. Retryable failure → `store.fail` + `scheduled_for_retry { reason: "handler_retry" }`. |
+| `durable_retry` + `ackAfterClaim: true` | After durable claim, park and return `scheduled_for_retry { reason: "parked" }` **without** running the handler. **Requires `workerGuaranteed: true`**. Workers call `processRetryable`. Parking does not consume `maxAttempts`. |
+
+```typescript
+const durableEngine = createWebhookInboxEngine({
+  store,
+  mode: "durable_retry",
+  maxAttempts: 5, // finite integer >= 1
+  defaultRetryAfterMs: 5_000, // finite number >= 0
+  ackAfterClaim: true,
+  workerGuaranteed: true, // required to emit parked (HTTP 200 path in adapters)
+});
+```
+
+Constructor throws if `ackAfterClaim` is set without `mode: "durable_retry"` or without `workerGuaranteed`. Per-call park without `workerGuaranteed` is retryable `handler_failed`, never parked. `processRetryable` throws on `inline` engines.
+
+`processRetryable` claims **one row at a time**. Do not assume `limit: 10` + `leaseMs: 30_000` covers N serial handlers with leases taken up front — they are not.
+
+Missing `payloadRef` on redrive never stubs `{ key, payloadHash }`. The poll returns `handler_failed { retryable: true }` and leaves the row pending (does not dead-letter paid work).
+
+## Outcomes (no HTTP in this package)
+
+```typescript
+type ScheduledForRetryReason = "parked" | "handler_retry" | "not_available";
+
+type WebhookProcessingOutcome =
+  | { outcome: "processed" }
+  | { outcome: "duplicate_completed" }
+  | { outcome: "already_processing"; retryAfterMs?: number }
+  | {
+      outcome: "scheduled_for_retry";
+      reason: ScheduledForRetryReason;
+      availableAt?: string;
+      retryAfterMs?: number;
+    }
+  | { outcome: "handler_failed"; retryable: boolean }
+  | { outcome: "payload_conflict" }
+  | { outcome: "invalid_webhook"; reason?: string };
+```
+
+Silent ACK of failed work is forbidden. Always inspect the discriminant.
+
+`mapInboxOutcome` in `@paykernel/integration-http` (source of HTTP numbers — not this package):
+
+| Outcome | `provider_redelivery` (default) | `{ kind: "durable_worker" }` |
+| --- | --- | --- |
+| `processed` / `duplicate_completed` | 200 | 200 |
+| `invalid_webhook` | 400 | 400 |
+| `payload_conflict` | 409 | 409 |
+| `already_processing` | 503 | 503 |
+| `handler_failed` retryable | 500 | 500 |
+| `handler_failed` not retryable | 200 | 200 |
+| `scheduled_for_retry` `not_available` | 503 | 503 |
+| `scheduled_for_retry` `parked` / `handler_retry` | 503 | 200 |
+
+Parked is safe to ACK 200 **only** when a `processRetryable` worker is guaranteed. Do not 200 `payload_conflict` without a recovery plan.
+
+## processWithVerifier (verify-only)
+
+```typescript
+declare const body: string;
+declare const headers: Record<string, string>;
+
+const outcome = await engine.processWithVerifier({
+  raw: { body, headers },
+  verifyAndNormalize: async (raw) => {
+    const event = await client.handleWebhook(
+      "stripe",
+      raw.body,
+      raw.headers["stripe-signature"],
+    );
+    return {
+      ok: true,
+      gateway: "stripe",
+      providerEventId: event.id,
+      payloadHash: resolveInboxPayloadHash({
+        eventPayloadHash: event.payloadHash,
+        payloadForHash: event.rawPayload ?? event.event ?? event,
+      }),
+      event,
+    };
+  },
+  handler: async (ctx) => {
+    // Fulfill only here — after claim.
+  },
+});
+```
+
+Classification:
+
+| Verify result | Engine outcome |
+| --- | --- |
+| `{ ok: false }` or verify-false `InvalidWebhookError` (forgery) | `invalid_webhook` (never claims) |
+| Missing `webhookSecret` / `hmacSecret` / `webhookId` | `handler_failed { retryable: true }` (not forgery) |
+| Parse-stage `InvalidWebhookError` / `InvalidRequestError` | `handler_failed { retryable: true }` (not permanent 4xx) |
+| `RateLimitError` / `NetworkError` / unknown `Error` | `handler_failed { retryable: true }` |
+| Permanent structure `GatewayApiError` | `handler_failed { retryable: false }` |
+
+Do not catch-and-map infrastructure errors to `{ ok: false }` — that stops provider redelivery of paid events.
+
+## Event key (Paymob)
+
+```typescript
+import { deriveWebhookEventKey, parseWebhookEventKey } from "@paykernel/webhooks";
+
+deriveWebhookEventKey("stripe", "evt_123"); // "stripe:evt_123"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION_RESPONSE");
+// "paymob:TRANSACTION_RESPONSE:123456789"
+deriveWebhookEventKey("paymob", "123456789", "TRANSACTION", "paid");
+// "paymob:TRANSACTION:123456789:paid"
+```
+
+Empty gateway / `providerEventId`, or `:` in the gateway id, throws (`processVerified` maps that to `invalid_webhook`).
+
+Paymob redirect `TRANSACTION_RESPONSE` and processed `TRANSACTION` share `WebhookEvent.id`. Pass `event` (PaymentEvent) so `processVerified` qualifies the class from `provider.eventType` — do **not** inbox-dedupe Paymob on raw `event.id` or you ACK-suppress later paid. Do **not** fulfill on Paymob `payment.processing` (redirect); wait for processed `TRANSACTION`. See [Paymob](/gateways/paymob) and [events](/reference/events).
+
+## Failure paths
+
+| Situation | Outcome |
+| --- | --- |
+| Handler throws retryable (`inline`) | `handler_failed { retryable: true }` |
+| Handler throws retryable (`durable_retry`) | `scheduled_for_retry { reason: "handler_retry" }` |
+| `NonRetryableHandlerError` (default) | `dead_letter` + `handler_failed { retryable: false }` |
+| `complete` loses lease after handler success | `handler_failed { retryable: true }` — **not** `processed` |
+| Active lease, different hash | `payload_conflict` |
+| Idle pending, different hash | **supersede** and reclaim |
+| Terminal `completed` / `dead_letter` | `duplicate_completed` / `handler_failed { retryable: false }` |
+| Durable backoff (`availableAt` in future) | `scheduled_for_retry { reason: "not_available" }`; **inline** → `handler_failed { retryable: true }` |
+
+Handlers **must be idempotent**. Crash after side effect, before `complete`, re-runs the handler under a new lease.
+
+:::note[Lease renewal]
+`await ctx.renew(30_000)` rotates `leaseToken`. Stale token → `StoreLeaseLostError` (`code: "lease_lost"`). The engine also auto-renews ~`leaseMs / 3` while the handler runs. `defaultLeaseMs` / per-call `leaseMs` must be finite and `> 0`.
+:::
+
+## What this package does not do
+
+- PSP signature algorithms (`handleWebhook` / gateway verify).
+- HTTP status codes (use `mapInboxOutcome`).
+- Auto-fulfillment, inventory, or order mutation.
+- Queue products, Redis, or DB drivers (you inject `WebhookInboxStore`).
+- Export a public memory store (in-package `memory-store` is tests-only and can drift vs SQL fencing).
+
+## Runtime exports
+
+`createWebhookInboxEngine`, `computePayloadHash`, `resolveInboxPayloadHash`, `deriveWebhookEventKey`, `parseWebhookEventKey`, `qualifyPaymobProviderEventId`, `sanitizeWebhookError`, `redactOpaquePayloadRefString`, `DEFAULT_SANITIZE_MAX_LENGTH`, `StoreLeaseLostError`, `isStoreLeaseLostError`, `NonRetryableHandlerError`.
+
+See also: [webhook guide](/guides/webhooks), [HTTP integration](/integrations/http), [outcomes](/guides/outcomes), [stores](/guides/adapter-selection).

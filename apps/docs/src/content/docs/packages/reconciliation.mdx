@@ -1,0 +1,284 @@
+---
+title: "@paykernel/reconciliation"
+description: Decision-only reconciliation — safe ordered lookup, machine-readable drift, and store-backed scheduling. Never createPayment after indeterminate.
+sidebar:
+  order: 4
+---
+
+`@paykernel/reconciliation` looks up provider state, compares it to a local snapshot, and returns a **decision**. It never mutates payments and never calls `createPayment` / capture / refund / void. Workspace version is `0.1.0-next.0` — not a released 1.0.
+
+After `outcome === "indeterminate"` or `reconciliationRequired`, **do not** `createPayment` again. Lookup + `decideReconciliationPolicy` only.
+
+:::caution[No replacement charges]
+`shouldForbidReplacementCharge` is true for `ambiguous_match`, `provider_not_found`, `temporarily_unavailable`, `manual_review_required`, and any open local money state (`pending` / `processing` / `authorized` / `paid` / refunds / …). Multi-match is **never** silent pick-first (`ambiguous_match`).
+:::
+
+## Install
+
+Depends only on `@paykernel/core`. Single export map: `"."`.
+
+```bash
+bun add @paykernel/reconciliation
+# workspace / peer: @paykernel/core
+```
+
+Durable jobs need a `ReconciliationStore` from a `@paykernel/store-*` adapter ([adapter selection](/guides/adapter-selection)). Redis is optional. Local SQLite is **single-host**. `:memory:` is one process. Memory stores from `@paykernel/testkit` are **test-only / NON-PRODUCTION**.
+
+This package does **not** export `createMemoryReconciliationStore`. Do not install `@paykernel/internal-sql-store`.
+
+## Mental model
+
+```text
+indeterminate create / drift
+        │
+        ▼
+  ReconciliationTarget  (gateway + keys + optional expected)
+        │
+        ├─ createPaymentReconciler.reconcile → ReconciliationResult
+        │         │
+        │         ▼
+        │   decideReconciliationPolicy → ReconciliationDecision
+        │         │
+        │         ▼
+        │   YOUR app applies safe updates (or alerts)
+        │
+        └─ createReconciliationScheduler.schedule
+                  │
+                  ▼
+            processDue  (claim immediately before each handler)
+```
+
+## Quickstart (indeterminate payment)
+
+```typescript
+import {
+  createPaymentReconciler,
+  decideReconciliationPolicy,
+  shouldForbidReplacementCharge,
+  type ProviderLookupPort,
+  type ReconciliationTarget,
+} from "@paykernel/reconciliation";
+
+declare const lookup: ProviderLookupPort;
+
+const reconciler = createPaymentReconciler({ lookup });
+
+const target: ReconciliationTarget = {
+  gateway: "stripe",
+  gatewayPaymentId: "pi_123",
+  expected: { status: "pending" },
+};
+
+const result = await reconciler.reconcile(target);
+const decision = decideReconciliationPolicy(result, target);
+
+if (shouldForbidReplacementCharge(result, target)) {
+  // Do NOT call createPayment for this intent.
+}
+
+if (decision.action === "update_local_to_paid" && decision.safe) {
+  // await orderService.markPaid(decision.provider);
+}
+```
+
+`createPaymentReconciler` has **no** `createPayment` / capture / refund methods — by design. Unexpected lookup throws map to `{ outcome: "temporarily_unavailable" }`; business outcomes are result discriminants, not exceptions.
+
+Prefer builders when assembling snapshots:
+
+```typescript
+import {
+  buildReconciliationTarget,
+  buildLocalPaymentSnapshot,
+  buildProviderPaymentSnapshot,
+} from "@paykernel/reconciliation";
+
+const target = buildReconciliationTarget({
+  gateway: "stripe",
+  gatewayPaymentId: "pi_123",
+  expected: buildLocalPaymentSnapshot({
+    status: "pending",
+    amount: { amount: "10.00", currency: "USD" },
+  }),
+});
+```
+
+## Lookup order
+
+`resolveProviderSnapshot` (alias `safeLookup`) walks keys when both the key and the port method exist:
+
+1. `gatewayPaymentId` → `findByPaymentId`
+2. `idempotencyKey` → `findByIdempotencyKey`
+3. `localReference` → `findByLocalReference`
+4. `providerRequestId` → `findByProviderRequestId`
+
+Unsupported methods are skipped. No keys, or no methods for available keys → `manual_review_required`.
+
+```typescript
+import type { ProviderLookupPort, LookupOutcome } from "@paykernel/reconciliation";
+import { createGetPaymentLookupPort } from "@paykernel/reconciliation";
+
+const lookup: ProviderLookupPort = {
+  async findByPaymentId(_gateway, _id): Promise<LookupOutcome> {
+    return { kind: "found", snapshots: [/* ProviderPaymentSnapshot */] };
+  },
+  // findByIdempotencyKey? findByLocalReference? findByProviderRequestId?
+};
+
+const port = createGetPaymentLookupPort({
+  async getPayment({ gateway, gatewayPaymentId }) {
+    // Map client.getPayment → ProviderPaymentSnapshot (do not invent money fields).
+    void gateway;
+    void gatewayPaymentId;
+    return undefined; // → not_found
+  },
+});
+void lookup;
+void port;
+```
+
+`LookupOutcome` kinds: `found` (0/1/N snapshots), `not_found`, `unavailable` (optional `retryAfterMs`), `error` (`retryable` + optional sanitized `message`).
+
+| Situation | Result |
+| --- | --- |
+| `found` with **>1** snapshot | `ambiguous_match` immediately |
+| `found` with 1 snapshot | `consistent` or `drift_detected` vs `expected` |
+| `unavailable` or thrown exception | `temporarily_unavailable` (never invent failed) |
+| `error` retryable | `temporarily_unavailable` — **does not** continue to later keys |
+| All steps not_found | `provider_not_found` `{ retryable: true }` |
+| Primary `gatewayPaymentId` not_found, secondary finds a **different** id | `manual_review_required` |
+
+## Results and policy
+
+| `result.outcome` | Meaning |
+| --- | --- |
+| `consistent` | Single snapshot; expected fields match (or no expected) |
+| `drift_detected` | Single snapshot; `differences[]` |
+| `provider_not_found` | All runnable lookups not found; `retryable` |
+| `temporarily_unavailable` | Provider error / throw; optional `retryAfterMs` |
+| `ambiguous_match` | Multiple snapshots — never pick first |
+| `manual_review_required` | Incomplete inputs / capability gap / identity mismatch |
+
+`decideReconciliationPolicy(result, target)` (alias `decideReconciliationAction`) returns a `ReconciliationDecision`. `safe: true` means the **app** may apply the named local update after its own validation — this package never applies it.
+
+| `action` | `safe` | When |
+| --- | --- | --- |
+| `update_local_to_paid` | `true` | Indeterminate/pending local + provider **paid-like** (`paid` only via `isPaidLikePaymentStatus` — **not** `approved` / `authorized` / `partially_captured`); identity-bound; not when refunds/capture totals disagree |
+| `update_local_to_failed` | `true` | Indeterminate local + definitive `failed` / `cancelled` / `canceled`; **not** when capture/refund totals are non-zero |
+| `mark_consistent` | `true` | Consistent snapshot without upgrade; **not** sparse local + still-settling or open-incomplete provider |
+| `apply_drift_review` | `false` | Non-trivial money/identity drift |
+| `retry_later` | `false` | Temporarily unavailable, or sparse/indeterminate local + in-flight provider `pending` / `processing` |
+| `manual_review` | `false` | Ambiguous matches, non-retryable `provider_not_found`, paid-like + refunds, open incomplete provider (when local expected is **not** indeterminate/sparse) |
+| `do_not_create_replacement` | `false` | All retryable `provider_not_found`, **and** `manual_review_required` when local expected is indeterminate/sparse — never recreate while original may still settle |
+
+Never complete a scheduler job on raw `result.outcome === "consistent"`: pending/processing is still settling and maps to `retry_later`.
+
+`compareSnapshots` / `comparePaymentSnapshots` compare only fields present on the local snapshot. Money uses core `toMinorUnits` (bigint); `"10"` ≡ `"10.00"` for the same currency; currency codes are case-insensitive.
+
+## Durable schedule (no queue)
+
+`ReconciliationStore` **is** the scheduling abstraction. No Redis Streams / SQS / Bull required.
+
+```typescript
+import {
+  createPaymentReconciler,
+  createReconciliationScheduler,
+  decideReconciliationPolicy,
+  type ProviderLookupPort,
+  type ReconciliationStore,
+  type ReconciliationTarget,
+} from "@paykernel/reconciliation";
+
+declare const store: ReconciliationStore;
+declare const lookup: ProviderLookupPort;
+declare function loadTarget(job: { record: { subjectId: string } }): Promise<ReconciliationTarget>;
+
+const reconciler = createPaymentReconciler({ lookup });
+const scheduler = createReconciliationScheduler({ store, maxAttempts: 8 });
+
+await scheduler.schedule({
+  target: {
+    gateway: "stripe",
+    gatewayPaymentId: "pi_123",
+    expected: { status: "pending" },
+  },
+  runAt: new Date().toISOString(),
+  reason: "indeterminate_create",
+});
+
+await scheduler.processDue({
+  limit: 10,
+  handler: async (job) => {
+    const target = await loadTarget(job); // store row is subjectId + reason, not a full target
+    const result = await reconciler.reconcile(target);
+    const decision = decideReconciliationPolicy(result, target);
+
+    if (decision.action === "mark_consistent" && decision.safe) {
+      return { disposition: "complete" };
+    }
+    if (
+      (decision.action === "update_local_to_paid" ||
+        decision.action === "update_local_to_failed") &&
+      decision.safe
+    ) {
+      // Apply the local paid/failed update in YOUR app first, then complete.
+      return { disposition: "complete" };
+    }
+    if (decision.action === "retry_later") {
+      return { disposition: "retry_later", error: new Error("retry_later") };
+    }
+    if (decision.action === "do_not_create_replacement") {
+      return { disposition: "retry", error: new Error(decision.reason) };
+    }
+    if (
+      decision.action === "manual_review" ||
+      decision.action === "apply_drift_review"
+    ) {
+      return { disposition: "manual_review", note: decision.action };
+    }
+    return { disposition: "retry" };
+  },
+});
+```
+
+:::caution[processDue is the production poll loop]
+`claimDue` is discovery / test inspection: it still returns N live leases. Do **not** `claimDue({ limit: N })` then serial-work that array — later default-30s leases expire while the first handler runs, and a peer can steal them (`lease_lost` after a successful lookup). `processDue` claims immediately before each handler and auto-renews on `leaseMs / 3`.
+:::
+
+Returning `void` from a `processDue` handler is treated as **retry** (fail-closed). `{ disposition: "retry_later" }` reschedules and does **not** consume the `maxAttempts` dead-letter budget. `{ disposition: "retry" }` does.
+
+Default job key: `deriveReconciliationJobKey(target)` → `recon:{gateway}:{primaryId}` (preference: `gatewayPaymentId` → `idempotencyKey` → `localReference` → `providerRequestId`). Second schedule of the same key → `{ kind: "already_exists", record }`.
+
+Backoff: `createExponentialBackoff({ baseMs, maxMs, jitterRatio? })`. Scheduler default is base 1s, max 15m, multiplier 2, jitter 0.2.
+
+Store statuses: `scheduled` | `claimed` | `completed` | `failed` | `manual_review`. Stale `leaseToken` → `StoreLeaseLostError` (`code: "lease_lost"`). Sanitize notes with `sanitizeReconciliationError` — no secrets in `lastError`.
+
+## Batch
+
+```typescript
+for await (const { index, target, result } of reconciler.reconcileMany(targets, {
+  concurrency: 5, // default 5; integer >= 1
+})) {
+  // Completion order — correlate with index/target (not zip-by-position).
+  void index;
+  void target;
+  void result;
+}
+```
+
+The package does not persist, alert, or mutate. Bound concurrency **per provider** in your app so you do not storm rate limits.
+
+## Failure paths
+
+| Signal | Do |
+| --- | --- |
+| Timeout / `temporarily_unavailable` | Reschedule lookup. Never invent local `failed`. |
+| `provider_not_found` retryable | `do_not_create_replacement`. Original may still settle. |
+| `ambiguous_match` | Manual review. Never pick-first. Never re-charge. |
+| `retry_later` (pending/processing) | `failAndReschedule` / `{ disposition: "retry_later" }`. Do not `complete`. |
+| Auth-hold `authorized` / `approved` | Not a safe auto-upgrade to paid. |
+
+## Runtime exports
+
+`createPaymentReconciler`, `createReconciliationScheduler`, `deriveReconciliationJobKey`, `createExponentialBackoff`, `decideReconciliationPolicy`, `decideReconciliationAction`, `shouldForbidReplacementCharge`, `compareSnapshots`, `comparePaymentSnapshots`, `moneyEquals`, `resolveProviderSnapshot`, `safeLookup`, `createGetPaymentLookupPort`, `sanitizeReconciliationError`, `DEFAULT_SANITIZE_MAX_LENGTH`, `StoreLeaseLostError`, `isStoreLeaseLostError`, `buildLocalPaymentSnapshot`, `buildReconciliationTarget`, `buildProviderPaymentSnapshot`.
+
+See also: [outcomes](/guides/outcomes), [composition](/guides/composition), [stores](/guides/adapter-selection).

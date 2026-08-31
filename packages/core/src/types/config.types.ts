@@ -48,6 +48,11 @@ export interface PayPalConfig {
     webhookId?: string;
     /** Request timeout in milliseconds. Default: 30000 */
     timeoutMs?: number;
+    /**
+     * Far-future `paypal-transmission-time` rejection window (ms).
+     * Default 72 hours. Aged (past) transmissions are still verified.
+     */
+    webhookMaxAgeMs?: number;
 }
 
 /**

@@ -1,0 +1,78 @@
+---
+title: Gateways
+description: Built-in Moyasar, PayPal, Paymob, and Stripe adapters in @paykernel/core, plus extra Tap and MyFatoorah packages.
+sidebar:
+  order: 1
+---
+
+Four **built-in** gateways ship inside [`@paykernel/core`](/packages/core): Moyasar, PayPal, Paymob, and Stripe. `BuiltInGatewayName` is closed to those four strings.
+
+Tap and MyFatoorah are **extra packages**. They implement the same `GatewayAdapter` shape and depend only on `@paykernel/core`. They are **not** `BuiltInGatewayName` values — do not treat them as if they lived in core.
+
+| Gateway | Factory | Package | Docs |
+| --- | --- | --- | --- |
+| Moyasar | `moyasarGateway` | `@paykernel/core` | [Moyasar](/gateways/moyasar) |
+| PayPal | `paypalGateway` | `@paykernel/core` | [PayPal](/gateways/paypal) |
+| Paymob | `paymobGateway` | `@paykernel/core` | [Paymob](/gateways/paymob) |
+| Stripe | `stripeGateway` | `@paykernel/core` | [Stripe](/gateways/stripe) |
+| Tap | `tapGateway` | `@paykernel/gateway-tap` | [Tap](/gateways/tap) |
+| MyFatoorah | `myfatoorahGateway` | `@paykernel/gateway-myfatoorah` | [MyFatoorah](/gateways/myfatoorah) |
+| Custom | your `GatewayAdapter` | your code | [Custom](/gateways/custom) |
+
+There is **no** `@paykernel/gateway-stripe` (or Moyasar / PayPal / Paymob) package.
+
+Always follow up on the **same** gateway that created the payment (`refundPayment(..., "paypal")`, etc.). Provider IDs and auth flows are not interchangeable.
+
+## Refund target IDs and `capture: false`
+
+| Topic | Moyasar | PayPal | Paymob | Stripe |
+| --- | --- | --- | --- | --- |
+| **Refund target ID** | Payment UUID from create / webhook | **Capture ID** (not order ID) from `capturePayment()` | **Numeric transaction ID** from webhook/dashboard (not intention `pi_...`) | PaymentIntent `pi_...` (not `cs_...` / `sub_...`) |
+| **`capture: false`** | Auth-only payment; later `capturePayment` / `voidPayment` on that payment ID. Not supported for decrypted Apple Pay DPAN or STC Pay. | `AUTHORIZE` intent order → customer approves → `authorizePayment` → `capturePayment` / void on **authorization ID** | Sends `is_auth: true` and uses `authIntegrationId` (or per-request override); capture/void use **transaction ID** | PaymentIntent with manual capture; later `capturePayment` / cancel (void) on `pi_...` |
+
+## Capability claims (built-ins)
+
+Cells are `✓` when the adapter **claims** the capability on its manifest. Claims are conservative: method presence alone does not imply `true`. Generated from code — do not invent cells. Full matrix: [capabilities](/reference/capabilities).
+
+| Capability | Stripe | Moyasar | PayPal | Paymob |
+| --- | --- | --- | --- | --- |
+| payments | ✓ | ✓ | ✓ | ✓ |
+| immediateCapture | ✓ | ✓ | ✓ | ✓ |
+| authorization | ✓ | ✓ | ✓ | ✓ |
+| partialCapture | ✓ | ✓ | ✓ | ✓ |
+| refunds | ✓ | ✓ | ✓ | ✓ |
+| partialRefunds | ✓ | ✓ | ✓ | ✓ |
+| voids | ✓ | ✓ | ✓ | ✓ |
+| hostedCheckout | ✓ | ✗ | ✗ | ✗ |
+| tokenization | ✗ | ✗ | ✗ | ✗ |
+| customers | ✓ | ✗ | ✗ | ✗ |
+| paymentMethods | ✓ | ✗ | ✗ | ✗ |
+| marketplaceSplits | ✗ | ✓ | ✗ | ✗ |
+| disputes | ✓ | ✗ | ✗ | ✗ |
+| paymentLinks | ✓ | ✗ | ✗ | ✗ |
+| providerRecurring | ✗ | ✗ | ✗ | ✗ |
+
+Notes from the generated matrix:
+
+- **PayPal partialCapture:** claimed because authorization captures accept `amount` when `paypalCaptureType: "authorization"`. Order captures reject amount.
+- **hostedCheckout:** first-class `createCheckoutSession` (Stripe Checkout), not every provider redirect URL.
+- **marketplaceSplits:** Moyasar `splits` on create.
+- **tokenization:** Stripe `tok_…` on attach is `paymentMethods`, not this key. Built-ins stay `false`.
+- **providerRecurring:** Checkout subscription mode does **not** force `true`.
+
+Query at runtime:
+
+```ts
+const gateway = client.gateway("stripe");
+if (gateway.supports("partialRefunds")) {
+  // partial amount is a claimed path
+}
+```
+
+## Shared rules
+
+- Pass `money("10.50", "SAR")` — payment APIs reject `number`. [money](/guides/money)
+- Fulfill with `isPaidOutcome` / `status === "paid"`, not `success: true`. [outcomes](/guides/outcomes)
+- `handleWebhook` verifies only. Never fulfill in `onWebhookVerified`. [webhooks](/guides/webhooks)
+- After `indeterminate`, lookup + reconcile — do not `createPayment` again and do not auto-route a second gateway.
+- Secret keys stay on the server. Publishable keys are optional and unused for mutations / verify in core.

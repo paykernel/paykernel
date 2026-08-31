@@ -207,27 +207,36 @@ Refunds use `RefundOperationOutcome` / `RefundOperationResult` via `mapGatewayRe
 | `inferRefundOperationOutcome(result)` | Infer / coerce when branching on refund outcomes |
 | `mapGatewayRefundToOperationResult(result)` | Gateway refund shape → preferred refund union |
 
-**P610-INF-2 (refunds):** `{ outcome: 'indeterminate' }` or `status: 'pending'` on refund infers **`indeterminate`**, not `failed`. A forged decline would invite a retry and can **double-refund**.
+**P610-INF-2 (refunds):** `{ outcome: 'indeterminate' }` or
+`reconciliationRequired: true` on refund infers **`indeterminate`**, not
+`failed`. A forged decline would invite a retry and can **double-refund**.
+Bare refund `status: 'pending'` (no recon flag) infers **`pending`**, not
+indeterminate and not failed.
 Reconcile; do not retry the mutation as a fresh failure.
 
-**CORE-INF-2:** refund with `status: 'completed'` but ambiguous outcome is **`indeterminate`**, not `failed`. Status says the refund settled while the API flag does not — do not retry the mutation as a fresh failure.
+**CORE-INF-2:** bare refund `status: 'completed'` infers **`succeeded`**.
+Indeterminate only when `reconciliationRequired` or an explicit indeterminate
+marker is set — do not retry a completed refund as a fresh failure.
 
 Do not treat a pending refund as settled. Same Engineering Rule 3 applies after
 submit when the refund request may have been accepted.
 
 **CORE-5:** `applyOutcomeToGatewayResult` coerces stored `outcome`
-against `status`. `outcome: 'succeeded'` with `status: 'failed'` becomes
-`declined`; with `status: 'pending'` / `'processing'` /
-`'approved'` it becomes `requires_action`. Callers branching on
+against `status`. `outcome: 'succeeded'` with `status: 'failed'` /
+`'refund_failed'` becomes **`declined` only when a `decline` object is
+present, otherwise `failed`**. With `status: 'pending'` / `'processing'` /
+`'approved'` / `'partially_captured'` / `'refund_completed'` /
+`'refund_pending'` it becomes `requires_action`. Callers branching on
 `result.outcome === 'succeeded'` must not see a failed or still-pending payment
 as a successful operation.
 
-**NEW-CORE-10:** `outcome: 'requires_action'` with `status: 'failed'` is stored
-and inferred as **`declined`**. A failed snapshot is not
-customer action.
+**NEW-CORE-10:** `outcome: 'requires_action'` or `'succeeded'` with
+`status: 'failed'` / `'refund_failed'` is stored and inferred as **`declined`
+only when a `decline` object is present; otherwise `failed`**. A failed
+snapshot is not customer action.
 
-**NEW-CORE-9:** Payment infer treats `refund_completed` /
-`refund_pending` / `reversed` as **`indeterminate`** (not a retryable `failed`).
+**NEW-CORE-9:** Bare payment infer: `refund_completed` / `refund_pending` →
+**`requires_action`**; `reversed` → **`failed`**. Not indeterminate.
 Refund coerce: `outcome: 'failed'` + gateway `status: 'completed'` becomes
 **`succeeded`** (status wins — a settled refund is not a fresh-fail retry).
 

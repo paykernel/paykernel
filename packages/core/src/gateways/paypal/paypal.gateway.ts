@@ -2174,14 +2174,11 @@ export class PayPalGateway extends BaseGateway {
   }
 
   /**
-   * Optional `webhookMaxAgeMs` on config (soft-documented; not on base interface)
-   * clamps far-future rejection. Soft path always allows aged transmissions to
-   * reach PayPal verify.
+   * Optional `webhookMaxAgeMs` on {@link PayPalConfig} clamps far-future
+   * rejection. Soft path always allows aged transmissions to reach PayPal verify.
    */
   private getWebhookMaxAgeMs(): number {
-    const configured = (this.paypalConfig as PayPalConfig & {
-      webhookMaxAgeMs?: number;
-    }).webhookMaxAgeMs;
+    const configured = this.paypalConfig.webhookMaxAgeMs;
     if (
       typeof configured === "number" &&
       Number.isFinite(configured) &&

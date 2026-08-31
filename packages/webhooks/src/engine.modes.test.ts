@@ -287,6 +287,22 @@ describe("modes: inline vs durable_retry (A6)", () => {
     ).toThrow(/workerGuaranteed/);
   });
 
+  it("exposes workerGuaranteed on the returned engine for HTTP adapters", () => {
+    const store = createMemoryWebhookInboxStore();
+    const omitted = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+    });
+    expect(omitted.workerGuaranteed).toBe(false);
+    const guaranteed = createWebhookInboxEngine({
+      store,
+      mode: "durable_retry",
+      workerGuaranteed: true,
+    });
+    expect(guaranteed.workerGuaranteed).toBe(true);
+    expect(guaranteed.mode).toBe("durable_retry");
+  });
+
   it("I6: per-call ackAfterClaim without workerGuaranteed is retryable, not parked", async () => {
     const store = createMemoryWebhookInboxStore();
     const engine = createWebhookInboxEngine({

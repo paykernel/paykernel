@@ -1,0 +1,138 @@
+---
+title: Turso
+description: Remote multi-host Turso serverless and libSQL stores. No /sync export. Not local SQLite.
+sidebar:
+  order: 5
+---
+
+`@paykernel/store-turso` is a **shared remote** SQLite-compatible store. Multi-host safe when every worker uses the **same remote primary**. Dialect is **`sqlite`** via [`@paykernel/sql-foundation`](/packages/sql-foundation). Claims prefer single-statement `INSERT … ON CONFLICT … RETURNING`, not get-then-set.
+
+Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+
+:::caution
+This is **not** [`@paykernel/store-sqlite`](/stores/sqlite) (local single-host file). There is **no** `@paykernel/store-turso/sync` export. Embedded replicas are **not** advertised as local-first multi-writer. `/serverless` and `/libsql` clients are **not interchangeable**.
+:::
+
+## Install
+
+```bash
+bun add @paykernel/store-turso
+# optional drivers (pick one binding):
+bun add @libsql/client
+# or
+bun add @tursodatabase/serverless
+```
+
+Root entry **never** statically imports `@tursodatabase/serverless` or `@libsql/client`.
+
+## Quick start (root executor)
+
+```ts
+import {
+  createTursoIdempotencyStore,
+  migrateTursoAdapter,
+  type TursoExecutor,
+} from "@paykernel/store-turso";
+
+const executor: TursoExecutor = /* … */;
+
+// Explicit migrate — NEVER automatic on import or factory construction.
+await migrateTursoAdapter(executor);
+
+const store = createTursoIdempotencyStore({ executor });
+const r = await store.reserve({
+  key: "pay_123",
+  fingerprint: "fp",
+  owner: "worker-1",
+  leaseMs: 30_000,
+});
+```
+
+## Subpaths (real exports only)
+
+| Subpath | Package | Notes |
+| --- | --- | --- |
+| `.` | none | Factories, `migrateTursoAdapter`, `TURSO_STORAGE_ADAPTER_MANIFEST` |
+| `/libsql` | `@libsql/client` | Remote URL or `file:` / `:memory:` for CI |
+| `/serverless` | `@tursodatabase/serverless` | Fetch-based remote Turso Cloud |
+| `/sync` | — | **Does not exist** |
+
+### `/libsql`
+
+```ts
+import { createClient } from "@libsql/client";
+import {
+  createLibsqlStores,
+  createLibsqlExecutor,
+  migrateTursoAdapter,
+} from "@paykernel/store-turso/libsql";
+
+const client = createClient({ url: "file:./payments.db" });
+const executor = createLibsqlExecutor(client);
+await migrateTursoAdapter(executor);
+const stores = createLibsqlStores({ client });
+```
+
+`file:` / `:memory:` are **CI / single-process** convenience. They do **not** give the advertised `multi-host` remote primary. `BEGIN IMMEDIATE` is local `file:` only; remote clients are **async**.
+
+### `/serverless`
+
+```ts
+import { connect } from "@tursodatabase/serverless";
+import {
+  createTursoServerlessExecutor,
+  createTursoServerlessStores,
+  migrateTursoAdapter,
+} from "@paykernel/store-turso/serverless";
+
+const connection = connect({
+  url: process.env.TURSO_DATABASE_URL!,
+  authToken: process.env.TURSO_AUTH_TOKEN,
+});
+const executor = createTursoServerlessExecutor(connection);
+await migrateTursoAdapter(executor);
+const stores = createTursoServerlessStores({ client: connection });
+```
+
+`createTursoServerlessStores` accepts `{ connection }` or `{ client }`. Auth tokens must **never** appear in `StoreError` messages.
+
+## Migrate
+
+```ts
+import {
+  migrateTursoAdapter,
+  verifyTursoAdapterSchema,
+} from "@paykernel/store-turso";
+
+await migrateTursoAdapter(executor);
+const check = await verifyTursoAdapterSchema(executor);
+if (!check.ok) throw new Error(check.errors.join("; "));
+```
+
+Never auto-migrate on import. Drizzle is **not** required. If you mirror foundation tables for joins, keep correctness-critical claims on `createTurso*Store` — never raw ORM get-then-set.
+
+## Guarantees
+
+`TURSO_STORAGE_ADAPTER_MANIFEST`: `coordinationScope: "multi-host"` (shared remote primary), `durability: "durable"`, `claims: "strong"`. **Not advertised:** multi-region strong consistency; `/sync`; embedded-replica offline conflict resolution.
+
+An embedded replica file plus a cloud primary is **not** this adapter’s multi-host claim. Point workers at divergent local replicas and you lose engine-level exclusivity.
+
+`withTransaction` fails closed (`StoreUnsupportedFeatureError`) when `TursoExecutor.transaction` is unavailable.
+
+## Failure paths
+
+| Event | Behavior |
+| --- | --- |
+| Crash after claim, before complete | Lease until expiry; another worker on the **shared remote** reclaims |
+| Crash after provider work, before complete | Uncertain — `markIndeterminate` if lease still valid; do **not** `createPayment` again |
+| Network / timeout mid-statement | Map to `StoreUnavailableError` / `StoreTimeoutError`; re-read / re-claim |
+| Stale token | `StoreLeaseLostError` |
+| Mixing `/serverless` and `/libsql` clients | Not interchangeable — test each path independently |
+| Assuming `/sync` exists | There is no such export |
+
+**Never fulfill in `onWebhookVerified`.** See [Webhooks](/guides/webhooks).
+
+## Related
+
+- [Stores overview](/stores) · [Local SQLite](/stores/sqlite) · [D1](/stores/d1)
+- [Store contracts](/packages/store-contracts) · [Adapter selection](/guides/adapter-selection)

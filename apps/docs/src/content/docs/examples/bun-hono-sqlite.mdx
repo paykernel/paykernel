@@ -1,0 +1,93 @@
+---
+title: Bun + Hono + SQLite
+description: Thin Hono fetch adapter over the private checkout kernel with in-memory Bun SQLite.
+sidebar:
+  order: 3
+---
+
+`@paykernel/example-bun-hono-sqlite` is a **private** workspace host (`private: true`). It is **not** `@paykernel/integration-hono` and is **not** published. The [checkout kernel](/examples/checkout-kernel) owns checkout, inbox, and reconciliation. This package only maps HTTP.
+
+Source: [`examples/bun-hono-sqlite`](https://github.com/paykernel/paykernel/tree/main/examples/bun-hono-sqlite) ([README](https://github.com/paykernel/paykernel/blob/main/examples/bun-hono-sqlite/README.md)).
+
+## Mapping
+
+[`createHonoCheckoutApp`](https://github.com/paykernel/paykernel/blob/main/examples/bun-hono-sqlite/src/app.ts) builds a `Hono` from `createCheckoutHandlers` + [`honoWebhook`](/integrations/hono). Imports and Stripe route as in source:
+
+```ts
+import { Hono } from "hono";
+import { honoWebhook } from "@paykernel/integration-hono";
+import {
+  checkoutJsonResponse,
+  createCheckoutHandlers,
+  createPaymentInputFromUnknown,
+  gatewayPaymentIdFromUnknown,
+  readRequestJson,
+  type CheckoutHttpOptions,
+  type CheckoutKernel,
+} from "@paykernel/example-checkout-kernel";
+
+app.post(
+  "/webhooks/stripe",
+  honoWebhook({
+    gateway: kernel.webhook.gateway,
+    client: kernel.webhook.client,
+    engine: kernel.webhook.engine,
+    handler: kernel.webhook.handler,
+  }),
+);
+```
+
+`honoWebhook` reads `c.req.raw` with `request.text()` and calls `processWebhookHttp`. **Do not** use `c.req.json()` (or any body parser) on `/webhooks/stripe`. Stripe HMAC needs the original bytes.
+
+Fulfillment is only `kernel.webhook.handler` after the inbox claim. Never fulfill in `onWebhookVerified`.
+
+HTTP status comes from the kernel / `mapInboxOutcome`, not from [`@paykernel/webhooks`](/packages/webhooks).
+
+## `:memory:` is process-local
+
+`createCheckoutKernel()` (no `storeFactory`) uses `createBunSqliteStoresInMemory` from [`@paykernel/store-sqlite/bun`](/stores/sqlite) and then `migrateSqliteAdapter`. That database is **single-host and one process**. It is not multi-host and must not be shared across machines. Memory stores are **non-production**.
+
+## Routes
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/payments` | `readRequestJson` → `createPayment`. Invalid JSON → `400 { "error": "invalid_json" }`. |
+| `POST` | `/webhooks/stripe` | `honoWebhook` (raw body + `stripe-signature`). |
+| `GET` | `/orders/:orderId` | Order book. Missing → `404`. |
+| `POST` | `/internal/reconcile` | **Test hook.** Unauthenticated. Do not deploy. |
+| `POST` | `/internal/provider-paid` | **Test hook.** Unauthenticated. Do not deploy. |
+| `GET` | `/internal/create-count` | **Test hook.** Unauthenticated. Do not deploy. |
+
+:::caution[Test hooks]
+Tests call `createHonoCheckoutApp(kernel, { enableTestHooks: true })`. Without the flag, `/internal/reconcile` and `/internal/create-count` return `404`. The listen script does **not** pass the flag. Do not deploy it.
+:::
+
+Failure paths (shared suite `runCheckoutHttpScenarios("hono", …)`): bad Stripe signature → `400` unpaid; rewritten JSON body → `400`; concurrent redelivery → `200` or `503` and one fulfill; `fulfillThrows` → `500` unpaid; indeterminate create does **not** call `createPayment` again. Full table: [Checkout kernel](/examples/checkout-kernel).
+
+## Run
+
+From this directory:
+
+```bash
+bun test
+```
+
+From the monorepo root:
+
+```bash
+bun test examples/bun-hono-sqlite
+```
+
+Tests construct `createHonoCheckoutApp(kernel)` and call `app.fetch`. They do not start a listener.
+
+Optional listen (`enableTestHooks` stays off):
+
+```bash
+bun src/index.ts
+```
+
+`PORT` defaults to `3000`. `Bun.serve({ fetch: (req) => app.fetch(req) })`. Do not deploy this example as-is.
+
+## Related
+
+- [Checkout kernel](/examples/checkout-kernel) · [Hono integration](/integrations/hono) · [SQLite store](/stores/sqlite) · [Webhooks](/guides/webhooks)

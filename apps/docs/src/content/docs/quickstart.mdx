@@ -1,0 +1,133 @@
+---
+title: Quickstart
+description: Create a first Moyasar payment with createPaymentClient, money, and isPaidOutcome, including declined and indeterminate branches.
+sidebar:
+  order: 2
+prev:
+  link: /
+  label: PayKernel
+next:
+  link: /guides/getting-started
+  label: Getting started
+---
+
+Compose a `PaymentClient` from `@paykernel/core`, charge with `money()`, and fulfill only when `isPaidOutcome` is true. This page is core only — no inbox, store, or second gateway.
+
+:::caution[Packages are not on npm as 1.0]
+Public packages are version **`0.1.0-next.0`**. They are **not** published to npm as a released 1.0. From a clone: `bun install` at the repository root, then import `@paykernel/core` from the workspace. `bun add @paykernel/core` is the consumer command **after** the first npm publish — not proof that a 1.0 tarball exists today.
+:::
+
+Core is ESM-only (`exports.import` only). Engines: Node `>=18` or Bun `>=1.0.0`. Secret keys are server-side only.
+
+What you need for this page: **`@paykernel/core`**. Inbox fulfillment adds `@paykernel/webhooks` plus a store; recovery after timeout adds `@paykernel/reconciliation`. See [Getting started](/guides/getting-started).
+
+## Create a client and a payment
+
+Exports: `createPaymentClient`, `moyasarGateway`, `money`, `isPaidOutcome` from `@paykernel/core` (package `exports["."]`).
+
+Empty `moyasar.secretKey` throws `InvalidRequestError` (`"moyasar.secretKey must be a non-empty string"`) from `moyasarGateway` — the client is never constructed.
+
+```typescript
+import { createPaymentClient, money, isPaidOutcome, moyasarGateway } from "@paykernel/core";
+
+const client = createPaymentClient({
+  gateways: {
+    moyasar: moyasarGateway({
+      secretKey: process.env.MOYASAR_SECRET_KEY!,
+      webhookSecret: process.env.MOYASAR_WEBHOOK_SECRET,
+    }),
+  },
+  defaultGateway: "moyasar",
+});
+
+const result = await client.createPayment({
+  amount: money("100.00", "SAR"),
+  currency: "SAR",
+  orderId: "order_123",
+  callbackUrl: "https://example.com/callback",
+  moyasarSource: { type: "token", token: "token_xxx" },
+});
+
+if (isPaidOutcome(result)) {
+  // Paid-like settlement only (`outcome === "succeeded"` and status `paid`).
+} else if (result.outcome === "indeterminate" || result.reconciliationRequired) {
+  // Charge may already exist. Schedule reconcile. Do not createPayment again.
+} else {
+  // declined / pending / authorized — see branches below
+}
+```
+
+`createPaymentClient` takes **exactly one** of `gateways` or `registry`. Mixing both, or omitting both, throws `InvalidRequestError`.
+
+Prefer `money("100.00", "SAR")` over a plain `number`. Amounts are major-unit decimal strings; conversion uses bigint minor units. See [Money](/guides/money).
+
+1.0 removed `success` from `GatewayPaymentResult`. Older in-repo prose that still says “`success: true` is not the fulfillment signal” is describing the 0.x footgun — the field is gone. Discriminate on `outcome` / `isPaidOutcome`. Code: `packages/core/src/types/payment.types.ts`.
+
+## Failure paths
+
+`isPaidOutcome(result)` is true only when `outcome === "succeeded"` **and** status is `paid` (`PAID_LIKE_PAYMENT_STATUSES` is `paid` only). It is **false** for `authorized`, `approved`, `pending`, `partially_captured`, `requires_action`, `declined`, `failed`, and **always false** when `reconciliationRequired === true`.
+
+### Indeterminate — do not charge again
+
+Timeouts, dropped connections after POST, mutating HTTP 2xx with unreadable JSON, and `outcome: "indeterminate"` mean the provider **may already have the charge**.
+
+```typescript
+import { isIndeterminateOutcome } from "@paykernel/core";
+
+if (isIndeterminateOutcome(result) || result.reconciliationRequired) {
+  // Lookup + decideReconciliationPolicy only.
+  // Do NOT client.createPayment(...) again.
+  // Do NOT mark the order paid or failed-at-provider.
+  // Do NOT select a second gateway.
+}
+```
+
+On `createPayment` / capture / refund / void, a post-submit transport failure is a **typed `outcome: "indeterminate"` result**, not a thrown “create failed.” `BaseGateway` maps `NetworkError` with `afterProviderSubmit: true` (timeouts, 5xx, connection drop after mutating POST, Moyasar mutating HTTP 200 + invalid JSON) into that result — those paths do **not** reach `catch`. Preflight auth, GET, and pre-submit transport still throw `NetworkError` (`afterProviderSubmit` unset).
+
+Next: [Getting started](/guides/getting-started) (schedule + `decideReconciliationPolicy`) and [Outcomes](/guides/outcomes).
+
+### Declined — definitive, not a timeout
+
+```typescript
+if (result.outcome === "declined") {
+  // Issuer/provider decline. Optional structured `result.decline` (code / message).
+  // Do not fulfill. Do not treat as indeterminate. A corrected retry is a new attempt.
+}
+```
+
+Hard declines may also **throw** `CardDeclinedError` or `InsufficientFundsError` on some gateway paths. Handle both the `declined` outcome arm **and** those error classes until every path uses outcomes only.
+
+### Other non-paid arms
+
+| `result.outcome` / helper | Do |
+| --- | --- |
+| `isPaidOutcome(result)` | Only then treat money as settled for fulfillment |
+| `"requires_action"` / `isRequiresActionOutcome(result)` | 3DS, redirect (`result.redirectUrl`), OTP, client SDK. Do not fulfill |
+| `"indeterminate"` / `reconciliationRequired` | Reconcile. Do not `createPayment` again |
+| `"declined"` | Show decline. Do not fulfill |
+| `"failed"` | Definitive failure of the attempt. Do not fulfill |
+| `"succeeded"` but status `authorized` / `approved` / not `paid` | `isPaidOutcome` is false. Auth hold or buyer approval is not paid |
+
+`approved` is PayPal buyer approval **before capture**. Never ship on approval alone.
+
+## Verify is not fulfill
+
+`PaymentClient.handleWebhook` **verifies, normalizes, and runs hooks**. It does not claim an inbox, dedupe across workers, or decide HTTP status.
+
+```typescript
+const webhookEvent = await client.handleWebhook("moyasar", rawBody, signature);
+// webhookEvent.event is the PaymentEvent when mapping succeeds.
+```
+
+**Never fulfill inside `onWebhookVerified`.** That hook is authenticity-only. Verification can succeed on a payload you must still claim and lease.
+
+`handleWebhook` throws `InvalidWebhookError` on a failed signature. That is forgery — map to a 4xx in **your** HTTP adapter. The inbox engine never sets status codes. HTTP mapping lives in `@paykernel/integration-http` (`mapInboxOutcome`), not in `@paykernel/webhooks`.
+
+Moyasar compares payload `secret_token` to `webhookSecret` (parsed JSON is fine). Stripe signs the **exact raw body** — pass `string` / `Buffer`, never re-serialized JSON. See [Webhooks](/guides/webhooks).
+
+## Next
+
+1. [Getting started](/guides/getting-started) — inbox claim, durable store, reconcile, optional routing
+2. [Best practices](/guides/best-practices) — fulfillment, stores, retries
+3. [Outcomes](/guides/outcomes) · [Money](/guides/money) · [Moyasar](/gateways/moyasar)
+4. [Examples](/examples) — private hosts; do not deploy `enableTestHooks` routes

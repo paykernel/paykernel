@@ -1,0 +1,91 @@
+---
+title: Package catalog
+description: name, version, and exports keys from each packages/*/package.json, plus the unpublished internal SQL shim.
+sidebar:
+  order: 2
+---
+
+Every row below is copied from `packages/*/package.json` (`name`, `version`, `exports` keys, `private` absent/false). Current workspace version is **`0.1.0-next.0`**. These packages are **not** published to the public npm registry as a released 1.0 — consume them from this monorepo until the first publish.
+
+`bun add @paykernel/<name>` is the intended consumer command **after** publish, not proof that a 1.0 tarball exists today.
+
+:::caution[Names]
+The folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Never import or install `@paykernel/observability`.
+:::
+
+## Publishable packages
+
+`private` is not set (publishable). Export maps are ESM `import` + `types` only (no CommonJS `require` build).
+
+| Package | Version | `exports` keys | Docs |
+| --- | --- | --- | --- |
+| `@paykernel/core` | `0.1.0-next.0` | `.` | [core](/packages/core) |
+| `@paykernel/webhooks` | `0.1.0-next.0` | `.` | [webhooks](/packages/webhooks) |
+| `@paykernel/reconciliation` | `0.1.0-next.0` | `.` | [reconciliation](/packages/reconciliation) |
+| `@paykernel/routing` | `0.1.0-next.0` | `.` | [routing](/packages/routing) |
+| `@paykernel/opentelemetry` | `0.1.0-next.0` | `.`, `./otel` | [opentelemetry](/packages/opentelemetry) |
+| `@paykernel/gateway-tap` | `0.1.0-next.0` | `.` | [Tap](/gateways/tap) |
+| `@paykernel/gateway-myfatoorah` | `0.1.0-next.0` | `.` | [MyFatoorah](/gateways/myfatoorah) |
+| `@paykernel/integration-http` | `0.1.0-next.0` | `.` | [HTTP](/integrations/http) |
+| `@paykernel/integration-hono` | `0.1.0-next.0` | `.` | [Hono](/integrations/hono) |
+| `@paykernel/integration-elysia` | `0.1.0-next.0` | `.` | [Elysia](/integrations/elysia) |
+| `@paykernel/integration-express` | `0.1.0-next.0` | `.` | [Express](/integrations/express) |
+| `@paykernel/integration-cloudflare-workers` | `0.1.0-next.0` | `.` | [Workers](/integrations/cloudflare-workers) |
+| `@paykernel/store-contracts` | `0.1.0-next.0` | `.` | [store-contracts](/packages/store-contracts) |
+| `@paykernel/sql-foundation` | `0.1.0-next.0` | `.` | [sql-foundation](/packages/sql-foundation) |
+| `@paykernel/store-postgres` | `0.1.0-next.0` | `.`, `./bun-sql`, `./postgres-js`, `./pg`, `./drizzle` | [postgres](/stores/postgres) |
+| `@paykernel/store-redis` | `0.1.0-next.0` | `.`, `./bun`, `./upstash`, `./ioredis`, `./node-redis` | [redis](/stores/redis) |
+| `@paykernel/store-sqlite` | `0.1.0-next.0` | `.`, `./bun`, `./node`, `./better-sqlite3` | [sqlite](/stores/sqlite) |
+| `@paykernel/store-turso` | `0.1.0-next.0` | `.`, `./serverless`, `./libsql` | [turso](/stores/turso) |
+| `@paykernel/store-d1` | `0.1.0-next.0` | `.` | [d1](/stores/d1) |
+| `@paykernel/store-durable-objects` | `0.1.0-next.0` | `.` | [durable objects](/stores/durable-objects) |
+| `@paykernel/testkit` | `0.1.0-next.0` | `.` | [testkit](/packages/testkit) |
+
+There is **no** `@paykernel/gateway-stripe` (or Moyasar / PayPal / Paymob) package. Built-ins are factories on `@paykernel/core`: `stripeGateway`, `moyasarGateway`, `paypalGateway`, `paymobGateway`. Tap and MyFatoorah are extra packages and are **not** `BuiltInGatewayName`.
+
+## Subpaths that exist (do not invent others)
+
+Import paths must match `exports` keys. A subpath that is not in the table **does not exist**.
+
+| Package | Legal specifiers |
+| --- | --- |
+| `@paykernel/opentelemetry` | `@paykernel/opentelemetry`, `@paykernel/opentelemetry/otel` |
+| `@paykernel/store-postgres` | `@paykernel/store-postgres`, `/bun-sql`, `/postgres-js`, `/pg`, `/drizzle` |
+| `@paykernel/store-redis` | `@paykernel/store-redis`, `/bun`, `/upstash`, `/ioredis`, `/node-redis` |
+| `@paykernel/store-sqlite` | `@paykernel/store-sqlite`, `/bun`, `/node`, `/better-sqlite3` |
+| `@paykernel/store-turso` | `@paykernel/store-turso`, `/serverless`, `/libsql` — **no** `/sync` |
+| `@paykernel/store-d1` | `.` only |
+| `@paykernel/store-durable-objects` | `.` only — never one global Durable Object |
+
+Redis is **optional**. Local SQLite is **single-host**. `:memory:` is one process. Turso is **remote multi-host**. D1 ≠ Durable Objects ≠ Turso ≠ local SQLite. Memory stores (`@paykernel/testkit`) are **NON-PRODUCTION**. No published adapter declares `coordinationScope: "multi-region"`. Importing a store package does **not** apply DDL — migrate explicitly.
+
+## Not published
+
+| Name | Location | Version | `private` | Notes |
+| --- | --- | --- | --- | --- |
+| `@paykernel/internal-sql-store` | `internal/sql-store` | `0.1.0` | `true` | Thin BC shim that re-exports `@paykernel/sql-foundation`. **Do not install it.** Prefer `@paykernel/sql-foundation`. |
+| `@paykernel/docs` | `apps/docs` | `0.0.1` | `true` | This site. Not in changesets publish. |
+| `@paykernel/example-*` | `examples/*` | `0.1.0` | `true` | Runnable hosts. Never published. See [examples](/examples). |
+| (root) `paykernel` | repo root | `0.1.0` | `true` | Workspace only. |
+
+:::caution[Do not install the SQL shim]
+Never `bun add` / `npm install` `@paykernel/internal-sql-store`. Relational adapters depend on `@paykernel/sql-foundation`.
+:::
+
+## Failure path (wrong specifier)
+
+The folder `packages/observability` is **not** an import path. Use the publish name (root or `./otel` subpath):
+
+```ts
+import { createOpenTelemetryBridge } from "@paykernel/opentelemetry";
+// same factory, no static OTEL import:
+import { createOpenTelemetryBridge } from "@paykernel/opentelemetry/otel";
+```
+
+Turso has **no** `./sync` export. Legal driver subpaths:
+
+```ts
+import { createLibsqlStores } from "@paykernel/store-turso/libsql";
+```
+
+Store factories and exact export names: [stores](/stores). Runtime export list for core: [core API](/reference/core-api).
