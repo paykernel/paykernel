@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-postgres",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "PostgreSQL durable stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation.",
   "type": "module",
   "main": "./dist/index.js",

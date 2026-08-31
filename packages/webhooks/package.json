@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/webhooks",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Storage-agnostic webhook inbox engine for @paykernel/core: claim, dedupe, retry, lease-fenced processing outcomes (no HTTP hardcoding).",
   "type": "module",
   "main": "./dist/index.js",

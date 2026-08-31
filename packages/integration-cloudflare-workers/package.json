@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/integration-cloudflare-workers",
-  "version": "0.1.0-next.0",
+  "version": "0.1.0",
   "description": "Thin Cloudflare Workers adapter for @paykernel/integration-http webhook handling.",
   "type": "module",
   "main": "./dist/index.js",

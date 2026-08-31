@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/gateway-tap",
-  "version": "0.1.0-next.0",
+  "version": "1.0.0",
   "description": "Portable Tap Payments gateway adapter for @paykernel/core: charges, authorize/capture/void, refunds, and hashstring webhooks.",
   "type": "module",
   "main": "./dist/index.js",
