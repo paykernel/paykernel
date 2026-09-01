@@ -7,7 +7,7 @@ sidebar:
 
 PayKernel ships **private** workspace apps under [`examples/`](https://github.com/paykernel/paykernel/tree/main/examples). They are consumer hosts, not SDK packages: `private: true`, never published. `packages/*` must not import `examples/*`.
 
-The shared kernel is [`@paykernel/example-checkout-kernel`](/examples/checkout-kernel). Five thin HTTP hosts map routes onto it. SDK packages used here are **`0.1.0-next.0` and are not on npm as a released 1.0**.
+The shared kernel is [`@paykernel/example-checkout-kernel`](/examples/checkout-kernel). Five thin HTTP hosts map routes onto it. SDK packages used here are **published** (`core` 1.0.0, others 0.1.1) — `bun add @paykernel/core` works. Examples themselves are private (not published).
 
 :::caution[Do not deploy these apps as-is]
 Local SQLite is **single-host**. Default kernels use in-memory Bun SQLite (`:memory:`), which is **one process**. `POST /internal/*` and `GET /internal/create-count` are unauthenticated test hooks served only when `enableTestHooks` is `true`. Listen scripts leave that flag off. Do not enable it in a deployed host.

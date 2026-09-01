@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-turso` is a **shared remote** SQLite-compatible store. Multi-host safe when every worker uses the **same remote primary**. Dialect is **`sqlite`** via [`@paykernel/sql-foundation`](/packages/sql-foundation). Claims prefer single-statement `INSERT … ON CONFLICT … RETURNING`, not get-then-set.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-turso`. Install: `bun add @paykernel/store-turso`.
 
 :::caution
 This is **not** [`@paykernel/store-sqlite`](/stores/sqlite) (local single-host file). There is **no** `@paykernel/store-turso/sync` export. Embedded replicas are **not** advertised as local-first multi-writer. `/serverless` and `/libsql` clients are **not interchangeable**.

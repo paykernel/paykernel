@@ -5,9 +5,7 @@ sidebar:
   order: 2
 ---
 
-Every row below is copied from `packages/*/package.json` (`name`, `version`, `exports` keys, `private` absent/false). Current workspace version is **`0.1.0-next.0`**. These packages are **not** published to the public npm registry as a released 1.0 — consume them from this monorepo until the first publish.
-
-`bun add @paykernel/<name>` is the intended consumer command **after** publish, not proof that a 1.0 tarball exists today.
+Every row below is copied from `packages/*/package.json` (`name`, `version`, `exports` keys, `private` absent/false). All packages are **published to the public registry** (`core` 1.0.0, gateways/testkit 1.0.1, engines/stores/integrations 0.1.1, contracts/sql-foundation 0.1.0). Install with `bun add @paykernel/<name>` or `npm install @paykernel/<name>`.
 
 :::caution[Names]
 The folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Never import or install `@paykernel/observability`.
@@ -19,27 +17,27 @@ The folder `packages/observability` publishes as **`@paykernel/opentelemetry`**.
 
 | Package | Version | `exports` keys | Docs |
 | --- | --- | --- | --- |
-| `@paykernel/core` | `0.1.0-next.0` | `.` | [core](/packages/core) |
-| `@paykernel/webhooks` | `0.1.0-next.0` | `.` | [webhooks](/packages/webhooks) |
-| `@paykernel/reconciliation` | `0.1.0-next.0` | `.` | [reconciliation](/packages/reconciliation) |
-| `@paykernel/routing` | `0.1.0-next.0` | `.` | [routing](/packages/routing) |
-| `@paykernel/opentelemetry` | `0.1.0-next.0` | `.`, `./otel` | [opentelemetry](/packages/opentelemetry) |
-| `@paykernel/gateway-tap` | `0.1.0-next.0` | `.` | [Tap](/gateways/tap) |
-| `@paykernel/gateway-myfatoorah` | `0.1.0-next.0` | `.` | [MyFatoorah](/gateways/myfatoorah) |
-| `@paykernel/integration-http` | `0.1.0-next.0` | `.` | [HTTP](/integrations/http) |
-| `@paykernel/integration-hono` | `0.1.0-next.0` | `.` | [Hono](/integrations/hono) |
-| `@paykernel/integration-elysia` | `0.1.0-next.0` | `.` | [Elysia](/integrations/elysia) |
-| `@paykernel/integration-express` | `0.1.0-next.0` | `.` | [Express](/integrations/express) |
-| `@paykernel/integration-cloudflare-workers` | `0.1.0-next.0` | `.` | [Workers](/integrations/cloudflare-workers) |
-| `@paykernel/store-contracts` | `0.1.0-next.0` | `.` | [store-contracts](/packages/store-contracts) |
-| `@paykernel/sql-foundation` | `0.1.0-next.0` | `.` | [sql-foundation](/packages/sql-foundation) |
-| `@paykernel/store-postgres` | `0.1.0-next.0` | `.`, `./bun-sql`, `./postgres-js`, `./pg`, `./drizzle` | [postgres](/stores/postgres) |
-| `@paykernel/store-redis` | `0.1.0-next.0` | `.`, `./bun`, `./upstash`, `./ioredis`, `./node-redis` | [redis](/stores/redis) |
-| `@paykernel/store-sqlite` | `0.1.0-next.0` | `.`, `./bun`, `./node`, `./better-sqlite3` | [sqlite](/stores/sqlite) |
-| `@paykernel/store-turso` | `0.1.0-next.0` | `.`, `./serverless`, `./libsql` | [turso](/stores/turso) |
-| `@paykernel/store-d1` | `0.1.0-next.0` | `.` | [d1](/stores/d1) |
-| `@paykernel/store-durable-objects` | `0.1.0-next.0` | `.` | [durable objects](/stores/durable-objects) |
-| `@paykernel/testkit` | `0.1.0-next.0` | `.` | [testkit](/packages/testkit) |
+| `@paykernel/core` | `1.0.0` | `.` | [core](/packages/core) |
+| `@paykernel/webhooks` | `0.1.1` | `.` | [webhooks](/packages/webhooks) |
+| `@paykernel/reconciliation` | `0.1.1` | `.` | [reconciliation](/packages/reconciliation) |
+| `@paykernel/routing` | `0.1.1` | `.` | [routing](/packages/routing) |
+| `@paykernel/opentelemetry` | `0.1.1` | `.`, `./otel` | [opentelemetry](/packages/opentelemetry) |
+| `@paykernel/gateway-tap` | `1.0.1` | `.` | [Tap](/gateways/tap) |
+| `@paykernel/gateway-myfatoorah` | `1.0.1` | `.` | [MyFatoorah](/gateways/myfatoorah) |
+| `@paykernel/integration-http` | `0.1.1` | `.` | [HTTP](/integrations/http) |
+| `@paykernel/integration-hono` | `0.1.1` | `.` | [Hono](/integrations/hono) |
+| `@paykernel/integration-elysia` | `0.1.1` | `.` | [Elysia](/integrations/elysia) |
+| `@paykernel/integration-express` | `0.1.1` | `.` | [Express](/integrations/express) |
+| `@paykernel/integration-cloudflare-workers` | `0.1.1` | `.` | [Workers](/integrations/cloudflare-workers) |
+| `@paykernel/store-contracts` | `0.1.0` | `.` | [store-contracts](/packages/store-contracts) |
+| `@paykernel/sql-foundation` | `0.1.0` | `.` | [sql-foundation](/packages/sql-foundation) |
+| `@paykernel/store-postgres` | `0.1.1` | `.`, `./bun-sql`, `./postgres-js`, `./pg`, `./drizzle` | [postgres](/stores/postgres) |
+| `@paykernel/store-redis` | `0.1.1` | `.`, `./bun`, `./upstash`, `./ioredis`, `./node-redis` | [redis](/stores/redis) |
+| `@paykernel/store-sqlite` | `0.1.1` | `.`, `./bun`, `./node`, `./better-sqlite3` | [sqlite](/stores/sqlite) |
+| `@paykernel/store-turso` | `0.1.1` | `.`, `./serverless`, `./libsql` | [turso](/stores/turso) |
+| `@paykernel/store-d1` | `0.1.1` | `.` | [d1](/stores/d1) |
+| `@paykernel/store-durable-objects` | `0.1.1` | `.` | [durable objects](/stores/durable-objects) |
+| `@paykernel/testkit` | `1.0.1` | `.` | [testkit](/packages/testkit) |
 
 There is **no** `@paykernel/gateway-stripe` (or Moyasar / PayPal / Paymob) package. Built-ins are factories on `@paykernel/core`: `stripeGateway`, `moyasarGateway`, `paypalGateway`, `paymobGateway`. Tap and MyFatoorah are extra packages and are **not** `BuiltInGatewayName`.
 

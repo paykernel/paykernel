@@ -73,7 +73,7 @@ Before-hooks can abort with `{ proceed: false }` or throw → `PaymentAbortedErr
 
 - Import **`@paykernel/opentelemetry`**. Folder `packages/observability` is not the npm name. Optional OTEL bridge is the `./otel` subpath.
 - Stripe / PayPal / Paymob / Moyasar built-ins ship in `@paykernel/core`. Tap (`@paykernel/gateway-tap`) and MyFatoorah (`@paykernel/gateway-myfatoorah`) are extra packages and are **not** `BuiltInGatewayName`.
-- Packages are **`0.1.0-next.0`**, not an npm 1.0 release.
+- Packages are **published**: `core` 1.0.0, gateways/testkit 1.0.1, others 0.1.1/0.1.0.
 - ESM-only. Node `>=18`, Bun `>=1.0.0`. Deno is Web-API-intended, not CI-gated. No secrets on `PaymentRuntime`.
 - Unmapped provider statuses fail closed toward non-fulfillment. Do not invent fulfillment from unknown strings. Do not paraphrase upstream PSP docs — document PayKernel’s mapping only.
 

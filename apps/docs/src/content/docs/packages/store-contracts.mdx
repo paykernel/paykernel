@@ -7,7 +7,7 @@ sidebar:
 
 Lease-aware **idempotency**, **webhook inbox**, and **reconciliation** contracts live in `@paykernel/store-contracts`. Production adapters implement these interfaces; inject stores at the app layer. Core and the webhook engine do **not** depend on a specific database.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.0`** — published on npm as `@paykernel/store-contracts`. Install: `bun add @paykernel/store-contracts`.
 
 :::note
 Canonical import is `@paykernel/store-contracts`. `@paykernel/testkit` re-exports the same types for backward compatibility and hosts conformance suites plus **NON-PRODUCTION** memory factories.

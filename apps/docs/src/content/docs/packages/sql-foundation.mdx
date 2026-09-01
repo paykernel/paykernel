@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/sql-foundation` is the **shared relational foundation** used by PostgreSQL, SQLite, Turso, D1, and Durable Object adapters. It is **not** a query builder or ORM.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.0`** — published on npm as `@paykernel/sql-foundation`. Install: `bun add @paykernel/sql-foundation`.
 
 :::caution
 Do **not** install `@paykernel/internal-sql-store`. That name is a **private** monorepo shim (thin re-export of this package). Store adapters depend on `@paykernel/sql-foundation` at runtime. Application code usually gets this package **transitively** via a store adapter.

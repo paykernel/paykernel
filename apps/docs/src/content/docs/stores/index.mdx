@@ -7,7 +7,7 @@ sidebar:
 
 Pick a store adapter by **package + subpath** and the adapter’s `StorageAdapterManifest` — not by marketing copy. All production adapters implement the same [store contracts](/packages/store-contracts) (idempotency, webhook inbox, reconciliation). Inject stores at the app layer; `@paykernel/core` and `@paykernel/webhooks` never depend on a database package.
 
-Current adapter versions in this repo are **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+All store adapters are **published**: `store-postgres`/`redis`/`sqlite`/`turso`/`d1`/`durable-objects` `0.1.1`, `store-contracts`/`sql-foundation` `0.1.0` on npm.
 
 :::caution
 **Migrate explicitly.** Importing a store package does not apply DDL. Factories do not migrate. Call `migrate*Adapter` from ops/CI (or DO lifecycle `ensureDoSchema`) before traffic.

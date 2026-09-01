@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-redis` is **optional** coordination: lease-aware idempotency, webhook inbox, and reconciliation against shared Redis, Valkey, or Upstash. Claims are atomic **Lua** (never get-then-set). PostgreSQL alone can satisfy the same [store contracts](/packages/store-contracts).
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-redis`. Install: `bun add @paykernel/store-redis`.
 
 :::caution
 Redis is **not** required to use `@paykernel/core` or the webhook engine. Do not add Redis only because this adapter exists. Manifest durability is **`configuration-dependent`**, not `durable`. Not recommended as the sole long-term audit store.

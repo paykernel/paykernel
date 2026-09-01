@@ -13,9 +13,9 @@ next:
 
 Compose a `PaymentClient` from `@paykernel/core`, charge with `money()`, and fulfill only when `isPaidOutcome` is true. This page is core only — no inbox, store, or second gateway.
 
-:::caution[Packages are not on npm as 1.0]
-Public packages are version **`0.1.0-next.0`**. They are **not** published to npm as a released 1.0. From a clone: `bun install` at the repository root, then import `@paykernel/core` from the workspace. `bun add @paykernel/core` is the consumer command **after** the first npm publish — not proof that a 1.0 tarball exists today.
-:::
+::::note[Published]
+`@paykernel/core` **1.0.0** and all other packages are **published** on the public registry. `bun add @paykernel/core` works from any project. In a clone: `bun install` at the root still works via workspaces.
+::::
 
 Core is ESM-only (`exports.import` only). Engines: Node `>=18` or Bun `>=1.0.0`. Secret keys are server-side only.
 

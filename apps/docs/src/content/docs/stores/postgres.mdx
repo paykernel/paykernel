@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-postgres` is the general production default when all workers share one PostgreSQL cluster. Claims use engine-level `INSERT … ON CONFLICT` / `UPDATE … RETURNING` — not application get-then-set.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-postgres`. Install: `bun add @paykernel/store-postgres`.
 
 Manifest: `POSTGRES_STORAGE_ADAPTER_MANIFEST` — `coordinationScope: "multi-host"`, `durability: "durable"`, `consistency.claims: "strong"`, `readAfterWrite: "strong"`, `staleReadsPossible: false`. Multi-primary without consensus is **out of scope**. No adapter declares `multi-region`.
 

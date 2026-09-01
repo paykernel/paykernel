@@ -5,7 +5,7 @@ sidebar:
   order: 3
 ---
 
-`@paykernel/webhooks` claims a verified delivery under a lease, then runs **your** handler. It does **not** verify PSP signatures, pick HTTP status codes, or fulfill orders. Version in this workspace is `0.1.0-next.0` — not a released 1.0.
+`@paykernel/webhooks` claims a verified delivery under a lease, then runs **your** handler. It does **not** verify PSP signatures, pick HTTP status codes, or fulfill orders. Version `0.1.1` — published on npm as `@paykernel/webhooks`. Install: `bun add @paykernel/webhooks`.
 
 `handleWebhook` on [`@paykernel/core`](/packages/core) verifies and normalizes. The inbox engine is the next step: **claim, then fulfill**.
 

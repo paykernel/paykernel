@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-d1` is the **Worker-native shared relational** adapter. Multi-host when every Worker binds the **same** D1 database. Single root export (no driver subpaths). Claims prefer single-statement UPSERT + `RETURNING`; multi-statement only inside D1 `batch()`.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-d1`. Install: `bun add @paykernel/store-d1`.
 
 :::caution
 This is **not** [`store-sqlite`](/stores/sqlite), **not** [`store-turso`](/stores/turso), and **not** [`store-durable-objects`](/stores/durable-objects). Manifest `readAfterWrite` is **`session`**; `staleReadsPossible` is **`true`** without Sessions under read replication. Never `@paykernel/store-sqlite` on Workers (no durable local FS; multi-isolate).

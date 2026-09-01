@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-durable-objects` is **per-partition** strong coordination on **SQLite-backed** Durable Objects (`new_sqlite_classes`). The Worker client is async (stub RPC). In-object SQL is sync (`storage.sql.exec`). Single root export.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-durable-objects`. Install: `bun add @paykernel/store-durable-objects`.
 
 :::caution
 **Never** route all payment work through one global Durable Object. `createDoPaymentStores` requires an explicit `sharding` strategy. This is **not** [`store-d1`](/stores/d1) (shared D1), **not** [`store-sqlite`](/stores/sqlite), **not** [`store-turso`](/stores/turso). There is no `packages/adapter-cloudflare` umbrella.

@@ -7,7 +7,7 @@ sidebar:
 
 `@paykernel/store-sqlite` is **local/embedded SQLite** for a **single host**. One database file must have one durable filesystem authority. Claims use `BEGIN IMMEDIATE` (or equivalent) + conditional writes in **one synchronous transaction**.
 
-Version **`0.1.0-next.0`**. Not published to the public npm registry yet — consume from this monorepo.
+Version **`0.1.1`** — published on npm as `@paykernel/store-sqlite`. Install: `bun add @paykernel/store-sqlite`.
 
 :::caution
 `SQLITE_STORAGE_ADAPTER_MANIFEST.coordinationScope` is **`single-host`**. Do not use this package for multi-host or multi-isolate coordination (including Cloudflare Workers). Do not share the file over NFS/SMB. `:memory:` is **one process** and does not satisfy the file-backed `durable` claim across restart.

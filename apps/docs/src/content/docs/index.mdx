@@ -1,6 +1,6 @@
 ---
 title: PayKernel
-description: Type-safe payment orchestration for TypeScript. Workspace packages are 0.1.0-next.0 and are not published to npm as 1.0.
+description: Type-safe payment orchestration for TypeScript. MENA gateways + modern server runtimes. Published on npm as @paykernel/*.
 sidebar:
   order: 1
 next:
@@ -10,7 +10,7 @@ next:
 
 PayKernel is a TypeScript payment orchestration toolkit. You compose **`@paykernel/core`** (create / capture / refund / verify) with optional inbox, reconciliation, routing, stores, and HTTP adapters at the application layer. Core never depends on those packages.
 
-Workspace version of every public `packages/*` package is **`0.1.0-next.0`**. Packages are **not** published to npm as a released 1.0. Clone the [monorepo](https://github.com/paykernel/paykernel) and `bun install` until the first npm publish.
+All packages are **published to npm** as `@paykernel/*` (`core` 1.0.0, gateways/testkit 1.0.1, engines/stores/integrations 0.1.1, contracts/sql-foundation 0.1.0). Install with `bun add @paykernel/core` or `npm install @paykernel/core`. Source: [paykernel/paykernel](https://github.com/paykernel/paykernel).
 
 <CardGrid>
   <Card title="Quickstart" icon="ph:rocket-launch">
@@ -29,8 +29,8 @@ Workspace version of every public `packages/*` package is **`0.1.0-next.0`**. Pa
 
 ## Honesty
 
-:::caution[Not an npm 1.0]
-Do not treat registry install commands as proof that a 1.0 tarball exists. Current versions are `0.1.0-next.0`.
+:::note[Published]
+All packages are published (`core` 1.0.0, gateways/testkit 1.0.1, others 0.1.1/0.1.0). `bun add @paykernel/core` works. See [Packages](/packages) and [Reference](/reference/packages).
 :::
 
 - Folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Do not invent an npm name from the folder.

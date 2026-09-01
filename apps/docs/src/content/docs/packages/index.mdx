@@ -1,13 +1,13 @@
 ---
 title: Packages
-description: Map of every publishable PayKernel package at version 0.1.0-next.0, with npm names, exports, and what each one is for.
+description: Map of every publishable PayKernel package (core 1.0.0, gateways/testkit 1.0.1, others 0.1.0/0.1.1) with npm names and exports.
 sidebar:
   order: 1
 ---
 
 PayKernel is a **composition** of packages, not a single SDK. `@paykernel/core` creates payments, maps money, and **verifies** webhooks. Claim, lease, HTTP status, stores, routing, and OpenTelemetry live in other packages you wire at the application layer.
 
-Current version is **`0.1.0-next.0`**. These packages are **not published to the public npm registry yet**. Consume them from this monorepo workspace. The specifiers below are the intended public names once they ship.
+Published versions: `core` **1.0.0**, `gateway-tap`/`gateway-myfatoorah`/`testkit` **1.0.1**, `webhooks`/`reconciliation`/`routing`/`opentelemetry`/`stores`/`integrations` **0.1.1**, `store-contracts`/`sql-foundation` **0.1.0**. All packages below are **published** to the public registry. Install with `bun add @paykernel/<name>`.
 
 :::caution
 The folder `packages/observability` publishes as **`@paykernel/opentelemetry`**. Never import or install `@paykernel/observability`.
