@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/opentelemetry",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Portable payment metrics, span instrumentation, and optional OpenTelemetry bridge for @paykernel/core (no hard OTEL dep in core).",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,7 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/core": "workspace:*"
+    "@paykernel/core": "^1.0.0"
   },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.0.0"

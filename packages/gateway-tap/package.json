@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/gateway-tap",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Portable Tap Payments gateway adapter for @paykernel/core: charges, authorize/capture/void, refunds, and hashstring webhooks.",
   "type": "module",
   "main": "./dist/index.js",
@@ -33,11 +33,11 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/core": "workspace:*"
+    "@paykernel/core": "^1.0.0"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "@paykernel/testkit": "workspace:*",
+    "@paykernel/testkit": "^1.0.1",
     "@types/bun": "latest",
     "publint": "^0.3.22",
     "typescript": "^5.9.3"

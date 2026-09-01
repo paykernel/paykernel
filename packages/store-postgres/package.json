@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-postgres",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "PostgreSQL durable stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation.",
   "type": "module",
   "main": "./dist/index.js",
@@ -46,8 +46,8 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/store-contracts": "workspace:*",
-    "@paykernel/sql-foundation": "workspace:*"
+    "@paykernel/store-contracts": "^0.1.0",
+    "@paykernel/sql-foundation": "^0.1.0"
   },
   "peerDependencies": {
     "drizzle-orm": ">=0.29.0",
@@ -71,7 +71,7 @@
     "pg": "^8.16.3",
     "postgres": "^3.4.7",
     "typescript": "^5.9.3",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/testkit": "^1.0.1"
   },
   "keywords": [
     "payments",

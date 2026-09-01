@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-redis",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Redis/Valkey/Upstash stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation coordination.",
   "type": "module",
   "main": "./dist/index.js",
@@ -46,7 +46,7 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/store-contracts": "workspace:*"
+    "@paykernel/store-contracts": "^0.1.0"
   },
   "peerDependencies": {
     "ioredis": ">=5.0.0",
@@ -70,7 +70,7 @@
     "ioredis": "^5.7.0",
     "redis": "^5.8.2",
     "typescript": "^5.9.3",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/testkit": "^1.0.1"
   },
   "keywords": [
     "payments",

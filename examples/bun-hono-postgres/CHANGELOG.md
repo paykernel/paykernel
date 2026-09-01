@@ -1,5 +1,14 @@
 # @paykernel/example-bun-hono-postgres
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @paykernel/integration-hono@0.1.1
+  - @paykernel/store-postgres@0.1.1
+  - @paykernel/example-checkout-kernel@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes

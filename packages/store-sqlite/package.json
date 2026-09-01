@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-sqlite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Local/embedded SQLite stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (single-host). engines.node >=18 covers the root types and /better-sqlite3; @paykernel/store-sqlite/node requires Node >=22.5.0 (experimental node:sqlite).",
   "type": "module",
   "main": "./dist/index.js",
@@ -42,8 +42,8 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/store-contracts": "workspace:*",
-    "@paykernel/sql-foundation": "workspace:*"
+    "@paykernel/store-contracts": "^0.1.0",
+    "@paykernel/sql-foundation": "^0.1.0"
   },
   "peerDependencies": {
     "better-sqlite3": ">=9.0.0"
@@ -58,7 +58,7 @@
     "@types/bun": "latest",
     "better-sqlite3": "^11.10.0",
     "typescript": "^5.9.3",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/testkit": "^1.0.1"
   },
   "keywords": [
     "payments",

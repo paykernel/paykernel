@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/integration-elysia",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin Elysia adapter for @paykernel/integration-http webhook handling (parse none).",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,13 +31,13 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/integration-http": "workspace:*"
+    "@paykernel/integration-http": "^0.1.1"
   },
   "peerDependencies": {
     "elysia": ">=1"
   },
   "devDependencies": {
-    "@paykernel/testkit": "workspace:*",
+    "@paykernel/testkit": "^1.0.1",
     "@types/bun": "latest",
     "elysia": "^1.4.29",
     "typescript": "^5.9.3"

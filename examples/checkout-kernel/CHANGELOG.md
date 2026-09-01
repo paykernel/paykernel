@@ -1,5 +1,16 @@
 # @paykernel/example-checkout-kernel
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @paykernel/integration-http@0.1.1
+  - @paykernel/reconciliation@0.1.1
+  - @paykernel/store-sqlite@0.1.1
+  - @paykernel/testkit@1.0.1
+  - @paykernel/webhooks@0.1.1
+
 ## 0.1.1
 
 ### Patch Changes

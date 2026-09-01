@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/store-turso",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Turso serverless and libSQL stores for PayKernel lease-aware idempotency, webhook inbox, and reconciliation (shared remote SQLite-compatible).",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,8 +38,8 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/store-contracts": "workspace:*",
-    "@paykernel/sql-foundation": "workspace:*"
+    "@paykernel/store-contracts": "^0.1.0",
+    "@paykernel/sql-foundation": "^0.1.0"
   },
   "peerDependencies": {
     "@libsql/client": ">=0.14.0",
@@ -58,7 +58,7 @@
     "@tursodatabase/serverless": "^1.4.0",
     "@types/bun": "latest",
     "typescript": "^5.9.3",
-    "@paykernel/testkit": "workspace:*"
+    "@paykernel/testkit": "^1.0.1"
   },
   "keywords": [
     "payments",

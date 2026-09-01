@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/integration-cloudflare-workers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin Cloudflare Workers adapter for @paykernel/integration-http webhook handling.",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,7 +31,7 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/integration-http": "workspace:*"
+    "@paykernel/integration-http": "^0.1.1"
   },
   "peerDependencies": {
     "@cloudflare/workers-types": "*"
@@ -42,7 +42,7 @@
     }
   },
   "devDependencies": {
-    "@paykernel/testkit": "workspace:*",
+    "@paykernel/testkit": "^1.0.1",
     "@types/bun": "latest",
     "typescript": "^5.9.3"
   },

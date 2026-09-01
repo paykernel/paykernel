@@ -1,6 +1,6 @@
 {
   "name": "@paykernel/integration-express",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Thin Express adapter for @paykernel/integration-http webhook handling (raw-body safe).",
   "type": "module",
   "main": "./dist/index.js",
@@ -31,13 +31,13 @@
     "bun": ">=1.0.0"
   },
   "dependencies": {
-    "@paykernel/integration-http": "workspace:*"
+    "@paykernel/integration-http": "^0.1.1"
   },
   "peerDependencies": {
     "express": ">=4"
   },
   "devDependencies": {
-    "@paykernel/testkit": "workspace:*",
+    "@paykernel/testkit": "^1.0.1",
     "@types/bun": "latest",
     "@types/express": "^4.17.21",
     "express": "^4.21.1",

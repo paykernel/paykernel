@@ -1,5 +1,13 @@
 # @paykernel/example-cloudflare-workers-fetch
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies
+  - @paykernel/integration-cloudflare-workers@0.1.1
+  - @paykernel/example-checkout-kernel@0.1.2
+
 ## 0.1.1
 
 ### Patch Changes
